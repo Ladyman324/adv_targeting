@@ -4,7 +4,7 @@
   "description": "Call log, dial queue and do-not-call list for the advisor map.",
   "main": "*/index.js",
   "engines": {
-    "node": ">=20"
+    "node": ">=22.12.0"
   },
   "dependencies": {
     "@azure/data-tables": "^13.2.2",

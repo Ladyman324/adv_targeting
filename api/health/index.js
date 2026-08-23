@@ -7,10 +7,52 @@
  */
 "use strict";
 
+const fs = require("node:fs");
+const path = require("node:path");
 const store = require("../shared/store");
 const actSync = require("../shared/act");
 
-module.exports = async function (context, req) {
+const RELEASE_PATH = path.join(__dirname, "..", "release.json");
+
+/*
+ * release.json is generated in a fresh staging directory by build_api.sh.  It
+ * contains only build provenance; never environment variables, Azure settings,
+ * contact data, or credentials.  A whitelist here makes that guarantee hold
+ * even if somebody accidentally adds a sensitive field to the build file.
+ */
+function releaseMetadata(file = RELEASE_PATH) {
+  const unavailable = {
+    available: false, id: "development", commit: "", builtUtc: "",
+    workflowRun: "", dirty: false,
+  };
+  try {
+    const raw = JSON.parse(fs.readFileSync(file, "utf8"));
+    const id = String(raw.id || "");
+    const commit = String(raw.commit || "");
+    const builtUtc = String(raw.builtUtc || "");
+    const workflowRun = String(raw.workflowRun || "");
+    if (!/^[A-Za-z0-9._-]{1,128}$/.test(id)) return unavailable;
+    if (!/^[0-9a-f]{7,40}$/i.test(commit)) return unavailable;
+    if (!/^\d{4}-\d{2}-\d{2}T/.test(builtUtc)
+        || !Number.isFinite(Date.parse(builtUtc))) return unavailable;
+    if (workflowRun && !/^[A-Za-z0-9._-]{1,64}$/.test(workflowRun))
+      return unavailable;
+    return {
+      available: true,
+      id,
+      commit: commit.toLowerCase(),
+      builtUtc,
+      workflowRun,
+      dirty: raw.dirty === true,
+    };
+  } catch {
+    return unavailable;
+  }
+}
+
+const release = releaseMetadata();
+
+async function health(context, req) {
   try {
     const who = store.identity(req);
     let storageOk = false;
@@ -30,6 +72,7 @@ module.exports = async function (context, req) {
       configured: store.configured(),
       storageOk,
       detail,
+      release,
       // Diagnostic only, and deliberately says nothing the caller could not
       // already infer. "Why did my call not appear in Act!" has several
       // answers that all look identical from the outside -- not deployed, not
@@ -42,4 +85,7 @@ module.exports = async function (context, req) {
   } catch (err) {
     return store.fail(context, err);
   }
-};
+}
+
+module.exports = health;
+module.exports.releaseMetadata = releaseMetadata;

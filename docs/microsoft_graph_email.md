@@ -86,19 +86,23 @@ because Microsoft's Static Web Apps overview says an existing Function App can
 use any plan while its older plan comparison table does not explicitly list
 Flex.
 
-`src/deploy_swa.py` enforces this split. After the Function App exists and is
-linked to the Static Web App, install Azure Functions Core Tools v4 and sign
-in with Azure CLI or Azure PowerShell, then run:
+Deployment is intentionally split and is documented step by step in
+[`deployment_automation.md`](deployment_automation.md). For an API change,
+commit the intended source, run the clean `src/build_api.sh` packager, retain
+its SHA-256 file, and upload both `dist/api.tgz` and
+`dist/api.tgz.sha256`. Verify the hash, extract into a fresh temporary
+directory in Cloud Shell, and publish the Function App with the remote build.
+
+After the authenticated `/api/health` response proves that the expected clean
+commit is live, deploy the static application separately with the saved SWA
+token:
 
 ~~~powershell
-python src/deploy_swa.py --test --function-app <FUNCTION_APP_NAME>
-python src/deploy_swa.py --full --function-app <FUNCTION_APP_NAME>
+python src/deploy_swa.py --full --static-only
 ~~~
 
-`AZURE_FUNCTION_APP_NAME` may be set instead of repeating `--function-app`.
-Use `--static-only` only when the linked Function App has already been deployed
-from the same revision. The deployment script deliberately refuses the old
-managed-API upload when it detects `email-worker`'s queue trigger.
+The deployment script deliberately refuses the old managed-API upload when it
+detects `email-worker`'s queue trigger.
 
 Set these Function App settings (values belong in Azure configuration or Key
 Vault references, never source control):
