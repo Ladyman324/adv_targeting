@@ -366,7 +366,10 @@ class MainTests(unittest.TestCase):
         child_environment = run.call_args.kwargs["env"]
         self.assertNotIn("--deployment-token", command)
         self.assertEqual(command[-4:], ["--env", "preview-blue", "--app-name", "eic-advisors"])
-        self.assertEqual(child_cwd, folder.resolve())
+        artifact = folder.resolve()
+        self.assertEqual(child_cwd, artifact.parent)
+        self.assertNotEqual(child_cwd, artifact)
+        self.assertNotIn(artifact, child_cwd.parents)
         self.assertNotEqual(child_cwd, ROOT.resolve())
         if os.name == "nt":
             self.assertFalse(str(child_cwd).startswith("\\\\"))
@@ -402,7 +405,11 @@ class MainTests(unittest.TestCase):
 
         self.assertNotEqual(raised.exception.code, 0)
         self.assertIn("exit 19", str(raised.exception.code))
-        self.assertEqual(run.call_args.kwargs["cwd"], folder.resolve())
+        artifact = folder.resolve()
+        child_cwd = run.call_args.kwargs["cwd"]
+        self.assertEqual(child_cwd, artifact.parent)
+        self.assertNotEqual(child_cwd, artifact)
+        self.assertNotIn(artifact, child_cwd.parents)
         self.assertFalse(folder.exists())
 
     def test_static_only_acknowledgement_is_required(self):

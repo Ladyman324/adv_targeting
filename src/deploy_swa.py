@@ -178,14 +178,15 @@ def cleanup_staged_tree(path: pathlib.Path, expected_prefix: str) -> None:
     shutil.rmtree(candidate)
 
 
-def validated_local_stage_cwd(
+def validated_local_cli_cwd_for_stage(
     path: pathlib.Path, expected_prefix: str = "swa_deploy_"
 ) -> pathlib.Path:
-    """Return an existing local staging directory safe for a CLI cwd.
+    """Validate a stage and return its local parent as a safe CLI cwd.
 
     Windows ``.cmd`` wrappers are launched through cmd.exe, which cannot use a
     UNC directory as its current directory and silently falls back elsewhere.
-    Constrain the child cwd to the local temp tree created by stage().
+    StaticSitesClient also rejects a cwd equal to or contained by the artifact,
+    so run from the verified stage's local temp parent, not the stage itself.
     """
     if path.is_symlink():
         raise RuntimeError(f"refusing to use staging symlink as CLI cwd: {path}")
@@ -201,10 +202,10 @@ def validated_local_stage_cwd(
             f"refusing unverified staging directory as CLI cwd: {path}"
         )
     if os.name == "nt" and (
-        str(candidate).startswith("\\\\") or not candidate.drive
+        str(temp_root).startswith("\\\\") or not temp_root.drive
     ):
-        raise RuntimeError(f"refusing non-local CLI cwd: {candidate}")
-    return candidate
+        raise RuntimeError(f"refusing non-local CLI cwd: {temp_root}")
+    return temp_root
 
 
 def validated_cli_label(value: str | None, option: str) -> str | None:
@@ -566,7 +567,7 @@ def main() -> None:
         try:
             run_checked(
                 cmd,
-                cwd=validated_local_stage_cwd(folder),
+                cwd=validated_local_cli_cwd_for_stage(folder),
                 env=swa_child_environment(token),
             )
         except FileNotFoundError:
