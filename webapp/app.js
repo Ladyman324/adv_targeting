@@ -35,7 +35,11 @@ const mapMuted = () => cssVar("--map-muted");
 
 // selected-firm color; the array remains for restoring older saved state safely
 const COMPARE = ["#12b39c", "#e0a53a", "#8079e0", "#e8615d", "#4aa3e0", "#9fc93c"];
-const DATA_VERSION = "20260822b";
+// Stamped by src/web_assets.py from the normalized metadata time plus a digest
+// of every deployed JSON path and byte. It changes for standalone shard
+// rebuilds too, and its leading date keeps the stale-build warning readable.
+// Do not edit it by hand.
+const DATA_VERSION = "20260822T034641Z-b6e82b13c94619a6";
 const dataUrl = file => `data/${file}?v=${DATA_VERSION}`;
 // ONE scale for every mark on the map. There used to be two, and they were not
 // comparable: buildings grew as 20 + 5.2*sqrt(n) and saturated at 56px by just
@@ -555,12 +559,14 @@ function loadNational(){
    * come back 304 in about 100 ms each, while this one took 2,453 ms because
    * no-store forbids keeping it at all.
    *
-   * Freshness is not lost. staticwebapp.config.json sends
-   * `Cache-Control: no-cache` on /data/*, which means the browser must
-   * REVALIDATE before reusing anything -- so every load still asks the server,
-   * Entra still checks the session, and a 304 is only served when the file
-   * genuinely has not changed. If that header is ever removed from the route
-   * config this becomes a stale-data bug; the header is the thing to protect.
+   * staticwebapp.config.json permits five-minute browser-private cache hits
+   * only for national_view, offices_national and pins_*. Every contact, ACT and
+   * field payload keeps `no-cache` and therefore revalidates. dataUrl() appends
+   * a timestamp plus an all-data digest, so any rebuilt JSON gets a new URL.
+   * The deliberately short, public-data-only window avoids repeat roundtrips
+   * during map transitions without delaying revocation for direct lines,
+   * emails or relationship data. A blanket one-year immutable policy was
+   * rejected for that reason.
    */
   return fetch(dataUrl("national_view.json")).then(r => r.json()).then(j => {
     if (!j.firms.every(firm => firm.length >= 8))

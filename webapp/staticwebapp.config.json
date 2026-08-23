@@ -30,6 +30,21 @@
       "headers": { "Cache-Control": "no-store" }
     },
     {
+      "route": "/data/pins_*.json",
+      "allowedRoles": ["authenticated"],
+      "headers": { "Cache-Control": "private, max-age=300, must-revalidate" }
+    },
+    {
+      "route": "/data/national_view.json",
+      "allowedRoles": ["authenticated"],
+      "headers": { "Cache-Control": "private, max-age=300, must-revalidate" }
+    },
+    {
+      "route": "/data/offices_national.json",
+      "allowedRoles": ["authenticated"],
+      "headers": { "Cache-Control": "private, max-age=300, must-revalidate" }
+    },
+    {
       "route": "/data/*",
       "allowedRoles": ["authenticated"],
       "headers": { "Cache-Control": "no-cache" }

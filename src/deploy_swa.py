@@ -39,6 +39,7 @@ arguments or logs.
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
 import pathlib
@@ -224,6 +225,55 @@ def check_config() -> None:
     print(f"[*] config OK: {len(routes)} route rule(s), tenant issuer set")
 
 
+def check_web_assets() -> None:
+    """Run the repository's canonical read-only asset check before staging."""
+    checker = ROOT / "src" / "web_assets.py"
+    command = [sys.executable, str(checker), "--check"]
+    print("[*] verifying generated web assets (this can take about 30 seconds)")
+    try:
+        subprocess.run(command, check=True, cwd=ROOT, shell=False)
+    except FileNotFoundError:
+        sys.exit(f"[!] web asset checker is missing: {checker}")
+    except subprocess.CalledProcessError as exc:
+        sys.exit(
+            f"[!] web asset integrity check failed (exit {exc.returncode}); "
+            "nothing was staged or deployed.\n"
+            "    Rebuild/stamp the web assets, then rerun this deployment."
+        )
+
+
+def check_staged_web_assets(folder: pathlib.Path) -> None:
+    """Verify copied JSON fingerprint against both copied applications.
+
+    A data rebuild during the minutes-long copy can otherwise leave a hybrid
+    deploy. Reuse the canonical fingerprint/parser to prevent rule drift.
+    """
+    checker = ROOT / "src" / "web_assets.py"
+    spec = importlib.util.spec_from_file_location(
+        "_deploy_web_assets_check", checker
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot load web asset checker: {checker}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    module.WEB = folder
+    module.WEB_DATA = folder / "data"
+    module.DATA_VERSION_FILES = (folder / "app.js", folder / "field.js")
+    expected = module.data_fingerprint(module.WEB_DATA)
+    problems = module.check_data_versions(expected)
+    drifted_shell = module.check_assets()
+    problems.extend(
+        f"stale browser cache tag for {name}" for name in drifted_shell
+    )
+    if problems:
+        raise RuntimeError(
+            "staged web assets changed or mixed during copy: "
+            + "; ".join(problems)
+        )
+    print(f"[*] staged data fingerprint verified ({expected})")
+
+
 def function_bindings(api: pathlib.Path = API) -> dict[str, set[str]]:
     """Return binding types by function without walking node_modules."""
     found: dict[str, set[str]] = {}
@@ -350,7 +400,8 @@ def stage() -> pathlib.Path:
             kept += 1
             total += dest.stat().st_size
 
-        print(f"[*] staged {kept:,} files "
+        check_staged_web_assets(out)
+        print(f"[*] staged and verified {kept:,} files "
               f"({total / 1e6:.1f} MB), skipped {skipped:,}")
         return out
     except BaseException:
@@ -440,6 +491,9 @@ def main() -> None:
     except ValueError as exc:
         ap.error(str(exc))
 
+    # Both deployment and dry-run use the same fail-closed, read-only gate.
+    # stage() checks the copied tree again to catch a concurrent data rebuild.
+    check_web_assets()
     check_config()
     bindings = function_bindings()
     linked_required = requires_linked_function_app(bindings)
@@ -466,7 +520,7 @@ def main() -> None:
     try:
         if args.dry_run:
             print("[*] dry run -- API deployment intentionally excluded")
-            print(f"[*] dry run -- staged and verified {folder}")
+            print(f"[*] dry run -- staged and verified at {folder}")
             return
 
         cmd = swa_deploy_command(

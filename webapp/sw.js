@@ -5,26 +5,26 @@
  *   sensitive; all of it is what makes the app open instantly from the home
  *   screen instead of re-downloading itself.
  *
- * WHAT IS NEVER CACHED, AND WHY
- *   /data/*  — the tiles. They carry names, direct lines, email addresses and
- *              which EIC employee owns each relationship. A service worker's
- *              whole job is answering without touching the network, which also
- *              means without touching authentication. Caching them would put
- *              CRM data on the device at rest and make access revocation stop
- *              being immediate: remove someone from the security group and
- *              anything already cached still renders.
+ * WHAT THE SERVICE WORKER NEVER CACHES, AND WHY
+ *   /data/*  — never enters Cache Storage or an offline response path. Field
+ *              tiles carry names, direct lines, email addresses and ownership;
+ *              replaying them offline would bypass authentication and access
+ *              revocation. The ordinary browser HTTP cache is separate: field,
+ *              contact and ACT payloads use `no-cache` and revalidate, while
+ *              only the public desktop pin/national files may be fresh for at
+ *              most five minutes. This worker does not handle either policy.
  *   /.auth/* — the sign-in endpoints. Caching an auth response is how a stale
  *              session appears valid.
  *
- * So every launch still asks the network for data, which means Entra checks the
- * session every time. The cost is that the app does not work in a dead zone --
- * accepted, because a rep with no signal cannot make the call or send the email
- * that the data is for.
+ * So every field launch still reaches the network or revalidates before field
+ * data is reused, which gives Entra a chance to reject an expired/revoked
+ * session. The app does not work in a dead zone -- accepted, because a rep with
+ * no signal cannot make the call or send the email that the data is for.
  *
  * VERSION is rewritten by web_assets.py from a hash of the shell files, so a
  * deploy invalidates the cache. Never edit it by hand.
  */
-const VERSION = "86a941a674";
+const VERSION = "944d55a57c";
 const CACHE = `field-shell-${VERSION}`;
 
 const SHELL = [
@@ -63,7 +63,7 @@ self.addEventListener("fetch", (e) => {
   if (e.request.method !== "GET" || url.origin !== self.location.origin) return;
   if (url.pathname.startsWith("/.auth/") || url.pathname.startsWith("/api/")) return;
 
-  // The data layer is never served from cache. Not a performance decision.
+  // Never put data in service-worker Cache Storage or an offline response path.
   if (url.pathname.startsWith("/data/")) return;
 
   // The desktop map is out of scope: this worker exists for the field view and

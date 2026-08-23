@@ -6,6 +6,7 @@ import importlib.util
 import io
 import os
 import pathlib
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -22,6 +23,30 @@ SPEC.loader.exec_module(deploy_swa)
 
 
 class CommandTests(unittest.TestCase):
+    def test_web_asset_check_uses_current_python_without_shell(self):
+        with mock.patch.object(deploy_swa.subprocess, "run") as run:
+            deploy_swa.check_web_assets()
+
+        run.assert_called_once_with(
+            [
+                sys.executable,
+                str(ROOT / "src" / "web_assets.py"),
+                "--check",
+            ],
+            check=True,
+            cwd=ROOT,
+            shell=False,
+        )
+
+    def test_web_asset_check_reports_fail_closed_result(self):
+        failure = subprocess.CalledProcessError(7, ["python", "--check"])
+        with mock.patch.object(
+            deploy_swa.subprocess, "run", side_effect=failure
+        ), self.assertRaisesRegex(
+            SystemExit, "nothing was staged or deployed"
+        ):
+            deploy_swa.check_web_assets()
+
     def test_cli_labels_reject_command_metacharacters(self):
         with self.assertRaises(ValueError):
             deploy_swa.validated_cli_label("production & whoami", "--env")
@@ -106,6 +131,126 @@ class CommandTests(unittest.TestCase):
 
 
 class StagingSafetyTests(unittest.TestCase):
+    def _write_valid_staged_tree(self, staged):
+        data = staged / "data"
+        data.mkdir()
+        (data / "metadata.json").write_text(
+            '{"generated_utc":"2026-08-23T12:00:00+00:00"}',
+            encoding="utf-8",
+        )
+        payload = data / "pins_test.json"
+        payload.write_text('{"pins":[1]}', encoding="utf-8")
+
+        spec = importlib.util.spec_from_file_location(
+            "test_web_assets", ROOT / "src" / "web_assets.py"
+        )
+        assert spec and spec.loader
+        web_assets = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(web_assets)
+        expected = web_assets.data_fingerprint(data)
+        (staged / "app.js").write_text(
+            f'const DATA_VERSION = "{expected}";', encoding="utf-8"
+        )
+        (staged / "field.js").write_text(
+            f'const DATA_VERSION = "{expected}";', encoding="utf-8"
+        )
+        for name in (
+            "style.css", "field.css", "dial.js", "email.js", "email.css"
+        ):
+            (staged / name).write_text(f"/* {name} */", encoding="utf-8")
+        (staged / "sw.js").write_text(
+            'const VERSION = "";', encoding="utf-8"
+        )
+
+        web_assets.WEB = staged
+        desktop_tag = web_assets.asset_tag()
+        field_tag = web_assets.field_tag()
+        (staged / "index.html").write_text(
+            " ".join(
+                f'"{name}?v={desktop_tag}"'
+                for name in web_assets.VERSIONED
+            ),
+            encoding="utf-8",
+        )
+        (staged / "field.html").write_text(
+            " ".join(
+                f'"{name}?v={field_tag}"'
+                for name in web_assets.FIELD_VERSIONED
+            ),
+            encoding="utf-8",
+        )
+        (staged / "sw.js").write_text(
+            f'const VERSION = "{field_tag}";', encoding="utf-8"
+        )
+        return payload
+
+    def test_stage_verifies_the_completed_copy_before_returning(self):
+        with tempfile.TemporaryDirectory() as temp:
+            source = pathlib.Path(temp) / "webapp"
+            source.mkdir()
+            (source / "app.js").write_text("// app", encoding="utf-8")
+            with mock.patch.object(deploy_swa, "WEB", source), \
+                    mock.patch.object(
+                        deploy_swa, "validate_deployment_source"
+                    ), mock.patch.object(
+                        deploy_swa, "check_staged_web_assets"
+                    ) as staged_check:
+                folder = deploy_swa.stage()
+        try:
+            staged_check.assert_called_once_with(folder)
+        finally:
+            deploy_swa.cleanup_staged_tree(folder, "swa_deploy_")
+
+    def test_hybrid_staged_data_cannot_pass_fingerprint_check(self):
+        with tempfile.TemporaryDirectory() as temp:
+            staged = pathlib.Path(temp)
+            payload = self._write_valid_staged_tree(staged)
+            deploy_swa.check_staged_web_assets(staged)
+            payload.write_text('{"pins":[1,2]}', encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "mixed during copy"):
+                deploy_swa.check_staged_web_assets(staged)
+
+    def test_stale_desktop_pin_cannot_pass_staged_check(self):
+        for target in ("index.html", "app.js"):
+            with self.subTest(target=target), tempfile.TemporaryDirectory() as temp:
+                staged = pathlib.Path(temp)
+                self._write_valid_staged_tree(staged)
+                path = staged / target
+                if target == "index.html":
+                    path.write_text(
+                        path.read_text(encoding="utf-8").replace(
+                            "app.js?v=", "app.js?v=stale-", 1
+                        ),
+                        encoding="utf-8",
+                    )
+                else:
+                    path.write_text(
+                        path.read_text(encoding="utf-8") + "\n// changed",
+                        encoding="utf-8",
+                    )
+                with self.assertRaisesRegex(RuntimeError, "app.js"):
+                    deploy_swa.check_staged_web_assets(staged)
+
+    def test_stale_field_pin_and_worker_tag_cannot_pass_staged_check(self):
+        for target in ("field.html", "sw.js"):
+            with self.subTest(target=target), tempfile.TemporaryDirectory() as temp:
+                staged = pathlib.Path(temp)
+                self._write_valid_staged_tree(staged)
+                path = staged / target
+                if target == "field.html":
+                    path.write_text(
+                        path.read_text(encoding="utf-8").replace(
+                            "field.js?v=", "field.js?v=stale-", 1
+                        ),
+                        encoding="utf-8",
+                    )
+                else:
+                    path.write_text(
+                        'const VERSION = "stale";', encoding="utf-8"
+                    )
+                with self.assertRaisesRegex(RuntimeError, target.split(".")[0]):
+                    deploy_swa.check_staged_web_assets(staged)
+
     def test_sensitive_backup_archive_and_key_artifacts_fail_closed(self):
         forbidden = [
             ".env",
@@ -185,7 +330,8 @@ class MainTests(unittest.TestCase):
         folder = pathlib.Path(tempfile.mkdtemp(prefix="swa_deploy_"))
         output = io.StringIO()
         environment = environment or {}
-        with mock.patch.object(deploy_swa, "check_config"), \
+        with mock.patch.object(deploy_swa, "check_web_assets") as assets, \
+                mock.patch.object(deploy_swa, "check_config"), \
                 mock.patch.object(deploy_swa, "function_bindings", return_value={}), \
                 mock.patch.object(deploy_swa, "stage", return_value=folder), \
                 mock.patch.object(deploy_swa, "run_checked") as run, \
@@ -193,16 +339,20 @@ class MainTests(unittest.TestCase):
                 mock.patch.dict(os.environ, environment, clear=True), \
                 contextlib.redirect_stdout(output):
             deploy_swa.main()
-        return folder, run, output.getvalue()
+        return folder, run, assets, output.getvalue()
 
     def test_dry_run_removes_staging_folder(self):
-        folder, run, _ = self._run_main(["--full", "--static-only", "--dry-run"])
+        folder, run, assets, output = self._run_main(
+            ["--full", "--static-only", "--dry-run"]
+        )
 
         self.assertFalse(folder.exists())
         run.assert_not_called()
+        assets.assert_called_once_with()
+        self.assertIn("staged and verified at", output)
 
     def test_keychain_path_needs_no_token(self):
-        folder, run, output = self._run_main(
+        folder, run, assets, output = self._run_main(
             [
                 "--full", "--static-only", "--static-app", "eic-advisors",
                 "--env", "preview-blue",
@@ -210,6 +360,7 @@ class MainTests(unittest.TestCase):
         )
 
         self.assertFalse(folder.exists())
+        assets.assert_called_once_with()
         command = run.call_args.args[0]
         child_environment = run.call_args.kwargs["env"]
         self.assertNotIn("--deployment-token", command)
@@ -218,9 +369,10 @@ class MainTests(unittest.TestCase):
         self.assertIn("native keychain authentication", output)
 
     def test_environment_defaults_explicitly_to_production(self):
-        folder, run, _ = self._run_main(["--full", "--static-only"])
+        folder, run, assets, _ = self._run_main(["--full", "--static-only"])
 
         self.assertFalse(folder.exists())
+        assets.assert_called_once_with()
         command = run.call_args.args[0]
         self.assertEqual(command[-2:], ["--env", "production"])
 
@@ -277,6 +429,38 @@ class MainTests(unittest.TestCase):
         self.assertNotIn("mkdir -p ~/api", help_text)
         self.assertNotIn("tar -xzf ~/api.tgz -C ~/api", help_text)
 
+    def test_setup_help_does_not_run_web_asset_check_or_stage(self):
+        output = io.StringIO()
+        with mock.patch.object(
+            sys, "argv", ["deploy_swa.py", "--setup-help"]
+        ), mock.patch.object(deploy_swa, "check_web_assets") as assets, \
+                mock.patch.object(deploy_swa, "stage") as stage, \
+                contextlib.redirect_stdout(output):
+            deploy_swa.main()
+
+        assets.assert_not_called()
+        stage.assert_not_called()
+        self.assertIn("Deployment responsibilities", output.getvalue())
+
+    def test_failed_web_asset_check_blocks_staging_and_deploy(self):
+        failure = SystemExit(
+            "[!] web asset integrity check failed; nothing was staged or deployed"
+        )
+        with mock.patch.object(
+            sys,
+            "argv",
+            ["deploy_swa.py", "--full", "--static-only", "--dry-run"],
+        ), mock.patch.object(
+            deploy_swa, "check_web_assets", side_effect=failure
+        ) as assets, mock.patch.object(deploy_swa, "stage") as stage, \
+                mock.patch.object(deploy_swa, "run_checked") as run, \
+                self.assertRaisesRegex(SystemExit, "nothing was staged"):
+            deploy_swa.main()
+
+        assets.assert_called_once_with()
+        stage.assert_not_called()
+        run.assert_not_called()
+
     def test_obsolete_partial_test_mode_is_rejected(self):
         with mock.patch.object(
             sys, "argv", ["deploy_swa.py", "--test", "--dry-run"]
@@ -301,12 +485,13 @@ class MainTests(unittest.TestCase):
 
     def test_documented_environment_token_never_enters_child_argv(self):
         secret = "environment-only-secret"
-        folder, run, output = self._run_main(
+        folder, run, assets, output = self._run_main(
             ["--full", "--static-only"],
             {"SWA_CLI_DEPLOYMENT_TOKEN": secret},
         )
 
         self.assertFalse(folder.exists())
+        assets.assert_called_once_with()
         command = run.call_args.args[0]
         child_environment = run.call_args.kwargs["env"]
         self.assertNotIn(secret, repr(command))

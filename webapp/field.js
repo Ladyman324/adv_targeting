@@ -16,6 +16,16 @@ const RADII = [25, 50, 100];       // miles, in the order "Search wider" walks
 const THIN = 20;                   // below this, widen without being asked
 const PAGE = 200;                  // rows added per "Show more"
 
+// Stamped by src/web_assets.py from metadata time plus every deployed JSON
+// byte. Field data still revalidates, but the shared build ID prevents stale
+// same-day rebuilds and keeps every first-party data request explicit.
+const DATA_VERSION = "20260822T034641Z-b6e82b13c94619a6";
+const dataUrl = file => {
+  const path = file.startsWith("data/") ? file : `data/${file}`;
+  return `${path}${path.includes("?") ? "&" : "?"}v=${encodeURIComponent(DATA_VERSION)}`;
+};
+
+
 let INDEX = null;
 let COL = {};
 const TILE_CACHE = new Map();
@@ -106,8 +116,8 @@ async function loadExtras(){
     try { const r = await fetch(url); return r.ok ? await r.json() : null; }
     catch { return null; }
   };
-  [BOOK, TERR] = await Promise.all([grab("data/act_assets.json"),
-                                    grab("data/territories.json")]);
+  [BOOK, TERR] = await Promise.all([grab(dataUrl("act_assets.json")),
+                                    grab(dataUrl("territories.json"))]);
 }
 
 const bookFor = (crd) => (BOOK && BOOK.advisors[String(crd)]) || null;
@@ -119,7 +129,7 @@ const territoryFor = (state) => (TERR && TERR.states[String(state || "").toUpper
 async function loadIndex(){
   if (INDEX) return INDEX;
   const start = performance.now();
-  INDEX = await (await fetch("data/tile_index.json")).json();
+  INDEX = await (await fetch(dataUrl("tile_index.json"))).json();
   PERF.add("tile_index:fetch", performance.now() - start);
   INDEX.columns.forEach((c, i) => { COL[c] = i; });
   // Built here rather than by the caller: neighbourhood() depends on it, and a
@@ -148,7 +158,7 @@ async function loadTiles(keys){
   const start = performance.now();
   await Promise.all(keys.map(async (k) => {
     if (!TILE_CACHE.has(k)) {
-      const r = await fetch(`data/tiles/${k}.json`);
+      const r = await fetch(dataUrl(`tiles/${k}.json`));
       TILE_CACHE.set(k, r.ok ? (await r.json()).rows : []);
     }
     out.push(...TILE_CACHE.get(k));
@@ -282,7 +292,7 @@ async function practicesFor(state){
   if (!key) return {};
   if (!PRACTICE_CACHE.has(key)) {
     const start = performance.now();
-    PRACTICE_CACHE.set(key, fetch(`data/practices/${key}.json`)
+    PRACTICE_CACHE.set(key, fetch(dataUrl(`practices/${key}.json`))
       .then((r) => { PERF.add(`practices:${key} fetch`, performance.now() - start); return r; })
       .then((r) => (r.ok ? r.json() : {}))
       .catch(() => ({})));
@@ -1487,7 +1497,7 @@ async function recordOutcome(disposition){
  * gzipped, median 28 records. */
 async function loadNameIndex(){
   if (NAMES) return NAMES;
-  const d = await (await fetch("data/name_index.json")).json();
+  const d = await (await fetch(dataUrl("name_index.json"))).json();
   NAMES = { cols: d.columns, shards: new Set(d.shards), split: new Set(d.split),
             unplaced: d.unplaced, searchable: d.searchable };
   NAMES.C = {}; d.columns.forEach((c, i) => { NAMES.C[c] = i; });
@@ -1505,7 +1515,7 @@ function shardFor(term){
 
 async function loadShard(key){
   if (!NAME_CACHE.has(key)) {
-    const r = await fetch(`data/names/${key}.json`);
+    const r = await fetch(dataUrl(`names/${key}.json`));
     NAME_CACHE.set(key, r.ok ? (await r.json()).rows : []);
   }
   return NAME_CACHE.get(key);
@@ -1602,7 +1612,7 @@ function renderWhere(){
 // rep opens the picker, which is the first moment it can possibly be wanted.
 async function loadGeo(){
   if (GEO) return GEO;
-  GEO = await (await fetch("data/geo_index.json")).json();
+  GEO = await (await fetch(dataUrl("geo_index.json"))).json();
   return GEO;
 }
 
