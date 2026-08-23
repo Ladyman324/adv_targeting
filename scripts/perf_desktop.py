@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List
 from urllib.parse import urlparse
+from uuid import uuid4
 
 
 CDP_ENDPOINT = 'http://127.0.0.1:9222'
@@ -65,6 +66,12 @@ def ensure_allowed(url: str) -> None:
     origin = exact_origin(url)
     if origin not in ALLOWED_ORIGINS:
         raise RuntimeError('refusing non-allowlisted page origin: {!r}'.format(origin or url))
+
+
+def next_measure_target(origin: str) -> str:
+    target = '{}/?desktop_perf_run={}{}'.format(origin, uuid4().hex, PROFILE_HASH)
+    ensure_allowed(target)
+    return target
 
 
 def poll_value(page: Any, expression: str, arg: Any,
@@ -208,8 +215,7 @@ def measure_scope(page: Any, scope: str, timeout_ms: int) -> Dict[str, Any]:
 
 def measure_run(page: Any, origin: str, scopes: List[str],
                 timeout_ms: int) -> Dict[str, Any]:
-    target = origin + '/' + PROFILE_HASH
-    ensure_allowed(target)
+    target = next_measure_target(origin)
     page.goto(target, wait_until='domcontentloaded', timeout=timeout_ms)
     ensure_allowed(page.url)
     wait_map_usable(page, timeout_ms)

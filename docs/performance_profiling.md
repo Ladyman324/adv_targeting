@@ -70,7 +70,9 @@ It can be stated explicitly or narrowed while diagnosing one scope:
 Cold-ish mode disables the HTTP cache and bypasses the service worker only for
 the harness-owned page. It does not clear the browser's global cache, cookies,
 or authentication. Warm mode enables normal caching and runs the complete scope
-sequence once before recording repetitions.
+sequence once before recording repetitions. Every sequence uses a unique
+same-origin query URL, which forces a fresh HTML document and a fresh `PERF`
+object; JavaScript and data asset URLs remain unchanged and therefore cacheable.
 
 ## Results and comparison
 
