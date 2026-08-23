@@ -35,7 +35,7 @@ const mapMuted = () => cssVar("--map-muted");
 
 // selected-firm color; the array remains for restoring older saved state safely
 const COMPARE = ["#12b39c", "#e0a53a", "#8079e0", "#e8615d", "#4aa3e0", "#9fc93c"];
-const DATA_VERSION = "20260822a";
+const DATA_VERSION = "20260822b";
 const dataUrl = file => `data/${file}?v=${DATA_VERSION}`;
 // ONE scale for every mark on the map. There used to be two, and they were not
 // comparable: buildings grew as 20 + 5.2*sqrt(n) and saturated at 56px by just
@@ -312,12 +312,49 @@ function clearMapSelection(){
   selectedMapLayer = null;
 }
 
-function addMarkerBatches(target, markers, token, start=0){
+function afterNextPaint(fn){
+  // One rAF runs before a paint. A second one cannot run until the browser has
+  // had an opportunity to paint the work queued by the first frame.
+  requestAnimationFrame(() => requestAnimationFrame(fn));
+}
+
+function activeTransitionBatch(target, token, transition){
+  return transition && token === markerBatchToken && target === cluster &&
+    map.hasLayer(target) && transition.request === scopeRequest;
+}
+
+function addMarkerBatches(target, markers, token, start=0, transition=null){
   if (token !== markerBatchToken || target !== cluster || !map.hasLayer(target)) return;
   const end = Math.min(start + MARKER_BATCH_SIZE, markers.length);
   target.addLayers(markers.slice(start, end));
-  if (end < markers.length)
-    requestAnimationFrame(() => addMarkerBatches(target, markers, token, end));
+  if (start === 0 && transition){
+    afterNextPaint(() => {
+      if (!activeTransitionBatch(target, token, transition)) return;
+      const elapsedMs = performance.now() - transition.startedAt;
+      PERF.add(`scope:${transition.scope}:to first regional batch visible`, elapsedMs);
+      PERF.signal("regional:first-batch-visible", {
+        scope: transition.scope, request: transition.request, elapsedMs,
+        markerCount: end, totalMarkers: markers.length,
+      });
+    });
+  }
+  if (end < markers.length){
+    requestAnimationFrame(() =>
+      addMarkerBatches(target, markers, token, end, transition));
+  } else if (transition){
+    afterNextPaint(() => {
+      if (!activeTransitionBatch(target, token, transition)) return;
+      const elapsedMs = performance.now() - transition.startedAt;
+      const detail = {
+        scope: transition.scope, request: transition.request, elapsedMs,
+        markerCount: markers.length,
+        batchCount: Math.max(1, Math.ceil(markers.length / MARKER_BATCH_SIZE)),
+      };
+      PERF.add(`scope:${transition.scope}:to regional batches settled`, elapsedMs);
+      PERF.signal("regional:batches-settled", detail);
+      PERF.signal("scope:transition-settled", { ...detail, kind: "regional" });
+    });
+  }
 }
 map.addLayer(cluster);
 const heatLayer = L.heatLayer([], {
@@ -3359,36 +3396,69 @@ function rehydrate(c, sourceState=""){
   return out;
 }
 
-function loadState(st){
+async function fetchScopeJson(st, metricPrefix, missingOk=false){
+  const downloadStart = performance.now();
+  let response, text;
+  try {
+    response = await fetch(dataUrl(`pins_${st}.json`));
+    if (!response.ok){
+      if (missingOk) return {
+        data: null, downloadMs: performance.now() - downloadStart,
+        parseMs: 0, downloadedAt: performance.now(),
+      };
+      throw new Error(`no data for ${st}`);
+    }
+    text = await response.text();
+  } finally {
+    PERF.add(`${metricPrefix}:download`, performance.now() - downloadStart);
+  }
+
+  const downloadedAt = performance.now();
+  const parseStart = performance.now();
+  let data;
+  try { data = JSON.parse(text); }
+  finally { PERF.add(`${metricPrefix}:JSON.parse`, performance.now() - parseStart); }
+  return {
+    data,
+    downloadMs: downloadedAt - downloadStart,
+    parseMs: performance.now() - parseStart,
+    downloadedAt,
+  };
+}
+
+async function loadState(st){
   setLoading();
-  return PERF.time(`scope:${st}:fetch+parse`,
-    () => fetch(dataUrl(`pins_${st}.json`)).then(r => {
-      if (!r.ok) throw new Error(`no data for ${st}`);
-      return r.json();
-    })
-  ).then(j => ({
-    features: (() => {
-      const start = performance.now();
-      const out = rehydrate(j, st);
-      PERF.spans.push([`scope:${st}:rehydrate (${out.length.toLocaleString()} pins)`,
-                       performance.now() - start]);
-      return out;
-    })(),
+  const result = await fetchScopeJson(st, `scope:${st}`);
+  const features = PERF.timeSync(`scope:${st}:rehydrate`,
+    () => rehydrate(result.data, st));
+  return {
+    features,
     missing: [],
-  }));
+  };
 }
 
 // A territory is several state files stitched into one pin set, so every
 // advisor-level filter works across the whole footprint unchanged.
-function loadTerritory(name){
+async function loadTerritory(name){
   const sts = TERRITORIES[name] || [];
   setLoading();
-  return Promise.all(sts.map(s =>
-    fetch(dataUrl(`pins_${s}.json`)).then(r => r.ok ? r.json() : null)
-  )).then(js => ({
-    features: js.flatMap((layer, i) => layer ? rehydrate(layer, sts[i]) : []),
-    missing: sts.filter((_, i) => !js[i]),
-  }));
+  const metric = `scope:T:${name}`;
+  const startedAt = performance.now();
+  const loaded = await Promise.all(sts.map(st =>
+    fetchScopeJson(st, `${metric}/${st}`, true)));
+  // Downloads overlap, so elapsed wall time and JSON.parse CPU are both useful;
+  // summing download times would exaggerate what the rep actually waited for.
+  const lastDownload = loaded.reduce((latest, row) =>
+    Math.max(latest, row.downloadedAt || startedAt), startedAt);
+  PERF.add(`${metric}:download (parallel elapsed)`, lastDownload - startedAt);
+  PERF.add(`${metric}:JSON.parse (CPU total)`,
+           loaded.reduce((total, row) => total + (row.parseMs || 0), 0));
+  const features = PERF.timeSync(`${metric}:rehydrate`, () =>
+    loaded.flatMap((row, i) => row.data ? rehydrate(row.data, sts[i]) : []));
+  return {
+    features,
+    missing: sts.filter((_, i) => !loaded[i].data),
+  };
 }
 
 /* The dialer boots independently, and now actually does.
@@ -3417,14 +3487,31 @@ function loadTerritory(name){
 const PERF = window.PERF = {
   t0: performance.now(),
   spans: [],
+  signals: [],
   mark(name){ performance.mark(name); },
+  add(name, ms){
+    this.spans.push([name, ms]);
+    performance.measure(name, { start: performance.now() - ms, duration: ms });
+    return ms;
+  },
+  signal(name, detail={}){
+    const event = { name, at: performance.now(), ...detail };
+    this.signals.push(event);
+    performance.mark(name, { detail: event });
+    window.dispatchEvent(new CustomEvent("advisor-map-perf", { detail: event }));
+    return event;
+  },
+  timeSync(name, fn){
+    const start = performance.now();
+    try { return fn(); }
+    finally { this.add(name, performance.now() - start); }
+  },
   async time(name, fn){
     const start = performance.now();
     try { return await fn(); }
     finally {
       const ms = performance.now() - start;
-      this.spans.push([name, ms]);
-      performance.measure(name, { start, duration: ms });
+      this.add(name, ms);
     }
   },
   report(){
@@ -4142,9 +4229,9 @@ function applyScopeUI(){
   document.title = `Advisor Map — ${scopeLabel(scope)}`;
 }
 
-function renderAll(fit){
+function renderAll(fit, transition=null){
   if (scope === "US") renderNational(fit ? "national" : false);
-  else renderMarkers(fit);
+  else renderMarkers(fit, transition);
   refreshPanel();
 }
 
@@ -4184,6 +4271,8 @@ function resetForScopeChange(){
 let scopeRequest = 0;
 function switchScope(next, panTo){
   const request = ++scopeRequest;
+  const transition = { scope: next, request, startedAt: performance.now() };
+  PERF.signal("scope:transition-start", { scope: next, request });
   markerBatchToken++;                 // cancel marker work belonging to the prior scope
   map.stop();
   if (typeof cluster._animationEnd === "function") cluster._animationEnd();
@@ -4198,9 +4287,17 @@ function switchScope(next, panTo){
     applyScopeUI();
     // when panning to a searched location, skip the fit-to-scope so it does not
     // override the pan and drop us back at the whole state
-    renderAll(!panTo);
+    renderAll(!panTo, next === "US" ? null : transition);
     if (panTo) map.setView(panTo, 11, { animate: false });
     scopeNotice = missing.length ? `Missing jurisdiction data: ${missing.join(", ")}.` : "";
+    if (next === "US") afterNextPaint(() => {
+      if (request !== scopeRequest) return;
+      const elapsedMs = performance.now() - transition.startedAt;
+      PERF.add("scope:US:to national layer painted", elapsedMs);
+      PERF.signal("scope:transition-settled", {
+        scope: next, request, elapsedMs, kind: "national",
+      });
+    });
   };
   scopeNotice = "";
   if (next === "US"){ ALL = []; finish(); return Promise.resolve(); }
@@ -5157,7 +5254,7 @@ function redrawSpokes(){
 
 map.on("zoomend moveend", () => { if (selectedBuilding) redrawSpokes(); });
 
-function renderMarkers(fit){
+function renderMarkers(fit, transition=null){
   const _t0 = performance.now();
   const feats = ALL.filter(f => passesFilters(f.properties));
   const buildings = buildingsFor(feats);
@@ -5182,7 +5279,7 @@ function renderMarkers(fit){
     BUILDING_MARKERS.set(b.key, mk);
     return mk;
   });
-  addMarkerBatches(cluster, markers, markerBatchToken);
+  addMarkerBatches(cluster, markers, markerBatchToken, 0, transition);
   redrawSpokes();
 
   if (fit && buildings.length){
