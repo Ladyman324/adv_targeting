@@ -362,9 +362,14 @@ class MainTests(unittest.TestCase):
         self.assertFalse(folder.exists())
         assets.assert_called_once_with()
         command = run.call_args.args[0]
+        child_cwd = run.call_args.kwargs["cwd"]
         child_environment = run.call_args.kwargs["env"]
         self.assertNotIn("--deployment-token", command)
         self.assertEqual(command[-4:], ["--env", "preview-blue", "--app-name", "eic-advisors"])
+        self.assertEqual(child_cwd, folder.resolve())
+        self.assertNotEqual(child_cwd, ROOT.resolve())
+        if os.name == "nt":
+            self.assertFalse(str(child_cwd).startswith("\\\\"))
         self.assertNotIn("SWA_CLI_DEPLOYMENT_TOKEN", child_environment)
         self.assertIn("native keychain authentication", output)
 
@@ -375,6 +380,30 @@ class MainTests(unittest.TestCase):
         assets.assert_called_once_with()
         command = run.call_args.args[0]
         self.assertEqual(command[-2:], ["--env", "production"])
+
+    def test_local_cwd_upload_failure_remains_nonzero_and_cleans_stage(self):
+        folder = pathlib.Path(tempfile.mkdtemp(prefix="swa_deploy_"))
+        failure = subprocess.CalledProcessError(19, ["swa", "deploy"])
+        output = io.StringIO()
+        with mock.patch.object(deploy_swa, "check_web_assets"), \
+                mock.patch.object(deploy_swa, "check_config"), \
+                mock.patch.object(
+                    deploy_swa, "function_bindings", return_value={}
+                ), mock.patch.object(
+                    deploy_swa, "stage", return_value=folder
+                ), mock.patch.object(
+                    deploy_swa, "run_checked", side_effect=failure
+                ) as run, mock.patch.object(
+                    sys, "argv", ["deploy_swa.py", "--full", "--static-only"]
+                ), mock.patch.dict(os.environ, {}, clear=True), \
+                contextlib.redirect_stdout(output), \
+                self.assertRaises(SystemExit) as raised:
+            deploy_swa.main()
+
+        self.assertNotEqual(raised.exception.code, 0)
+        self.assertIn("exit 19", str(raised.exception.code))
+        self.assertEqual(run.call_args.kwargs["cwd"], folder.resolve())
+        self.assertFalse(folder.exists())
 
     def test_static_only_acknowledgement_is_required(self):
         with mock.patch.object(sys, "argv", ["deploy_swa.py", "--full"]), \

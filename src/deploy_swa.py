@@ -178,6 +178,35 @@ def cleanup_staged_tree(path: pathlib.Path, expected_prefix: str) -> None:
     shutil.rmtree(candidate)
 
 
+def validated_local_stage_cwd(
+    path: pathlib.Path, expected_prefix: str = "swa_deploy_"
+) -> pathlib.Path:
+    """Return an existing local staging directory safe for a CLI cwd.
+
+    Windows ``.cmd`` wrappers are launched through cmd.exe, which cannot use a
+    UNC directory as its current directory and silently falls back elsewhere.
+    Constrain the child cwd to the local temp tree created by stage().
+    """
+    if path.is_symlink():
+        raise RuntimeError(f"refusing to use staging symlink as CLI cwd: {path}")
+    try:
+        candidate = path.resolve(strict=True)
+    except OSError as exc:
+        raise RuntimeError(f"staging directory is unavailable: {path}") from exc
+    temp_root = pathlib.Path(tempfile.gettempdir()).resolve()
+    if (not candidate.is_dir()
+            or candidate.parent != temp_root
+            or not candidate.name.startswith(expected_prefix)):
+        raise RuntimeError(
+            f"refusing unverified staging directory as CLI cwd: {path}"
+        )
+    if os.name == "nt" and (
+        str(candidate).startswith("\\\\") or not candidate.drive
+    ):
+        raise RuntimeError(f"refusing non-local CLI cwd: {candidate}")
+    return candidate
+
+
 def validated_cli_label(value: str | None, option: str) -> str | None:
     """Accept Azure-style identifiers without command-shell metacharacters."""
     if value is None:
@@ -535,7 +564,11 @@ def main() -> None:
         print(f"[*] deploying {target!r} to SWA environment "
               f"{args.deployment_environment!r}")
         try:
-            run_checked(cmd, env=swa_child_environment(token))
+            run_checked(
+                cmd,
+                cwd=validated_local_stage_cwd(folder),
+                env=swa_child_environment(token),
+            )
         except FileNotFoundError:
             sys.exit("[!] the SWA CLI is not installed. Run:\n"
                      "    npm install -g @azure/static-web-apps-cli")
