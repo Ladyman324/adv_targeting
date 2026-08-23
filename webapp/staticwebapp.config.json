@@ -1,0 +1,61 @@
+{
+  "auth": {
+    "identityProviders": {
+      "azureActiveDirectory": {
+        "registration": {
+          "openIdIssuer": "https://login.microsoftonline.com/c1efc78d-a7d7-4998-98b6-08e90af5661f/v2.0",
+          "clientIdSettingName": "AZURE_CLIENT_ID",
+          "clientSecretSettingName": "AZURE_CLIENT_SECRET"
+        }
+      }
+    }
+  },
+
+  "platform": { "apiRuntime": "node:20" },
+
+  "routes": [
+    {
+      "route": "/api/email-preferences",
+      "allowedRoles": ["anonymous"],
+      "headers": { "Cache-Control": "no-store" }
+    },
+    {
+      "route": "/api/email-auth",
+      "allowedRoles": ["anonymous"],
+      "headers": { "Cache-Control": "no-store" }
+    },
+    {
+      "route": "/api/*",
+      "allowedRoles": ["authenticated"],
+      "headers": { "Cache-Control": "no-store" }
+    },
+    {
+      "route": "/data/*",
+      "allowedRoles": ["authenticated"],
+      "headers": { "Cache-Control": "no-cache" }
+    },
+    {
+      "route": "/*",
+      "allowedRoles": ["authenticated"]
+    }
+  ],
+
+  "responseOverrides": {
+    "401": { "statusCode": 302, "redirect": "/.auth/login/aad" }
+  },
+
+  "navigationFallback": {
+    "rewrite": "/index.html",
+    "exclude": [
+      "/data/*",
+      "*.{css,js,json,png,jpg,svg,ico,webmanifest,gz}"
+    ]
+  },
+
+  "globalHeaders": {
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "strict-origin-when-cross-origin",
+    "Content-Security-Policy": "frame-ancestors 'none'"
+  }
+}

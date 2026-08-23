@@ -1,0 +1,1538 @@
+:root{
+  --bg:#0c1015; --panel:#141a21; --panel-2:#1a222b; --ink:#e7ecf1; --muted:#8a95a2;
+  --hair:#242d38; --accent:#54d4bf; --accent-ink:#08120f;
+  /* Map marks: fixed, never themed. The basemap is always light, so a marker
+     colour that follows the panel's dark theme is painted on the wrong ground.
+     Contrast against OSM tones -- land / parkland / water:
+       #54d4bf (old)  1.58 / 1.39 / 1.13   white numerals 1.82:1
+       #0b6357 (new)  6.23 / 5.48 / 4.46   white numerals 7.15:1  */
+  --map-accent:#0b6357; --map-muted:#5b6a72;
+  --space-section:16px; --space-control:10px; --space-tight:6px;
+  --m-sma:#12b39c; --m-fund:#e0a53a; --m-both:#8079e0; --m-low:#7a8593; --m-unc:#556170;
+  --m-field:var(--m-sma); --m-eicix:var(--m-fund); --m-platform:var(--m-both); --m-nt:var(--m-low);
+  --barrons-ink:#0c1015;
+  --shadow:0 6px 24px rgba(0,0,0,.35);
+}
+@media (prefers-color-scheme:light){
+  :root{
+    --bg:#eef1f4; --panel:#ffffff; --panel-2:#f4f7f9; --ink:#141922; --muted:#5c6773;
+    --hair:#e2e7ec; --accent:#0c6f62; --accent-ink:#ffffff;
+    --m-sma:#0c8d7b; --m-fund:#b8811d; --m-both:#6259c4; --m-low:#6b7684; --m-unc:#9aa4b0;
+    --m-field:var(--m-sma); --m-eicix:var(--m-fund); --m-platform:var(--m-both); --m-nt:var(--m-low);
+    --barrons-ink:#ffffff;
+    --shadow:0 6px 20px rgba(20,30,40,.10);
+  }
+}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%}
+body{font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  color:var(--ink);background:var(--bg);-webkit-font-smoothing:antialiased;overflow:hidden}
+.mono{font-variant-numeric:tabular-nums;font-family:ui-monospace,"SF Mono",Menlo,Consolas,monospace}
+
+/* one source of truth for the sidebar width -- the stats strip and the details
+   panel both position against it */
+:root{--panel-w:420px;--filter-control-w:216px}
+#app{display:grid;grid-template-columns:var(--panel-w) 1fr;height:100vh;position:relative}
+#map{height:100vh;background:var(--panel-2)}
+
+#panel{background:var(--panel);border-right:1px solid var(--hair);display:flex;flex-direction:column;
+  height:100vh;overflow-y:auto;overflow-x:hidden;overscroll-behavior:contain}
+/* The sticky region now ends at Active filters: search, scope and the two
+   scope switches stay reachable while everything below -- the KPI grid down --
+   scrolls freely. It used to pin the whole header including the six KPI cards,
+   which on a short viewport left very little moving room. Capped and given its
+   own scroll so a long filter list can never eat the panel. */
+#panel header{padding:13px 20px 11px;border-bottom:1px solid var(--hair);
+  position:sticky;top:0;background:var(--panel);z-index:3;
+  /* flex:none is load-bearing. #panel is a flex column, so giving the header a
+     max-height and its own overflow made it a shrinkable flex item: the layout
+     collapsed it to 37px while its content was 275px. */
+  flex:none;max-height:min(62vh,520px);overflow-y:auto;overscroll-behavior:contain}
+#panel header::-webkit-scrollbar{width:8px}
+#panel header::-webkit-scrollbar-thumb{background:var(--hair);border-radius:4px}
+/* the KPI grid is a plain scrolling block now, so it supplies its own rhythm */
+.kpi-block{gap:var(--space-tight)}
+.kpi-block .kpi-grid{margin-top:0}
+
+/* thin scrollbars so the panel doesn't lose width to chrome */
+#panel::-webkit-scrollbar,.firms::-webkit-scrollbar{width:8px}
+#panel::-webkit-scrollbar-thumb,.firms::-webkit-scrollbar-thumb{
+  background:var(--hair);border-radius:4px}
+#panel::-webkit-scrollbar-thumb:hover,.firms::-webkit-scrollbar-thumb:hover{background:var(--muted)}
+#panel,.firms{scrollbar-width:thin;scrollbar-color:var(--hair) transparent}
+.eyebrow{margin:0 0 5px;font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--accent);font-weight:700}
+#panel h1{margin:0;font-size:17px;letter-spacing:-.02em;display:flex;align-items:baseline;gap:8px}
+.title-row{display:flex;align-items:center;gap:8px}
+#fieldLink{display:none;margin-left:auto;flex:none;align-items:center;gap:5px;
+  font-size:12px;font-weight:650;text-decoration:none;white-space:nowrap;
+  padding:6px 12px;border-radius:20px;
+  background:var(--accent);color:var(--accent-ink)}
+#panel h1 .state{font-size:13px;font-weight:500;color:var(--muted);letter-spacing:0}
+#scope{margin-top:7px;width:100%;font:inherit;font-size:13px;font-weight:550;
+  padding:8px 11px;border-radius:9px;border:1px solid var(--hair);
+  background:var(--panel-2);color:var(--ink);outline:none;cursor:pointer;
+  -webkit-appearance:none;appearance:none;
+  background-image:linear-gradient(45deg,transparent 50%,var(--muted) 50%),
+                   linear-gradient(135deg,var(--muted) 50%,transparent 50%);
+  background-position:calc(100% - 16px) 52%,calc(100% - 11px) 52%;
+  background-size:5px 5px,5px 5px;background-repeat:no-repeat;padding-right:32px}
+#scope:focus{border-color:var(--accent)}
+#scope option{background:var(--panel);color:var(--ink)}
+.kpi-status{margin:10px 0 0;font-size:12px;color:var(--muted)}
+.kpi-status[hidden]{display:none}
+.kpi-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:var(--space-tight);margin-top:var(--space-control)}
+/* Label and value on one line. Six stacked cards cost 162px of a 720px laptop
+   viewport for six numbers; inline they cost about a third of that and read
+   just as well. */
+.kpi-card{min-width:0;padding:4px 7px;border:1px solid var(--hair);border-radius:7px;
+  display:flex;align-items:baseline;justify-content:space-between;gap:6px;
+  background:linear-gradient(145deg,var(--panel-2),var(--panel));box-shadow:0 1px 2px rgba(10,22,28,.04)}
+/* The VALUE is the point of the card, so it never shrinks -- the label gives
+   way instead. Inline cards squeezed "8,693" to zero width in the Advisors
+   card and clipped Funds/ETFs, because three flex children were competing in
+   102px and the number lost. */
+.kpi-card strong{margin-top:0;flex:0 0 auto;color:var(--ink);font-size:12.5px;font-weight:650;
+  line-height:1.2;font-variant-numeric:tabular-nums;white-space:nowrap}
+.kpi-card .kpi-label{min-width:0;overflow:hidden}
+.kpi-card .kpi-label>span:first-of-type{overflow:hidden;text-overflow:ellipsis}
+.kpi-label{display:flex;align-items:center;gap:3px;color:var(--muted);font-size:9.5px;font-weight:700;
+  line-height:1;text-transform:uppercase;letter-spacing:.08em;white-space:nowrap}
+.kpi-label .info-button{width:14px;height:14px;font-size:8px;background:transparent}
+.kpi-card .info-popover{left:0;right:auto;width:min(320px,calc(100vw - 42px));white-space:normal}
+.kpi-card:nth-child(4) .info-popover{left:0}
+.kpi-note{margin:5px 0 0;color:var(--muted);font-size:10px;line-height:1.3}
+.count{margin:10px 0 0;font-size:13px;color:var(--muted)}
+.count b{color:var(--ink);font-weight:650}
+.count-help{margin:4px 0 0;font-size:10.5px;color:var(--muted);line-height:1.35}
+.info-wrap{position:relative;display:inline-flex;align-items:center;flex:none}
+.info-wrap[hidden]{display:none}
+[data-needs-state][hidden]{display:none!important}
+.info-button{display:inline-flex;align-items:center;justify-content:center;width:17px;height:17px;padding:0;
+  border:1px solid var(--hair);border-radius:50%;background:var(--panel-2);color:var(--muted);
+  font:700 10px/1 ui-serif,Georgia,serif;cursor:help}
+.info-button:hover,.info-button:focus-visible{color:var(--accent);border-color:var(--accent);outline:none}
+.info-popover{display:none;position:absolute;top:calc(100% + 7px);left:0;z-index:20;width:min(290px,calc(100vw - 42px));
+  padding:9px 10px;border:1px solid var(--hair);border-radius:9px;background:var(--panel);box-shadow:var(--shadow);
+  color:var(--muted);font-size:10.5px;font-weight:400;line-height:1.45;letter-spacing:0;text-transform:none}
+.info-wrap:hover .info-popover,.info-wrap:focus-within .info-popover{display:block}
+.floating-info-enabled .info-wrap:hover .info-popover,
+.floating-info-enabled .info-wrap:focus-within .info-popover{display:none}
+.floating-info{position:fixed;z-index:10000;width:min(320px,calc(100vw - 24px));padding:10px 11px;
+  border:1px solid var(--hair);border-radius:9px;background:var(--panel);box-shadow:var(--shadow);
+  color:var(--muted);font-size:10.5px;font-weight:400;line-height:1.45;letter-spacing:0;
+  text-transform:none;pointer-events:none}
+.floating-info[hidden]{display:none}
+.filter-state{margin-top:8px;padding-top:8px;border-top:1px solid var(--hair)}
+.filter-state[hidden]{display:none}
+.filter-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:var(--space-tight)}
+.active-filters{display:flex;gap:var(--space-tight);flex-wrap:wrap;min-height:18px}
+.filter-chip{font:inherit;font-size:10.5px;color:var(--ink);background:var(--panel-2);
+  border:1px solid var(--hair);border-radius:999px;padding:3px 7px;cursor:pointer}
+.filter-chip:hover,.filter-chip:focus-visible{border-color:var(--accent);outline:none}
+.filter-chip::after{content:" ×";color:var(--muted)}
+
+.block{padding:var(--space-section) 20px;border-bottom:1px solid var(--hair);display:flex;flex-direction:column;gap:var(--space-control);
+  flex:none}
+/* Firms in view takes whatever height is left and scrolls internally, so the
+   list runs to the bottom of the screen. It was flex:none with the list capped
+   at min(46vh,400px), which meant it stopped short and left dead space below.
+   The min-height stops it collapsing to nothing when the advanced filters are
+   open on a short screen -- the panel scrolls in that case instead. The floor
+   is sized to keep five firm rows fully visible with the filters expanded:
+   5 rows at a 63px pitch, less one 2px gap, plus 139px of panel chrome
+   (heading, firm search box, count line) = 452. */
+.block.grow{flex:1 1 auto;min-height:452px}
+.block-head{display:flex;align-items:center;justify-content:space-between}
+.firm-head-actions{display:flex;align-items:center;gap:var(--space-control)}
+.firm-panel-body{display:flex;flex-direction:column;gap:var(--space-control);
+  flex:1 1 auto;min-height:0}
+.firm-panel-body[hidden]{display:none}
+.label{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);font-weight:700}
+.mini{font:inherit;font-size:11px;color:var(--accent);background:none;border:0;cursor:pointer;padding:0}
+.mini:hover{text-decoration:underline}
+.sel{font-size:11px;color:var(--accent);font-weight:600}
+.action-btn{font:inherit;font-size:12px;font-weight:650;color:var(--accent);background:var(--panel-2);
+  border:1px solid var(--hair);border-radius:9px;padding:8px 10px;cursor:pointer;text-align:center}
+.action-btn:hover,.action-btn:focus-visible{border-color:var(--accent);outline:none}
+.action-btn.on{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}
+.scope-filter{margin-top:var(--space-control)}
+.scope-filter .switch-lbl{display:flex;align-items:baseline;gap:6px}
+.notice{display:flex;align-items:flex-start;gap:var(--space-control);margin-top:var(--space-control);padding:var(--space-control);border-radius:9px;
+  border:1px solid color-mix(in srgb,var(--accent) 45%,var(--hair));
+  background:color-mix(in srgb,var(--accent) 10%,var(--panel-2));color:var(--ink);
+  font-size:11.5px;line-height:1.4}
+.notice[hidden]{display:none}
+.notice button{font:inherit;font-size:17px;line-height:1;color:var(--muted);background:none;border:0;
+  padding:0;margin-left:auto;cursor:pointer}
+.notice button:hover{color:var(--ink)}
+
+.seg{display:flex;background:var(--panel-2);border:1px solid var(--hair);border-radius:10px;padding:3px;gap:2px}
+.seg button{flex:1;font:inherit;font-size:12px;font-weight:500;color:var(--muted);background:none;border:0;
+  padding:6px 4px;border-radius:7px;cursor:pointer;transition:.14s;white-space:nowrap}
+.seg button:hover{color:var(--ink)}
+.seg button[aria-pressed="true"]{background:var(--accent);color:var(--accent-ink);font-weight:650}
+
+.hint{margin:0;font-size:11px;color:var(--muted);line-height:1.4}
+.mini-note{font-size:10px;color:var(--muted);opacity:.8}
+.data-info,.advanced-panel{padding:11px 20px;border-bottom:1px solid var(--hair);font-size:11px;color:var(--muted)}
+.advanced-panel>summary{cursor:pointer;color:var(--accent);font-weight:650;list-style:none;
+  font-size:11.5px;letter-spacing:.02em}
+.advanced-panel>summary::after{content:" +";float:right;color:var(--muted)}
+.advanced-panel[open]>summary::after{content:" −"}
+.advanced-panel>summary::-webkit-details-marker{display:none}
+.advanced-panel[open]>summary{margin-bottom:4px}
+.advanced-panel .aum-bands{margin-bottom:2px}
+.advanced-panel .filter-row:first-of-type{padding-top:2px}
+.data-info>summary{cursor:pointer;color:var(--accent);font-weight:650;list-style:none}
+.data-info>summary::after{content:" +";float:right;color:var(--muted)}
+.data-info[open]>summary::after{content:" −"}
+.data-info>summary::-webkit-details-marker{display:none}
+.data-info>p{margin:10px 0 0;line-height:1.45}
+.quality-details{margin-top:9px;line-height:1.45}
+.quality-details summary{cursor:pointer;color:var(--accent);font-weight:600}
+.quality-details p{margin:7px 0 0}
+/* ---- filter rows ----
+   Label and control on ONE line where they fit, wrapping to two only where the
+   control is genuinely too wide (map position has five buttons). Letting flex
+   decide beats hardcoding which rows stack: the six sections were 63-78px each
+   when every label sat above its control, which is most of a laptop viewport
+   for controls that are mostly three short buttons. */
+.filter-rows{display:flex;flex-direction:column}
+/* One rhythm for every row: label (or switch) on the left, control on the
+   right, a hairline between. The segmented controls share a FIXED width so
+   their right edges line up down the column -- previously a three-button row
+   and a five-button row were different widths and the column looked ragged. */
+/* min-height, not padding, so switch rows and segmented rows are the same
+   height -- they were 27px and 45px, which made the column look uneven.
+   No rules between rows: the uniform height and aligned right edge already
+   separate them, and hairlines on six short rows read as clutter. */
+.filter-row{display:flex;align-items:center;gap:8px;min-height:36px;padding:1px 0}
+.filter-row>.label{flex:1 1 auto;min-width:0;display:inline-flex;align-items:center;gap:5px}
+.filter-row>.seg{flex:0 0 var(--filter-control-w);min-width:0;padding:2px;border-radius:8px}
+.filter-row>.seg button{padding:4px 2px;font-size:10px;border-radius:6px}
+.filter-row .switch{margin:0}
+/* Switch rows lead with the control; segmented rows lead with the label. The
+   toggle is the thing being set, so on those rows it comes first. */
+.switch.compact{flex:1 1 auto;justify-content:flex-start;gap:8px}
+.switch.compact .switch-lbl{font-size:11.5px;font-weight:550}
+.filter-row>.info-wrap{margin-left:auto}
+.advisor-filter-head{margin-top:var(--space-section);padding-top:var(--space-control);
+  border-top:1px solid var(--hair);align-items:baseline;gap:8px;flex-wrap:wrap}
+
+/* National view has no per-advisor data client-side -- it aggregates offices --
+   so these cannot work there. Greyed with the reason stated, rather than
+   hidden: hiding made the panel jump on every scope change and left people
+   hunting for controls that had silently vanished. */
+.filters-disabled{opacity:.42;pointer-events:none;filter:saturate(.5)}
+
+/* ---- Filters / Firms switch ---- */
+.pane-switch{margin:0 20px var(--space-control);display:flex}
+.pane-switch button{flex:1 1 0}
+/* .block sets display:flex, which outranks the [hidden] attribute's UA rule --
+   the firm pane stayed 471px tall while reporting hidden. */
+.pane[hidden]{display:none!important}
+#firmListMeta{color:var(--accent)}
+#map.lasso-ready{cursor:crosshair}
+.heat-key{display:grid;grid-template-columns:auto 1fr auto;align-items:center;gap:7px;
+  margin-top:9px;color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:.06em}
+.heat-key i{display:block;height:7px;border-radius:5px;background:linear-gradient(90deg,
+  #2c7bb6 0%,#28a9a1 30%,#f3df78 55%,#f39a3c 76%,#d73027 100%)}
+
+/* unified global search */
+/* Fixed, not absolute: the panel header is a capped scrolling box, and an
+   absolutely-positioned child was cropped at its lower edge by the KPI cards.
+   Left/top/width are set from the input's rect in positionGlobalResults(). */
+.global-results{position:fixed;z-index:1200;max-height:min(48vh,420px);
+  overflow-y:auto;padding:6px;background:var(--panel);border:1px solid var(--hair);border-radius:10px;
+  box-shadow:var(--shadow);scrollbar-width:thin;scrollbar-color:var(--hair) transparent}
+.global-results[hidden],.result-section[hidden]{display:none!important}
+.global-results::-webkit-scrollbar{width:8px}
+.global-results::-webkit-scrollbar-thumb{background:var(--hair);border-radius:4px}
+.result-section+.result-section{border-top:1px solid var(--hair);margin-top:5px;padding-top:4px}
+.ares{display:flex;flex-direction:column;gap:1px;padding:7px 9px;border-radius:8px;cursor:pointer;
+  transition:.1s;font:inherit;color:var(--ink);background:none;border:0;text-align:left;width:100%}
+.ares:hover{background:var(--panel-2)}
+.ares .an{font-size:13px;font-weight:600;line-height:1.2}
+.ares .af{font-size:11.5px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ares .ac{font-size:10.5px;color:var(--muted);opacity:.85}
+.result-label{margin:7px 9px 3px;font-size:10px;letter-spacing:.1em;text-transform:uppercase;
+  color:var(--muted);font-weight:700}
+
+/* office-mode bubbles */
+.advisor-cluster-wrap{background:none;border:0}
+/* Buildings and clusters now share one size scale, so size alone no longer says
+   which is which -- and they mean different things: a building is one place you
+   can visit, a cluster is several places to zoom into. A cluster carries a
+   second inner ring, reading as stacked; a building keeps a single clean ring.
+   Deliberately not a colour difference: colour is already carrying firm identity
+   through the proportional splits, and a second meaning would collide with it. */
+.advisor-cluster{display:flex;align-items:center;justify-content:center;border-radius:50%;
+  color:#fff;font-size:12px;font-weight:700;line-height:1;border:2px solid #fff;
+  box-shadow:inset 0 0 0 2px rgba(255,255,255,.5),0 1px 5px rgba(0,0,0,.32);
+  font-variant-numeric:tabular-nums;box-sizing:border-box;cursor:pointer}
+.office-wrap{background:none;border:0}
+/* Shape carries the office/area distinction. Size cannot -- both marks share one
+   scale now -- and colour is taken by firm identity in the proportional splits.
+   Shape is the strongest channel left and it still reads at 22px: a rounded
+   square is a discrete place you can visit, a circle is an aggregate to zoom
+   into. Buildings and clusters sit on screen together at every zoom (66 vs 68
+   at zoom 12), so this is not an edge case. */
+.office{display:flex;align-items:center;justify-content:center;border-radius:22%;
+  color:#fff;font-weight:700;border:2px solid #fff;
+  box-shadow:0 2px 8px rgba(0,0,0,.35);cursor:pointer;
+  font-variant-numeric:tabular-nums;transition:transform .12s}
+.office:hover{transform:scale(1.08)}
+.office-firms{max-height:190px;overflow-y:auto;padding-right:3px}
+.office-firm-row{align-items:center;border-bottom:1px solid var(--hair)}
+.office-firm-actions{display:flex;flex-direction:column;align-items:flex-end;gap:2px;flex:none}
+.office-firm-actions button,.roster-firm-overview{font:inherit;font-size:10px;color:var(--accent);background:none;
+  border:0;padding:1px 0;cursor:pointer;white-space:nowrap}
+.office-firm-actions button:hover,.roster-firm-overview:hover{text-decoration:underline}
+.swatch{display:inline-block;width:8px;height:8px;border-radius:2px;margin-right:6px;vertical-align:middle}
+
+/* both panel searches share one look -- a bare search input keeps the UA default,
+   which renders white and breaks the dark panel */
+#search,#advisorSearch,#locSearch,#globalSearch{font:inherit;font-size:13px;padding:8px 11px;border-radius:9px;
+  border:1px solid var(--hair);background:var(--panel-2);color:var(--ink);outline:none;
+  width:100%;-webkit-appearance:none;appearance:none}
+#search::placeholder,#advisorSearch::placeholder,#locSearch::placeholder,#globalSearch::placeholder{color:var(--muted)}
+#search:focus,#advisorSearch:focus,#locSearch:focus,#globalSearch:focus{border-color:var(--accent)}
+
+/* location search (header) + territory/firm/advisor grouping */
+.loc{margin-top:var(--space-control);position:relative}
+.loc .results{margin-top:6px}
+.group-label{margin:16px 20px 2px;font-size:10.5px;letter-spacing:.14em;text-transform:uppercase;
+  color:var(--accent);font-weight:700}
+.lres{display:flex;align-items:center;gap:8px;width:100%;text-align:left;font:inherit;font-size:13px;
+  padding:7px 9px;border:0;background:none;color:var(--ink);border-radius:8px;cursor:pointer}
+.lres:hover,.lres:focus-visible{background:var(--panel-2);outline:none}
+.lres .lst{font-size:11px;font-weight:700;color:var(--accent)}
+.lres .sub{margin-left:auto;color:var(--muted);font-size:11px}
+#search::-webkit-search-cancel-button,#advisorSearch::-webkit-search-cancel-button,#globalSearch::-webkit-search-cancel-button{
+  -webkit-appearance:none;height:11px;width:11px;cursor:pointer;background:var(--muted);
+  -webkit-mask:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'><path d='M1 1L11 11M11 1L1 11' stroke='black' stroke-width='2.2' stroke-linecap='round'/></svg>") center/contain no-repeat;
+          mask:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'><path d='M1 1L11 11M11 1L1 11' stroke='black' stroke-width='2.2' stroke-linecap='round'/></svg>") center/contain no-repeat}
+.firms{flex:1 1 auto;min-height:0;overflow-y:auto;display:flex;flex-direction:column;gap:2px;
+  margin:0 -6px;padding:0 6px}
+.frow{display:grid;grid-template-columns:1fr auto;gap:3px 8px;align-items:center;padding:7px 9px;
+  border-radius:8px;cursor:pointer;transition:.1s}
+.frow:hover{background:var(--panel-2)}
+.frow.active{background:color-mix(in srgb,var(--firm-col,var(--accent)) 16%,transparent);outline:1px solid var(--firm-col,var(--accent))}
+.frow .fn{font-size:13px;line-height:1.25;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* Exclude rides the metrics line, pushed to the right edge. Stacked under
+   Details it added a second row to every firm and grew the whole list. */
+/* padding:0 and the metrics line-height on purpose -- 1px of padding here made
+   every firm row 62px instead of 61, which cost a whole row off the visible
+   list once the pitch no longer divided into the panel height. */
+.frow .fexclude{margin-left:auto;font:inherit;font-size:10.5px;font-weight:650;color:var(--muted);
+  background:none;border:0;padding:0;line-height:inherit;cursor:pointer;white-space:nowrap}
+.frow .fexclude:hover{color:var(--m-fund);text-decoration:underline}
+.excluded-firms{display:flex;flex-wrap:wrap;align-items:center;gap:5px}
+.excluded-firms[hidden]{display:none}
+.excl-label{font-size:9.5px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
+/* A struck-off firm leaves the list below, so these pills are the only route
+   back. Each says what it is and restores that one firm on click. */
+.excl-pill{font:inherit;font-size:10.5px;color:var(--ink);background:var(--panel-2);
+  border:1px dashed color-mix(in srgb,var(--m-fund) 60%,transparent);border-radius:999px;
+  padding:2px 8px;cursor:pointer;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.excl-pill::after{content:" ↺";color:var(--muted)}
+.excl-pill:hover{border-style:solid;color:var(--m-fund)}
+.frow .fdetails{font:inherit;font-size:10.5px;font-weight:650;color:var(--accent);background:none;
+  border:0;padding:2px 0;cursor:pointer}
+.frow .fdetails:hover{text-decoration:underline}
+.frow .fmetrics{grid-column:1/3;display:flex;align-items:baseline;gap:11px;color:var(--muted);font-size:10.5px;
+  flex-wrap:wrap}
+.frow .fmetrics b{color:var(--ink);font-size:12px;font-weight:680}
+.frow .fb{grid-column:1/3;height:3px;border-radius:2px;background:var(--hair);overflow:hidden;margin-top:2px}
+.frow .fb i{display:block;height:100%;border-radius:2px;background:var(--accent)}
+.frow .meta{grid-column:1/3;font-size:11px;color:var(--muted)}
+
+/* compact segmented control for the firm-list sort */
+.mini-seg{padding:2px;border-radius:8px}
+.mini-seg button{font-size:10.5px;padding:3px 7px;letter-spacing:.01em}
+
+/* targeting: 5.G(7) switch + AUM dual-range */
+.switch{display:flex;align-items:center;gap:9px;cursor:pointer;user-select:none}
+.switch input{position:absolute;opacity:0;width:0;height:0}
+.switch-ui{position:relative;flex:none;width:34px;height:19px;border-radius:19px;
+  background:var(--panel-2);border:1px solid var(--hair);transition:.15s}
+.switch-ui::after{content:"";position:absolute;top:2px;left:2px;width:13px;height:13px;border-radius:50%;
+  background:var(--muted);transition:.15s}
+/* on-state driven by a JS class as well as :checked -- the class is what renders
+   the toggle; :checked is kept as a no-JS fallback */
+.switch.on .switch-ui,.switch input:checked + .switch-ui{background:var(--accent);border-color:var(--accent)}
+.switch.on .switch-ui::after,.switch input:checked + .switch-ui::after{transform:translateX(15px);background:var(--accent-ink)}
+.switch input:focus-visible + .switch-ui{outline:2px solid var(--accent);outline-offset:2px}
+.switch-lbl{font-size:12.5px;line-height:1.3}
+
+.range{display:flex;flex-direction:column;gap:8px}
+.range-head{display:flex;align-items:center;justify-content:space-between}
+.label2{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);font-weight:600}
+.range-head .mono{font-size:12px;color:var(--ink)}
+.dual{position:relative;height:22px}
+.dtrack,.dfill{position:absolute;top:9px;height:4px;border-radius:2px}
+.dtrack{left:0;right:0;background:var(--hair)}
+.dfill{background:var(--accent)}
+.dual input[type=range]{position:absolute;top:0;left:0;width:100%;height:22px;margin:0;
+  background:none;pointer-events:none;-webkit-appearance:none;appearance:none}
+.dual input[type=range]::-webkit-slider-runnable-track{height:22px;background:none}
+.dual input[type=range]::-moz-range-track{height:22px;background:none}
+.dual input[type=range]::-webkit-slider-thumb{pointer-events:auto;-webkit-appearance:none;appearance:none;
+  width:16px;height:16px;margin-top:3px;border-radius:50%;background:var(--accent);
+  border:2px solid var(--panel);cursor:pointer;box-shadow:0 1px 3px rgba(0,0,0,.35)}
+.dual input[type=range]::-moz-range-thumb{pointer-events:auto;width:16px;height:16px;border-radius:50%;
+  background:var(--accent);border:2px solid var(--panel);cursor:pointer}
+.aum-bands{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:5px}
+.aum-bands button{font:inherit;font-size:11px;color:var(--muted);background:var(--panel-2);
+  border:1px solid var(--hair);border-radius:8px;padding:6px 4px;cursor:pointer;white-space:nowrap}
+.aum-bands button:hover{color:var(--ink);border-color:var(--muted)}
+.aum-bands button[aria-pressed="true"]{background:var(--accent);color:var(--accent-ink);border-color:var(--accent);font-weight:650}
+
+.lasso-control{display:flex!important;background:var(--panel)!important;border-color:var(--hair)!important;overflow:hidden}
+.lasso-control button{display:block;border:0;border-right:1px solid var(--hair);background:var(--panel);color:var(--ink);
+  font:inherit;font-size:11px;font-weight:650;padding:7px 9px;cursor:pointer;line-height:1.2}
+.lasso-control button:last-child{border-right:0}
+.lasso-control button:hover{background:var(--panel-2);color:var(--accent)}
+.lasso-control button.on{background:var(--accent);color:var(--accent-ink)}
+.lasso-control button[hidden]{display:none}
+/* Bulk add lives in the stats bar on a desktop, and the stats bar is hidden
+   under 760px -- so on a phone this is the ONLY way to queue what is on
+   screen. Hidden above that width rather than duplicated, so the two can never
+   be on screen at once saying the same thing twice. */
+.lasso-queue{display:none!important}
+@media (max-width:760px){
+  .lasso-queue{display:block!important; font-size:15px; letter-spacing:-.03em}
+}
+
+#panel footer{padding:12px 20px;border-top:1px solid var(--hair);font-size:10.5px;color:var(--muted);line-height:1.4}
+
+.rclose{font:inherit;font-size:20px;line-height:1;color:var(--muted);background:none;border:0;
+  cursor:pointer;padding:0 2px;margin-left:auto;flex:none}
+.rclose:hover{color:var(--ink)}
+.rgrp{margin-top:8px}
+.rfirm{display:flex;align-items:center;gap:2px;padding:6px 8px;position:sticky;top:0;
+  background:var(--panel);z-index:1}
+.rft{font-size:11px;letter-spacing:.05em;text-transform:uppercase;color:var(--muted);font-weight:700;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.rft.detail-noun{font-family:inherit;background:none;border:0;padding:0;text-align:left;cursor:pointer;flex:1}
+.rft.detail-noun:hover,.rft.detail-noun:focus-visible{color:var(--accent);outline:none}
+.map-object-selected .office{outline:3px solid var(--ink);outline-offset:2px;
+  box-shadow:0 0 0 5px color-mix(in srgb,var(--accent) 30%,transparent)}
+.rfc{margin-left:auto;font-size:11px;color:var(--muted);font-weight:700;padding-left:8px}
+.rrow{display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:8px;
+  cursor:pointer;transition:.1s}
+.rrow:hover{background:var(--panel-2)}
+.rrow:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
+.rrow.on{background:color-mix(in srgb,var(--accent) 16%,transparent);
+  outline:1px solid var(--accent)}
+.rrow.dim{opacity:.42}
+.rrow .rrl{display:flex;flex-direction:column;gap:1px;min-width:0;flex:1}
+.rrow .rn{font-size:13px;font-weight:600;line-height:1.25;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.rrow .rm{font-size:11px;color:var(--muted)}
+.rrow .rline{font-size:10.5px;color:var(--accent);opacity:.85;margin-top:1px;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.rlink{flex:none;color:var(--muted);text-decoration:none;font-size:13px;
+  padding:2px 5px;border-radius:6px;line-height:1}
+.rlink:hover{color:var(--accent);background:var(--panel)}
+
+/* roster launcher inside popups */
+.rbtn{font:inherit;font-size:12px;font-weight:600;color:var(--accent);cursor:pointer;width:100%;
+  padding:7px 10px;border-radius:9px;border:1px solid var(--hair);background:var(--panel-2);
+  text-align:left;transition:.12s}
+.rbtn:hover{border-color:var(--accent);background:color-mix(in srgb,var(--accent) 12%,transparent)}
+
+/* sales-oriented firm overview */
+.firm-overview{position:absolute;top:62px;right:14px;z-index:1300;width:min(480px,calc(100vw - var(--panel-w) - 28px));
+  max-height:calc(100vh - 76px);display:flex;flex-direction:column;background:var(--panel);
+  border:1px solid var(--hair);border-radius:14px;box-shadow:var(--shadow);overflow:hidden}
+.firm-overview[hidden]{display:none}
+.firm-overview-head{display:flex;align-items:flex-start;gap:10px;padding:15px 16px 13px;
+  border-bottom:1px solid var(--hair);background:var(--panel)}
+.details-back{align-self:center;font:inherit;font-size:11.5px;font-weight:650;color:var(--accent);
+  background:none;border:0;padding:5px 4px 5px 0;cursor:pointer;white-space:nowrap}
+.details-back:hover,.details-back:focus-visible{text-decoration:underline;outline:none}
+.details-back[hidden]{display:none}
+.firm-overview-title{min-width:0;flex:1}
+.firm-overview-head h2{margin:0;font-size:18px;line-height:1.25;letter-spacing:-.02em}
+.firm-overview-head .count{margin-top:5px;font-size:11.5px}
+.firm-overview-body{overflow-y:auto;padding:14px 16px 22px;scrollbar-width:thin;scrollbar-color:var(--hair) transparent}
+.firm-overview-body::-webkit-scrollbar{width:8px}
+.firm-overview-body::-webkit-scrollbar-thumb{background:var(--hair);border-radius:4px}
+.detail-list{display:flex;flex-direction:column;gap:4px;margin:8px 0 14px}
+.detail-row{display:flex;align-items:center;gap:8px;width:100%;padding:8px 9px;text-align:left;
+  font:inherit;color:var(--ink);background:var(--panel-2);border:1px solid var(--hair);border-radius:9px;cursor:pointer}
+.detail-row:hover,.detail-row:focus-visible{border-color:var(--accent);outline:none}
+.detail-row-main{min-width:0;flex:1;display:flex;flex-direction:column;gap:2px}
+.detail-row-main b{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px}
+.detail-row-main small{color:var(--muted);font-size:10.5px;line-height:1.3}
+.detail-chevron{color:var(--muted);font-size:17px;line-height:1}
+.profile-actions{display:flex;flex-wrap:wrap;gap:7px;margin-bottom:14px}
+.profile-actions a,.profile-actions button{font:inherit;font-size:11.5px;font-weight:650;color:var(--accent);
+  background:var(--panel-2);border:1px solid var(--hair);border-radius:8px;padding:7px 9px;
+  text-decoration:none;cursor:pointer}
+.profile-actions a:hover,.profile-actions button:hover{border-color:var(--accent)}
+.profile-territories{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:8px}
+.profile-territories button{display:flex;flex-direction:column;gap:2px;text-align:left;font:inherit;color:var(--ink);
+  background:var(--panel-2);border:1px solid var(--hair);border-radius:9px;padding:8px;cursor:pointer}
+.profile-territories button:hover{border-color:var(--accent)}
+.profile-territories button b{font-size:11.5px}
+.profile-territories button span{font-size:10px;color:var(--muted);line-height:1.3}
+.profile-badges{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px}
+.profile-badge{display:inline-flex;align-items:center;gap:6px;font-size:11px;font-weight:650;
+  border:1px solid var(--hair);border-radius:999px;background:var(--panel-2);padding:4px 8px}
+.profile-badge i{width:8px;height:8px;border-radius:2px}
+.profile-recommendation{border:1px solid color-mix(in srgb,var(--accent) 42%,var(--hair));
+  background:color-mix(in srgb,var(--accent) 8%,var(--panel-2));border-radius:11px;padding:11px 12px;margin-bottom:13px}
+.profile-recommendation h3{margin:0 0 4px;font-size:13.5px}
+.profile-recommendation p{margin:0;color:var(--muted);font-size:11.5px;line-height:1.45}
+.profile-metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:7px;margin-bottom:14px}
+.profile-metric{padding:9px;border-radius:10px;background:var(--panel-2);border:1px solid var(--hair);min-width:0}
+.profile-metric span{display:block;color:var(--muted);font-size:9.5px;line-height:1.25;text-transform:uppercase;letter-spacing:.05em}
+.profile-metric b{display:block;margin-top:4px;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.profile-section{padding:13px 0;border-top:1px solid var(--hair)}
+.profile-section h3{margin:0 0 7px;font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
+.profile-section p{margin:5px 0;font-size:11.5px;line-height:1.45;color:var(--muted)}
+.profile-section p b{color:var(--ink)}
+.profile-score-row{display:grid;grid-template-columns:100px 1fr 32px;align-items:center;gap:8px;margin:7px 0;
+  font-size:11.5px}
+.profile-score-track{height:6px;background:var(--hair);border-radius:4px;overflow:hidden}
+.profile-score-track i{display:block;height:100%;border-radius:4px;background:var(--accent)}
+.profile-table-wrap{overflow-x:auto}
+.profile-table{width:100%;border-collapse:collapse;font-size:10.5px;font-variant-numeric:tabular-nums}
+.profile-table th{color:var(--muted);text-align:right;font-weight:650;padding:5px 4px;border-bottom:1px solid var(--hair);white-space:nowrap}
+.profile-table th:first-child,.profile-table td:first-child{text-align:left}
+.profile-table td{text-align:right;padding:6px 4px;border-bottom:1px solid color-mix(in srgb,var(--hair) 70%,transparent);vertical-align:top}
+.profile-table td:first-child{line-height:1.3;min-width:160px}
+.profile-note{font-size:10.5px!important;font-style:italic}
+.profile-empty{padding:12px 0;color:var(--muted);font-size:12px}
+
+/* leaflet popup */
+.leaflet-popup-content-wrapper{background:var(--panel);color:var(--ink);border-radius:12px;box-shadow:var(--shadow)}
+.leaflet-popup-tip{background:var(--panel)}
+.leaflet-popup-content{margin:12px 14px;font-family:inherit}
+
+@media (max-width:760px){
+  /* The advisors / offices / firms / AUM band is six stat cards plus two CSV
+     export buttons. On a phone it wraps to several rows and pushes the search
+     box below the fold -- the one control a rep actually needs there. Exporting
+     a CSV is not a phone activity, so the whole band goes. The field view at
+     field.html is the intended mobile experience anyway. */
+  #statsBar{display:none}
+  /* Only offered where it is the better tool. On a desktop the full map is
+     the point, and a link away from it would be noise. */
+  #fieldLink{display:inline-flex}
+  #app{grid-template-columns:1fr;grid-template-rows:minmax(0,auto) 1fr;height:100vh}
+  #panel{height:auto;max-height:58vh;border-right:0;border-bottom:1px solid var(--hair)}
+  #map{height:100%;min-height:320px}
+  .firms{max-height:min(34vh,300px)}
+  .firm-overview{top:auto;bottom:0;left:0;right:0;width:auto;max-height:86vh;border-radius:14px 14px 0 0}
+  .profile-metrics{grid-template-columns:repeat(2,1fr)}
+  .profile-territories{grid-template-columns:1fr}
+  .aum-bands{grid-template-columns:repeat(3,minmax(0,1fr))}
+}
+
+/* a disclosure is the one advisor fact a rep should not have to click to find */
+.rrow .rflag{margin-left:6px;font-size:11px;color:var(--m-fund);vertical-align:1px}
+.profile-warn{color:var(--m-fund);font-size:12px;line-height:1.5;margin:0 0 6px}
+
+/* an "i" sitting in a details-drawer section heading: smaller than the panel's,
+   and baseline-aligned with the uppercase label rather than centred on it */
+.profile-section h3 .info-button{width:14px;height:14px;font-size:8px;background:transparent}
+.profile-section h3 .info-wrap{vertical-align:middle;margin-left:2px}
+
+/* advisor employment history */
+.history-joined{margin:0 0 9px;font-size:12px;line-height:1.5}
+.history-label{margin:10px 0 6px;font-size:10.5px;letter-spacing:.05em;text-transform:uppercase;
+  color:var(--muted)}
+
+/* Schedule A/B ownership */
+.detail-row.static{cursor:default;border-color:transparent;background:var(--panel-2)}
+.detail-row.static:hover{border-color:transparent}
+.owner-chain{margin-top:8px}
+.owner-chain summary{font-size:11px;color:var(--accent);cursor:pointer;list-style:none}
+.owner-chain summary::-webkit-details-marker{display:none}
+.owner-chain summary:hover{text-decoration:underline}
+.owner-chain ol{margin:8px 0 0;padding-left:18px;font-size:11.5px;color:var(--muted);line-height:1.6}
+
+/* the advisor's role at their firm -- the decision-maker signal, given weight */
+.owner-callout{margin:0 0 14px;padding:11px 12px;border-radius:11px;
+  border:1px solid color-mix(in srgb,var(--accent) 45%,transparent);
+  background:color-mix(in srgb,var(--accent) 13%,transparent)}
+.owner-callout-head{font-size:13.5px;font-weight:700;line-height:1.35;color:var(--ink)}
+.owner-callout-tags{display:flex;flex-wrap:wrap;gap:5px;margin-top:7px}
+.owner-tag{font-size:10.5px;font-weight:700;letter-spacing:.03em;padding:3px 8px;border-radius:20px;
+  background:color-mix(in srgb,var(--accent) 22%,transparent);color:var(--ink)}
+.owner-tag.strong{background:var(--accent);color:#04211d}
+.owner-tag.muted{background:transparent;border:1px solid var(--hair);color:var(--muted);font-weight:600}
+.rown{margin-left:6px;font-size:9px;font-weight:800;letter-spacing:.06em;padding:2px 5px;
+  border-radius:4px;background:var(--accent);color:#04211d;vertical-align:1px}
+.parent-step{font:inherit;font-size:11.5px;color:var(--accent);background:none;border:0;padding:0;
+  cursor:pointer;text-align:left;display:inline-flex;align-items:center;gap:7px}
+.parent-step:hover{text-decoration:underline}
+.parent-count{font-size:10px;font-weight:700;color:var(--muted);border:1px solid var(--hair);
+  border-radius:20px;padding:1px 7px}
+
+/* one marker per building; the dot marks a multi-firm building */
+.office-multi{display:inline-block;width:5px;height:5px;border-radius:50%;
+  background:rgba(255,255,255,.9);vertical-align:3px;margin-left:3px}
+.spoke-label{background:var(--panel);color:var(--ink);border:1px solid var(--hair);
+  border-radius:6px;font-size:11px;font-weight:650;padding:3px 7px;box-shadow:var(--shadow)}
+.spoke-label::before{display:none}
+
+/* placement not corroborated by the advisor's employment record */
+.uncertain-note{margin:8px 0 0;padding:8px 10px;border-radius:9px;font-size:11.5px;line-height:1.5;
+  border:1px solid color-mix(in srgb,var(--m-fund) 45%,transparent);
+  background:color-mix(in srgb,var(--m-fund) 12%,transparent)}
+.runc{margin-left:6px;font-size:8.5px;font-weight:800;letter-spacing:.05em;padding:2px 5px;
+  border-radius:4px;background:color-mix(in srgb,var(--m-fund) 30%,transparent);
+  color:var(--ink);vertical-align:1px;white-space:nowrap}
+.office.office-unsure{border-style:dashed}
+
+/* A city-only filing is a COARSER location, not a doubtful one -- amber is
+   already spoken for by "address uncertain", and a warning colour here would
+   overstate it. Neutral grey reads as lower resolution without alarm. Ink
+   flips per mode: #7a8593 on #0c1015 is 5.09:1, #6b7684 on white is 4.62:1. */
+.rcity{margin-left:6px;font-size:8.5px;font-weight:800;letter-spacing:.05em;padding:2px 5px;
+  border-radius:4px;background:var(--m-low);color:var(--barrons-ink);
+  vertical-align:1px;white-space:nowrap}
+.head-sub{font-size:11px;font-weight:500;color:var(--muted);letter-spacing:0}
+.remote-note{margin:8px 0 0;padding:8px 10px;border-radius:9px;font-size:11.5px;line-height:1.5;
+  border:1px solid color-mix(in srgb,var(--m-low) 45%,transparent);
+  background:color-mix(in srgb,var(--m-low) 12%,transparent)}
+
+/* ---- contact panel ----
+   Sits at the top of the advisor card because it is the action, not a detail.
+   Uses the accent, which is this app's "do something" colour, unlike the
+   ranking and ownership badges that only report a fact. */
+.contact-panel{margin:0 0 14px;padding:10px 12px;border-radius:11px;
+  border:1px solid color-mix(in srgb,var(--accent) 45%,transparent);
+  background:color-mix(in srgb,var(--accent) 10%,transparent)}
+.contact-actions{display:flex;flex-wrap:wrap;gap:6px}
+.contact-btn{display:inline-flex;align-items:center;gap:5px;font-size:11.5px;font-weight:650;
+  padding:5px 11px;border-radius:20px;background:var(--accent);color:var(--accent-ink);
+  text-decoration:none;white-space:nowrap}
+.contact-btn:hover{filter:brightness(1.08);text-decoration:none}
+/* An office line is still worth dialling, so it stays a button -- but it is
+   outlined rather than filled, so "Direct" is the only solid phone action on
+   the card and the difference survives a glance. Never colour alone: the
+   LABEL itself reads Direct / Office / Work. */
+.contact-btn-office{background:transparent;color:var(--accent);
+  box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--accent) 55%,transparent)}
+/* "Listed" sits between Direct and Office in what it promises, so it is
+   filled like Direct but in the neutral ink rather than the accent -- the
+   LABEL still carries the meaning on its own. */
+.contact-btn-listed{background:color-mix(in srgb,var(--accent) 22%,transparent);
+  color:var(--ink);
+  box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--accent) 40%,transparent)}
+/* Profile and LinkedIn are RESEARCH, not contact. Filled like Email and
+   Direct they read as equal calls to action and dilute the two buttons the
+   rep is actually meant to press, so they are quieter than an office line
+   rather than as loud as a direct one. */
+.contact-btn-link{background:transparent;color:var(--muted);
+  box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--muted) 35%,transparent)}
+.contact-btn-link:hover{color:var(--ink)}
+/* Teammates are a disclosure, not a list. Most of the time the rep is looking
+   at one person; the rest of the practice matters only when they ask for it.
+   Built from the vocabulary the rest of the app already uses: the +/- summary
+   of .advanced-panel and .data-info, and the bare accent text button of
+   .office-firm-actions. Nothing new is invented here -- a second disclosure
+   idiom on one card would read as a different product. */
+.teammates{margin:5px 0 0}
+.teammates>summary{cursor:pointer;color:var(--accent);font-weight:650;
+  font-size:10.5px;letter-spacing:.02em;list-style:none;display:inline-block}
+.teammates>summary::-webkit-details-marker{display:none}
+.teammates>summary::after{content:" +";color:var(--muted)}
+.teammates[open]>summary::after{content:" −";color:var(--muted)}
+.teammates>summary:hover{text-decoration:underline}
+/* Indented to the width of the TEAM pill above, so the roster reads as
+   belonging to that line rather than floating loose in the card. */
+.teammates ul{margin:5px 0 0;padding:0;list-style:none;
+  border-left:1px solid var(--hair);padding-left:9px}
+.teammates li{font-size:11px;line-height:1.5;color:var(--muted);
+  padding:1px 0;display:flex;align-items:baseline;gap:5px;flex-wrap:wrap}
+.teammate{font:inherit;font-size:11px;color:var(--accent);background:none;
+  border:0;padding:0;cursor:pointer;text-align:left;font-weight:600}
+.teammate:hover{text-decoration:underline}
+/* The title is context, not the thing being clicked, so it recedes -- same
+   relationship as .contact-team to .contact-title above. */
+.teammate-title{color:var(--muted);font-size:10px}
+.teammate-dot{color:var(--accent);font-size:7px;line-height:1}
+.phone-kind{color:var(--muted);font-size:10px}
+.contact-meta{margin:8px 0 0;font-size:11px;color:var(--ink);word-break:break-word}
+.contact-src{margin:3px 0 0;font-size:10px;color:var(--muted)}
+
+/* Ownership sits ABOVE the buttons because it changes whether to press them. */
+.contact-owner{margin:0 0 7px;font-size:11px;font-weight:650;color:var(--m-fund)}
+/* A DERIVED territory assignment, deliberately quieter than a recorded
+   relationship. Same row, lower voice: one is a fact somebody entered, the
+   other is an inference from the advisor's state, and they should not look
+   equally authoritative. */
+.contact-territory{color:var(--muted); font-weight:600}
+/* Seniority, at reading size rather than hidden in a tooltip. */
+.contact-title{margin:0 0 8px;font-size:12px;font-weight:600;color:var(--ink)}
+.contact-team{margin:7px 0 0;font-size:11px;color:var(--muted);line-height:1.55}
+.contact-team b{color:var(--ink);font-weight:700;margin-left:4px}
+/* The practice's book, de-duplicated. Distinguished from the individual figure
+   below by sitting on the team line, not by colour alone. */
+.contact-team-book{white-space:nowrap}
+/* The practice's own site. Underlined on hover only: the team name has to keep
+   reading as a NAME, not as a button competing with the call and email
+   actions below it. */
+.contact-team-link{color:var(--ink);font-weight:600;text-decoration:none;border-bottom:1px dotted var(--muted)}
+.contact-team-link:hover{border-bottom-style:solid}
+/* The address, clickable. Same weight as the surrounding meta line -- it is a
+   fact first and a link second, so it must not compete with the Call and Email
+   buttons above it. */
+.contact-mailto{color:inherit;text-decoration:none;border-bottom:1px dotted var(--muted)}
+.contact-mailto:hover{color:var(--ink);border-bottom-style:solid}
+.contact-mailto-unsure{border-bottom-style:dashed}
+/* Off / CC / BCC. Inline radios rather than a dropdown: three options where the
+   difference between two of them matters, so both should be visible at once. */
+.set-radio{display:inline-flex;align-items:center;gap:5px;margin-right:14px;font-size:12px}
+.set-radio input{margin:0}
+
+/* Key contact and due diligence.
+   Grey when unset, coloured when set -- the OFF state has to look clickable, or
+   nobody discovers that the card is where you record this. */
+.contact-flags{display:inline-flex;gap:4px;margin-left:8px;vertical-align:middle}
+/* Marks beside the name. OUTLINE means not set, FILLED means set -- the whole
+   point being that an unset mark still has to look like a control worth
+   clicking, or nobody discovers the card is where you record this. */
+.flag-mark{background:none;border:0;padding:2px;cursor:pointer;line-height:0;
+  color:var(--muted);opacity:.55}
+.flag-mark svg{width:19px;height:19px;display:block}
+.flag-mark:hover{opacity:1;color:var(--ink)}
+.flag-mark.on{opacity:1}
+.flag-mark[data-flag="key"].on{color:#d9a017}
+.flag-mark[data-flag="dd"].on{color:#2f8f6b}
+.flag-mark:disabled{opacity:.35;cursor:progress}
+/* Read-only, for lists: information, not a control. */
+.flag-glyphs{display:inline-flex;gap:3px;margin-left:5px;vertical-align:-2px}
+.flag-glyph{width:13px;height:13px}
+.flag-glyphs .flag-glyph:first-child{color:#d9a017}
+.flag-glyphs .flag-glyph:last-child{color:#2f8f6b}
+/* The two standing lists sit above the rep's own, separated because they are
+   not the same kind of thing: nothing to rename, empty or delete. */
+.lists-row.flag-list{border-bottom:1px solid var(--line)}
+.lists-row.flag-list:last-child{margin-bottom:10px}
+/* Copy someone on this batch. Small print under each choice, because who else
+   receives a client-facing email is worth a sentence, not just a label. */
+.email-copy{border:1px solid var(--line);border-radius:8px;padding:8px 10px;margin:10px 0}
+.email-copy legend{font-size:11px;color:var(--muted);padding:0 4px}
+.email-copy label{display:block;margin:4px 0;font-size:12px}
+.email-copy label small{display:block;color:var(--muted);font-size:10.5px;margin-left:20px}
+/* Said before Generate, not discovered afterwards: these people stop getting
+   their own email. */
+.email-warn{margin:6px 0 0;font-size:11px;line-height:1.5;color:var(--warn,#b4690e)}
+/* Per-message teammate copies. A teammate who is also a recipient is marked,
+   because ticking them deletes their own email. */
+/* Copying a teammate is the exception, so it costs one line until it is used.
+   The old version was a permanently expanded list that pushed the subject and
+   body off screen on a twelve-person practice -- the two things a rep opened
+   this step to edit. */
+.email-mates{border:1px solid var(--line);border-radius:8px;margin:8px 0;padding:0}
+.email-mates > summary{
+  display:flex; align-items:center; gap:8px; cursor:pointer; user-select:none;
+  padding:7px 10px; font-size:12px; list-style:none}
+.email-mates > summary::-webkit-details-marker{display:none}
+.email-mates > summary::before{content:"+"; width:11px; color:var(--muted); font-weight:700}
+.email-mates[open] > summary::before{content:"2"}
+.email-mates-title{color:var(--muted)}
+/* The count carries the state, so a collapsed picker still says whether anyone
+   is being copied. */
+.email-mates-count{margin-left:auto; font-size:11px; color:var(--muted)}
+.email-mates[open] .email-mates-count,
+.email-mates:has(input:checked) .email-mates-count{color:var(--accent)}
+
+/* Two columns where there is room: eleven teammates is a scroll in one. */
+.email-mates-list{
+  display:grid; grid-template-columns:repeat(auto-fill,minmax(230px,1fr));
+  gap:1px 14px; padding:2px 10px 6px}
+.email-mate{
+  display:grid; grid-template-columns:auto 1fr; gap:0 7px;
+  align-items:baseline; padding:3px 0; font-size:12px; cursor:pointer}
+.email-mate input{margin:0}
+.email-mate-name{overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+.email-mate-addr{
+  grid-column:2; color:var(--muted); font-size:10.5px;
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+.email-mate-flag{grid-column:2; font-size:10.5px; color:var(--warn,#b4690e)}
+.email-mates .email-fine{margin:0; padding:0 10px 8px; font-size:10.5px}
+/* Why an address is on the envelope. */
+.env-note{color:var(--muted);font-size:11px}
+.dial-mail{margin:2px 0 0;font-size:11px;color:var(--muted)}
+/* Said only while contacts.json is still in flight. Muted and italic so it
+   reads as a state, not as a finding about this person. */
+.contact-pending{margin:7px 0 0;font-size:11px;color:var(--muted);font-style:italic}
+/* The two switches that cannot answer until contact detail arrives. */
+.switch-waiting{opacity:.5;cursor:progress}
+
+/* EIC's book, split by product. A ZERO IS PRINTED, not omitted -- "Large-Cap —"
+   is the sales fact, and a missing line would read as missing data. The em dash
+   is deliberately muted so the eye lands on the amounts that exist. */
+.contact-products{margin:7px 0 0; display:flex; flex-wrap:wrap; align-items:baseline;
+  gap:4px 10px; font-size:11px; color:var(--muted); line-height:1.55}
+.contact-products .prod{display:inline-flex; align-items:baseline; gap:4px}
+.contact-products .prod i{font-style:normal; font-size:10px; opacity:.85}
+.contact-products .prod b{color:var(--ink); font-weight:700}
+.contact-products .prod b.none{color:var(--muted); font-weight:500}
+.contact-products small{flex-basis:100%; font-size:10px; opacity:.8}
+.prod-warn{margin-left:3px; color:var(--warn, #d08b00); cursor:help}
+
+/* EIC's own figures in the stats bar, set apart from the ADV market figures
+   beside them so the two are never read as the same kind of number. */
+.stat-eic .stat-label{color:var(--accent)}
+/* Says which map this number describes. Present only when the tile is NOT
+   scoped to the viewport -- i.e. the national view, where the three EIC tiles
+   show the whole book while every tile beside them tracks what is on screen.
+   Deliberately quiet: it is a qualifier on the label, not a second label. */
+.stat-scope{font-style:normal;font-weight:600;opacity:.72;letter-spacing:.04em}
+.stat-eic strong{color:var(--ink)}
+.contact-team-label{display:inline-block;margin-right:5px;padding:1px 6px;border-radius:9px;
+  font-size:9.5px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;
+  background:color-mix(in srgb,var(--muted) 22%,transparent);color:var(--ink)}
+/* An unconfirmed match is marked by a dashed border AND by the warning glyph
+   in the text, never by colour alone. */
+.contact-panel-review{border-style:dashed;
+  border-color:color-mix(in srgb,var(--m-fund) 55%,transparent);
+  background:color-mix(in srgb,var(--m-fund) 8%,transparent)}
+.contact-src-review{color:var(--m-fund)}
+/* A move is a prospecting signal, not an error -- styled as information. */
+.contact-moved{margin:6px 0 0;font-size:10.5px;color:var(--m-both);line-height:1.5}
+.contact-moved b{color:var(--ink)}
+
+/* Roster-row marks. Each carries a distinct GLYPH as well as a colour, so the
+   three stay apart for a colourblind reader and at small size. */
+.pin-dots{display:inline-flex;gap:3px;margin-left:6px;vertical-align:baseline}
+.pin-dot{font-size:9.5px;line-height:1;font-weight:700;letter-spacing:0}
+.pin-dot-reach{color:var(--m-sma)}
+.pin-dot-owned{color:var(--m-fund)}
+.pin-dot-assets{color:var(--m-both)}
+#contactLogCount{font-size:10px;color:var(--muted)}
+#contactLogCount[hidden]{display:none}
+
+/* an officer holding under 5% is not an owner; keep the tag visually distinct */
+.rown-officer{background:color-mix(in srgb,var(--accent) 34%,transparent);color:var(--ink)}
+
+/* Barron's ranking. Accent-green is the ownership tag and amber is the
+   uncertain-address tag, so this takes the palette's third existing hue rather
+   than introducing a new one. Ink flips per mode because neither choice clears
+   4.5:1 in both -- the tag is 9px/800, so it needs the small-text threshold:
+     dark   #8079e0 on #0c1015   5.21:1
+     light  #6259c4 on #ffffff   5.61:1 */
+.rbar{margin-left:6px;font-size:9px;font-weight:800;letter-spacing:.06em;padding:2px 5px;
+  border-radius:4px;background:var(--m-both);color:var(--barrons-ink);
+  vertical-align:1px;white-space:nowrap}
+.barrons-callout{border-color:color-mix(in srgb,var(--m-both) 55%,transparent);
+  background:color-mix(in srgb,var(--m-both) 14%,transparent)}
+.barrons-callout .owner-callout-head{letter-spacing:.06em;font-size:11px;color:var(--muted)}
+/* two classes, to outrank .owner-tag.strong -- otherwise the callout tag
+   inherits accent-green and stops being distinguishable from the ownership one */
+.owner-tag.barrons-tag{background:var(--m-both);color:var(--barrons-ink);text-decoration:none;
+  display:inline-flex;align-items:baseline;gap:5px}
+.barrons-tag:hover{text-decoration:underline}
+.barrons-tag small{font-weight:600;opacity:.78;font-size:9px}
+.owner-callout-note{margin:7px 0 0;font-size:11px;line-height:1.45;color:var(--muted)}
+.barrons-note{display:flex;align-items:center;gap:6px;margin:0 0 9px}
+.barrons-note .rbar,.barrons-note .rfor{margin-left:0}
+
+/* Forbes shares Barron's hue deliberately: both are third-party rankings, so
+   they are the same KIND of fact and the wordmark tells them apart. Inventing
+   a fifth hue would say they differ in kind, which they do not.
+
+   What does differ is provenance. Barron's CRDs come from a BrokerCheck link;
+   most Forbes CRDs were inferred at 99.6% precision, so roughly one badge in
+   250 is the wrong person. Inferred badges are outlined rather than filled and
+   carry a leading "≈", so the distinction survives greyscale, colour-blindness
+   and a printed page -- it is never colour alone. */
+.rfor{margin-left:6px;font-size:9px;font-weight:800;letter-spacing:.06em;padding:2px 5px;
+  border-radius:4px;background:var(--m-both);color:var(--barrons-ink);
+  vertical-align:1px;white-space:nowrap}
+.rfor-inferred{background:transparent;color:var(--ink);
+  border:1px dashed color-mix(in srgb,var(--m-both) 70%,transparent);padding:1px 4px}
+.forbes-callout{border-color:color-mix(in srgb,var(--m-both) 55%,transparent);
+  background:color-mix(in srgb,var(--m-both) 10%,transparent)}
+.forbes-callout .owner-callout-head{letter-spacing:.06em;font-size:11px;color:var(--muted)}
+.owner-tag.forbes-tag{background:var(--m-both);color:var(--barrons-ink);text-decoration:none}
+.owner-tag.forbes-tag:hover{text-decoration:underline}
+.owner-tag.forbes-tag.forbes-inferred{background:transparent;color:var(--ink);
+  border:1px dashed color-mix(in srgb,var(--m-both) 70%,transparent)}
+.forbes-caveat{font-style:italic}
+.forbes-assets{color:var(--ink)}
+.forbes-assets .mini-note{display:block;color:var(--muted);font-style:normal}
+
+/* Mute the basemap so the data reads as figure and the geography as ground.
+   Standard practice for a data map, and it lifts every mark drawn on top
+   rather than only the ones we happen to have tuned. */
+.leaflet-tile-pane{filter:saturate(.55) brightness(1.04) contrast(.96)}
+
+/* .frow is a <button> now: strip the UA chrome, keep the grid, add a focus ring */
+.frow{font:inherit;color:inherit;background:var(--panel-2);border:1px solid transparent;
+  width:100%;text-align:left;appearance:none}
+.frow:focus-visible,.fdetails:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
+
+/* CSV export affordances sit with the thing they export */
+.kpi-export{margin-top:4px;font-size:10px}
+
+
+/* ---- height breakpoint ----
+   Below this the sidebar cannot hold both the filters (~290px) and a useful
+   firm list (~250px) on top of ~322px of fixed furniture, so they share the
+   space and the switch appears. Above it both stack and the switch is gone.
+   One media query on the same markup -- deliberately not a second layout,
+   which is what a parallel firms column would have required. */
+@media (min-height:920px){
+  .pane-switch{display:none}
+  .pane[hidden]{display:flex!important}
+}
+
+
+/* The two scope switches share a row. An earlier attempt at this failed --
+   at 370px panel width, "Selects outside managers / ADV 5.G(7)" wrapped and
+   the row grew TALLER than stacking. It works now because both conditions
+   changed: the labels lost their sub-notes and the panel went to 420px. */
+.scope-filters{display:flex;gap:10px;margin-top:8px}
+.scope-filter{flex:1 1 0;min-width:0;margin:0}
+.scope-filter .switch-lbl{font-size:11.5px;line-height:1.25}
+
+
+/* ---- stats strip ----
+   Was six cards in the sidebar costing 94px of the scarcest axis. On the map
+   it stays put while the sidebar scrolls -- the counts used to disappear
+   exactly when a rep was deep in a filter list. A fixed, cushioned width keeps
+   updates from resizing the strip; auto side margins centre it in the map
+   column instead of stretching it across nearly the whole viewport. */
+.stats-bar{position:absolute;top:12px;left:calc(var(--panel-w) + 12px);right:14px;z-index:1250;
+  width:min(780px,calc(100% - var(--panel-w) - 26px));margin-inline:auto;
+  display:flex;align-items:center;justify-content:center;flex-wrap:wrap;gap:4px 18px;
+  padding:7px 13px;border:1px solid var(--hair);border-radius:11px;
+  background:color-mix(in srgb,var(--panel) 94%,transparent);
+  backdrop-filter:blur(6px);box-shadow:var(--shadow)}
+.stat{display:flex;align-items:baseline;gap:6px;min-width:0}
+/* Counts and allocated asset values share a banner but are different kinds of
+   measures; a quiet divider makes that grouping explicit without adding a
+   second floating panel. */
+.stat:nth-of-type(4){border-left:2px solid var(--muted);padding-left:18px}
+.stat-label{display:inline-flex;align-items:center;gap:3px;color:var(--muted);
+  font-size:9.5px;font-weight:700;line-height:1;text-transform:uppercase;letter-spacing:.08em;
+  white-space:nowrap}
+.stat strong{flex:0 0 auto;color:var(--ink);font-size:13px;font-weight:680;line-height:1.2;
+  font-variant-numeric:tabular-nums;white-space:nowrap}
+/* Against the count it produces, so the number beside it is the row count. */
+.stat-export{font:inherit;font-size:13px;line-height:1;color:var(--muted);background:none;
+  border:0;padding:1px 3px;border-radius:5px;cursor:pointer}
+.stat-export:hover,.stat-export:focus-visible{color:var(--accent);background:var(--panel-2);outline:none}
+.stats-status{flex-basis:100%;margin:1px 0 0;font-size:10px;line-height:1.35;color:var(--muted)}
+.stats-status[hidden]{display:none}
+.stats-bar .info-popover{top:calc(100% + 6px)}
+
+@media (max-width:760px){
+  .stats-bar{left:12px;right:12px;width:min(780px,calc(100% - 24px))}
+  .stat:nth-of-type(4){border-left:0;padding-left:0}
+}
+
+/* ===================== the dialer ======================================= *
+ * A dock, not a panel section. A rep works a list while browsing the map, so
+ * it has to survive every scope change, filter and details view. Anchored
+ * bottom-left over the map, clear of the details aside on the right.
+ *
+ * Deliberately absent: any call timer or "in progress" indicator. The browser
+ * is never told whether a call connected, so such a display would be invented.
+ * ======================================================================== */
+#dialer{
+  position:fixed; left:calc(var(--panel-w) + 14px); bottom:14px; z-index:900;
+  width:340px; max-width:calc(100vw - var(--panel-w) - 28px);
+  background:var(--panel); border:1px solid var(--hair); border-radius:14px;
+  box-shadow:var(--shadow); overflow:hidden;
+  font-size:13px;
+}
+#dialer[hidden]{display:none}
+
+#dialerBar{
+  /* Wraps rather than overflowing. Giving the list name a width floor, then
+     adding a word to the History button, made this row wider than the dock --
+     and with no wrap and no overflow rule the far end (Start calling, and the
+     list menu) was simply clipped off the right edge. Two short rows beat one
+     row whose end you cannot reach. */
+  display:flex; flex-direction:column; gap:7px; padding:9px 10px;
+  max-width:100%; box-sizing:border-box;
+  background:var(--panel-2); border-bottom:1px solid var(--hair);
+}
+.dial-row{display:flex; align-items:center; gap:8px; min-width:0}
+/* The list name gets the top row to itself and the menu sits at its end. */
+.dial-row-top .dial-list{flex:1 1 auto}
+.dial-row-top .dial-btn{margin-left:auto}
+/* Actions read left to right, with the primary last where the eye finishes. */
+.dial-row-actions{flex-wrap:wrap}
+.dial-row-actions .dial-btn.primary{margin-left:auto}
+/* The controls that must always be reachable never shrink. */
+#dialerBar .dial-btn{flex:0 0 auto}
+.dial-count{flex:0 1 auto; min-width:0; font-weight:650;
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+.dial-problem{flex:1; color:var(--warn,#e0a53a); font-weight:650;
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+.dial-collapse{
+  flex:none; width:26px; height:26px; border-radius:7px; border:1px solid var(--hair);
+  background:transparent; color:var(--muted); cursor:pointer; line-height:1;
+}
+.dial-btn{
+  font:inherit; font-size:12.5px; font-weight:650; height:28px; padding:0 11px;
+  border-radius:8px; border:0; cursor:pointer; flex:none; text-decoration:none;
+  display:inline-flex; align-items:center; gap:5px;
+}
+.dial-btn.primary{background:var(--accent); color:var(--accent-ink)}
+.dial-btn.primary:disabled{opacity:.45; cursor:default}
+.dial-btn.ghost{background:transparent; color:var(--muted);
+  box-shadow:inset 0 0 0 1px var(--hair)}
+
+/* The queue list — collapsed by default, because the point of a queue is not
+   having to look at it. */
+#dialerQueue{max-height:220px; overflow-y:auto; border-bottom:1px solid var(--hair)}
+#dialerQueue[hidden]{display:none}
+.dial-queue{list-style:none; margin:0; padding:0; counter-reset:dq}
+.dial-queue li{
+  display:flex; align-items:center; gap:8px; padding:7px 10px;
+  border-bottom:1px solid var(--hair);
+}
+.dial-queue li:last-child{border-bottom:0}
+.dial-queue li.done{opacity:.45}
+.dial-queue li.current{background:color-mix(in srgb,var(--accent) 12%,transparent)}
+.dial-li-main{flex:1; min-width:0; display:flex; flex-direction:column}
+.dial-li-main b{overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+.dial-li-main small{color:var(--muted); font-size:11px;
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+.dial-li-acts{display:flex; gap:2px; flex:none}
+.dial-li-acts button{
+  width:22px; height:22px; border:0; border-radius:5px; cursor:pointer;
+  background:transparent; color:var(--muted); font-size:10px; line-height:1;
+}
+.dial-li-acts button:hover:not(:disabled){background:var(--panel-2); color:var(--ink)}
+.dial-li-acts button:disabled{opacity:.25; cursor:default}
+.dial-empty{margin:0; padding:12px 10px; color:var(--muted)}
+
+#dialerSession{padding:11px 12px 12px}
+#dialerSession[hidden]{display:none}
+.dial-sess-head{display:flex; align-items:center; justify-content:space-between; gap:8px}
+.dial-pos{font-size:10.5px; font-weight:800; letter-spacing:.06em;
+  text-transform:uppercase; color:var(--muted)}
+.dial-open{font:inherit; font-size:11.5px; background:none; border:0; padding:0;
+  color:var(--accent); cursor:pointer}
+.dial-name{margin:5px 0 1px; font-size:17px; line-height:1.2; overflow-wrap:anywhere}
+.dial-sub{margin:0 0 6px; color:var(--muted); font-size:12px}
+.dial-hist{margin:0 0 8px; font-size:11.5px; color:var(--muted)}
+.dial-hist:empty{display:none}
+.dial-acts{display:flex; gap:7px; flex-wrap:wrap; margin-bottom:8px}
+.dial-acts .dial-btn{height:32px; font-size:13px}
+.dial-nonum{font-size:12px; color:var(--muted); font-style:italic}
+
+/* The note field is the whole reason the desktop dialer differs from the
+   phone's. A rep at a desk can type; one in a car should not. */
+.dial-note{
+  width:100%; box-sizing:border-box; font:inherit; font-size:12.5px;
+  padding:7px 8px; border-radius:8px; border:1px solid var(--hair);
+  background:var(--panel-2); color:var(--ink); resize:vertical; margin-bottom:9px;
+}
+.dial-note:focus{outline:2px solid color-mix(in srgb,var(--accent) 55%,transparent);
+  outline-offset:-1px}
+
+.dial-outcomes{display:flex; gap:6px; flex-wrap:wrap}
+.dial-outcomes button{
+  font:inherit; font-size:12px; font-weight:650; height:30px; padding:0 10px;
+  border-radius:8px; border:1px solid var(--hair);
+  background:var(--panel-2); color:var(--ink); cursor:pointer;
+}
+.dial-outcomes button:hover:not(:disabled){border-color:var(--accent); color:var(--accent)}
+.dial-outcomes button:disabled{opacity:.5; cursor:default}
+/* Firm-wide and with no undo in the UI, so it does not look like the others. */
+.dial-outcomes button.grave{color:var(--m-fund); border-color:color-mix(in srgb,var(--m-fund) 45%,transparent)}
+.dial-foot{display:flex; align-items:center; justify-content:space-between;
+  gap:8px; margin-top:9px}
+.dial-skip{font:inherit; font-size:11.5px; background:none; border:0; padding:0;
+  color:var(--muted); cursor:pointer; text-decoration:underline}
+.dial-next{font-size:11.5px; color:var(--muted); min-width:0;
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+.dial-err{
+  margin:9px 0 0; padding:8px 9px; border-radius:8px; font-size:12px;
+  color:var(--m-fund);
+  border:1px solid color-mix(in srgb,var(--m-fund) 45%,transparent);
+  background:color-mix(in srgb,var(--m-fund) 12%,transparent);
+}
+
+/* The card's own queue button. It is a <button> among <a>s, so it inherited
+   none of .contact-btn's shape -- the browser supplies its own border, padding
+   and font-size, which is why it sat taller and squarer than everything beside
+   it. Each of those is restated here.
+   Weighted like Profile rather than like Email: queueing is an organising
+   action, and filled in the accent it read as a third call to action and
+   diluted the two buttons the rep is actually meant to press. */
+.contact-btn-queue{
+  border:0; cursor:pointer; font-family:inherit; font-size:11.5px;
+  font-weight:650; line-height:normal;
+  background:transparent; color:var(--muted);
+  box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--muted) 35%,transparent);
+}
+.contact-btn-queue:hover{color:var(--ink)}
+/* Once queued it IS a state worth seeing at a glance, so it takes the accent. */
+.contact-btn-queue.on{color:var(--accent);
+  box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--accent) 55%,transparent)}
+.contact-btn-dnc{background:transparent; color:var(--m-fund); cursor:default;
+  box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--m-fund) 45%,transparent)}
+/* A suppressed number still READS -- a rep needs to recognise the caller -- but
+   it is not a link, so it cannot be dialled from here. */
+.contact-btn.blocked{cursor:default; opacity:.55; text-decoration:line-through;
+  text-decoration-color:var(--m-fund)}
+
+/* Prior contact, on the advisor card. Under the buttons: it changes whether to
+   dial, but only matters once the rep knows they CAN. */
+.contact-hist{margin:5px 0 0; font-size:10.5px; color:var(--muted)}
+.contact-hist:empty{display:none}
+
+/* Quick-add on a list row. The row is itself a <button>, and a button cannot
+   contain another, so the two are siblings in a flex wrapper rather than
+   nested -- nested, the browser silently reparents the markup and the inner
+   click never fires. */
+.detail-row-wrap{display:flex; align-items:stretch}
+.detail-row-wrap>.detail-row{flex:1; min-width:0}
+.row-queue{
+  flex:none; width:30px; border:0; background:transparent; cursor:pointer;
+  color:var(--muted); font-size:13px; line-height:1;
+}
+.row-queue:hover{color:var(--accent); background:var(--panel-2)}
+.row-queue.on{color:var(--accent)}
+.row-queue.dnc{color:var(--m-fund); cursor:default}
+
+/* On a phone the field view owns this job entirely — see field.html. Two
+   dialers on one screen would be two queues to reason about. */
+@media (max-width:760px){ #dialer{display:none} }
+
+/* Auto-dial. Off by default and it stays that way: dialing without an explicit
+   press means dialing while the rep is still reading, and an accidental call to
+   a prospect costs far more than the click it saved. */
+.dial-auto{margin-top:10px; padding-top:9px; border-top:1px solid var(--hair)}
+.dial-auto-row{display:flex; align-items:center; gap:7px; font-size:12px;
+  color:var(--muted); cursor:pointer}
+.dial-auto-row input{margin:0}
+.dial-auto-opts{display:flex; align-items:center; gap:12px; margin:7px 0 0 22px;
+  font-size:11.5px; color:var(--muted); flex-wrap:wrap}
+.dial-auto-opts label{display:flex; align-items:center; gap:5px}
+.dial-auto-opts input[type=number]{width:44px; font:inherit; font-size:11.5px;
+  padding:2px 4px; border-radius:6px; border:1px solid var(--hair);
+  background:var(--panel-2); color:var(--ink)}
+.dial-countdown{
+  margin:9px 0 0; padding:7px 9px; border-radius:8px; font-size:12px;
+  display:flex; align-items:center; gap:8px;
+  color:var(--accent);
+  border:1px solid color-mix(in srgb,var(--accent) 45%,transparent);
+  background:color-mix(in srgb,var(--accent) 10%,transparent);
+}
+.dial-countdown button{margin-left:auto; font:inherit; font-size:11.5px;
+  background:none; border:0; color:var(--muted); cursor:pointer;
+  text-decoration:underline}
+
+/* Bulk add. The count is IN the label so the size of the action is known
+   before it is taken, not reported after. */
+.bulk-actions{margin-bottom:8px}
+.bulk-actions button{width:100%}
+
+/* The list picker in the dock header. */
+.dial-list{
+  font:inherit; font-size:12px; font-weight:650; height:28px;
+  /* The list name is the one thing on this bar the rep must be able to read.
+     It was capped at 120px and allowed to shrink to nothing, so adding a word
+     to any neighbouring button collapsed it to just the dropdown arrow. It now
+     holds a floor and the counter gives way first. */
+  max-width:none; min-width:130px; flex:1 1 auto; text-overflow:ellipsis;
+  padding:0 4px; border-radius:7px; border:1px solid var(--hair);
+  background:var(--panel); color:var(--ink);
+}
+.dial-count{flex:0 1 auto; min-width:0; font-size:12px; font-weight:650;
+  color:var(--muted); text-align:right; white-space:nowrap}
+
+/* Back, and the prior outcome, in the dock. */
+.dial-sess-head{gap:8px}
+.dial-prior{
+  margin:6px 0 0; padding:6px 8px; border-radius:7px; font-size:11.5px;
+  color:var(--muted); background:var(--panel-2);
+  box-shadow:inset 0 0 0 1px var(--hair);
+}
+
+/* List options in the dock. */
+#dialerMenu{border-bottom:1px solid var(--hair); background:var(--panel-2); padding:5px 0 7px}
+#dialerMenu[hidden]{display:none}
+.dial-menu-head{padding:5px 10px; font-size:10.5px; font-weight:800;
+  letter-spacing:.05em; text-transform:uppercase; color:var(--muted)}
+#dialerMenu button{
+  display:block; width:100%; text-align:left; font:inherit; font-size:12.5px;
+  height:30px; padding:0 10px; border:0; background:transparent;
+  color:var(--ink); cursor:pointer;
+}
+#dialerMenu button:hover:not(:disabled){background:var(--panel); color:var(--accent)}
+#dialerMenu button:disabled{opacity:.4; cursor:default}
+#dialerMenu button.grave{color:var(--m-fund)}
+.dial-menu-note{margin:5px 10px 0; font-size:11px; color:var(--muted)}
+
+.settings-btn{font:inherit; font-size:15px; line-height:1; color:var(--muted);
+  background:none; border:0; cursor:pointer; padding:2px 4px}
+.settings-btn:hover{color:var(--accent)}
+
+/* ---- preferences ---- */
+.set-row{display:flex; align-items:center; justify-content:space-between; gap:12px;
+  padding:10px 0; border-top:1px solid var(--hair); font-size:12.5px}
+.set-row:first-of-type{border-top:0}
+.set-row.set-block{display:block}
+.set-row select{max-width:58%; height:30px; padding:0 7px; font:inherit;
+  font-size:12.5px; color:var(--ink); background:var(--panel-2);
+  border:0; border-radius:7px; box-shadow:inset 0 0 0 1px var(--hair)}
+.set-sub{margin:3px 0 0; font-size:11px; color:var(--muted)}
+/* The signature-too-long warning. A caution, not a failure: the draft
+   still works in most clients. */
+.set-sub.bad{color:var(--warn)}
+.set-saved{margin:12px 0 0; font-size:11.5px; color:var(--muted); min-height:15px}
+.set-saved.bad{color:var(--warn)}
+
+/* ---- the full history, ours and the CRM's ----
+   ONE date-ordered list, not two panels. A rep asking "has anyone spoken to
+   them" does not want the answer split by which system happens to hold it.
+   The source is a rule down the left edge rather than a badge on every row,
+   which at four rows a screen would be four pieces of noise. */
+.hist-full{margin:8px 0 0}
+.hist-full > summary{
+  font-size:11.5px; font-weight:650; color:var(--muted); cursor:pointer;
+  padding:4px 0; list-style:none; user-select:none}
+.hist-full > summary::-webkit-details-marker{display:none}
+.hist-full > summary::before{content:"+ "; opacity:.7}
+.hist-full[open] > summary::before{content:"\2212 "}
+.hist-list{list-style:none; margin:4px 0 0; padding:0; max-height:320px; overflow-y:auto}
+.hist-list li{padding:6px 0 6px 9px; border-top:1px solid var(--hair);
+  border-left:3px solid transparent; font-size:12px}
+.hist-list li:first-child{border-top:0}
+.hist-list li.from-crm{border-left-color:var(--accent)}
+.hist-list li.from-app{border-left-color:color-mix(in srgb,var(--muted) 45%,transparent)}
+.hist-when{color:var(--muted); font-size:11px; margin-right:7px}
+.hist-what{font-weight:650}
+.hist-who{display:block; margin-top:1px; font-size:11px; color:var(--muted)}
+/* `pre-line` keeps the paragraph breaks the cleaner recovered from the CRM's
+   markup and still wraps long lines. Without it every newline collapses to a
+   space and three separate thoughts run into one sentence. */
+.hist-text{display:block; margin-top:2px; font-size:11.5px; color:var(--muted);
+  white-space:pre-line}
+/* Never silent about a missing half: "nobody has contacted them" is a reason
+   to cold-call and "we could not reach Act!" is not, and the two look
+   identical on screen. */
+.hist-notice{margin:5px 0; font-size:11.5px; color:var(--warn)}
+.hist-foot{margin:6px 0 0; font-size:11px; color:var(--muted)}
+
+/* WHY THE CALL WAS MADE. Four chips on one line, sitting above the note
+   because it is the coarse choice made first; the note refines it.
+   Deliberately quieter than the outcome buttons below -- this is optional and
+   the outcome is not, and the visual weight should say so. */
+/* margin-bottom was 0 while the note box below it had no margin-top, so the
+   chips sat flush against the textarea -- they read as one control rather than
+   as "why you called" followed by "what happened". Matches the 9px the note box
+   already leaves beneath itself, so the three blocks are evenly spaced. */
+.purpose{display:flex; gap:5px; margin:8px 0 9px; flex-wrap:nowrap; overflow-x:auto;
+  scrollbar-width:none}
+.purpose::-webkit-scrollbar{display:none}
+.purpose button{
+  flex:0 0 auto; height:26px; padding:0 10px; font:inherit; font-size:11.5px;
+  white-space:nowrap; cursor:pointer; color:var(--muted);
+  background:var(--panel-2); border:0; border-radius:13px;
+  box-shadow:inset 0 0 0 1px var(--hair)}
+.purpose button:hover{color:var(--accent)}
+.purpose button.on{background:var(--accent); color:var(--accent-ink);
+  box-shadow:none; font-weight:650}
+
+/* Every saved list at once. Reuses the .ask modal shell, widened: this one is
+   read as a table of four columns per row rather than as a question. */
+/* Bounded, and scrollable inside. Editing who is on a list renders a row per
+   person, and with no height limit the dialog simply grew past the window and
+   clipped everyone below the fold with no way to reach them. */
+.ask.lists{width:min(520px,94vw); max-height:86vh; display:flex; flex-direction:column}
+.ask.lists .lists-ul{flex:1 1 auto; min-height:0; overflow-y:auto; -webkit-overflow-scrolling:touch}
+/* A panel whose own BODY scrolls, for dialogs with no single scrollable list.
+   Settings is a stack of blocks: capped at 86vh with nothing able to scroll, it
+   simply overflowed, and the Log out button at the bottom was cut off the
+   screen. Adding two blocks to it is what pushed it over. */
+.ask.ask-scroll{overflow-y:auto; -webkit-overflow-scrolling:touch; overscroll-behavior:contain}
+.lists-ul{list-style:none; margin:0 0 4px; padding:0}
+.lists-row{display:flex; align-items:center; gap:10px; padding:9px 0;
+  border-top:1px solid var(--hair)}
+.lists-row:first-child{border-top:0}
+/* A rule down the edge rather than a filled row: the rep needs to see which
+   list they are standing in without it competing with the Call buttons. */
+.lists-row.on{border-left:3px solid var(--accent); padding-left:8px}
+.lists-main{flex:1 1 auto; min-width:0}
+.lists-main b{font-size:13px}
+.lists-main small{display:block; margin-top:1px; font-size:11px; color:var(--muted)}
+.lists-acts{flex:0 0 auto; display:flex; gap:5px}
+.lists-acts button{height:28px; padding:0 9px; font:inherit; font-size:11.5px;
+  cursor:pointer; border:0; border-radius:7px; background:var(--panel-2);
+  color:var(--ink); box-shadow:inset 0 0 0 1px var(--hair)}
+.lists-acts button:hover{color:var(--accent)}
+.lists-acts button.grave{color:var(--m-fund)}
+.lists-acts button:disabled{opacity:.4; cursor:default}
+.lists-acts .ask-btn.primary{display:block; width:auto; height:28px; margin:0}
+.lists-new{display:flex; gap:6px; margin-top:12px}
+.lists-new .ask-name{margin:0}
+.lists-new .ask-btn{width:auto; margin:0; flex:0 0 auto}
+
+/* "Add these 40 where?" -- shown whenever the destination list already holds
+   people, whatever it is called. */
+.ask-back{position:fixed; inset:0; z-index:2000; display:flex; align-items:center;
+  justify-content:center; background:rgba(15,20,28,.45)}
+.ask{width:min(340px,92vw); padding:16px; border-radius:12px; background:var(--panel);
+  box-shadow:0 18px 46px rgba(0,0,0,.28), inset 0 0 0 1px var(--hair)}
+.ask h3{margin:0 0 4px; font-size:14.5px}
+.ask p{margin:0 0 12px; font-size:12.5px; color:var(--muted)}
+.ask-btn{display:block; width:100%; height:34px; margin-top:7px; padding:0 10px;
+  font:inherit; font-size:12.5px; border:0; border-radius:8px; cursor:pointer;
+  background:var(--panel-2); color:var(--ink); box-shadow:inset 0 0 0 1px var(--hair)}
+.ask-btn:hover{color:var(--accent)}
+.ask-btn.primary{background:var(--accent); color:var(--accent-ink); box-shadow:none}
+.ask-btn.primary:hover{color:var(--accent-ink); filter:brightness(1.06)}
+.ask-btn.ghost{background:transparent; box-shadow:none; color:var(--muted)}
+.ask-name{width:100%; height:32px; margin-top:7px; padding:0 9px; font:inherit;
+  font-size:12.5px; border:0; border-radius:8px; background:var(--panel-2);
+  color:var(--ink); box-shadow:inset 0 0 0 1px var(--hair)}
+
+/* Log an outcome, from the card rather than from a dialer session.
+   Collapsed by default and quieter than the action buttons above it: most
+   views of a card are research, and only some are logging. */
+.log-out{margin:10px 0 0}
+.log-out > summary{
+  font-size:11.5px; font-weight:650; color:var(--muted); cursor:pointer;
+  padding:4px 0; list-style:none; user-select:none}
+.log-out > summary::-webkit-details-marker{display:none}
+.log-out > summary::before{content:"+ "; opacity:.7}
+.log-out[open] > summary::before{content:"\2212 "}
+.card-outcomes{margin-top:6px}
+.card-outcomes button.grave{color:var(--warn); border-color:transparent;
+  box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--warn) 45%,transparent)}
+.card-outcomes button.on{background:var(--accent); color:var(--accent-ink);
+  border-color:transparent}
+.card-out-note{margin:6px 0 0; font-size:11.5px; color:var(--muted)}
+.card-out-note:empty{display:none}
+.card-out-note.bad{color:var(--warn)}
+.card-note{
+  width:100%; box-sizing:border-box; margin:6px 0 0; padding:7px 8px;
+  font:inherit; font-size:12.5px; color:var(--ink);
+  background:var(--panel-2); border:1px solid var(--hair); border-radius:8px;
+  resize:vertical}
+
+/* Quieter than the value it will hold — see the note in field.css. */
+.card-note::placeholder{font-size:11.5px; color:var(--muted); opacity:1}
+
+/* Email actions in the dialer bar. These had no rule at all, so they rendered
+   as bare text beside real buttons and did not read as tappable.
+   Outlined, not filled: one accent button per bar is what makes "Start calling"
+   findable, and three competing fills would make none of them stand out. */
+.email-toolbar-btn{
+  font:inherit; font-size:12.5px; font-weight:650; height:28px; padding:0 11px;
+  border-radius:8px; border:0; box-shadow:inset 0 0 0 1px var(--hair);
+  background:transparent; color:var(--muted); cursor:pointer; flex:0 0 auto;
+  display:inline-flex; align-items:center; gap:5px;
+}
+.email-toolbar-btn:hover{color:var(--accent); box-shadow:inset 0 0 0 1px var(--accent)}
+
+/* Log out, at the foot of the Settings dialog. Matches .ask-btn so it sits with
+   the dialog's own controls rather than competing with them. */
+.set-signout{display:block; width:100%; height:34px; margin:8px 0 2px; padding:0 10px;
+  font:inherit; font-size:12.5px; color:var(--ink); background:var(--panel-2);
+  border:0; border-radius:8px; cursor:pointer; box-shadow:inset 0 0 0 1px var(--hair)}
+.set-signout:hover{color:var(--accent)}
+
+/* Settings actions. These were carrying a .linkish class whose rule had been
+   removed from this stylesheet, so they rendered as raw browser buttons --
+   white boxes with black text, the one thing on the panel that looked like it
+   belonged to a different application.
+   Shaped like .set-signout below them so the panel reads as one set of
+   controls, but sharing a row and staying in the quiet palette: managing
+   templates is a routine errand, while signing out is the deliberate act the
+   full-width button is reserved for. */
+.set-actions{display:flex;flex-wrap:wrap;gap:8px;margin:8px 0 2px}
+.set-btn{flex:1 1 auto;min-width:0;height:34px;padding:0 12px;
+  font:inherit;font-size:12.5px;color:var(--ink);background:var(--panel-2);
+  border:0;border-radius:8px;cursor:pointer;
+  box-shadow:inset 0 0 0 1px var(--hair)}
+.set-btn:hover{color:var(--accent);box-shadow:inset 0 0 0 1px var(--accent)}
+
+/* The Act! record viewer. Verbatim JSON in a monospace block that scrolls in
+   both directions -- reformatting or truncating it would decide for the reader
+   which fields matter, and the reason they opened it is that they do not know
+   yet. */
+.act-json{width:min(760px,94vw); max-height:82vh; display:flex; flex-direction:column}
+.act-json h3{margin:0 0 6px}
+.act-json p{margin:0 0 8px}
+.act-json code{font-size:11.5px}
+.act-json-body{flex:1; min-height:0; overflow:auto; margin:0 0 10px;
+  padding:10px 12px; border-radius:8px; background:var(--panel-2);
+  box-shadow:inset 0 0 0 1px var(--hair);
+  font:12px/1.45 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  white-space:pre; tab-size:2}
+.act-json .profile-actions{margin:0; display:flex; gap:8px}
+.act-json .profile-actions .ask-btn{width:auto; margin:0; flex:0 0 auto}
+
+/* Two sources disagreeing about where somebody is. On an unconfirmed match this
+   is the clearest evidence available that the record belongs to a different
+   person -- and it was invisible: an Atlanta address above a Virginia phone
+   number, with nothing connecting the two facts. */
+.contact-clash{margin:8px 0 0; padding:8px 10px; border-radius:8px; font-size:12px;
+  line-height:1.5; color:var(--warn,#d08b00);
+  box-shadow:inset 0 0 0 1px var(--warn,#d08b00)}
+.contact-clash b{color:inherit}
+
+/* The outcome grid, matching the field view: three equal columns, Skip across
+   two cells on the last row with Do not call beside it. A wrapping flex row
+   moved the buttons around as the panel resized, so the position a hand learns
+   was never the same twice -- and the irreversible one landed wherever there
+   was space. */
+.dial-outcomes{display:grid; grid-template-columns:repeat(3, 1fr); gap:6px; flex-wrap:unset}
+.dial-outcomes button{width:auto; min-width:0}
+.dial-outcomes .span2{grid-column:span 2}
+/* .dial-skip was styled as an underlined link when it lived in the footer.
+   Inside the grid it is a button like the others, minus the emphasis. */
+.dial-outcomes .dial-skip{color:var(--muted); text-decoration:none}
+.dial-outcomes .dial-skip:hover:not(:disabled){color:var(--accent)}
+
+/* ---- advisor email activity ---------------------------------------------
+   A relationship timeline: what has passed between this firm and this advisor,
+   whoever sent it and from wherever. Rows a rep cannot open -- a colleague's
+   mailbox holds them -- are still SHOWN, because knowing somebody already made
+   contact on Tuesday is the point of having this at all. */
+.activity-list{list-style:none; margin:0; padding:0}
+.activity-row{display:grid; grid-template-columns:minmax(120px,auto) minmax(120px,auto) 1fr auto;
+  gap:10px; align-items:baseline; padding:7px 0;
+  border-bottom:1px solid var(--hair); font-size:12px}
+.activity-row:last-child{border-bottom:0}
+.activity-when{color:var(--muted); white-space:nowrap}
+/* Inbound is the side that matters -- an advisor writing to us is the signal
+   the whole feature exists to surface -- so it carries the weight. */
+.activity-inbound .activity-what{font-weight:600}
+.activity-outbound .activity-what{color:var(--muted)}
+.activity-subject{overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+.activity-warn{font-weight:400; color:var(--muted); font-style:italic}
+.activity-elsewhere{color:var(--muted); padding:0 6px}
+.activity-view{font:inherit; padding:2px 8px; border-radius:6px; cursor:pointer;
+  border:1px solid var(--hair); background:var(--panel-2); color:inherit}
+.activity-view:hover{background:var(--panel)}
+
+.activity-msg{width:min(720px,94vw); max-height:82vh; display:flex; flex-direction:column}
+.activity-msg h3{margin:0 0 6px}
+.activity-meta{margin:0 0 8px; color:var(--muted); font-size:12px}
+/* pre, and wrapped. This is somebody else's prose, not code: it must not force
+   a horizontal scrollbar, and it must not have its line breaks collapsed. */
+.activity-body{flex:1; min-height:0; overflow:auto; margin:0 0 10px;
+  padding:10px 12px; border-radius:8px; background:var(--panel-2);
+  box-shadow:inset 0 0 0 1px var(--hair);
+  font:12.5px/1.5 inherit; white-space:pre-wrap; overflow-wrap:anywhere}
+.activity-msg .profile-actions{margin:0; display:flex; gap:8px; align-items:center}
+.activity-msg .profile-actions .ask-btn{width:auto; margin:0; flex:0 0 auto}
+
+@media (max-width:640px){
+  .activity-row{grid-template-columns:1fr auto; row-gap:2px}
+  .activity-when{grid-column:1/-1}
+  .activity-subject{grid-column:1/-1}
+}
+
+/* ---- the work queue ------------------------------------------------------
+   "Who should I pick up now, and why." The headline counts are things that
+   need DOING; there is deliberately no count of what has been sent. A number
+   that rewards sending would pull against the 25-a-day limit, and a dashboard
+   read every morning beats a limit met once a day. */
+.work-queue{width:min(760px,94vw); max-height:82vh; display:flex; flex-direction:column}
+.work-queue h3{margin:0 0 8px}
+.wq-body{flex:1; min-height:0; overflow:auto; margin:0 0 10px}
+.wq-heads{display:flex; flex-wrap:wrap; gap:6px 14px; margin:0 0 10px;
+  padding:0 0 10px; border-bottom:1px solid var(--hair); font-size:12px}
+.wq-count b{font-size:15px; margin-right:4px}
+.wq-list{list-style:none; margin:0; padding:0}
+.wq-row{display:grid; grid-template-columns:minmax(140px,1.4fr) minmax(150px,auto) auto auto;
+  gap:10px; align-items:center; padding:8px 0;
+  border-bottom:1px solid var(--hair); font-size:12.5px}
+.wq-row:last-child{border-bottom:0}
+.wq-name{font:inherit; font-weight:600; text-align:left; padding:0; cursor:pointer;
+  background:none; border:0; color:inherit; text-decoration:underline;
+  text-decoration-color:var(--hair); text-underline-offset:3px}
+.wq-when{color:var(--muted); white-space:nowrap}
+/* The reason is the whole point of the row, so it is legible before the name.
+   A reply outranks everything and is coloured accordingly; the rest read as
+   context rather than alarm. */
+.wq-why{font-weight:600}
+.wq-reply_new{color:var(--accent)}
+.wq-reply_followup{color:var(--accent)}
+.wq-bounced{color:var(--warn,#c2703a)}
+.wq-due,.wq-quiet_warm{color:var(--muted); font-weight:500}
+.wq-acts{display:flex; gap:6px; justify-content:flex-end}
+.wq-act{font:inherit; font-size:11.5px; padding:3px 9px; border-radius:6px; cursor:pointer;
+  border:1px solid var(--hair); background:var(--panel-2); color:inherit; white-space:nowrap}
+.wq-act:hover{background:var(--panel)}
+.wq-act[disabled]{opacity:.5; cursor:default}
+.wq-act.ghost{color:var(--muted)}
+
+@media (max-width:640px){
+  .wq-row{grid-template-columns:1fr auto; row-gap:3px}
+  .wq-why{grid-column:1/-1}
+  .wq-acts{grid-column:1/-1; justify-content:flex-start}
+}
+
+/* ---- replying from the timeline ------------------------------------------
+   Deliberately plain: a textarea, no formatting, no attachments. This is the
+   twenty-word answer to a question an advisor asked. The moment it needs to be
+   more than that, `Open in Outlook` is the honest answer rather than
+   reimplementing a mail client badly. */
+.reply-box{margin:0 0 10px; border-top:1px solid var(--hair); padding-top:8px}
+.reply-box > summary{
+  font-size:12px; font-weight:650; color:var(--muted); cursor:pointer;
+  padding:4px 0; list-style:none; user-select:none}
+.reply-box > summary::-webkit-details-marker{display:none}
+.reply-box > summary::before{content:"+ "; opacity:.7}
+.reply-box[open] > summary::before{content:"\2212 "}
+.reply-to{margin:4px 0 6px; font-size:12px; color:var(--muted)}
+.reply-text{
+  width:100%; box-sizing:border-box; padding:8px 10px; border-radius:8px;
+  border:1px solid var(--hair); background:var(--panel-2); color:inherit;
+  font:inherit; font-size:13px; resize:vertical}
+.reply-text[disabled]{opacity:.6}
+.reply-all{display:inline-flex; align-items:center; gap:6px;
+  font-size:12px; color:var(--muted)}
+.reply-note{margin:6px 0 0; font-size:12px; color:var(--muted); min-height:1em}
+
+/* ---- attaching, and the follow-up composer -------------------------------
+   Two sources side by side: the approved library and the rep's own machine.
+   The note is not decoration -- a rep should know before they attach that the
+   compliance mailbox gets a copy, because that is the thing that makes an
+   uncurated file acceptable here at all. */
+.attach-row{margin:8px 0 0; display:flex; flex-wrap:wrap; gap:10px 16px; align-items:flex-start}
+.attach-lab{display:flex; flex-direction:column; gap:4px; font-size:12px; color:var(--muted)}
+.attach-doc{min-width:220px; font:inherit; font-size:12px; padding:4px;
+  border-radius:8px; border:1px solid var(--hair);
+  background:var(--panel-2); color:inherit}
+.attach-file{font-size:12px; color:var(--muted); max-width:240px}
+.attach-note{flex-basis:100%; margin:0; font-size:11.5px; color:var(--muted)}
+
+.follow-up{width:min(640px,94vw); max-height:86vh; display:flex; flex-direction:column}
+.follow-up h3{margin:0 0 4px}
+.follow-note-top{margin:0 0 10px; font-size:12px; color:var(--muted)}
+.follow-subject{
+  width:100%; box-sizing:border-box; margin:0 0 8px; padding:8px 10px;
+  border-radius:8px; border:1px solid var(--hair); background:var(--panel-2);
+  color:inherit; font:inherit; font-size:13px}
+.follow-text{
+  width:100%; box-sizing:border-box; flex:1; min-height:120px; padding:8px 10px;
+  border-radius:8px; border:1px solid var(--hair); background:var(--panel-2);
+  color:inherit; font:inherit; font-size:13px; resize:vertical}
+.follow-up .profile-actions{margin:10px 0 0; display:flex; gap:8px}
+.follow-up .profile-actions .ask-btn{width:auto; margin:0; flex:0 0 auto}
+
+/* Who a Reply All actually reaches. Shown, not enforced: a suppressed address
+   on a thread somebody is already part of may still be answered -- that is the
+   whole point of treating a reply differently from a campaign. */
+.reply-audience{margin:6px 0 0; font-size:11.5px; color:var(--muted); line-height:1.5}
+.reply-who{white-space:nowrap}
+.reply-who.off{text-decoration:underline dotted; opacity:.85}
+.wq-error{margin:0 0 8px; font-size:12px; color:var(--warn,#c2703a)}
+
+/* Failed is not pending. A card that says "Loading…" about a file that already
+   failed leaves a rep waiting for something that is never coming. */
+.contact-failed{color:var(--warn,#c2703a)}

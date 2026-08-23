@@ -1,0 +1,255 @@
+"use strict";
+
+const test = require("node:test");
+const assert = require("node:assert/strict");
+const worker = require("../email-worker/index");
+
+function fixture(mode, state) {
+  let version = 1;
+  const batch = { id: "batch-1", userId: "user-1", status: mode === "send" ? "sending" : "drafting",
+    mode, graphMailboxId: "user-1", sendNotBeforeUtc: new Date(0).toISOString(), etag: `v${version}` };
+  const message = { id: "message-1", batchId: batch.id, userId: batch.userId, state,
+    ordinal: 0, recipientEmail: "safe@example.test", recipientName: "Safe User",
+    subject: "Subject", bodyHtml: "<p>Body</p>", signatureHtml: "<div>Signature</div>",
+    attachments: [], graphMessageId: "", attemptCount: 0,
+    draftAttempts: 0, sendAttempts: 0, reconcileAttempts: 0, etag: `m${version}` };
+  const audits = [], enqueued = [];
+  const policy = { killed: false, reason: "" };
+  // Nobody is suppressed unless a test says so. Stubbed rather than left to the
+  // real module, which would reach for Azure storage.
+  const suppressed = new Map();
+  const store = {
+    getBatch: async () => ({ ...batch }),
+    listMessages: async () => [{ ...message }],
+    patchBatch: async (_u, _b, patch) => { Object.assign(batch, patch); batch.etag = `v${++version}`; return { ...batch }; },
+    getMessage: async () => ({ ...message }),
+    claimMessage: async (_u, _b, _m, allowed, next, _lease, phase) => {
+      if (!allowed.includes(message.state)) return null;
+      message.state = next; message.attemptCount++;
+      if (phase) message[`${phase}Attempts`] = (message[`${phase}Attempts`] || 0) + 1;
+      message.etag = `m${++version}`; return { ...message };
+    },
+    patchMessage: async (_u, _b, _m, patch) => { Object.assign(message, patch); message.etag = `m${++version}`; return { ...message }; },
+    audit: async (...args) => audits.push(args),
+    // The kill switch. Defaults to off; the fault-injection tests flip it.
+    policy: async () => ({ ...policy }),
+  };
+  return { batch, message, audits, enqueued, store, policy, suppressed,
+    suppress: { blockedAmong: async () => new Map(suppressed) },
+    auth: { tokenFor: async () => ({ accessToken: "mock-token", mailboxId: "user-1" }) },
+    enqueue: async (work, delay) => enqueued.push({ work, delay }),
+    // campaignHealth is the real one -- stubbing the brake would let these tests
+    // pass while it was broken.
+    core: { config: () => ({ mailboxIntervalSeconds: 5 }),
+            campaignHealth: require("../shared/email-core").campaignHealth },
+    mailboxGate: { acquire: async () => 0 } };
+}
+
+test("draft retry reconciles the application property before creating anything", async () => {
+  const f = fixture("drafts", "draft_pending");
+  let creates = 0, attachments = 0;
+  const graph = {
+    findByAppId: async () => ({ id: "immutable-1", isDraft: true, internetMessageId: "<one@example>" }),
+    createDraft: async () => { creates++; throw new Error("must not create a duplicate"); },
+    attachDocuments: async () => { attachments++; },
+    getMessage: async () => null,
+  };
+  await worker.processWork({ kind: "draft", userId: "user-1", batchId: "batch-1", messageId: "message-1" }, { ...f, graph });
+  assert.equal(creates, 0);
+  assert.equal(attachments, 1);
+  assert.equal(f.message.graphMessageId, "immutable-1");
+  assert.equal(f.message.state, "draft_ready");
+  assert.equal(f.batch.status, "drafts_ready");
+});
+
+test("send retry treats a non-draft immutable message as already sent", async () => {
+  const f = fixture("send", "send_scheduled");
+  f.message.graphMessageId = "immutable-1";
+  let sends = 0;
+  const graph = {
+    getMessage: async () => ({ id: "immutable-1", isDraft: false, sentDateTime: "2026-08-15T12:00:00Z" }),
+    findByAppId: async () => null,
+    sendDraft: async () => { sends++; },
+  };
+  await worker.processWork({ kind: "send", userId: "user-1", batchId: "batch-1", messageId: "message-1" }, { ...f, graph });
+  assert.equal(sends, 0);
+  assert.equal(f.message.state, "sent");
+  assert.equal(f.batch.status, "completed");
+});
+
+test("accepted send is reconciled and never submitted a second time", async () => {
+  const f = fixture("send", "submitted");
+  f.message.graphMessageId = "immutable-1";
+  let sends = 0;
+  const graph = {
+    getMessage: async () => ({ id: "immutable-1", isDraft: false, sentDateTime: "2026-08-15T12:00:00Z" }),
+    findByAppId: async () => null,
+    sendDraft: async () => { sends++; },
+  };
+  await worker.processWork({ kind: "reconcile", userId: "user-1", batchId: "batch-1", messageId: "message-1" }, { ...f, graph });
+  assert.equal(sends, 0);
+  assert.equal(f.message.state, "sent");
+  assert.ok(f.audits.some((a) => a[2] === "send_reconciled"));
+});
+test("interactive token expiry pauses work for reconnection instead of failing or sending", async () => {
+  const f = fixture("drafts", "draft_pending");
+  const reconnect = new Error("Reconnect Microsoft 365.");
+  reconnect.code = "graph_reconnect_required";
+  f.auth.tokenFor = async () => { throw reconnect; };
+  let graphCalls = 0;
+  const graph = {
+    findByAppId: async () => { graphCalls++; }, createDraft: async () => { graphCalls++; },
+    attachDocuments: async () => { graphCalls++; }, getMessage: async () => { graphCalls++; },
+  };
+  await worker.processWork({ kind: "draft", userId: "user-1", batchId: "batch-1", messageId: "message-1" }, { ...f, graph });
+  assert.equal(graphCalls, 0);
+  assert.equal(f.message.state, "auth_required");
+  assert.equal(f.message.failureCode, "auth_required_draft");
+  assert.equal(f.batch.status, "action_required");
+});
+/* ---------- fault injection between approval and send --------------------
+ *
+ * These cover the interval the earlier tests did not: a batch is paced apart by
+ * mailboxIntervalSeconds, so at the default of five seconds a 250-recipient send
+ * is still going out some twenty minutes after approval. Anything checked only
+ * at approval is checked against a world that has since moved on.
+ */
+
+test("a recipient who opts out AFTER approval is not sent to", async () => {
+  const f = fixture("send", "send_scheduled");
+  f.suppressed.set("safe@example.test", "asked to unsubscribe");
+  let sends = 0;
+  const graph = {
+    getMessage: async () => ({ id: "draft-1", isDraft: true }),
+    findByAppId: async () => ({ id: "draft-1", isDraft: true }),
+    sendDraft: async () => { sends++; return { requestId: "r1" }; },
+  };
+  await worker.processWork({ kind: "send", userId: "user-1", batchId: "batch-1", messageId: "message-1" },
+    { ...f, graph });
+
+  assert.equal(sends, 0, "the send must not happen");
+  assert.equal(f.message.state, "canceled");
+  assert.equal(f.message.failureCode, "recipient_opted_out");
+  assert.match(f.message.failureMessage, /asked to unsubscribe/);
+  assert.ok(f.audits.some((a) => a.includes("send_blocked_recipient_opted_out")),
+    "the block should be auditable");
+  // Final: there is no state in which retrying a send to someone who opted out
+  // is the right answer.
+  assert.equal(f.enqueued.length, 0, "must not be re-queued");
+});
+
+test("the kill switch stops a batch that is already mid-flight", async () => {
+  const f = fixture("send", "send_scheduled");
+  f.policy.killed = true;
+  f.policy.reason = "Compliance halted all outbound email.";
+  let sends = 0;
+  const graph = {
+    getMessage: async () => ({ id: "draft-1", isDraft: true }),
+    findByAppId: async () => ({ id: "draft-1", isDraft: true }),
+    sendDraft: async () => { sends++; return { requestId: "r1" }; },
+  };
+  await worker.processWork({ kind: "send", userId: "user-1", batchId: "batch-1", messageId: "message-1" },
+    { ...f, graph });
+
+  assert.equal(sends, 0, "an emergency switch that only blocks new approvals is not an emergency switch");
+  assert.equal(f.batch.status, "paused");
+  assert.match(f.batch.warningMessage, /Compliance halted/);
+  assert.equal(f.message.state, "send_scheduled", "resumable, not failed");
+  assert.ok(f.enqueued.length >= 1, "should come back and look again");
+  assert.ok(f.audits.some((a) => a.includes("send_halted_by_kill_switch")));
+});
+
+test("a clean recipient still sends once both checks pass", async () => {
+  // The counterweight: it would be easy to make the two tests above pass by
+  // breaking sending altogether.
+  const f = fixture("send", "send_scheduled");
+  let sends = 0;
+  const graph = {
+    getMessage: async () => ({ id: "draft-1", isDraft: true }),
+    findByAppId: async () => ({ id: "draft-1", isDraft: true }),
+    sendDraft: async () => { sends++; return { requestId: "r1" }; },
+  };
+  await worker.processWork({ kind: "send", userId: "user-1", batchId: "batch-1", messageId: "message-1" },
+    { ...f, graph });
+  assert.equal(sends, 1);
+  assert.equal(f.message.state, "submitted");
+});
+
+test("draft retries do not spend the send phase's retry budget", async () => {
+  // One shared counter meant a message that fought through five draft retries
+  // reached its first send attempt with nothing left, and failed permanently on
+  // a transient error it had never actually hit while sending.
+  const f = fixture("send", "send_scheduled");
+  f.message.draftAttempts = 5;          // a rough ride getting the draft made
+  f.message.attemptCount = 5;
+  const graph = {
+    getMessage: async () => ({ id: "draft-1", isDraft: true }),
+    findByAppId: async () => ({ id: "draft-1", isDraft: true }),
+    sendDraft: async () => { const e = new Error("Graph is busy"); e.statusCode = 503; throw e; },
+  };
+  await worker.processWork({ kind: "send", userId: "user-1", batchId: "batch-1", messageId: "message-1" },
+    { ...f, graph });
+
+  assert.equal(f.message.state, "send_ambiguous", "should be retryable, not failed");
+  assert.notEqual(f.message.state, "failed");
+  assert.ok(f.enqueued.length >= 1, "a retry should have been queued");
+});
+
+test("a phase still fails permanently once its own budget is gone", async () => {
+  const f = fixture("send", "send_scheduled");
+  f.message.sendAttempts = 6;           // this phase has genuinely run out
+  const graph = {
+    getMessage: async () => ({ id: "draft-1", isDraft: true }),
+    findByAppId: async () => ({ id: "draft-1", isDraft: true }),
+    sendDraft: async () => { const e = new Error("Graph is busy"); e.statusCode = 503; throw e; },
+  };
+  await worker.processWork({ kind: "send", userId: "user-1", batchId: "batch-1", messageId: "message-1" },
+    { ...f, graph });
+  assert.equal(f.message.state, "failed");
+});
+
+/* conversationId is what ties a REPLY back to the message it answers. These
+ * guard the two places it can be captured, and the one place it must not be
+ * clobbered. */
+
+test("the conversation id is captured when the draft is created", async () => {
+  const f = fixture("drafts", "draft_pending");
+  const graph = {
+    findByAppId: async () => null,
+    createDraft: async () => ({ id: "immutable-1", internetMessageId: "<one@example>",
+                                conversationId: "conv-abc", isDraft: true }),
+    attachDocuments: async () => {},
+    getMessage: async () => null,
+  };
+  await worker.processWork({ kind: "draft", userId: "user-1", batchId: "batch-1", messageId: "message-1" }, { ...f, graph });
+  assert.equal(f.message.graphConversationId, "conv-abc");
+});
+
+test("a message drafted before capture existed is backfilled on send", async () => {
+  const f = fixture("send", "send_scheduled");
+  f.message.graphMessageId = "immutable-1";
+  f.message.graphConversationId = "";          // drafted before this field existed
+  const graph = {
+    getMessage: async () => ({ id: "immutable-1", isDraft: false, conversationId: "conv-recovered",
+                               sentDateTime: "2026-08-15T12:00:00Z" }),
+    sendDraft: async () => { throw new Error("must not re-send an already-sent message"); },
+  };
+  await worker.processWork({ kind: "send", userId: "user-1", batchId: "batch-1", messageId: "message-1" }, { ...f, graph });
+  assert.equal(f.message.state, "sent");
+  assert.equal(f.message.graphConversationId, "conv-recovered");
+});
+
+test("backfill never overwrites a conversation id the draft already captured", async () => {
+  const f = fixture("send", "send_scheduled");
+  f.message.graphMessageId = "immutable-1";
+  f.message.graphConversationId = "conv-from-draft";
+  const graph = {
+    // Graph disagreeing here would mean the draft moved threads; the value we
+    // stored at draft time is the one our sent record was built against.
+    getMessage: async () => ({ id: "immutable-1", isDraft: false, conversationId: "conv-different",
+                               sentDateTime: "2026-08-15T12:00:00Z" }),
+    sendDraft: async () => { throw new Error("must not re-send an already-sent message"); },
+  };
+  await worker.processWork({ kind: "send", userId: "user-1", batchId: "batch-1", messageId: "message-1" }, { ...f, graph });
+  assert.equal(f.message.graphConversationId, "conv-from-draft");
+});

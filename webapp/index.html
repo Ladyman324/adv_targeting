@@ -1,0 +1,349 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Advisor Map — United States</title>
+  <!-- NO EXTERNAL SCRIPT HOST. Leaflet and its plugins used to load from
+       unpkg.com on every page view: a third-party origin executing with full
+       access to a signed-in page that holds the contact file and the call log,
+       fetched by tag rather than by hash. They are vendored now
+       (src/vendor_assets.py, hashes in webapp/vendor/manifest.json), so
+       script-src is 'self' and nothing else can run here.
+       Basemap tiles are images from openstreetmap.org — data, not code. -->
+  <meta http-equiv="Content-Security-Policy" content="
+    default-src 'self';
+    script-src 'self';
+    style-src 'self' 'unsafe-inline';
+    img-src 'self' data: blob: https://*.tile.openstreetmap.org;
+    connect-src 'self';
+    font-src 'self';
+    base-uri 'none';
+    form-action 'none';
+    object-src 'none'">
+  <!-- frame-ancestors is deliberately NOT here: it is ignored when delivered
+       in a meta element, and a directive that logs a warning and does nothing
+       is worse than none. It ships as a real header from
+       staticwebapp.config.json, alongside X-Frame-Options. -->
+  <link rel="stylesheet" href="vendor/leaflet.css">
+  <link rel="stylesheet" href="vendor/MarkerCluster.css">
+  <link rel="stylesheet" href="vendor/MarkerCluster.Default.css">
+  <link rel="stylesheet" href="style.css?v=06454b114e">
+  <link rel="stylesheet" href="email.css?v=06454b114e">
+</head>
+<body>
+  <div id="app">
+    <aside id="panel">
+      <header>
+        <div class="title-row">
+          <h1>Advisor Map</h1>
+          <!-- Phone widths only. Someone with a bookmark to this page lands on
+               the wrong tool for the device, and today that fails silently --
+               the map technically works, it is just the slowest way to answer
+               "who is near me". CSS hides it above the breakpoint. -->
+          <a id="fieldLink" href="field.html"
+             title="Switch to the field view — built for a phone">&#9788; Field view</a>
+          <span id="scopeNote" class="info-wrap">
+            <button type="button" class="info-button" aria-label="About the national view">i</button>
+            <span class="info-popover" role="tooltip">National view counts advisor placements per building; one advisor filed at several offices is counted at each. Pick a state or territory for distinct-advisor detail.</span>
+          </span>
+          <!-- Beside Settings rather than inside a panel: this is what a rep
+               should look at first thing, and a queue nobody can find is a
+               queue nobody works. -->
+          <button id="workQueueBtn" type="button" class="settings-btn"
+                  title="Needs attention — replies, follow-ups and lapsed contacts"
+                  aria-label="Needs attention">&#9873;</button>
+          <button id="settingsBtn" type="button" class="settings-btn"
+                  title="Settings" aria-label="Settings">&#9881;</button>
+        </div>
+        <div class="loc global-search-wrap">
+          <input id="globalSearch" type="search" placeholder="Advisor, firm, CRD, city, ZIP, or state…" autocomplete="off" aria-label="Search advisors, firms, and locations">
+          <div id="globalResults" class="global-results" hidden>
+            <div id="locResults" class="result-section" hidden></div>
+            <div id="advisorResults" class="result-section" hidden></div>
+          </div>
+        </div>
+        <select id="scope" aria-label="Area">
+          <option value="US">United States</option>
+        </select>
+        <div class="scope-filters">
+        <label class="switch scope-filter">
+          <input type="checkbox" id="continentalOnly" checked>
+          <span class="switch-ui"></span>
+          <span class="switch-lbl">Continental U.S. only</span>
+        </label>
+        <label class="switch scope-filter">
+          <input type="checkbox" id="selectsOnly">
+          <span class="switch-ui"></span>
+          <span class="switch-lbl">Uses outside managers</span>
+        </label>
+        </div>
+        <div id="filterState" class="filter-state">
+          <div class="filter-head">
+            <span class="label">Active filters</span>
+            <button id="resetAll" class="mini" hidden>reset all</button>
+          </div>
+          <div id="activeFilters" class="active-filters"><span class="hint">None</span></div>
+        </div>
+        <div id="notice" class="notice" role="status" aria-live="polite" hidden>
+          <span id="noticeText"></span>
+          <button id="noticeClose" type="button" aria-label="Dismiss notice">&times;</button>
+        </div>
+      </header>
+
+      <details class="advanced-panel" id="filterPane">
+        <summary>Advanced filters</summary>
+        <div class="filter-row">
+          <span class="label">Firm AUM</span>
+          <button id="clearTargeting" class="mini" hidden>clear</button>
+        </div>
+        <div id="aumBands" class="aum-bands" aria-label="Firm AUM range">
+          <button data-aum="all" aria-pressed="true">Any</button>
+          <button data-aum="lt100m" aria-pressed="false">&lt;$100M</button>
+          <button data-aum="100m1b" aria-pressed="false">$100M–$1B</button>
+          <button data-aum="1b10b" aria-pressed="false">$1B–$10B</button>
+          <button data-aum="10b100b" aria-pressed="false">$10B–$100B</button>
+          <button data-aum="gt100b" aria-pressed="false">&gt;$100B</button>
+        </div>
+
+        <div class="block-head advisor-filter-head">
+          <span class="label">Advisor filters</span>
+          <span id="advisorFilterNote" class="mini-note" hidden>Pick a state or territory &mdash; the national view counts offices, not people</span>
+        </div>
+        <!-- Ordered by how much they decide: the two that persist across a
+             territory switch lead, exploration follows, diagnostics last. -->
+        <div id="advisorFilters" class="filter-rows" data-needs-state>
+          <!-- Switch rows lead with the control, segmented rows lead with the
+               label, and every segmented control is the same width so the
+               right edge lines up down the column. -->
+          <div class="filter-row">
+            <label class="switch compact">
+              <input type="checkbox" id="rankedOnly">
+              <span class="switch-ui"></span>
+              <span class="switch-lbl">Ranked advisors only</span>
+            </label>
+            <span class="info-wrap">
+              <button type="button" class="info-button" aria-label="About the ranking filter">i</button>
+              <span class="info-popover" role="tooltip">Advisors named on a Barron's or Forbes ranking &mdash; about 9,000 people, or 2.3% of the universe. Both sources are pooled because what matters for prospecting is that an advisor is sizable and recognised, not who ranked them. Ranks are only comparable within the same list, and each badge names its own. Barron's is joined on CRD via BrokerCheck; Forbes publishes no CRD, so most of those are matched on name, firm and location and are marked &#8776; on the map.</span>
+            </span>
+          </div>
+          <div class="filter-row">
+            <label class="switch compact">
+              <input type="checkbox" id="contactableOnly">
+              <span class="switch-ui"></span>
+              <span class="switch-lbl">Has contact data</span>
+            </label>
+            <span class="info-wrap">
+              <button type="button" class="info-button" aria-label="About the contact filter">i</button>
+              <span class="info-popover" role="tooltip">Advisors with an email address or a phone number on file &mdash; from the CRM export and 26 scraped firm rosters, matched to SEC CRDs by name within the firm. A record carrying neither is only a name and does not pass. About a third of matches are unconfirmed and marked &#9888; on the card; they still count as reachable, because the contact detail is real even where the identity is inferred.</span>
+            </span>
+          </div>
+          <div class="filter-row">
+            <label class="switch compact">
+              <input type="checkbox" id="assetsOnly">
+              <span class="switch-ui"></span>
+              <span class="switch-lbl">Has assets on file</span>
+            </label>
+            <span class="info-wrap">
+              <button type="button" class="info-button" aria-label="About the assets filter">i</button>
+              <span class="info-popover" role="tooltip">Advisors carrying an asset figure from the CRM &mdash; either a team total or their own book. Coverage is thin and uneven: the CRM populates this for under 8% of contacts, so switching it on shows where EIC has recorded a number, NOT where the money is. Team amounts are stored once on the team and shown as the whole team's book, never as one person's.</span>
+            </span>
+          </div>
+          <div class="filter-row">
+            <label class="switch compact">
+              <input type="checkbox" id="ownerOnly">
+              <span class="switch-ui"></span>
+              <span class="switch-lbl">Owners and officers only</span>
+            </label>
+            <span class="info-wrap">
+              <button type="button" class="info-button" aria-label="About the owner and officer filter">i</button>
+              <span class="info-popover" role="tooltip">From Form ADV Schedule A, collected for the full firm roster, so this covers every mapped firm rather than only those reporting Item 5.G(7). A holding below 5% is an officer rather than an owner and is tagged as such.</span>
+            </span>
+          </div>
+          <div class="filter-row">
+            <span class="label">Experience
+              <span class="info-wrap">
+                <button type="button" class="info-button" aria-label="About the experience filter">i</button>
+                <span class="info-popover" role="tooltip">Years since first registration. Ctrl or Shift click to select more than one band.</span>
+              </span>
+            </span>
+            <div id="expToggle" class="seg">
+              <button data-exp="lt10" aria-pressed="false">&lt;10 yr</button>
+              <button data-exp="10to20" aria-pressed="false">10&ndash;20</button>
+              <button data-exp="gt20" aria-pressed="false">20+</button>
+            </div>
+          </div>
+          <div class="filter-row">
+            <span class="label">Registration</span>
+            <div id="regToggle" class="seg">
+              <button data-reg="all" aria-pressed="true">All</button>
+              <button data-reg="dual" aria-pressed="false">Dual</button>
+              <button data-reg="ria" aria-pressed="false">RIA only</button>
+            </div>
+          </div>
+          <div class="filter-row">
+            <span class="label">States registered</span>
+            <div id="reachToggle" class="seg">
+              <button data-reach="one" aria-pressed="false">1</button>
+              <button data-reach="few" aria-pressed="false">2&ndash;4</button>
+              <button data-reach="many" aria-pressed="false">5+</button>
+            </div>
+          </div>
+          <div class="filter-row">
+            <span class="label">Map position
+              <span class="info-wrap">
+                <button type="button" class="info-button" aria-label="What the map-position options mean">i</button>
+                <span class="info-popover" role="tooltip"><b>Rooftop</b>: exact Census match. <b>Approx.</b>: Census match was non-exact. <b>Nearest</b>: the closest validated address on the same block. <b>City</b>: the firm filed a city and state but no street, so the pin sits at the centre of the town &mdash; common for advisors working from a home office. The filed address is unchanged in every popup.</span>
+              </span>
+            </span>
+            <div id="geoToggle" class="seg">
+              <button data-geo="all" aria-pressed="true">All</button>
+              <button data-geo="rooftop" aria-pressed="false">Roof</button>
+              <button data-geo="approximate" aria-pressed="false">Approx</button>
+              <button data-geo="neighbour" aria-pressed="false">Near</button>
+              <button data-geo="city" aria-pressed="false">City</button>
+            </div>
+          </div>
+        </div>
+      </details>
+
+      <section class="block grow" id="firmPanel">
+        <div class="block-head">
+          <span class="label">Firms in view</span>
+          <div class="firm-head-actions">
+            <div id="firmSort" class="seg mini-seg">
+              <button data-sort="advisors" aria-pressed="true">Advisors</button>
+              <button data-sort="relevant" aria-pressed="false" title="Equities plus Funds/ETFs">Relevant AUM</button>
+            </div>
+            <button id="clearFirms" class="mini" hidden>clear</button>
+            <button id="toggleFirms" class="mini" aria-expanded="true">hide</button>
+          </div>
+        </div>
+        <div id="firmPanelBody" class="firm-panel-body">
+          <div id="excludedFirms" class="excluded-firms" hidden></div>
+          <input id="search" type="search" placeholder="Filter firms…" autocomplete="off">
+          <p id="firmListMeta" class="hint"></p>
+          <div id="firms" class="firms"></div>
+        </div>
+      </section>
+
+      <details class="data-info">
+        <summary>Data information</summary>
+        <p id="dataMeta" class="hint">Loading source and coverage details…</p>
+        <p class="hint">Counts follow the map view. Branch locations geocoded via US&nbsp;Census · tiles © OpenStreetMap</p>
+      </details>
+
+    </aside>
+    <div id="map" role="application" aria-label="Interactive advisor opportunity map"></div>
+
+    <!-- What is in the current map view. On the map rather than in the sidebar:
+         these numbers are a property of the viewport and change as you pan, and
+         the map has spare horizontal room where the sidebar has none to spare
+         vertically. Each export sits against the count it produces, so the
+         number beside it is the row count you will get. -->
+    <div id="statsBar" class="stats-bar" aria-label="Current map summary">
+      <div class="stat">
+        <span class="stat-label">Advisors
+          <span class="info-wrap">
+            <button type="button" class="info-button" aria-label="About advisor, office, and firm counts">i</button>
+            <span id="countHelp" class="info-popover" role="tooltip"></span>
+          </span>
+        </span>
+        <strong id="kpiAdvisors">&mdash;</strong>
+        <!-- CSV export withdrawn for now, to be reconsidered. exportAdvisors()
+             and exportFirms() are left intact in app.js: they encode the
+             column decisions and the "exactly what the panel is showing"
+             predicate, and rebuilding that from memory later would be worse
+             than carrying two unused functions.
+        <button id="exportAdvisors" class="stat-export" ...>&#8623;</button> -->
+        <!-- Bulk queueing takes the slot export used to hold, and shares its
+             selection rule: the advisors passing the current filters inside the
+             viewport. One predicate, so the two can never disagree about what
+             "what I am looking at" means. -->
+        <button id="queueVisible" class="stat-export" title="Add the advisors in view to the call list"
+                aria-label="Add the advisors in view to the call list">&#43;&#9742;</button>
+      </div>
+      <div class="stat"><span class="stat-label">Offices</span><strong id="kpiOffices">&mdash;</strong></div>
+      <div class="stat">
+        <span class="stat-label">Firms</span>
+        <strong id="kpiFirms">&mdash;</strong>
+        <!-- withdrawn with the advisor export above; exportFirms() remains in app.js
+        <button id="exportFirms" class="stat-export" ...>&#8623;</button> -->
+      </div>
+      <div class="stat">
+        <span class="stat-label">AUM
+          <span class="info-wrap">
+            <button type="button" class="info-button" aria-label="How AUM, equities, and funds or ETFs are calculated">i</button>
+            <span id="estimatedAumHelp" class="info-popover" role="tooltip"></span>
+          </span>
+        </span>
+        <strong id="estimatedAum">&mdash;</strong>
+      </div>
+      <div class="stat"><span class="stat-label">Equities</span><strong id="estimatedEquities">&mdash;</strong></div>
+      <div class="stat"><span class="stat-label">Funds/ETFs</span><strong id="estimatedFunds">&mdash;</strong></div>
+      <!-- EIC's own book in the current view. Kept ALONGSIDE the ADV figures
+           above, not in place of them: those are market size, these are our
+           share of it, and the pair is what makes penetration readable. Each
+           carries the "with EIC" prefix so nobody reads them as market data. -->
+      <!-- The scope badge is not decoration. Every other tile in this strip is
+           scoped to the viewport and moves as the map moves. In the national
+           view these three cannot be -- the national layer carries no advisor
+           identities -- so they show the whole de-duplicated book instead, and
+           a figure that ignores panning while its neighbours obey it has to say
+           so on its face, not in a tooltip nobody opens. -->
+      <div class="stat stat-eic">
+        <span class="stat-label">All-Cap &middot; EIC<em id="eicScope" class="stat-scope" hidden></em>
+          <span class="info-wrap">
+            <button type="button" class="info-button" aria-label="About EIC assets in view">i</button>
+            <span id="eicAssetsHelp" class="info-popover" role="tooltip"></span>
+          </span>
+        </span>
+        <strong id="eicAcv">&mdash;</strong>
+      </div>
+      <div class="stat stat-eic"><span class="stat-label">Large-Cap &middot; EIC</span><strong id="eicLcv">&mdash;</strong></div>
+      <div class="stat stat-eic"><span class="stat-label">EICIX</span><strong id="eicMf">&mdash;</strong></div>
+      <!-- National only: the SHAPE of the book. The tiles carry its size; this
+           carries what the size does not show -- how many advisors hold it, how
+           concentrated it is, and which of the two SMAs each side is missing.
+           Pre-computed and de-duplicated in build_act_assets.py, because the
+           national layer cannot derive any of it in the browser. -->
+      <p id="eicNationalNote" class="stats-status" hidden></p>
+      <p id="count" class="stats-status" role="status" aria-live="polite" hidden></p>
+      <p id="kpiNote" class="stats-status" hidden></p>
+    </div>
+
+    <!-- The dialer. A dock rather than a panel section: a rep works a list
+         while browsing the map, so it has to survive every scope change,
+         filter and details view without being scrolled away. Hidden entirely
+         until something is queued. -->
+    <aside id="dialer" hidden aria-label="Call list">
+      <div id="dialerBar"></div>
+      <div id="dialerMenu" hidden></div>
+      <div id="dialerQueue" hidden></div>
+      <div id="dialerSession" hidden aria-live="polite"></div>
+    </aside>
+
+    <aside id="firmOverview" class="firm-overview" hidden aria-labelledby="firmOverviewName">
+      <div class="firm-overview-head">
+        <button id="detailsBack" class="details-back" type="button" aria-label="Back to previous details" hidden>&larr; Back</button>
+        <div class="firm-overview-title">
+          <p id="detailsKind" class="eyebrow">Details</p>
+          <h2 id="firmOverviewName">Firm</h2>
+          <p id="firmOverviewMeta" class="count"></p>
+        </div>
+        <button id="firmOverviewClose" class="rclose" type="button" aria-label="Close details">&times;</button>
+      </div>
+      <div id="firmOverviewBody" class="firm-overview-body"></div>
+    </aside>
+  </div>
+
+  <script src="vendor/leaflet.js"></script>
+  <script src="vendor/leaflet.markercluster.js"></script>
+  <script src="vendor/leaflet-heat.js"></script>
+  <!-- Shared with the field view: one definition of what a call outcome is,
+       one queue, one do-not-call list. Loaded before app.js, which uses it. -->
+  <script src="dial.js?v=06454b114e"></script>
+  <script src="app.js?v=06454b114e"></script>
+  <script src="email.js?v=06454b114e"></script>
+</body>
+</html>

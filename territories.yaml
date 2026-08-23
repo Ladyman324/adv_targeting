@@ -1,0 +1,88 @@
+# Sales territories — who is responsible for advisors in each state.
+#
+# THIS IS A BUSINESS FACT, MAINTAINED BY HAND. It is not derived at build time
+# and must not be. Territories change when someone joins, leaves, or the map is
+# redrawn, and the moment this file disagrees with reality the app will tell a
+# rep, with total confidence, that an advisor belongs to the wrong colleague.
+# Edit it deliberately and change `as_of` when you do.
+#
+# WHERE IT CAME FROM
+# ------------------
+# Recovered on 2026-08-13 from the Act! CRM's "EIC Contact" field, which is
+# populated on 37,904 of 47,426 contacts. Every state resolved to exactly one
+# owner: 51 of 51 states and DC, all above 90% internal agreement, no state
+# ambiguous. Each territory is geographically contiguous, which is the strongest
+# evidence that this is a designed map rather than an accident of the data.
+#
+# It was validated OUT OF SAMPLE. The map was built from non-LPL records only,
+# then tested against the 6,141 LPL contacts that had been assigned by hand:
+# 6,140 matched — 100.0%. A separate 149 assigned records from the 2025 LPL load
+# matched 148 (99.3%).
+#
+# WHY IT IS AUTHORITATIVE OVER THE CRM FIELD
+# ------------------------------------------
+# The CRM's owner field is BLANK on 9,223 LPL contacts loaded in 2025 that were
+# never assigned. Those blanks are a data gap, not a finding: each salesperson is
+# responsible for the LPL advisors in their territory whether or not anyone
+# tagged the record. So this map is more accurate than the field it came from,
+# and it covers all 127,445 advisors in the map rather than only the 47,426 in
+# the CRM.
+#
+# WHAT IT IS FOR
+# --------------
+# A TERRITORY NOTICE: "this advisor is in TN and is assigned to Matt Keeter."
+# It tells a rep they are looking outside their own patch. It is NOT a statement
+# that a relationship exists — that is a different fact, carried by
+# has_clients___eic and the b* book of business, and it gets its own signal.
+
+as_of: 2026-08-13
+source: Act! CRM "EIC Contact" field, recovered 2026-08-13
+
+# Email is the join key in BOTH directions. The web app knows the signed-in
+# person's address from Entra (/.auth/me), and Act! user names are email
+# addresses, so state -> initials -> email -> Act! user id resolves with no
+# hand-maintained id table. Act! user GUIDs are deliberately NOT recorded here:
+# they are specific to one Act! database and are looked up at runtime from
+# GET /api/users, so this file stays portable and cannot go stale against them.
+#
+# All seven territory owners were confirmed ACTIVE Act! users on 2026-08-13.
+people:
+  SZ:  {name: Steve Zimmerman,   email: szimmerman@eicatlanta.com}
+  TL:  {name: Tate Lambeth,      email: tlambeth@eicatlanta.com}
+  SH:  {name: Stephen Halley,    email: shalley@eicatlanta.com}
+  DM:  {name: Dennis McKinney,   email: dmckinney@eicatlanta.com}
+  KT:  {name: Keith R. Telesca,  email: ktelesca@eicatlanta.com}
+  MK:  {name: Matt Keeter,       email: mkeeter@eicatlanta.com}
+  SB:  {name: Sam Borland,       email: sborland@eicatlanta.com}
+  # National / overlay roles. These are NOT territorial: JPP appears in 36
+  # states and RTI in 26, always as a small minority. Where the CRM names one of
+  # them on a specific contact, that value is a relationship fact and should win
+  # over the state rule.
+  JPP: {name: Paul Power,         email: ppower@eicatlanta.com}
+  RTI: {name: R. Terrence Irrgang, email: tirrgang@eicatlanta.com}
+  # In the CRM picklist with few or no current records. Andrew Bruner's Act!
+  # account is INACTIVE, so he must not be assigned a territory.
+  AW:  {name: Allen White,       email: awhite@eicatlanta.com}
+  WAB: {name: Andrew Bruner,     email: wabruner@eicatlanta.com, inactive: true}
+
+national:
+  - JPP
+  - RTI
+
+territories:
+  SZ: [IA, IL, IN, KY, MI, MN, MO, ND, NE, OH, SD, WI]   # Midwest
+  SH: [AK, CA, HI, ID, MT, NV, OR, WA, WY]               # West
+  TL: [AR, AZ, CO, KS, LA, NM, OK, TX, UT]               # South Central
+  DM: [CT, MA, ME, NH, NY, RI, VT]                       # Northeast
+  KT: [DC, DE, MD, NJ, PA, VA, WV]                       # Mid-Atlantic
+  MK: [AL, GA, MS, NC, SC, TN]                           # Southeast
+  SB: [FL, PR, VI]                                       # Florida / Caribbean
+
+# PR and VI belong to SB. That was missed on the first pass here -- the CRM has
+# almost no Caribbean records to derive from -- and was caught by audit.py
+# comparing this file against the TERRITORIES map app.js has carried by hand
+# since long before it, whose comment says plainly that "VI folds into
+# Florida/PR (Borland's Caribbean book)".
+#
+# GU and the foreign addresses in the file have no assigned owner, and the
+# notice says nothing rather than guessing.

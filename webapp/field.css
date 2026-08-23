@@ -1,0 +1,840 @@
+/* Field view — the phone experience.
+   Deliberately NOT a responsive reflow of index.html. That page is a 4,200-line
+   Leaflet map that pulls 7.6 MB of contacts before it can show anything; no
+   amount of media queries makes that usable in a car park. This is a separate,
+   small page that loads a few hundred KB of the tiles nearest the rep. */
+
+:root{
+  --bg:#0c1015; --panel:#141a21; --panel-2:#1a222b; --ink:#e7ecf1; --muted:#8a95a2;
+  --hair:#242d38; --accent:#54d4bf; --accent-ink:#08120f;
+  --warn:#e0a53a; --rank:#8079e0;
+  --tap:46px;                      /* minimum comfortable tap target */
+}
+@media (prefers-color-scheme: light){
+  :root{
+    --bg:#eef1f4; --panel:#ffffff; --panel-2:#f4f7f9; --ink:#141922;
+    --muted:#5c6773; --hair:#e2e7ec; --accent:#0c6f62; --accent-ink:#ffffff;
+    --warn:#b8811d; --rank:#6259c4;
+  }
+}
+
+*{box-sizing:border-box}
+html,body{margin:0;padding:0}
+body{
+  background:var(--bg); color:var(--ink);
+  font:15px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+  /* iPhone notch / home indicator */
+  padding:env(safe-area-inset-top) env(safe-area-inset-right)
+          env(safe-area-inset-bottom) env(safe-area-inset-left);
+  -webkit-text-size-adjust:100%;
+}
+
+#bar{
+  display:flex; align-items:center; justify-content:space-between; gap:10px;
+  padding:10px 14px; border-bottom:1px solid var(--hair); background:var(--panel);
+  position:sticky; top:0; z-index:5;
+}
+#who{font-size:12px; color:var(--muted); overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+#deskLink{font-size:12px; color:var(--accent); text-decoration:none; flex:none}
+
+#controls{display:flex; gap:8px; padding:12px 14px 6px}
+#controls button, #controls input{
+  font:inherit; height:var(--tap); border-radius:11px; border:1px solid var(--hair);
+}
+#controls button.primary{
+  flex:none; padding:0 18px; background:var(--accent); color:var(--accent-ink);
+  font-weight:700; border:0;
+}
+#controls button.primary:active{filter:brightness(.92)}
+/* "Elsewhere" is deliberately quieter than "Near me". Standing somewhere and
+   asking who is nearby is the common case; planning a trip is the occasional
+   one, and giving both equal weight would make the common one harder to hit.
+   Narrow padding keeps the search box the widest thing on the row. */
+#placeBtn{flex:none; padding:0 12px; background:var(--panel-2); color:var(--ink)}
+#workBtn{
+  flex:none; width:32px; height:32px; margin-left:auto; position:relative;
+  font-size:17px; line-height:1; color:var(--muted); background:transparent; border:0}
+/* The count rides on the flag. Absolute so it cannot change the button's
+   size and shove the header about when it appears. */
+#workCount{
+  position:absolute; top:-2px; right:-4px; min-width:16px; height:16px;
+  padding:0 4px; border-radius:9px; background:var(--accent); color:#0b0f14;
+  font-size:10.5px; font-weight:700; line-height:16px; text-align:center}
+#workCount[hidden]{display:none}
+/* Settings keeps its slot but no longer needs to push itself right --
+   the flag now carries the auto margin for the pair. */
+#settingsBtn{
+  flex:none; width:32px; height:32px; font-size:17px; line-height:1;
+  color:var(--muted); background:transparent; border:0}
+/* 16px is NOT a style choice. iOS Safari zooms the viewport on focus for any
+   input under 16px, and there is no way back out except pinching -- which is
+   why tapping the search box shunted the layout sideways and clipped the first
+   few characters of every name off the left edge. `font:inherit` above pulls
+   the body's 15px, so the size is restated here after it. */
+#controls input{
+  flex:1; min-width:0; padding:0 12px; background:var(--panel-2); color:var(--ink);
+  font-size:16px;
+}
+
+/* Chips, not checkboxes: thumb-sized, and their state reads from a metre away
+   on a phone held at arm's length in a car park. */
+#chips{display:flex; gap:8px; padding:4px 14px 10px; flex-wrap:wrap}
+.chip{
+  font:inherit; font-size:12.5px; font-weight:650; height:34px; padding:0 14px;
+  border-radius:20px; border:1px solid var(--hair);
+  background:var(--panel-2); color:var(--muted);
+}
+.chip.on{background:var(--accent); color:var(--accent-ink); border-color:transparent}
+
+#status{margin:0; padding:10px 14px; font-size:13px; color:var(--muted)}
+
+/* ---- the dialer ------------------------------------------------------- *
+ * There is no call timer and no "in progress" state anywhere in here, on
+ * purpose: the browser is never told whether a call connected, so any such
+ * display would be invented. The rep says what happened. */
+#dialProblem{margin:0; padding:10px 14px; font-size:13px; color:var(--warn)}
+#dialProblem[hidden]{display:none}
+
+#queueBar{
+  /* Wraps rather than overflowing. Giving the list name a floor made the row
+     wider than a phone once the History button carried a word, and the far end
+     -- Continue, and the list menu -- simply left the screen. Two short rows
+     beat one row you cannot reach the end of. */
+  display:flex; flex-direction:column; gap:8px;
+  padding:10px 14px; max-width:100%; box-sizing:border-box; overflow:hidden;
+  border-bottom:1px solid var(--hair); background:var(--panel-2);
+}
+.q-row{display:flex; align-items:center; gap:10px; min-width:0}
+/* The list name owns the top row; the menu closes it. */
+.q-row-top #qList{flex:1 1 auto}
+.q-row-top #qMenu{margin-left:auto}
+/* Actions below, primary last -- the thumb's destination. */
+.q-row-actions{flex-wrap:wrap}
+.q-row-actions .primary{margin-left:auto}
+#queueBar[hidden]{display:none}
+.qn{flex:0 1 auto; min-width:0; font-size:13px; font-weight:650;
+    overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+#queueBar button{font:inherit; font-size:13px; font-weight:650; height:38px;
+  padding:0 14px; border-radius:10px; border:0; flex:none}
+#queueBar button.primary{background:var(--accent); color:var(--accent-ink)}
+#queueBar button.primary:disabled{opacity:.45}
+.ghost-btn{background:transparent; color:var(--muted);
+  box-shadow:inset 0 0 0 1px var(--hair)}
+
+/* The session card is sticky: it is the thing the rep is working, and it
+   should not scroll away behind the list underneath it. */
+#session{
+  position:sticky; top:0; z-index:4;
+  padding:12px 14px 14px; background:var(--panel);
+  border-bottom:1px solid var(--hair); box-shadow:0 6px 18px rgba(0,0,0,.25);
+}
+#session[hidden]{display:none}
+.sess-top{display:flex; align-items:center; justify-content:space-between; gap:10px}
+.sess-pos{font-size:11.5px; font-weight:800; letter-spacing:.06em;
+  text-transform:uppercase; color:var(--muted)}
+.sess-top button{font:inherit; font-size:12.5px; font-weight:650; height:32px;
+  padding:0 12px; border-radius:9px; border:0}
+.sess-name{margin:6px 0 1px; font-size:20px; line-height:1.2;
+  overflow-wrap:anywhere}
+.sess-sub{font-size:13px; color:var(--muted); margin-bottom:10px}
+.sess-acts{display:flex; gap:8px; flex-wrap:wrap; margin-bottom:10px}
+.sess-acts a, .sess-acts button{
+  font:inherit; font-weight:650; font-size:14px; text-decoration:none;
+  height:var(--tap); padding:0 16px; border-radius:12px; border:0;
+  display:inline-flex; align-items:center; gap:6px;
+  background:var(--accent); color:var(--accent-ink);
+}
+.sess-acts .ghost{background:transparent; color:var(--accent);
+  box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--accent) 55%,transparent)}
+.sess-hint{margin:0 0 8px; font-size:12px; color:var(--muted)}
+
+/* Closed, this is one quiet line; open, it is a real box. Deliberately plainer
+   than the outcome grid below it -- the note is optional and the outcome is
+   not, and nothing here should compete with a thumb heading for a button. */
+.sess-note{margin:0 0 10px}
+.sess-note > summary{
+  font-size:12px; color:var(--muted); cursor:pointer;
+  padding:6px 0; list-style:none; user-select:none}
+.sess-note > summary::-webkit-details-marker{display:none}
+.sess-note > summary::before{content:"+ "; opacity:.7}
+.sess-note[open] > summary::before{content:"\2212 "}
+.sess-note textarea{
+  width:100%; box-sizing:border-box; margin-top:4px; padding:8px;
+  font:inherit; font-size:16px;          /* below 16px, iOS zooms the page in */
+  color:var(--ink); background:var(--panel-2); border:1px solid var(--hair);
+  border-radius:8px; resize:vertical}
+
+/* THE PLACEHOLDER IS NOT THE INPUT. The 16px above is a hard iOS requirement --
+   anything smaller zooms the viewport on focus -- but it applied to the
+   placeholder too, so an empty box shouted a hint at 16px on a card whose other
+   hints are 12px. It read as the loudest thing on screen and it is the least
+   important.
+   Only the resting state is restyled; typed text stays 16px, and the box height
+   is fixed by `rows` so nothing shifts when the first character lands. */
+.sess-note textarea::placeholder,
+.log-note::placeholder{
+  font-size:13px; color:var(--muted); opacity:1}
+.sess-out{margin-top:0}
+.sess-foot{display:flex; align-items:center; justify-content:space-between;
+  gap:10px; margin-top:12px; flex-wrap:wrap}
+.sess-foot button{font:inherit; font-size:12.5px; font-weight:650; height:34px;
+  padding:0 12px; border-radius:9px; border:0}
+.sess-next{font-size:12px; color:var(--muted); min-width:0;
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+/* "Do not call" is firm-wide and there is no undo in the UI, so it does not
+   look like the other four. */
+.outcome button.grave{color:var(--warn);
+  box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--warn) 45%,transparent);
+  background:transparent; border-color:transparent}
+.outcome button:disabled{opacity:.5}
+.sheet-hist{margin:12px 0 0; font-size:12px; color:var(--muted)}
+.sheet-hist:empty{display:none}
+
+#list{list-style:none; margin:0; padding:0 0 40px}
+#list li{
+  padding:12px 14px; border-bottom:1px solid var(--hair);
+  display:flex; gap:12px; align-items:flex-start;
+}
+.who{flex:1; min-width:0}
+/* Name and owner badge share a line. The NAME may truncate; the badge may not
+   -- flex:none is doing the real work here. */
+/* WRAPS rather than truncates. Badges are flex:none and a long name used to
+   give way to them on a single line -- correct for protecting the owner
+   initials, wrong in that "Christopher" became "Christo…" on exactly the
+   records carrying the most badges. Wrapping keeps both: the name takes as
+   many lines as it needs (capped at two), and badges fall to the next line
+   only when the name genuinely fills the row. */
+.nm-line{display:flex; align-items:baseline; gap:7px; min-width:0; flex-wrap:wrap}
+.nm{font-weight:650; font-size:15px; min-width:0; flex:1 1 auto;
+    white-space:normal; overflow-wrap:anywhere;
+    display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical;
+    overflow:hidden}
+.sub{font-size:12.5px; color:var(--muted); margin-top:2px;
+     overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+.dist{font-size:12px; color:var(--muted); flex:none; padding-top:2px}
+/* An owned relationship is the one thing that should stop a rep dialling, so
+   it is a badge on the row rather than a detail inside the card. */
+/* Badges never shrink. The name gives way instead -- that is the whole point,
+   since the owner initials are the signal most worth not losing. */
+.badge{flex:none; font-size:10.5px; font-weight:800; letter-spacing:.04em;
+  padding:2px 7px; border-radius:20px; white-space:nowrap}
+.badge.owned{color:var(--warn);
+  border:1px solid color-mix(in srgb,var(--warn) 45%,transparent);
+  background:color-mix(in srgb,var(--warn) 14%,transparent)}
+.badge.money{color:var(--accent);
+  border:1px solid color-mix(in srgb,var(--accent) 45%,transparent);
+  background:color-mix(in srgb,var(--accent) 13%,transparent)}
+.badge.rank{color:var(--rank); padding:2px 5px; font-size:12px;
+  border:1px solid color-mix(in srgb,var(--rank) 45%,transparent);
+  background:color-mix(in srgb,var(--rank) 14%,transparent)}
+
+.acts{display:flex; gap:8px; flex:none}
+.acts a{
+  display:flex; align-items:center; justify-content:center;
+  width:var(--tap); height:var(--tap); border-radius:50%;
+  text-decoration:none; font-size:18px;
+  background:var(--accent); color:var(--accent-ink);
+}
+/* Anything that does not reach the person directly is outlined, not filled --
+   same rule as the desktop panel, so "Direct" stays the only solid call. */
+.acts a.office{background:transparent; color:var(--accent);
+  box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--accent) 55%,transparent)}
+.acts a.mail{background:transparent; color:var(--muted);
+  box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--muted) 40%,transparent)}
+
+#sheet{
+  position:fixed; inset:auto 0 0 0; z-index:20;
+  background:var(--panel); border-top:1px solid var(--hair);
+  border-radius:16px 16px 0 0; box-shadow:0 -8px 30px rgba(0,0,0,.4);
+  padding:16px 16px calc(16px + env(safe-area-inset-bottom));
+  max-height:80vh; overflow-y:auto;
+}
+#sheet h2{margin:0 0 2px; font-size:18px}
+#sheet .sub{white-space:normal}
+.sheet-row{margin:10px 0 0; font-size:13.5px}
+/* Tappable on a phone, where copying an address by hand is genuinely painful.
+   Underlined so it reads as a link at arm's length. */
+.sheet-mailto{color:inherit;text-decoration:underline;text-underline-offset:2px}
+.sheet-lab{display:inline-block; min-width:74px; color:var(--muted); font-size:11.5px;
+  text-transform:uppercase; letter-spacing:.04em}
+/* "With EIC  $5.9M  (ACV $5.9M · LCV — · Fund —)" — the total leads because it
+   is read first, the split follows because it is acted on. The split wraps to
+   its own line on a narrow phone rather than truncating, since a clipped
+   "LCV —" would lose exactly the zero that makes it worth showing. */
+.eic-split{display:inline-block; margin-left:6px; color:var(--muted); font-size:12px;
+  white-space:normal}
+.eic-note{display:block; margin-left:74px; margin-top:2px; font-size:11px;
+  color:var(--muted); opacity:.85}
+.warn-inline{color:var(--warn); cursor:help}
+
+.sheet-acts{display:flex; gap:10px; margin:16px 0 4px; flex-wrap:wrap}
+.sheet-acts a, .sheet-acts button{
+  font:inherit; font-weight:650; font-size:14px; text-decoration:none;
+  height:var(--tap); padding:0 18px; border-radius:12px; border:0;
+  display:inline-flex; align-items:center; gap:7px;
+  background:var(--accent); color:var(--accent-ink);
+}
+.sheet-acts .ghost{background:transparent; color:var(--accent);
+  box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--accent) 55%,transparent)}
+#sheetClose{position:absolute; right:14px; top:12px; background:none; border:0;
+  color:var(--muted); font-size:22px; line-height:1; padding:4px 8px}
+/* A suppressed number. It still READS -- a rep who gets a call back needs to
+   recognise the name -- but it is a span, not a link, so nothing dials it, and
+   the auto-dial timer finds no anchor to click. */
+.blocked{
+  display:inline-flex; align-items:center; justify-content:center; gap:6px;
+  opacity:.6; cursor:default; text-decoration:line-through;
+  text-decoration-color:var(--danger, #d9534f);
+}
+.warn-box{
+  margin:10px 0 0; padding:10px 12px; border-radius:10px; font-size:13px;
+  border:1px solid color-mix(in srgb,var(--warn) 45%,transparent);
+  background:color-mix(in srgb,var(--warn) 13%,transparent);
+}
+/* A GRID, not a wrapping row.
+   Equal cells put each outcome in the same place every time, which is what a
+   thumb learns and what lets a rep log a call without studying the card. The
+   flex row sized every button to its label, so positions shifted with the
+   text -- and it left "Do not call" alone on the final line, giving the one
+   irreversible action the most isolated, easiest-to-hit target on screen. */
+.outcome{display:grid; grid-template-columns:repeat(3, 1fr); gap:8px; margin-top:14px}
+/* Labels WRAP rather than ellipse. At a third of a 375px screen "Wrong number"
+   did not fit on one line and became "Wrong numb…" -- a clipped label on a
+   button whose entire job is being read at a glance. Two short lines are
+   legible; a truncated word is not. */
+.outcome button{
+  font:inherit; font-size:13px; min-height:var(--tap); padding:4px 6px;
+  border-radius:10px; line-height:1.15;
+  background:var(--panel-2); color:var(--ink); border:1px solid var(--hair);
+  min-width:0; white-space:normal; overflow-wrap:break-word;
+  display:flex; align-items:center; justify-content:center; text-align:center;
+}
+.outcome button.span2{grid-column:span 2}
+.outcome button.on{background:var(--accent); color:var(--accent-ink); border-color:transparent}
+
+/* Show more — a full-width target rather than a link, because it is pressed
+   with a thumb at the end of a scroll. */
+#more{
+  display:block; width:calc(100% - 28px); margin:14px auto 40px;
+  font:inherit; font-size:14px; font-weight:650; height:var(--tap);
+  border-radius:12px; border:1px solid var(--hair);
+  background:var(--panel-2); color:var(--accent);
+}
+#more[hidden]{display:none}
+
+/* Who else is in this building — a disclosure, using the same +/- idiom the
+   desktop panel uses for its teammate list. */
+.mates{margin:14px 0 0}
+.mates>summary{cursor:pointer; color:var(--accent); font-weight:650; font-size:13px;
+  list-style:none}
+.mates>summary::-webkit-details-marker{display:none}
+.mates>summary::after{content:" +"; color:var(--muted)}
+.mates[open]>summary::after{content:" 2"; color:var(--muted)}
+.mates ul{margin:8px 0 0; padding:0 0 0 10px; list-style:none;
+  border-left:1px solid var(--hair)}
+.mates li{display:flex; align-items:baseline; gap:7px; flex-wrap:wrap;
+  padding:5px 0; font-size:13px}
+.mate{font:inherit; font-size:13px; font-weight:650; color:var(--accent);
+  background:none; border:0; padding:0; text-align:left}
+
+/* A teammate we can name but cannot jump to: they work out of a city whose
+   tile is not loaded. Deliberately NOT accent-coloured -- it must not look
+   tappable when nothing happens on tap. */
+.mate-far{font-size:13px; font-weight:650; color:var(--ink)}
+.mate-sub{color:var(--muted); font-size:11.5px; min-width:0;
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+
+/* Search wider — sits under Show more, quieter than it. */
+#wider{
+  display:block; width:calc(100% - 28px); margin:0 auto 40px;
+  font:inherit; font-size:13.5px; font-weight:650; height:var(--tap);
+  border-radius:12px; border:1px dashed var(--hair);
+  background:transparent; color:var(--muted);
+}
+#wider[hidden]{display:none}
+#more{margin-bottom:10px}
+
+/* Offered at the moment a firm search comes back thin, rather than as standing
+   advice nobody reads. Accent-outlined because it IS the fix, not a footnote. */
+#useLoc{
+  display:block; width:calc(100% - 28px); margin:12px auto 40px;
+  font:inherit; font-size:13.5px; font-weight:650; height:var(--tap);
+  border-radius:12px; border:0; background:transparent; color:var(--accent);
+  box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--accent) 55%,transparent);
+}
+#useLoc[hidden]{display:none}
+
+/* Auto-dial. The announce is the point rather than a flourish: spoken aloud, a
+   rep between appointments knows who is being called without looking at the
+   screen, which is the only version of this that is defensible on the road. */
+.sess-auto{display:flex; align-items:center; gap:8px; margin-top:12px;
+  padding-top:10px; border-top:1px solid var(--hair);
+  font-size:13px; color:var(--muted)}
+.sess-auto input{width:20px; height:20px; margin:0; flex:none}
+.sess-count{
+  margin:10px 0 0; padding:10px 12px; border-radius:10px; font-size:13.5px;
+  display:flex; align-items:center; gap:10px; flex-wrap:wrap;
+  color:var(--accent);
+  border:1px solid color-mix(in srgb,var(--accent) 45%,transparent);
+  background:color-mix(in srgb,var(--accent) 12%,transparent);
+}
+.sess-count button{margin-left:auto; height:34px; padding:0 12px;
+  border-radius:9px; border:0; font:inherit; font-size:12.5px; font-weight:650}
+
+/* ---- swipe right to queue ------------------------------------------------
+ * RIGHT, never left. Left-swipe on a list row means "delete" in every other
+ * app on this phone; borrowing it for "add" fights muscle memory. The ＋ button
+ * stays, because a swipe nobody discovers is not a feature. */
+#list li{
+  position:relative;
+  /* Only the settle animates. Transform during the drag must track the finger
+     exactly, so the transition is applied by class rather than always. */
+  background:var(--bg);
+  touch-action:pan-y;               /* let vertical scroll through, claim the rest */
+}
+#list li:not(.swiping){transition:transform .18s ease-out}
+/* The affordance revealed underneath, sitting in the track the row vacates. */
+#list li::before{
+  content:"＋ Call list";
+  position:absolute; left:0; top:0; bottom:0; width:150px;
+  display:flex; align-items:center; padding-left:14px;
+  font-size:12px; font-weight:700; letter-spacing:.02em;
+  color:var(--accent-ink); background:var(--accent);
+  opacity:0; transition:opacity .12s linear;
+  z-index:-1;
+}
+#list li.swiping::before{opacity:1}
+#list li[data-swipe-armed="1"]::before{content:"＋ Release to add"}
+.swipe-flash{
+  position:absolute; right:12px; top:50%; transform:translateY(-50%);
+  font-size:11px; font-weight:700; padding:3px 9px; border-radius:20px;
+  background:var(--accent); color:var(--accent-ink);
+  animation:swipeFade 1.1s ease-out forwards; pointer-events:none;
+}
+@keyframes swipeFade{
+  0%{opacity:0; transform:translateY(-50%) scale(.9)}
+  15%{opacity:1; transform:translateY(-50%) scale(1)}
+  70%{opacity:1}
+  100%{opacity:0}
+}
+/* Already queued, visible without opening the card. */
+.badge.queued{color:var(--accent);
+  border:1px solid color-mix(in srgb,var(--accent) 45%,transparent);
+  background:color-mix(in srgb,var(--accent) 13%,transparent)}
+
+/* Outcome buttons match the app's tap target. They were 30px against 46px
+   everywhere else, which is the wrong size for a thumb in a car park. */
+/* Padding only. A fixed `height` here would override the grid's min-height and
+   clip the second line of a wrapped label. */
+.sess-out button{font-size:13.5px; padding:4px 8px}
+
+/* A queued person we cannot dial. Silence here was the bug: the Call button
+   simply was not rendered, so the card looked like an app fault rather than a
+   gap in the data. */
+.sess-nonum{
+  margin:0 0 10px; padding:9px 11px; border-radius:10px; font-size:12.5px;
+  color:var(--warn);
+  border:1px solid color-mix(in srgb,var(--warn) 40%,transparent);
+  background:color-mix(in srgb,var(--warn) 10%,transparent);
+}
+
+/* The list picker. A rep working "Georgia ranked" monthly and "New prospects"
+   weekly has two jobs, not one queue -- so the name is always on screen and
+   switching is one tap rather than a settings page. */
+#qList{
+  font:inherit; font-size:12.5px; font-weight:650; height:38px;
+  /* Was capped at 44%, which truncated "EIC (3)" to "EIC (" on a phone -- the
+     one thing on this bar the rep must be able to read. It now takes the space
+     the counter and buttons do not need, and they shrink first. */
+  min-width:120px; flex:1 1 auto; max-width:100%; text-overflow:ellipsis;
+  padding:0 6px; border-radius:10px; border:1px solid var(--hair);
+  background:var(--panel); color:var(--ink);
+}
+#queueBar .qn{font-size:12.5px; font-weight:650; color:var(--muted); flex:0 1 auto;
+  min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+#qMenu{flex:none; width:38px; padding:0; font-size:16px; line-height:1}
+
+/* Back, and what was already recorded. Secondary to the outcome grid, which is
+   what a thumb is aiming at. */
+.sess-top{gap:8px}
+#qBack{flex:none}
+.sess-prior{
+  margin:8px 0 0; padding:8px 10px; border-radius:9px; font-size:12px;
+  color:var(--muted); background:var(--panel-2);
+  box-shadow:inset 0 0 0 1px var(--hair);
+}
+
+/* Collapsed while searching. The card is sticky and ate most of the screen,
+   so every result sat below the fold — the session did not need pausing, it
+   needed to get out of the way. */
+#session.collapsed{padding:0}
+.sess-mini{
+  display:flex; align-items:center; gap:10px; width:100%;
+  padding:10px 14px; border:0; background:var(--panel-2); color:var(--ink);
+  font:inherit; font-size:13px; text-align:left; min-height:var(--tap);
+}
+.sess-mini-pos{font-size:10.5px; font-weight:800; letter-spacing:.05em;
+  text-transform:uppercase; color:var(--muted); flex:none}
+.sess-mini-name{font-weight:650; flex:1; min-width:0;
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+.sess-mini-hint{font-size:11px; color:var(--accent); flex:none}
+
+/* List options. A real menu — the previous version asked the rep to TYPE the
+   word "rename" into a prompt, which was unusable even where it worked. */
+#listMenu{
+  border-bottom:1px solid var(--hair); background:var(--panel);
+  padding:6px 0 8px;
+}
+#listMenu[hidden]{display:none}
+.lm-head{padding:6px 14px; font-size:11px; font-weight:800; letter-spacing:.05em;
+  text-transform:uppercase; color:var(--muted)}
+#listMenu button{
+  display:block; width:100%; text-align:left; font:inherit; font-size:14px;
+  min-height:var(--tap); padding:0 14px; border:0; background:transparent;
+  color:var(--ink);
+}
+#listMenu button:disabled{opacity:.4}
+#listMenu button.grave{color:var(--warn)}
+.lm-note{margin:6px 14px 0; font-size:11.5px; color:var(--muted)}
+
+/* ---- every saved list at once ----
+   A full sheet rather than a menu: this is a screen a rep reads, not a set of
+   verbs applied to something already chosen. Same bottom-sheet geometry as
+   #sheet so it arrives from the same place and closes the same way. */
+#lists{
+  position:fixed; inset:auto 0 0 0; z-index:22;
+  background:var(--panel); border-top:1px solid var(--hair);
+  border-radius:16px 16px 0 0; box-shadow:0 -8px 30px rgba(0,0,0,.4);
+  padding:16px 16px calc(16px + env(safe-area-inset-bottom));
+  max-height:82vh; overflow-y:auto}
+#lists[hidden]{display:none}
+#lists h2{margin:0 0 10px; font-size:18px}
+#listsClose{
+  position:absolute; top:10px; right:12px; width:34px; height:34px;
+  font-size:22px; line-height:1; color:var(--muted);
+  background:transparent; border:0}
+/* The sheet scrolls, but a long membership list pushed the create/back
+   controls below the fold. Give the list its own scroll region so the actions
+   stay reachable. */
+.lists-ul{list-style:none; margin:0; padding:0; max-height:56vh;
+  overflow-y:auto; -webkit-overflow-scrolling:touch}
+.lists-row{
+  padding:10px 0; border-top:1px solid var(--hair)}
+.lists-row:first-child{border-top:0}
+/* The open list is marked with a rule down its edge rather than a filled
+   background. A rep scanning four rows needs to know which one they are
+   standing in, and a highlighted row would compete with the Call buttons. */
+.lists-row.on{border-left:3px solid var(--accent); padding-left:9px}
+.lists-main{display:block}
+.lists-main b{font-size:15px}
+.lists-main small{display:block; margin-top:2px; font-size:11.5px; color:var(--muted)}
+/* Four actions on one row at 360px. Call is widest because it is the one that
+   gets pressed; the destructive one is last, farthest from the thumb's rest. */
+.lists-acts{display:flex; gap:6px; margin-top:8px}
+.lists-acts button{
+  flex:1 1 auto; min-height:var(--tap); padding:0 6px;
+  font:inherit; font-size:12.5px; color:var(--ink);
+  background:var(--panel-2); border:1px solid var(--hair); border-radius:9px}
+.lists-acts button.primary{
+  flex:1.4 1 auto; background:var(--accent); color:var(--accent-ink);
+  border-color:transparent; font-weight:650}
+.lists-acts button.grave{color:var(--warn)}
+.lists-acts button:disabled{opacity:.4}
+.lists-none{color:var(--muted); font-size:13px}
+.lists-new{display:flex; gap:8px; margin-top:14px}
+/* 16px for the same reason as every other text input here: below it, iOS
+   zooms the viewport the moment the rep taps in. */
+.lists-new input{
+  flex:1 1 auto; min-width:0; height:var(--tap); padding:0 10px;
+  font:inherit; font-size:16px; color:var(--ink);
+  background:var(--panel-2); border:1px solid var(--hair); border-radius:9px}
+.lists-new button{
+  flex:0 0 auto; min-height:var(--tap); padding:0 14px; font:inherit;
+  font-size:13px; color:var(--ink); background:var(--panel-2);
+  border:1px solid var(--hair); border-radius:9px}
+
+/* ---- where "here" is ----
+   Named, because "12 within 25 miles" is ambiguous the moment the centre can
+   be somewhere other than the rep's own position. */
+#whereNow{margin:0 12px 8px; font-size:12px; color:var(--muted)}
+#whereNow[hidden]{display:none}
+.linkish{font:inherit; font-size:inherit; color:var(--accent); background:none;
+  border:0; padding:0; text-decoration:underline}
+
+#places, #settings, #work{
+  position:fixed; inset:auto 0 0 0; z-index:24;
+  background:var(--panel); border-top:1px solid var(--hair);
+  border-radius:16px 16px 0 0; box-shadow:0 -8px 30px rgba(0,0,0,.4);
+  padding:16px 16px calc(16px + env(safe-area-inset-bottom));
+  max-height:86vh; overflow-y:auto}
+#places[hidden], #settings[hidden], #work[hidden]{display:none}
+#places h2, #settings h2, #work h2{margin:0 0 10px; font-size:18px}
+#placesClose, #settingsClose, #workClose{
+  position:absolute; top:10px; right:12px; width:34px; height:34px;
+  font-size:22px; line-height:1; color:var(--muted); background:transparent; border:0}
+/* 16px, or iOS zooms the viewport the moment the rep taps in. */
+#placeQ{
+  width:100%; box-sizing:border-box; height:var(--tap); padding:0 10px;
+  margin-bottom:10px; font:inherit; font-size:16px; color:var(--ink);
+  background:var(--panel-2); border:1px solid var(--hair); border-radius:9px}
+.places-ul{list-style:none; margin:0; padding:0}
+.places-ul button{
+  display:flex; justify-content:space-between; align-items:center; gap:10px;
+  width:100%; min-height:var(--tap); padding:0 4px; text-align:left;
+  font:inherit; color:var(--ink); background:none; border:0;
+  border-bottom:1px solid var(--hair)}
+.place-name{font-size:15px}
+/* The advisor count is why one Springfield is the right Springfield. */
+.place-n{flex:none; font-size:11.5px; color:var(--muted)}
+.place-default{
+  width:100%; min-height:var(--tap); margin-top:14px; font:inherit; font-size:13px;
+  color:var(--ink); background:var(--panel-2); border:1px solid var(--hair);
+  border-radius:9px}
+
+/* ---- preferences ---- */
+.set-note{margin:0 0 14px; font-size:12px; color:var(--muted)}
+.set-row{display:flex; align-items:center; justify-content:space-between; gap:12px;
+  padding:12px 0; border-top:1px solid var(--hair); font-size:14px}
+.set-row:first-of-type{border-top:0}
+.set-row.set-block{display:block}
+.set-row select{
+  flex:0 1 auto; max-width:58%; height:var(--tap); padding:0 8px; font:inherit;
+  font-size:14px; color:var(--ink); background:var(--panel-2);
+  border:1px solid var(--hair); border-radius:9px}
+.set-sub{margin:4px 0 0; font-size:12px; color:var(--muted)}
+/* The signature-too-long warning. Amber rather than red: the draft still
+   works in most clients, so this is a caution, not a failure. */
+.set-sub.bad{color:var(--warn)}
+#setSig{
+  width:100%; box-sizing:border-box; margin-top:8px; padding:8px;
+  font:inherit; font-size:16px; color:var(--ink);
+  background:var(--panel-2); border:1px solid var(--hair); border-radius:8px;
+  resize:vertical}
+.set-check{justify-content:flex-start}
+.set-check input{width:22px; height:22px; flex:none}
+.set-saved{margin:14px 0 0; font-size:12px; color:var(--muted); min-height:16px}
+.set-saved.bad{color:var(--warn)}
+
+/* ---- the full history, ours and the CRM's ----
+   One list, not two. A rep asking "has anyone spoken to them" does not want
+   the answer split by which system happens to hold it — they want it in date
+   order. The source shows as a rule down the left edge rather than a badge on
+   every row, which would be four badges of noise per screen. */
+.hist-full{margin:12px 0 0}
+.hist-full > summary{
+  font-size:12px; font-weight:650; color:var(--muted); cursor:pointer;
+  padding:6px 0; list-style:none; user-select:none}
+.hist-full > summary::-webkit-details-marker{display:none}
+.hist-full > summary::before{content:"+ "; opacity:.7}
+.hist-full[open] > summary::before{content:"\2212 "}
+.hist-list{list-style:none; margin:6px 0 0; padding:0}
+.hist-list li{
+  padding:8px 0 8px 10px; border-top:1px solid var(--hair);
+  border-left:3px solid transparent; font-size:13px}
+.hist-list li:first-child{border-top:0}
+.hist-list li.from-crm{border-left-color:var(--accent)}
+.hist-list li.from-app{border-left-color:color-mix(in srgb,var(--muted) 45%,transparent)}
+.hist-when{color:var(--muted); font-size:11.5px; margin-right:8px}
+.hist-what{font-weight:650}
+.hist-who{display:block; margin-top:1px; font-size:11.5px; color:var(--muted)}
+/* `pre-line` keeps the paragraph breaks the cleaner recovered from the CRM's
+   markup and still wraps long lines. Without it HTML collapses every newline
+   to a space, and three separate thoughts run together into one sentence --
+   which is the same loss as not stripping the tags properly. */
+.hist-text{display:block; margin-top:3px; color:var(--muted); font-size:12.5px;
+  white-space:pre-line}
+/* Never silent about a missing half: "nobody has contacted them" is a reason
+   to cold-call and "we could not reach Act!" is not, and on screen the two
+   look identical. */
+.hist-notice{margin:6px 0; font-size:12px; color:var(--warn)}
+.hist-foot{margin:8px 0 0; font-size:11.5px; color:var(--muted)}
+
+/* WHY THE CALL WAS MADE. One line, always — it must not wrap to two on a
+   narrow phone, because a second row of chips would push the outcome grid
+   below the fold and the outcome is the thing being logged.
+   `overflow-x:auto` rather than shrinking the text: four chips fit at 360px,
+   and if a label ever gets longer the row scrolls instead of the type going
+   unreadable. `flex:0 0 auto` stops flexbox squeezing them to their letters. */
+.purpose{
+  display:flex; gap:6px; margin:0 0 8px;
+  overflow-x:auto; -webkit-overflow-scrolling:touch; scrollbar-width:none}
+.purpose::-webkit-scrollbar{display:none}
+.purpose button{
+  flex:0 0 auto; padding:0 11px; height:32px;
+  font:inherit; font-size:12.5px; white-space:nowrap;
+  color:var(--muted); background:var(--panel-2);
+  border:1px solid var(--hair); border-radius:16px}
+.purpose button.on{
+  background:var(--accent); color:var(--accent-ink); border-color:transparent;
+  font-weight:650}
+
+/* The acknowledgement that the tap landed. Sits OUTSIDE the collapsing block,
+   so it is still there once the block has closed. */
+.log-out-note{margin:8px 0 0; font-size:12px; color:var(--muted)}
+.log-out-note:empty{display:none}
+.log-out-note.bad{color:var(--warn)}
+
+/* Ad-hoc outcome logging from the detail sheet. Collapsed by default now --
+   it used to be permanently expanded, which put eight buttons between the
+   phone number and everything below it on every single card. */
+.log-out{margin:12px 0 0}
+.log-out > summary{
+  font-size:12px; font-weight:650; color:var(--muted); cursor:pointer;
+  padding:6px 0; list-style:none; user-select:none}
+.log-out > summary::-webkit-details-marker{display:none}
+.log-out > summary::before{content:"+ "; opacity:.7}
+.log-out[open] > summary::before{content:"\2212 "}
+/* 16px, or iOS zooms the page when the rep taps into it — the same reason the
+   search box and the session note are 16px. */
+.log-note{
+  width:100%; box-sizing:border-box; margin:6px 0 2px; padding:8px;
+  font:inherit; font-size:16px; color:var(--ink);
+  background:var(--panel-2); border:1px solid var(--hair); border-radius:8px;
+  resize:vertical}
+
+/* Email actions in the calling bar. Matches the height and radius of its
+   neighbours so they read as controls, but outlined rather than filled --
+   "Continue calling" is the primary action and should be the only accent fill. */
+#queueBar .email-toolbar-btn{
+  background:transparent; color:var(--muted);
+  box-shadow:inset 0 0 0 1px var(--hair);
+}
+#queueBar .email-toolbar-btn:hover{color:var(--accent); box-shadow:inset 0 0 0 1px var(--accent)}
+
+/* Log out, at the foot of Settings. A real bordered button at full tap height,
+   not an underlined link -- it is the one destructive-feeling control on the
+   panel and should look like something you press deliberately. Sized and
+   shaped like the panel's other controls so it does not read as an alert. */
+.set-signout{display:block; width:100%; margin:8px 0 2px; height:var(--tap);
+  font:inherit; font-size:14px; color:var(--ink); background:var(--panel-2);
+  border:1px solid var(--hair); border-radius:11px; cursor:pointer}
+.set-signout:active{background:var(--hair)}
+
+/* Settings actions, matching .set-signout so the panel reads as one set of
+   controls. Side by side and quieter than sign-out, which keeps the full-width
+   treatment because it is the deliberate one. Full tap height regardless --
+   these are thumb targets. */
+.set-actions{display:flex;flex-wrap:wrap;gap:8px;margin:8px 0 2px}
+.set-btn{flex:1 1 auto;min-width:0;height:var(--tap);padding:0 12px;
+  font:inherit;font-size:13.5px;color:var(--ink);background:var(--panel-2);
+  border:1px solid var(--hair);border-radius:11px;cursor:pointer}
+.set-btn:active{background:var(--hair)}
+
+/* See style.css -- the same disagreement, on the phone. */
+.contact-clash{margin:8px 0 0; padding:8px 10px; border-radius:8px; font-size:12.5px;
+  line-height:1.5; color:var(--warn); border:1px solid var(--warn)}
+
+/* Auto-dial and its announce switch, side by side. The announce setting was
+   readable in the field view and only changeable from a desktop. */
+.sess-auto-row{display:flex; flex-wrap:wrap; gap:8px 18px; align-items:center;
+  margin-top:12px}
+.sess-auto-row .sess-auto{margin:0}
+
+/* ---- email activity ------------------------------------------------------
+   The desk's timeline, narrowed to what fits in the ten seconds before a call.
+   Collapsed by construction: nothing may come between a rep and the number.
+
+   Rows a rep cannot open -- a colleague's mailbox holds them -- carry no Read
+   button but are still SHOWN. "Somebody already emailed them Tuesday" is most
+   of the reason this is on a phone at all. */
+.mail-full{margin:10px 0 0}
+.mail-full > summary{
+  font-size:12px; font-weight:650; color:var(--muted); cursor:pointer;
+  padding:6px 0; list-style:none; user-select:none}
+.mail-full > summary::-webkit-details-marker{display:none}
+.mail-full > summary::before{content:"+ "; opacity:.7}
+.mail-full[open] > summary::before{content:"\2212 "}
+
+.mail-list{list-style:none; margin:6px 0 0; padding:0}
+.mail-row{
+  display:grid; grid-template-columns:auto 1fr auto; gap:4px 8px;
+  align-items:baseline; padding:8px 0 8px 10px;
+  border-top:1px solid var(--hair); border-left:3px solid transparent;
+  font-size:13px}
+.mail-row:first-child{border-top:0}
+/* Inbound is the signal the feature exists for, so it gets the accent and the
+   weight; our own sends are context. */
+.mail-inbound{border-left-color:var(--accent)}
+.mail-inbound .mail-what{font-weight:650}
+.mail-outbound .mail-what{color:var(--muted)}
+.mail-when{color:var(--muted); font-size:11.5px; white-space:nowrap}
+.mail-subj{grid-column:1/-1; color:var(--muted); font-size:12px;
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+.mail-warn{font-weight:400; font-style:italic; color:var(--muted); font-size:11.5px}
+/* 44px tall: this is a tap target on a phone held in one hand, not a mouse
+   target. Anything smaller is a mis-tap on a call the rep is about to make. */
+.mail-view{
+  min-height:44px; padding:0 14px; border-radius:8px; cursor:pointer;
+  border:1px solid var(--hair); background:var(--panel-2); color:inherit;
+  font:inherit; font-size:12px}
+
+.mail-msg{display:flex; flex-direction:column; max-height:82vh}
+.mail-msg h3{margin:0 0 4px; font-size:15px}
+.mail-meta{margin:0 0 8px; color:var(--muted); font-size:12px}
+/* Wrapped, not scrolled sideways: this is prose on a narrow screen, and a
+   horizontal scrollbar inside a modal on a phone is unusable. */
+.mail-body-text{
+  flex:1; min-height:0; overflow:auto; margin:0 0 10px; padding:10px 12px;
+  border-radius:8px; background:var(--panel-2);
+  box-shadow:inset 0 0 0 1px var(--hair);
+  font:13px/1.5 inherit; white-space:pre-wrap; overflow-wrap:anywhere}
+
+/* ---- needs attention (field) ---------------------------------------------
+   The desk's queue on a phone. Reasons and their order come from the server;
+   this decides layout only. No volume metric, by construction -- see
+   shared/email-engagement.js for why that matters more than it looks. */
+.work-heads{display:flex; flex-wrap:wrap; gap:6px 12px; margin:0 0 10px;
+  padding:0 0 10px; border-bottom:1px solid var(--hair); font-size:12px;
+  color:var(--muted)}
+.work-count b{font-size:15px; color:var(--ink); margin-right:3px}
+.work-list{list-style:none; margin:0; padding:0}
+.work-row{display:flex; align-items:stretch; gap:8px;
+  border-top:1px solid var(--hair); padding:4px 0}
+.work-row:first-child{border-top:0}
+/* The whole name block is the tap target, not just the text: on a phone the
+   difference between those two is a mis-tap on a call the rep meant to make. */
+.work-main{flex:1; min-width:0; text-align:left; padding:8px 0;
+  background:none; border:0; color:inherit; font:inherit; min-height:var(--tap)}
+.work-main b{display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+.work-why{display:block; margin-top:2px; font-size:11.5px; color:var(--muted)}
+/* A reply outranks everything, so it is the only one that gets the accent.
+   Colouring all five would make none of them mean anything. */
+.work-reply_new,.work-reply_followup{color:var(--accent)}
+.work-acts{display:flex; gap:6px; align-items:center; flex:none}
+.work-acts button{
+  min-height:var(--tap); padding:0 10px; border-radius:8px;
+  border:1px solid var(--hair); background:var(--panel-2); color:inherit;
+  font:inherit; font-size:12px}
+.work-acts button[disabled]{opacity:.5}
+
+/* ---- replying from the phone ---------------------------------------------
+   A short answer typed standing up: "yes, sending it over now". 16px on the
+   textarea is not a style choice -- iOS zooms the viewport on focus for
+   anything under it, and there is no way back out except pinching. */
+.mail-reply{
+  width:100%; box-sizing:border-box; margin:10px 0 8px; padding:8px 10px;
+  border-radius:9px; border:1px solid var(--hair); background:var(--panel-2);
+  color:var(--ink); font:inherit; font-size:16px; resize:vertical}
+.mail-reply[disabled]{opacity:.6}
+.mail-reply-note{margin:6px 0 0; font-size:12.5px; color:var(--muted); min-height:1em}
+
+/* ---- attaching, and the follow-up composer (field) ------------------------
+   Collapsed, because most replies carry nothing and the send button must stay
+   reachable with one thumb. 16px on the subject for the same reason as the
+   reply box: below that, iOS zooms the viewport on focus. */
+.mail-attach{margin:0 0 8px}
+.mail-attach > summary{
+  font-size:12px; font-weight:650; color:var(--muted); cursor:pointer;
+  padding:6px 0; list-style:none; user-select:none}
+.mail-attach > summary::-webkit-details-marker{display:none}
+.mail-attach > summary::before{content:"+ "; opacity:.7}
+.mail-attach[open] > summary::before{content:"\2212 "}
+.mail-doc{width:100%; box-sizing:border-box; margin:0 0 8px; padding:6px;
+  border-radius:9px; border:1px solid var(--hair);
+  background:var(--panel-2); color:var(--ink); font:inherit; font-size:14px}
+.mail-file{width:100%; font-size:13px; color:var(--muted)}
+.mail-attach-note{margin:6px 0 0; font-size:11.5px; color:var(--muted)}
+.follow-subject{
+  width:100%; box-sizing:border-box; margin:8px 0 0; padding:0 10px;
+  height:var(--tap); border-radius:9px; border:1px solid var(--hair);
+  background:var(--panel-2); color:var(--ink); font:inherit; font-size:16px}

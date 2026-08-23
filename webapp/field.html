@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#0c1015">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Advisors">
+<title>Advisors — Field</title>
+<!-- This view loads no third-party code at all, so it can say so. -->
+<meta http-equiv="Content-Security-Policy" content="
+  default-src 'self';
+  script-src 'self';
+  style-src 'self' 'unsafe-inline';
+  img-src 'self' data:;
+  connect-src 'self';
+  base-uri 'none';
+  form-action 'none';
+  object-src 'none'">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="stylesheet" href="field.css?v=86a941a674">
+<link rel="stylesheet" href="email.css?v=86a941a674">
+</head>
+<body>
+
+<header id="bar">
+  <div id="who" title="signed in"></div>
+  <!-- Carries a count when work is waiting, so a rep between meetings can see
+       there IS something without opening it. Silent when empty: a badge
+       reading zero is a badge nobody looks at twice. -->
+  <button id="workBtn" type="button" aria-label="Needs attention"
+          title="Needs attention">&#9873;<span id="workCount" hidden></span></button>
+  <button id="settingsBtn" type="button" aria-label="Settings">&#9881;</button>
+  <a id="deskLink" href="index.html" title="Open the full map">Full map</a>
+</header>
+
+<div id="controls">
+  <button id="nearBtn" class="primary">Near me</button>
+  <!-- "Near me" answers one question well and cannot answer the other one at
+       all: a rep planning Thursday in Charlotte is not standing in Charlotte.
+       Same radius search, different centre. -->
+  <button id="placeBtn" type="button">Elsewhere</button>
+  <input id="q" type="search" inputmode="search" autocomplete="off"
+         placeholder="Name or firm…" aria-label="Search by name or firm">
+</div>
+<!-- Which point the distances are measured from. Only shown once a location is
+     set, and it names the place: "12 within 25 miles" is ambiguous in exactly
+     the situation this feature creates. -->
+<p id="whereNow" hidden></p>
+
+<!-- Chips rather than checkboxes: they read as "narrow this down", they are
+     thumb-sized, and they show their state at a glance from a metre away. -->
+<div id="chips" role="group" aria-label="Filters">
+  <button class="chip" data-chip="direct" aria-pressed="false">Direct line</button>
+  <button class="chip" data-chip="crm"    aria-pressed="false"
+          title="Someone at EIC is recorded as the relationship owner in Act!">In CRM</button>
+  <button class="chip" data-chip="assets" aria-pressed="false"
+          title="This advisor has assets with EIC">Has assets</button>
+  <button class="chip" data-chip="ranked" aria-pressed="false">Ranked</button>
+</div>
+
+<!-- The call list, and the session that works through it. Both stay hidden
+     until there is something in them, so the ordinary "who is near me" path is
+     unchanged for a rep who never opens the dialer. -->
+<div id="queueBar" hidden></div>
+<div id="listMenu" hidden></div>
+<section id="session" hidden aria-live="polite"></section>
+<p id="dialProblem" hidden></p>
+
+<p id="status">Tap <b>Near me</b> to find advisors around you.</p>
+<ul id="list"></ul>
+<button id="more" hidden></button>
+<button id="wider" hidden></button>
+<!-- Shown only while a search is running against no loaded tiles — the one
+     state in which "Name or firm…" quietly means "name". -->
+<button id="useLoc" hidden>&#9788; Load advisors near me to search by firm</button>
+
+<div id="sheet" hidden>
+  <div id="sheetInner"></div>
+</div>
+
+<!-- Every saved list at once, with Call as the primary action on each row.
+     The bar's picker can switch lists and nothing else could rename, empty or
+     delete one without opening it first -- which is also how the wrong list
+     gets emptied. -->
+<div id="lists" hidden>
+  <div id="listsInner"></div>
+</div>
+
+<!-- Search a city or ZIP and work from there instead of from the GPS. -->
+<div id="places" hidden>
+  <div id="placesInner"></div>
+</div>
+
+<!-- Preferences. Stored on the account, not in this browser: a default that
+     differs between the desk and the phone is not a default. -->
+<div id="settings" hidden>
+  <div id="settingsInner"></div>
+</div>
+
+<!-- Needs attention. The same queue the desk shows, from the same endpoint --
+     who to pick up now and why, never a count of what has been sent. -->
+<div id="work" hidden>
+  <div id="workInner"></div>
+</div>
+
+<script src="dial.js?v=86a941a674"></script>
+<script src="field.js?v=86a941a674"></script>
+<script src="email.js?v=86a941a674"></script>
+<!-- The service-worker registration moved into field.js. Keeping it inline
+     would have required either 'unsafe-inline' or a hash in the CSP above,
+     and 'unsafe-inline' is not a thing to spend on eight lines. -->
+</body>
+</html>

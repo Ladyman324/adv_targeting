@@ -1,0 +1,563 @@
+.email-back{position:fixed; inset:0; z-index:3000; display:flex; align-items:center;
+  justify-content:center; padding:18px; box-sizing:border-box; background:rgba(15,20,28,.58)}
+.email-back[hidden]{display:none}
+.email-compose{width:min(1160px,98vw); height:min(880px,96vh); display:flex; flex-direction:column;
+  overflow:hidden; border-radius:14px; color:var(--ink); background:var(--panel);
+  box-shadow:0 24px 70px rgba(0,0,0,.34),inset 0 0 0 1px var(--hair)}
+.email-head{display:flex; align-items:center; justify-content:space-between; flex:0 0 auto;
+  padding:14px 17px; border-bottom:1px solid var(--hair)}
+.email-head h2,.email-editor h3{margin:0; font-size:17px}.email-head .eyebrow,.email-section-head .eyebrow,
+.email-preview>.eyebrow{margin:0 0 2px; font-size:10px; font-weight:800; letter-spacing:.07em;
+  text-transform:uppercase; color:var(--muted)}
+.email-body{min-height:0; flex:1; display:flex; flex-direction:column; overflow:auto}
+.email-loading,.email-connect,.email-setup{width:min(600px,90%); margin:auto; padding:25px; box-sizing:border-box}
+.email-connect h3{margin:0 0 7px}.email-connect p{font-size:13px; color:var(--muted)}
+.email-fine{font-size:11px!important; color:var(--muted); margin:5px 0 0}
+.email-error,.email-notice.bad,.email-checks .bad{color:var(--warn)!important}
+.email-summary{font-size:13px; margin:0 0 14px}.email-label{display:block; margin:9px 0;
+  font-size:11.5px; font-weight:700; color:var(--muted)}
+.email-label input,.email-label select,.email-label textarea{display:block; width:100%; box-sizing:border-box;
+  margin-top:4px; padding:8px 9px; font:inherit; font-size:13px; color:var(--ink); background:var(--panel-2);
+  border:1px solid var(--hair); border-radius:8px}.email-label input,.email-label select{height:36px}
+.email-label textarea{resize:vertical; line-height:1.42}.email-label input:disabled,.email-label textarea:disabled{opacity:.76}
+.email-docs{margin:14px 0; padding:10px; border:1px solid var(--hair); border-radius:9px}
+.email-docs legend{padding:0 5px; font-size:11.5px; font-weight:750}.email-docs label{display:flex; gap:7px;
+  align-items:center; padding:5px 2px; font-size:12.5px}.email-docs label span{flex:1}.email-docs small{color:var(--muted)}
+.email-docs p{font-size:12px; color:var(--muted)}.email-recipients summary{font-size:12px; cursor:pointer}
+.email-recipients ol{max-height:160px; overflow:auto; padding-left:24px}.email-recipients li{padding:3px 0;font-size:12px}
+.email-recipients li span{display:block;color:var(--muted)}.email-notice{min-height:16px;font-size:12px;color:var(--muted)}
+.email-grid{display:grid; grid-template-columns:230px minmax(0,1fr); min-height:0; flex:1}
+.email-list{min-height:0; border-right:1px solid var(--hair); background:var(--panel-2); display:flex; flex-direction:column}
+.email-list-head{padding:11px;border-bottom:1px solid var(--hair)}.email-list-head b,.email-list-head small{display:block}
+.email-list-head small{margin-top:2px;color:var(--muted);font-size:10.5px;overflow:hidden;text-overflow:ellipsis}
+.email-list ol{list-style:none;margin:0;padding:0;overflow:auto;flex:1;min-height:0}.email-list li button{width:100%;padding:9px 10px;
+  text-align:left;border:0;border-bottom:1px solid var(--hair);background:transparent;color:var(--ink);cursor:pointer}
+.email-list li button.on{background:var(--panel);box-shadow:inset 3px 0 var(--accent)}
+.email-list li span,.email-list li small,.email-list li em{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.email-list li span{font-size:12.5px;font-weight:700}.email-list li small{font-size:10.5px;color:var(--muted);margin-top:1px}
+.email-list li em{font-size:10px;font-style:normal;color:var(--muted);margin-top:3px}.email-list li .state-failed,
+.email-list li .state-invalid{color:var(--warn)}.email-list li .state-sent,.email-list li .state-draft_ready{color:var(--accent)}
+.email-editor{min-width:0;overflow:auto;padding:14px 18px 90px}.email-common,.email-individual,.email-preview{padding:0 0 14px;
+  margin:0 0 14px;border-bottom:1px solid var(--hair)}.email-section-head{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.email-small{font:inherit;font-size:11px;height:29px;padding:0 9px;border:1px solid var(--hair);border-radius:7px;
+  color:var(--accent);background:var(--panel-2);cursor:pointer}.email-override{font-size:11px;color:var(--muted)}
+.email-override button{font:inherit;border:0;background:none;color:var(--accent);text-decoration:underline;cursor:pointer}
+.email-checks p{margin:3px 0;font-size:11.5px;color:var(--muted)}.email-envelope{padding:8px 10px;background:var(--panel-2);
+  border:1px solid var(--hair);border-radius:8px 8px 0 0}.email-envelope p{margin:2px 0;font-size:11.5px;overflow-wrap:anywhere}
+.email-envelope .env-note{color:var(--muted);font-style:italic}
+.email-rendered{min-height:150px;padding:18px;background:#fff;color:#222;border:1px solid var(--hair);border-top:0;
+  border-radius:0 0 8px 8px;font-family:Arial,sans-serif;font-size:10pt;line-height:1.4}
+.email-footer{position:absolute;left:calc(50% - min(580px,49vw));bottom:max(18px,2vh);width:min(1160px,98vw);
+  box-sizing:border-box;display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 16px;
+  background:var(--panel);border-top:1px solid var(--hair);border-radius:0 0 14px 14px}
+.email-footer>p{margin:0;flex:1}.email-footer>div{display:flex;gap:7px}.email-footer .ask-btn{width:auto;margin:0}
+.email-history{padding:10px}.email-history>button{display:block;width:100%;padding:11px;text-align:left;border:0;
+  border-bottom:1px solid var(--hair);background:transparent;color:var(--ink);cursor:pointer}.email-history b,.email-history span,
+.email-history small{display:block}.email-history span,.email-history small{margin-top:2px;color:var(--muted);font-size:11px}
+.email-toolbar-btn{font:inherit;font-size:11px;height:28px;padding:0 8px;border:0;border-radius:7px;
+  background:var(--panel-2);color:var(--accent);cursor:pointer;white-space:nowrap}
+@media(max-width:760px){.email-back{padding:0}
+  /* dvh, not vh: on iOS vh is the tallest viewport, so with the browser chrome
+     showing the sheet is taller than the screen and the header slides up under
+     the status bar -- taking the title and the close button with it. The safe
+     area insets keep the header clear of the notch and the footer clear of the
+     home indicator. */
+  .email-compose{width:100vw;height:100dvh;border-radius:0}
+  .email-head{padding-top:calc(14px + env(safe-area-inset-top))}
+  .email-footer{padding-bottom:calc(10px + env(safe-area-inset-bottom))}
+  .email-grid{display:block}.email-list{max-height:none;border-right:0;border-bottom:1px solid var(--hair)}
+  .email-editor{padding:12px 12px 100px}.email-footer{left:0;bottom:0;width:100%;border-radius:0;display:block}
+  .email-footer>div{overflow-x:auto}.email-footer .ask-btn{flex:0 0 auto}.email-common .email-section-head{display:block}
+  .email-small{margin-top:5px}}
+
+/* Completion panel. A finished batch used to look like a working one -- the
+   only signal was a green label inside a scrolling list. Say what happened. */
+.email-done{padding:22px 20px 20px;max-width:520px;margin:0 auto}
+.email-done h3{margin:0 0 12px;font-size:18px}
+.email-done h3.good{color:var(--accent)}
+.email-done h3.bad{color:var(--warn)}
+.email-tally{list-style:none;margin:0 0 14px;padding:0;display:flex;flex-wrap:wrap;gap:8px}
+.email-tally li{padding:4px 10px;border:1px solid var(--hair);border-radius:999px;font-size:13px}
+.email-tally li.good{border-color:var(--accent);color:var(--accent)}
+.email-tally li.bad{border-color:var(--warn);color:var(--warn)}
+.email-next{margin:0 0 14px;font-size:13px;color:var(--muted);line-height:1.5}
+.email-done-actions{display:flex;flex-wrap:wrap;gap:8px}
+
+/* The cancellation window, counted down where the rep is already looking. */
+.email-countdown{color:var(--warn);font-size:13px}
+.email-countdown b{font-variant-numeric:tabular-nums}
+.email-countdown.gone{color:var(--muted)}
+
+/* Approved-document management. Admin only, and the server checks the role on
+   every write -- this styling only decides what an administrator sees. */
+.email-admin-link{margin:2px 0 10px}
+.email-ok{color:var(--accent);font-size:13px;margin:0 0 10px}
+.email-docs-admin{padding:18px 20px 20px;max-width:560px;margin:0 auto}
+.email-doclist{list-style:none;margin:0 0 16px;padding:0}
+.email-doclist li{display:flex;align-items:center;gap:10px;padding:8px 0;
+  border-bottom:1px solid var(--hair)}
+.email-doc-main{flex:1 1 auto;min-width:0}
+.email-doc-main small{display:block;color:var(--muted);font-size:11.5px}
+.email-doc-none{color:var(--muted);border-bottom:0}
+.email-doc-add{border:1px solid var(--hair);border-radius:10px;padding:12px;margin:0 0 14px}
+.email-doc-add legend{padding:0 6px;font-size:12px;color:var(--muted)}
+
+/* Template authoring. Same admin-only surface as the document catalog. */
+.email-tpl{padding:18px 20px 20px;max-width:760px;margin:0 auto}
+.email-tpl-meta{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:0 12px}
+.email-tpl code{font-size:11.5px;background:var(--panel-2);padding:1px 4px;border-radius:4px}
+.email-lint{margin:2px 0 12px;font-size:12.5px}
+.email-lint p{margin:0 0 4px}
+.email-lint .bad{color:var(--warn)}
+.email-lint .ok{color:var(--accent)}
+.email-tpl-prev{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:14px;margin:14px 0}
+.email-tpl-prev .email-rendered{border:1px solid var(--hair);border-radius:10px;padding:10px;font-size:13px}
+.email-prev-subject{margin:0 0 8px;padding-bottom:6px;border-bottom:1px solid var(--hair)}
+.email-img-chip{display:inline-block;padding:3px 8px;border:1px dashed var(--accent);
+  border-radius:8px;color:var(--accent);font-size:12px}
+.email-tpl-notes{margin:0 0 10px;padding:8px 10px;border-radius:8px;font-size:12.5px;
+  color:var(--ink);background:var(--panel-2);box-shadow:inset 0 0 0 1px var(--hair)}
+.email-tpl-notes[hidden]{display:none}
+
+/* Disabled controls dim everywhere else in the app; these did not, so a
+   switched-off destructive action looked perfectly tappable. */
+.ask-btn:disabled,.email-small:disabled{opacity:.4;cursor:default}
+.ask-btn:disabled:hover{color:inherit}
+
+/* Recipient navigation. Replaces a list panel that ate a third of a phone
+   screen and clipped after two names. */
+.email-tally-row{display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px;
+  padding:8px 12px;font-size:12px;border-bottom:1px solid var(--hair)}
+.email-tally-row .count{font-weight:650}
+.email-tally-row .good{color:var(--accent)}
+.email-tally-row .warnish{color:var(--muted)}
+.email-tally-row .bad{color:var(--warn);background:none;border:1px solid var(--warn);
+  border-radius:999px;padding:2px 9px;font:inherit;cursor:pointer}
+.email-pager{display:flex;align-items:center;gap:8px;padding:8px 10px;
+  border-bottom:1px solid var(--hair)}
+.email-pager button{flex:0 0 auto;width:36px;height:34px;border-radius:9px;
+  border:1px solid var(--hair);background:var(--panel);color:var(--ink);font-size:13px}
+.email-pager button:disabled{opacity:.3;cursor:default}
+.email-pager-who{flex:1;min-width:0;text-align:center}
+/* Wraps rather than ellipsing. This is the one piece of text on the screen that
+   says WHO the open message is addressed to; truncating it to "Christopher
+   Vandeg..." is exactly the case where a rep needs the rest of the name. Two
+   lines of a long name costs less than a mis-sent email. */
+.email-pager-who b{display:block;font-size:13.5px;line-height:1.25;
+  overflow-wrap:anywhere}
+.email-pager-who small{display:block;margin-top:1px;font-size:11.5px}
+.email-pager-who .good{color:var(--accent)}
+.email-pager-who .bad{color:var(--warn)}
+.email-pager-who .warnish{color:var(--muted)}
+/* The full name wraps here too -- this list is how a rep finds one person among
+   sixty, and half a name is not enough to pick from. */
+.email-list li span{white-space:normal;overflow-wrap:anywhere}
+.email-jump{padding:6px 12px 8px;font-size:12px}
+.email-jump summary{cursor:pointer;color:var(--muted)}
+/* The list runs to the bottom of the panel. It was capped at 40vh, which on a
+   desktop window left it stopping halfway down with empty space beneath -- and
+   the taller the window, the more obviously truncated it looked. */
+/* The <details> ITSELF is the scroller, and the <ol> inside it is left alone.
+ *
+ * This was a flex column with the ol as a flex:1 child, which is the obvious
+ * construction and does not work: a browser wraps a <details> element's content
+ * in an anonymous box of its own, so the ol is not a flex item of the details
+ * and never received a bounded height. Measured, with sixty recipients and the
+ * sidebar correctly capped at 807px: the ol still reported 3600px of content in
+ * a 3600px box, and clipped rather than scrolled.
+ *
+ * Putting overflow on the details sidesteps the anonymous box entirely, and the
+ * summary is made sticky so the "Jump to someone" header stays put instead of
+ * scrolling away with the names. */
+.email-list .email-jump{display:block;flex:1;min-height:0;overflow:auto}
+.email-list .email-jump summary{position:sticky;top:0;z-index:1;
+  padding:2px 0 4px;background:var(--panel-2)}
+.email-list .email-jump ol{max-height:none;overflow:visible;flex:none;margin:6px 0 0}
+/* The jump list only scrolls if something above it has a DEFINITE height.
+   .email-body is the scroller and .email-grid is flex:1 inside it -- but
+   flex-grow only distributes FREE space, and with sixty recipients there is
+   none. The grid therefore took its content height, the sidebar grew to match,
+   .email-jump ol's flex:1 resolved against an unbounded parent, and overflow
+   never triggered: the whole dialog scrolled instead. A phone has no sidebar,
+   which is why only the desktop was affected.
+
+   So on desktop the dialog body stops scrolling and hands that job to the two
+   columns, each of which then has a real height to overflow against.
+   Scoped with :has() rather than applied to .email-body outright, because the
+   same element also hosts the template manager, the document library, the
+   health dashboard and the batch history -- all of which are ordinary long
+   pages that must keep scrolling normally. A browser without :has() simply
+   ignores the rule and behaves as it does today. */
+@media(min-width:761px){
+  .email-body:has(> .email-grid){overflow:hidden}
+  /* grid-template-ROWS is the piece that was missing. Giving the grid
+     height:100% bounds the grid BOX, but its single implicit row is still
+     auto-sized, so the row grew past the box to fit sixty recipients and the
+     sidebar grew with it -- exactly the unbounded parent the ol needed not to
+     have. minmax(0,1fr) is required rather than plain 1fr: a 1fr row still
+     takes min-content as its floor, which for a long list is the whole list. */
+  .email-grid{height:100%;min-height:0;overflow:hidden;grid-template-rows:minmax(0,1fr)}
+  .email-list{min-height:0;height:100%;overflow:hidden}
+  .email-editor{min-height:0;height:100%;overflow:auto}
+}
+
+/* Saving is automatic; this says where it got to. */
+.email-savestate{font-size:11.5px}
+.email-savestate.good{color:var(--accent)}
+.email-savestate.warnish{color:var(--warn)}
+.email-sendoff{font-size:12px;color:var(--muted);padding:0 6px;white-space:nowrap}
+
+/* Remove-from-batch sits with the pager, not in the footer: it acts on the
+   person named beside it, and belongs where that name is. */
+.email-drop{flex:0 0 auto;width:32px;height:34px;border-radius:9px;font-size:15px;
+  border:1px solid var(--hair);background:var(--panel);color:var(--muted)}
+.email-drop:hover{color:var(--warn);border-color:var(--warn)}
+
+/* Swipe feedback. The transition was seamless to the point of being invisible:
+   a rep could swipe, not register that the person had changed, and type an edit
+   meant for someone else. Three signals now fire together -- the panel slides in
+   from the side the swipe came from, the recipient name flashes its accent, and
+   a brief overlay names who is now open. Redundant on purpose; the whole failure
+   mode is not noticing. */
+@keyframes email-slide-in-left{from{transform:translateX(26px);opacity:.35}to{transform:none;opacity:1}}
+@keyframes email-slide-in-right{from{transform:translateX(-26px);opacity:.35}to{transform:none;opacity:1}}
+.email-swipe-left .email-editor{animation:email-slide-in-left .18s ease-out}
+.email-swipe-right .email-editor{animation:email-slide-in-right .18s ease-out}
+@keyframes email-who-flash{0%{background:var(--accent);color:var(--accent-ink)}100%{background:transparent}}
+.email-swipe-left .email-pager-who b,.email-swipe-right .email-pager-who b{
+  border-radius:6px;animation:email-who-flash .7s ease-out}
+
+.email-swipe-toast{position:fixed;left:50%;top:50%;z-index:3100;
+  transform:translate(-50%,-50%);pointer-events:none;
+  padding:10px 16px;border-radius:999px;max-width:80%;text-align:center;
+  background:var(--panel);color:var(--ink);font-size:13.5px;font-weight:650;
+  box-shadow:0 10px 30px rgba(0,0,0,.35), inset 0 0 0 1px var(--hair);
+  animation:email-toast .95s ease-out forwards}
+.email-swipe-toast small{display:block;font-weight:400;font-size:11px;color:var(--muted)}
+@keyframes email-toast{0%{opacity:0;transform:translate(-50%,-50%) scale(.94)}
+  14%{opacity:1;transform:translate(-50%,-50%) scale(1)}
+  70%{opacity:1}100%{opacity:0}}
+
+/* Respect the system setting. Someone who has asked for less motion still gets
+   the toast and the flash -- they are the informative part -- without the slide. */
+@media (prefers-reduced-motion:reduce){
+  .email-swipe-left .email-editor,.email-swipe-right .email-editor{animation:none}
+}
+
+/* Recipients grouped by email domain. The point of the grouping is that a
+   stray firm reads as a whole row that does not belong, so the domain is the
+   loudest thing in each row and the count sits right beside it. */
+.email-domains{margin:14px 0 0;padding:12px;border:1px solid var(--hair);border-radius:10px}
+.email-domains legend{padding:0 6px;font-size:12px;color:var(--muted)}
+.email-domain-acts{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:4px 0 10px}
+.email-domain-warn{font-size:11.5px;color:var(--warn)}
+.email-domain-list{list-style:none;margin:0;padding:0;max-height:44vh;overflow:auto}
+.email-domain-list>li{border-top:1px solid var(--hair)}
+.email-domain-list>li:first-child{border-top:0}
+.email-domain-row{display:flex;align-items:center;gap:10px;padding:8px 2px}
+.email-domain-row label{display:flex;align-items:center;gap:8px;flex:1;min-width:0;cursor:pointer}
+.email-domain-row b{font-size:13px;overflow-wrap:anywhere}
+.email-domain-count{flex:0 0 auto;font-size:11.5px;color:var(--muted);font-variant-numeric:tabular-nums}
+.email-domain-count.off{color:var(--warn)}
+/* A fully-excluded domain is dimmed rather than hidden -- it still has to be
+   visible, or the rep cannot tell the difference between "I excluded these"
+   and "these were never here". */
+.email-domain-list>li.dom-none .email-domain-row b{opacity:.45;text-decoration:line-through}
+.email-domain-people{list-style:none;margin:0 0 8px;padding:0 0 0 26px}
+.email-domain-people li{padding:5px 0}
+.email-domain-people label{display:flex;align-items:baseline;gap:8px;cursor:pointer}
+.email-domain-people b{font-size:12.5px;font-weight:650}
+.email-domain-people span{font-size:11.5px;color:var(--muted);overflow-wrap:anywhere}
+.email-domain-off{margin:8px 0 0;font-size:12px;color:var(--warn)}
+
+/* The passcode step. Deliberately plain and deliberately not pre-filled --
+   the whole value of it is that it cannot be cleared by reflex. */
+.email-passcode{margin:10px 0 0;padding:12px;border:1px solid var(--warn);border-radius:10px}
+.email-passcode p{margin:0 0 8px;font-size:12.5px}
+.email-passcode input{width:120px;font:inherit;font-size:20px;letter-spacing:.35em;
+  text-align:center;padding:8px 10px;border-radius:8px;border:1px solid var(--hair);
+  background:var(--panel);color:var(--ink)}
+
+/* Recipients dropped for having opted out. Stated plainly at the top of the
+   batch: a rep who selected 60 and sees 57 must be told why, or the missing
+   three read as a bug and get chased. */
+.email-suppressed{margin:0;padding:9px 12px;font-size:12px;color:var(--warn);
+  border-bottom:1px solid var(--hair);background:var(--panel)}
+
+/* Why a message failed. The API has always carried failureMessage and the
+   completion screen has always said "see which recipients failed and why" --
+   but nothing rendered it, so the "why" was unreachable from the UI and the
+   only way to read it was Application Insights. */
+.email-failure{margin:10px 0 0;padding:10px 12px;border:1px solid var(--warn);
+  border-radius:9px;background:color-mix(in srgb, var(--warn) 8%, transparent)}
+.email-failure-head{margin:0 0 4px;font-size:12.5px;font-weight:650;color:var(--warn)}
+.email-failure-why{margin:0 0 4px;font-size:12.5px;overflow-wrap:anywhere}
+.email-failure code{font-size:11px;overflow-wrap:anywhere}
+
+/* "Saved" state for the template button. Disabled and quiet rather than hidden:
+   the button staying put, with its label changed, is what tells the
+   administrator the click landed. A button that looks identical before and
+   after a save reads as broken -- which is how this one read while it was
+   genuinely failing. */
+.email-saved-btn{background:transparent;color:var(--muted);
+  box-shadow:inset 0 0 0 1px var(--hair);cursor:default}
+.email-saved-btn:hover{color:var(--muted)}
+
+/* An attachment the template requires. Ticked, locked, and labelled as to WHY
+   it cannot be unticked -- a disabled checkbox with no explanation reads as a
+   broken control. Dimming the box while keeping the name at full strength says
+   "this is settled", not "this is unavailable". */
+.email-docs label.required{opacity:1}
+.email-docs label.required input{opacity:.55; cursor:not-allowed}
+.email-req-tag{margin-left:8px; font-style:normal; font-size:11px;
+  color:var(--accent); white-space:nowrap}
+
+/* Inline charts in the exact-final-preview render at their natural size, which
+   for an exported slide is wider than the panel. */
+.email-rendered img{max-width:100%; height:auto}
+
+/* ---------- the composer styles its own controls -------------------------
+ * These lived only in style.css, which the FIELD app never loads -- field.html
+ * pulls field.css and email.css and nothing else. So every button in the
+ * composer rendered as a raw browser button on a phone: Create Outlook drafts,
+ * Approve & Send, the close X, all of it. Defining them here makes the composer
+ * self-contained, which it should have been from the start given it is mounted
+ * into two different shells.
+ *
+ * Scoped to .email-back so the extra specificity cannot disturb the desktop
+ * app's own dialogs, which keep using style.css.
+ */
+.email-back .ask-btn{display:block; width:100%; height:34px; margin-top:7px; padding:0 12px;
+  font:inherit; font-size:12.5px; border:0; border-radius:8px; cursor:pointer;
+  background:var(--panel-2); color:var(--ink); box-shadow:inset 0 0 0 1px var(--hair)}
+.email-back .ask-btn:hover{color:var(--accent)}
+.email-back .ask-btn.primary{background:var(--accent); color:var(--accent-ink); box-shadow:none}
+.email-back .ask-btn.primary:hover{color:var(--accent-ink); filter:brightness(1.06)}
+.email-back .ask-btn.ghost{background:transparent; box-shadow:none; color:var(--muted)}
+
+/* Approve & Send. There was NO .ask-btn.grave rule anywhere in the codebase --
+   every .grave rule is scoped under some other parent -- so the one irreversible
+   control in the application looked exactly like a neutral button. Outlined
+   rather than filled: the filled accent belongs to Create Outlook drafts, the
+   safe default, and two solid buttons side by side would compete instead of
+   ranking. It fills on hover, at the moment of commitment. */
+.email-back .ask-btn.grave{background:transparent; color:var(--warn,#d08b00); font-weight:650;
+  box-shadow:inset 0 0 0 1.5px var(--warn,#d08b00)}
+.email-back .ask-btn.grave:hover{background:var(--warn,#d08b00); color:var(--accent-ink,#0b0b0b)}
+
+.email-back .rclose{font:inherit; font-size:20px; line-height:1; color:var(--muted);
+  background:none; border:0; cursor:pointer; padding:0 4px}
+.email-back .rclose:hover{color:var(--ink)}
+
+@media(max-width:760px){
+  /* Thumb targets, and room for the two footer buttons to sit side by side. */
+  .email-back .ask-btn{height:var(--tap,44px); font-size:14px; margin-top:0}
+  .email-back .rclose{font-size:26px; padding:0 8px}
+}
+
+/* ---------- footer buttons share the row ---------------------------------
+ * The base .email-back .ask-btn rule above sets width:100%, which is right for
+ * the stacked dialogs but wrong here: it has the same specificity as the
+ * footer's own width:auto and comes later in the file, so it won.
+ *
+ * On desktop the buttons could still shrink, so both stayed visible and merely
+ * wrapped their labels. On a phone the footer also sets flex:0 0 auto -- no
+ * shrinking -- so each button took the full width and Approve & Send sat
+ * off-screen inside an overflow-x container, with nothing on screen to suggest
+ * it was there. It read exactly like direct sending had been switched off.
+ *
+ * Scoped to the footer and to .email-back, so it outranks both.
+ */
+.email-back .email-footer .ask-btn{width:auto; margin:0; flex:1 1 auto; min-width:0}
+
+@media(max-width:760px){
+  /* Equal halves, never a scroller. A control that has to be scrolled into view
+     is a control a rep will not find. */
+  /* Wrapping with a 45% basis: two buttons take half the row each, and the
+     occasional third (Reconnect / Retry / Cancel, mid-send) drops to a second
+     line rather than crushing all three. */
+  .email-back .email-footer>div{display:flex; flex-wrap:wrap; gap:8px; overflow-x:visible}
+  .email-back .email-footer .ask-btn{flex:1 1 45%; min-width:0; padding:0 8px;
+    white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+}
+
+/* ---------- sender health ------------------------------------------------
+ * Four numbers per rep, colour-coded, each followed by what to do about it.
+ * The advice is the point: a percentage with no interpretation moves the
+ * problem from "I do not know my numbers" to "I do not know what my numbers
+ * mean", which is not progress.
+ */
+.email-health{padding:18px 20px 20px}
+.email-health-range{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin:10px 0 14px}
+.email-health-range .email-small.on{background:var(--accent);color:var(--accent-ink);
+  border-color:transparent}
+.email-health-rep{margin:0 0 22px;padding:14px;border:1px solid var(--hair);border-radius:12px}
+
+.hz-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(128px,1fr));gap:8px;margin:10px 0}
+.hz{padding:10px 12px;border-radius:10px;background:var(--panel-2);
+  box-shadow:inset 0 0 0 1px var(--hair)}
+.hz-n{display:block;font-size:20px;font-weight:700;line-height:1.1}
+.hz-l{display:block;font-size:12px;margin-top:2px}
+.hz small{display:block;font-size:11px;color:var(--muted);margin-top:3px}
+/* Colour carries urgency, never meaning on its own -- the label and the counts
+   say the same thing for anyone who cannot separate the hues. */
+.hz.warn .hz-n{color:var(--warn,#d08b00)}
+.hz.bad .hz-n{color:var(--warn,#d9534f)}
+.hz.bad{box-shadow:inset 0 0 0 1.5px var(--warn,#d9534f)}
+.hz.unknown .hz-n{color:var(--muted)}
+
+.email-advice{list-style:none;margin:10px 0 0;padding:0}
+.email-advice li{margin:0 0 7px;padding:9px 11px;border-radius:9px;font-size:12.5px;
+  line-height:1.5;background:var(--panel-2);box-shadow:inset 0 0 0 1px var(--hair)}
+.email-advice li.adv-warn{box-shadow:inset 0 0 0 1px var(--warn,#d08b00)}
+.email-advice li.adv-bad{box-shadow:inset 0 0 0 1.5px var(--warn,#d9534f)}
+.email-advice li.adv-ok,.email-advice li.adv-info{color:var(--muted)}
+
+.email-health-table{width:100%;border-collapse:collapse;margin:8px 0 0;font-size:12px}
+.email-health-table th{text-align:left;font-weight:650;color:var(--muted);
+  padding:5px 6px;border-bottom:1px solid var(--hair)}
+.email-health-table td{padding:5px 6px;border-bottom:1px solid var(--hair)}
+.email-health-table td.warn{color:var(--warn,#d08b00);font-weight:650}
+.email-health-table td.bad{color:var(--warn,#d9534f);font-weight:700}
+
+/* A limit the rep needs to know about before doing the work, not after. */
+.email-setup-warn{margin:12px 0 0;padding:10px 12px;border-radius:9px;
+  border:1px solid var(--warn);line-height:1.5}
+.email-notice.bad{color:var(--warn)}
+
+/* Lists in the preview panes, matching what the sanitizer lets through. */
+.email-rendered ul,.email-rendered ol{margin:0 0 12px;padding-left:22px}
+.email-rendered li{margin:0 0 4px}
+
+/* ---------- composer layout ---------------------------------------------
+ * Three numbered steps, visibly separate: edit everyone, edit this one, check
+ * what they receive. They previously ran together as three similar blocks, so
+ * the relationship between them -- and the fact that step 1 does not
+ * automatically reach step 2 -- had to be inferred.
+ */
+.email-editor > section{position:relative;padding-left:14px}
+.email-editor > section::before{content:"";position:absolute;left:0;top:2px;bottom:14px;
+  width:3px;border-radius:2px;background:var(--hair)}
+/* Three distinct colours, not two tints of the accent. The steps were an accent
+   bar, a faded accent bar and a grey one, which reads as "the same thing, less
+   important" rather than as three different jobs. */
+/* One blue for all three. They were three different colours to say "three
+   different jobs", but read as three unrelated widgets; the numbered eyebrow
+   already carries the sequence. */
+.email-common::before,.email-individual::before,.email-preview::before{background:#4f9cf9}
+/* ORDER MATTERS BELOW, and it is the whole reason the colours never appeared.
+   ".email-editor .eyebrow" and ".email-common .eyebrow" both score 0-2-0, so
+   the later one wins outright -- and the grey generic rule used to sit after
+   the three coloured ones, quietly repainting all of them var(--muted). The
+   generic rule now comes first and no longer sets a colour at all, so there is
+   nothing left to lose a tie against. */
+.email-editor .eyebrow{letter-spacing:.08em;text-transform:uppercase;font-size:10.5px;
+  font-weight:700;margin:0 0 2px}
+.email-editor .email-common .eyebrow,
+.email-editor .email-individual .eyebrow,
+.email-editor .email-preview .eyebrow{color:#4f9cf9}
+.email-editor > section > .email-section-head h3{font-size:16px;margin:0}
+
+/* Room to actually work. The bodies were five and eight rows, which showed
+   about a third of a real template. */
+.email-label.email-grow{display:flex;flex-direction:column}
+.email-label.email-grow textarea{min-height:190px;resize:vertical}
+.email-individual .email-label.email-grow textarea{min-height:230px}
+
+.email-head-acts{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+.email-small.ghost{background:transparent;color:var(--muted)}
+.email-small.ghost:hover{color:var(--accent)}
+.email-small.primary{background:var(--accent);color:var(--accent-ink);border-color:transparent;
+  font-weight:650}
+.email-small:disabled{opacity:.55;cursor:default}
+
+/* Unapplied common edits. The one thing on this screen a rep can silently get
+   wrong: rewrite the template, never press Apply, and send the old text. */
+.email-applystate{margin:6px 0 0;padding:8px 10px;border-radius:8px;font-size:12px;
+  color:var(--warn);border:1px solid var(--warn)}
+
+/* An individual override, stated at the top of the section it applies to
+   rather than as a footnote under the box. */
+.email-individual.overridden::before{background:var(--warn)}
+.email-override{margin:0 0 10px;padding:9px 11px;border-radius:9px;font-size:12.5px;
+  line-height:1.5;border:1px solid var(--warn)}
+.email-override b{display:inline}
+
+/* Remove-from-batch, on the row it names. */
+.email-list li{position:relative;display:flex;align-items:stretch}
+.email-list li button[data-email="pick"]{flex:1;min-width:0;text-align:left}
+/* Specificity matters here: ".email-list li button" sets width:100% and scores
+   0-1-1, which beat a bare ".email-row-drop" at 0-1-0. The X took the whole row
+   and the name beside it shrank to nothing, so the list rendered as a column of
+   X buttons with no people attached. */
+.email-list li button.email-row-drop{flex:0 0 30px;width:30px;padding:0;border:0;
+  border-bottom:1px solid var(--hair);background:none;color:var(--muted);
+  font-size:16px;line-height:1;cursor:pointer;opacity:0}
+.email-list li:hover button.email-row-drop,.email-list li.on button.email-row-drop{opacity:1}
+.email-list li button.email-row-drop:hover{color:var(--warn)}
+.email-list li.on{background:var(--panel);box-shadow:inset 3px 0 var(--accent)}
+.email-list li.on button[data-email="pick"]{background:transparent;box-shadow:none}
+/* A touch screen has no hover, so the control has to be permanently visible. */
+@media(hover:none){.email-list li button.email-row-drop{opacity:1}}
+
+/* ---------- phone overrides, deliberately last ---------------------------
+ * A media query adds no specificity, so these have to come AFTER the desktop
+ * rules they moderate. Placed earlier in the file they lost to identical
+ * selectors further down and silently did nothing.
+ */
+@media(max-width:760px){
+  /* The desktop composer grows its editors to fill a window. A phone has no
+     window to fill, and a 230px textarea between the rep and the send button is
+     the opposite of helpful. */
+  .email-label.email-grow textarea,
+  .email-individual .email-label.email-grow textarea{min-height:120px}
+  /* The jump list is collapsed by default here; it must not try to fill a
+     flex column that does not exist on this layout. */
+  .email-jump{display:block;flex:none}
+  .email-jump ol{max-height:46vh}
+  .email-editor > section{padding-left:11px}
+  .email-head-acts{width:100%;margin-top:6px}
+  .email-head-acts .email-small{flex:1 1 auto}
+}
+
+/* ---------- iPhone: stop the focus zoom -----------------------------------
+ * iOS Safari zooms the page whenever a focused text control is under 16px, and
+ * the composer's fields were 13px -- so every tap into a subject or body line
+ * jolted the layout, and the rep had to pinch back out. Nothing else causes it:
+ * checkboxes and file inputs never trigger the behaviour, and the only text
+ * controls in the composer and the template editor sit inside .email-label.
+ *
+ * Deliberately NOT solved with maximum-scale=1 on the viewport. That stops the
+ * zoom by disabling pinch-zoom for everybody, which is a real accessibility
+ * loss on a screen full of small print -- and recent iOS ignores it anyway.
+ *
+ * Scoped to the phone breakpoint: 16px everywhere would coarsen the desktop
+ * composer to fix a problem the desktop does not have.
+ */
+@media(max-width:760px){
+  .email-label input,
+  .email-label select,
+  .email-label textarea{font-size:16px}
+  /* The 36px box cannot hold 16px text with its padding -- the text clipped.
+     44px is also Apple's minimum touch target, so the field gets easier to hit
+     rather than merely taller. */
+  .email-label input,
+  .email-label select{height:44px}
+  /* Slightly taller, so the larger text does not cost a visible line. */
+  .email-label.email-grow textarea,
+  .email-individual .email-label.email-grow textarea{min-height:140px}
+
+  /* The preview is a swipe surface now, so let the browser keep vertical
+     scrolling and leave horizontal movement to the handler. */
+  .email-rendered{touch-action:pan-y}
+}
+
+/* Unapplied common edits that CANNOT reach everybody. A different problem from
+   "you have not pressed Apply", and the one a rep can miss entirely -- so it
+   gets the louder treatment rather than sharing the amber. */
+.email-applystate.severe{color:var(--warn,#d9534f);border-color:var(--warn,#d9534f);
+  border-width:1.5px;background:color-mix(in srgb,var(--warn,#d9534f) 8%,transparent)}
+.email-applyall{margin:8px 0 0}
+.email-small.grave{color:var(--warn,#d9534f);border-color:var(--warn,#d9534f);
+  background:transparent}
+.email-small.grave:hover{background:var(--warn,#d9534f);color:var(--accent-ink,#0b0b0b)}

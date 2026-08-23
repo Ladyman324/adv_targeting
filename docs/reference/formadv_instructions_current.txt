@@ -1,0 +1,1747 @@
+1 
+SEC 1707 (07-24)  File 1 of 5 
+ 
+ 
+ 
+FORM ADV (Paper Version) 
+• UNIFORM APPLICATION FOR INVESTMENT ADVISER REGISTRATION 
+AND 
+• REPORT FORM BY EXEMPT REPORTING ADVISERS 
+Form ADV: General Instructions 
+Read these instructions carefully before filing Form ADV. Failure to follow these instructions, 
+properly complete the form, or pay all required fees may result in your application or report 
+being delayed or rejected. 
+ 
+In these instructions and in Form ADV, “you” means the investment adviser (i.e., the advisory 
+firm). 
+ 
+If you are a “separately identifiable department or division” (SID) of a bank, “you” means the 
+SID, rather than your bank, unless the instructions or the form provide otherwise. 
+ 
+If you are a private fund adviser filing an umbrella registration, “you” means the filing adviser 
+and each relying adviser, unless the instructions or the form provide otherwise. The information 
+in Items 1, 2, 3 and 10 (including corresponding schedules) should be provided for the filing 
+adviser only. 
+ 
+Terms that appear in italics are defined in the Glossary of Terms to Form ADV. 
+ 
+1. 
+Where can I get more information on Form ADV, electronic filing, and the IARD? 
+ 
+The SEC provides information about its rules and the Advisers Act on its website: 
+<http://www.sec.gov/iard>. 
+ 
+NASAA provides information about state investment adviser laws and state rules, and how to 
+contact a state securities authority, on its website: <http://www.nasaa.org>. 
+ 
+FINRA provides information about the IARD and electronic filing on the IARD website: 
+<http://www.iard.com>. 
+ 
+2. 
+What is Form ADV used for? 
+ 
+Investment advisers use Form ADV to: 
+ 
+• Register with the Securities and Exchange Commission 
+• Register with one or more state securities authorities 
+OMB APPROVAL 
+OMB Number: 
+3235-0049 
+Expires: 
+July 31, 2027 
+Estimated average burden 
+hours per response 
+10.72 
+
+2 
+SEC 1707 (07-24)  File 1 of 5 
+ 
+• Amend those registrations 
+• Report to the SEC as an exempt reporting adviser 
+• Report to one or more state securities authorities as an exempt reporting adviser 
+• Amend those reports; and 
+• Submit a final report as an exempt reporting adviser 
+ 
+3. 
+How is Form ADV organized? 
+ 
+Form ADV contains five parts: 
+ 
+• Part 1A asks a number of questions about you, your business practices, the persons who 
+own and control you, and the persons who provide investment advice on your behalf. 
+o All advisers registering with the SEC or any of the state securities authorities must 
+complete Part 1A. 
+o Exempt reporting advisers (that are not also registering with any state securities 
+authority) must complete only the following Items of Part 1A: 1, 2, 3, 6, 7, 10, and 
+11, as well as corresponding schedules. Exempt reporting advisers that are 
+registering with any state securities authority must complete all of Form ADV. 
+ 
+Part 1A also contains several supplemental schedules. The items of Part 1A let you know 
+which schedules you must complete. 
+ 
+o Schedule A asks for information about your direct owners and executive officers. 
+o Schedule B asks for information about your indirect owners. 
+o Schedule C is used by paper filers to update the information required by Schedules A 
+and B (see Instruction 18). 
+o Schedule D asks for additional information for certain items in Part 1A. 
+o Schedule R asks for additional information about relying advisers. 
+o Disclosure Reporting Pages (or DRPs) are schedules that ask for details about 
+disciplinary events involving you or your advisory affiliates. 
+• Part 1B asks additional questions required by state securities authorities. Part 1B 
+contains three additional DRPs. If you are applying for SEC registration or are registered 
+only with the SEC, you do not have to complete Part 1B. (If you are filing electronically 
+and you do not have to complete Part 1B, you will not see Part 1B). 
+• Part 2A requires advisers to create narrative brochures containing information about the 
+advisory firm. The requirements in Part 2A apply to all investment advisers registered 
+with or applying for registration with the SEC, but do not apply to exempt reporting 
+advisers. Every application for registration must include a narrative brochure prepared in 
+accordance with the requirements of Part 2A of Form ADV. See Advisers Act Rule 203- 
+1. 
+• Part 2B requires advisers to create brochure supplements containing information about 
+certain supervised persons. The requirements in Part 2B apply to all investment advisers 
+registered with or applying for registration with the SEC, but do not apply to exempt 
+reporting advisers. 
+• Part 3 requires advisers to create relationship summary (Form CRS) containing 
+information for retail investors. The requirements in Part 3 apply to all investment 
+
+3 
+SEC 1707 (07-24)  File 1 of 5 
+ 
+advisers registered or applying for registration with the SEC, but do not apply to exempt 
+reporting advisers. Every adviser that has retail investors to whom it must deliver a 
+relationship summary must include in the application for registration a relationship 
+summary prepared in accordance with the requirements of Part 3 of Form ADV. See 
+Advisers Act Rule 203-1. 
+ 
+4. 
+When am I required to update my Form ADV? 
+ 
+• SEC- and State-Registered Advisers: 
+ 
+o Annual updating amendments: You must amend your Form ADV each year by filing 
+an annual updating amendment within 90 days after the end of your fiscal year. 
+When you submit your annual updating amendment, you must update your responses 
+to all items in Part 1A, 1B, 2A and 2B (as applicable), including corresponding 
+sections of Schedules A, B, C, and D and all sections of Schedule R for each relying 
+adviser. You must submit your summary of material changes required by Item 2 of 
+Part 2A either in the brochure (cover page or the page immediately thereafter) or as 
+an exhibit to your brochure. You may, but are not required, to submit amended 
+versions of the relationship summary required by Part 3 as part of your annual 
+updating amendment. 
+ 
+o Other-than-annual amendments: In addition to your annual updating amendment, 
+ 
+ If you are registered with the SEC or a state securities authority, you must 
+amend Part 1A, 1B, 2A and 2B (as applicable) of your Form ADV, including 
+corresponding sections of Schedules A, B, C, D, and R, by filing additional 
+amendments (other-than-annual amendments) promptly, if: 
+ 
+o you are adding or removing a relying adviser as part of your umbrella 
+registration; 
+ 
+o information you provided in response to Items 1 (except 1.O. and Section 
+1.F. of Schedule D), 3, 9 (except 9.A.(2), 9.B.(2), 9.E., and 9.F.), or 11 of 
+Part 1A or Items 1, 2.A. through 2.F., or 2.I. of Part 1B or Sections 1 or 3 
+of Schedule R becomes inaccurate in any way; 
+ 
+o information you provided in response to Items 4, 8, or 10 of Part 1A, or 
+Item 2.G. of Part 1B, or Section 4 of Schedule R becomes materially 
+inaccurate; or information you provided in your brochure becomes 
+materially inaccurate (see note below for exceptions). 
+ 
+Notes: Part 1: If you are submitting an other-than-annual amendment, you are not 
+required to update your responses to Items 2, 5, 6, 7, 9.A.(2), 9.B.(2), 9.E., 
+9.F., or 12 of Part 1A, Items 2.H. or 2.J. of Part 1B, Section 1.F. of Schedule 
+D or Section 2 of Schedule R even if your responses to those items have 
+become inaccurate. 
+ 
+Part 2: You must amend your brochure supplements (see Form ADV, Part 
+
+4 
+SEC 1707 (07-24)  File 1 of 5 
+ 
+2B) promptly if any information in them becomes materially inaccurate. If 
+you are submitting an other-than-annual amendment to your brochure, you are 
+not required to update your summary of material changes as required by Item 
+2. You are not required to update your brochure between annual amendments 
+solely because the amount of client assets you manage has changed or because 
+your fee schedule has changed. However, if you are updating your brochure 
+for a separate reason in between annual amendments, and the amount of client 
+assets you manage listed in response to Item 4.E. or your fee schedule listed in 
+response to Item 5.A. has become materially inaccurate, you should update 
+that item(s) as part of the interim amendment. 
+ 
+• If you are an SEC-registered adviser, you are required to file your 
+brochure amendments electronically through IARD. You are not 
+required to file amendments to your brochure supplements with the 
+SEC, but you must maintain a copy of them in your files. 
+ 
+• If you are a state-registered adviser, you are required to file your 
+brochure amendments and brochure supplement amendments with the 
+appropriate state securities authorities through IARD. 
+ 
+Part 3: If you are registered with the SEC, you must amend Part 3 of your 
+Form ADV within 30 days whenever any information in your relationship 
+summary becomes materially inaccurate by filing with the SEC an additional 
+other-than-annual amendment or by including the relationship summary as 
+part of an annual updating amendment. You must include an exhibit 
+highlighting the most recent changes required by Form ADV, Part 3 (Form 
+CRS), General Instruction 8.C. 
+ 
+• Exempt reporting advisers: 
+ 
+o Annual Updating Amendments: You must amend your Form ADV each year by 
+filing an annual updating amendment within 90 days after the end of your fiscal year. 
+When you submit your annual updating amendment, you must update your responses 
+to all required items, including corresponding sections of Schedules A, B, C, and D. 
+o Other-than-Annual Amendments: In addition to your annual updating amendment, 
+you must amend your Form ADV, including corresponding sections of Schedules A, 
+B, C, and D, by filing additional amendments (other-than-annual amendments) 
+promptly if: 
+ 
+information you provided in response to Items 1 (except Item 1.O. and Section 
+1.F. of Schedule D), 3, or 11 becomes inaccurate in any way; or 
+information you provided in response to Item 10 becomes materially 
+inaccurate. 
+ 
+Failure to update your Form ADV, as required by this instruction, is a violation of SEC 
+rules or similar state rules and could lead to your registration being revoked. 
+ 
+
+5 
+SEC 1707 (07-24)  File 1 of 5 
+ 
+5. 
+What is SEC umbrella registration and how can I satisfy the requirements of filing 
+an umbrella registration? 
+ 
+An umbrella registration is a single registration by a filing adviser and one or more relying 
+advisers who advise only private funds and certain separately managed account clients that 
+are qualified clients and collectively conduct a single advisory business. Absent other facts 
+suggesting that the filing adviser and relying adviser(s) conduct different businesses, 
+umbrella registration is available under the following circumstances: 
+ 
+i. The filing adviser and each relying adviser advise only private funds and clients in 
+separately managed accounts that are qualified clients and are otherwise eligible to invest 
+in the private funds advised by the filing adviser or a relying adviser and whose accounts 
+pursue investment objectives and strategies that are substantially similar or otherwise 
+related to those private funds. 
+ 
+ii. The filing adviser has its principal office and place of business in the United States and, 
+therefore, all of the substantive provisions of the Advisers Act and the rules thereunder 
+apply to the filing adviser's and each relying adviser's dealings with each of its clients, 
+regardless of whether any client of the filing adviser or relying adviser providing the 
+advice is a United States person. 
+ 
+iii. Each relying adviser, its employees and the persons acting on its behalf are subject to the 
+filing adviser’s supervision and control and, therefore, each relying adviser, its employees 
+and the persons acting on its behalf are “persons associated with” the filing adviser (as 
+defined in section 202(a)(17) of the Advisers Act). 
+ 
+iv. The advisory activities of each relying adviser are subject to the Advisers Act and the 
+rules thereunder, and each relying adviser is subject to examination by the SEC. 
+ 
+v. The filing adviser and each relying adviser operate under a single code of ethics adopted 
+in accordance with SEC rule 204A-1 and a single set of written policies and procedures 
+adopted and implemented in accordance with SEC rule 206(4)-7 and administered by a 
+single chief compliance officer in accordance with that rule. 
+ 
+To satisfy the requirements of Form ADV while using umbrella registration the filing 
+adviser must sign, file, and update as required, a single Form ADV (Parts 1 and 2) that 
+relates to, and includes all information concerning, the filing adviser and each relying adviser 
+(e.g., disciplinary information and ownership information), and must include this same 
+information in any other reports or filings it must make under the Advisers Act or the rules 
+thereunder (e.g., Form PF). The filing adviser and each relying adviser must not be 
+prohibited from registering with the SEC by section 203A of the Advisers Act (i.e., the filing 
+adviser and each relying adviser must individually qualify for SEC registration). 
+ 
+Unless otherwise specified, references to “you” in Form ADV refer to both the filing adviser 
+and each relying adviser. The information in Items 1, 2, 3 and 10 (including corresponding 
+schedules) should be provided for the filing adviser only. A separate Schedule R should be 
+completed for each relying adviser. References to “you” in Schedule R refer to the relying 
+
+6 
+SEC 1707 (07-24)  File 1 of 5 
+ 
+adviser only. 
+ 
+A filing adviser applying for registration with the SEC should complete a Schedule R for 
+each relying adviser. If you are a filing adviser registered with the SEC and would like to 
+add or delete relying advisers from an umbrella registration, you should file an other-than- 
+annual amendment and add or delete Schedule Rs as needed. 
+ 
+Note: Umbrella registration is not available to exempt reporting advisers. 
+ 
+6. 
+Where do I sign my Form ADV application or amendment? 
+ 
+You must sign the appropriate Execution Page. There are three Execution Pages at the end 
+of the form. Your initial application, your initial report (in the case of an exempt reporting 
+adviser), and all amendments to Form ADV must include at least one Execution Page. 
+ 
+• If you are applying for or are amending your SEC registration, or if you are reporting as 
+an exempt reporting adviser or amending your report, you must sign and submit either a: 
+ 
+o Domestic Investment Adviser Execution Page, if you (the advisory firm) are a 
+resident of the United States; or 
+o Non-Resident Investment Adviser Execution Page, if you (the advisory firm) are not a 
+resident of the United States. 
+ 
+• If you are applying for or are amending your registration with a state securities authority, 
+you must sign and submit the State-Registered Investment Adviser Execution Page. 
+ 
+7. 
+Who must sign my Form ADV or amendment? 
+ 
+The individual who signs the form depends upon your form of organization: 
+ 
+• For a sole proprietorship, the sole proprietor. 
+• For a partnership, a general partner. 
+• For a corporation, an authorized principal officer. 
+• For a “separately identifiable department or division” (SID) of a bank, a principal officer 
+of your bank who is directly engaged in the management, direction, or supervision of 
+your investment advisory activities. 
+• For all others, an authorized individual who participates in managing or directing your 
+affairs. 
+ 
+The signature does not have to be notarized, and in the case of an electronic filing, should be 
+a typed name. 
+ 
+8. 
+How do I file my Form ADV? 
+ 
+Complete Form ADV electronically using the Investment Adviser Registration Depository 
+(IARD) if: 
+ 
+
+7 
+SEC 1707 (07-24)  File 1 of 5 
+ 
+• You are filing with the SEC (and submitting notice filings to any of the state securities 
+authorities), or 
+ 
+• You are filing with a state securities authority that requires or permits advisers to submit 
+Form ADV through the IARD. 
+ 
+Note: SEC rules require advisers that are registered or applying for registration with the 
+SEC, or that are reporting to the SEC as an exempt reporting adviser, to file 
+electronically through the IARD system. See SEC rules 203-1 and 204-4. 
+ 
+To file electronically, go to the IARD website (<www.iard.com>), which contains detailed 
+instructions for advisers to follow when filing through the IARD. 
+ 
+Complete Form ADV (Paper Version) on paper if: 
+ 
+• You are filing with the SEC or a state securities authority that requires electronic filing, 
+but you have been granted a continuing hardship exemption. Hardship exemptions are 
+described in Instruction 17. 
+ 
+• You are filing with a state securities authority that permits (but does not require) 
+electronic filing and you do not file electronically. 
+ 
+9. 
+How do I get started filing electronically? 
+ 
+First, obtain a copy of the IARD Entitlement Package from the following website: 
+<http://www.iard.com/GetStarted.asp>. Second, request access to the IARD system for your 
+firm by completing and submitting the IARD Entitlement Package. The IARD Entitlement 
+Package explains how the form may be submitted. Mail the forms to: FINRA Entitlement 
+Group, 9509 Key West Avenue, Rockville, MD 20850. 
+ 
+When FINRA receives your Entitlement Package, they will assign a CRD number 
+(identification number for your firm) and a user I.D. code and password (identification 
+number and system password for the individual(s) who will submit Form ADV filings for 
+your firm). Your firm may request an I.D. code and password for more than one individual. 
+FINRA also will create a financial account for you from which the IARD will deduct filing 
+fees and any state fees you are required to pay. If you already have a CRD account with 
+FINRA, it will also serve as your IARD account; a separate account will not be established. 
+ 
+Once you receive your CRD number, user I.D. code and password, and you have funded your 
+account, you are ready to file electronically. 
+ 
+Questions regarding the Entitlement Process should be addressed to FINRA at 240.386.4848. 
+ 
+10. 
+If I am applying for registration with the SEC, or amending my SEC registration, 
+how do I make notice filings with the state securities authorities? 
+ 
+If you are applying for registration with the SEC or are amending your SEC registration, one 
+or more state securities authorities may require you to provide them with copies of your SEC 
+
+8 
+SEC 1707 (07-24)  File 1 of 5 
+ 
+filings. We call these filings “notice filings.” Your notice filings will be sent electronically 
+to the states that you check on Item 2.C. of Part 1A. The state securities authorities to which 
+you send notice filings may charge fees, which will be deducted from the account you 
+establish with FINRA. To determine which state securities authorities require SEC- 
+registered advisers to submit notice filings and to pay fees, consult the relevant state 
+investment adviser law or state securities authority. See General Instruction 1. 
+ 
+If you are granted a continuing hardship exemption to file Form ADV on paper, FINRA will 
+enter your filing into the IARD and your notice filings will be sent electronically to the state 
+securities authorities that you check on Item 2.C. of Part 1A. 
+ 
+11. 
+I am registered with a state. When must I switch to SEC registration? 
+ 
+If at the time of your annual updating amendment you meet at least one of the requirements 
+for SEC registration in Item 2.A.(1) to (12) of Part 1A, you must apply for registration with 
+the SEC within 90 days after you file the annual updating amendment. Once you register 
+with the SEC, you are subject to SEC regulation, regardless of whether you remain registered 
+with one or more states. See SEC rule 203A-1(b)(2). Each of your investment adviser 
+representatives, however, may be subject to registration in those states in which the 
+representative has a place of business. See Advisers Act section 203A(b)(1); SEC rule 
+203A-3(a). For additional information, consult the investment adviser laws or the state 
+securities authority for the particular state in which you are “doing business.” See General 
+Instruction 1. 
+ 
+12. 
+I am registered with the SEC. When must I switch to registration with a state 
+securities authority? 
+If you check box 13 in Item 2.A. of Part 1A to report on your annual updating amendment 
+that you are no longer eligible to register with the SEC, you must withdraw from SEC 
+registration within 180 days after the end of your fiscal year by filing Form ADV-W. See 
+SEC rule 203A-1(b)(2). You should consult state law or the state securities authority for the 
+states in which you are “doing business” to determine if you are required to register in these 
+states. See General Instruction 1. Until you file your Form ADV-W with the SEC, you will 
+remain subject to SEC regulation, and you also will be subject to regulation in any states 
+where you register. See SEC rule 203A-1(b)(2). 
+ 
+13. 
+I am an exempt reporting adviser. When must I submit my first report on Form 
+ADV? 
+ 
+• All exempt reporting advisers: 
+You must submit your initial Form ADV filing within 60 days of relying on the 
+exemption from registration under either section 203(l) of the Advisers Act as an adviser 
+solely to one or more venture capital funds or section 203(m) of the Advisers Act because 
+you act solely as an adviser to private funds and have assets under management in the 
+United States of less than $150 million. 
+ 
+• Additional instruction for advisers switching from being registered to being exempt 
+reporting advisers: 
+
+9 
+SEC 1707 (07-24)  File 1 of 5 
+ 
+If you are currently registered as an investment adviser (or have an application for 
+registration pending) with the SEC or with a state securities authority, you must file a 
+Form ADV-W to withdraw from registration in the jurisdictions where you are switching. 
+You must submit the Form ADV-W before submitting your first report as an exempt 
+reporting adviser. 
+ 
+14. 
+I am an exempt reporting adviser. Is it possible that I might be required to also 
+register with or submit a report to a state securities authority? 
+ 
+Yes, you may be required to register with or submit a report to one or more state securities 
+authorities. If you are required to register with one or more state securities authorities, you 
+must complete all of Form ADV. See General Instruction 3. If you are required to submit a 
+report to one or more state securities authorities, check the box(es) in Item 2.C. of Part 1A 
+next to the state(s) you would like to receive the report. Each of your investment adviser 
+representatives may also be subject to registration requirements. For additional information 
+about the requirements that may apply to you, consult the investment adviser laws or the 
+state securities authority for the particular state in which you are “doing business.” See 
+General Instruction 1. 
+ 
+15. 
+What do I do if I no longer meet the definition of “exempt reporting adviser”? 
+ 
+• Advisers Switching to SEC Registration: 
+ 
+o You may no longer be an exempt reporting adviser and may be required to register 
+with the SEC if you wish to continue doing business as an investment adviser. For 
+example, you may be relying on section 203(l) and wish to accept a client that is not a 
+venture capital fund as defined in SEC rule 203(l)-1, or you may have been relying on 
+SEC rule 203(m)-1 and reported in Section 2.B. of Schedule D to your annual 
+updating amendment that you have private fund assets of $150 million or more. 
+ 
+ If you are relying on section 203(l), unless you qualify for another exemption, 
+you would violate the Advisers Act’s registration requirement if you accept a 
+client that is not a venture capital fund as defined in SEC rule 203(l)-1 before 
+the SEC approves your application for registration. You must submit your 
+final report as an exempt reporting adviser and apply for SEC registration in 
+the same filing. 
+ 
+ If you were relying on SEC rule 203(m)-1 and you reported in Section 2.B. of 
+Schedule D to your annual updating amendment that you have private fund 
+assets of $150 million or more, you must register with the SEC unless you 
+qualify for another exemption. If you have complied with all SEC reporting 
+requirements applicable to an exempt reporting adviser as such, you have up 
+to 90 days after filing your annual updating amendment to apply for SEC 
+registration, and you may continue doing business as a private fund adviser 
+during this time. You must submit your final report as an exempt reporting 
+adviser and apply for SEC registration in the same filing. Unless you qualify 
+for another exemption, you would violate the Advisers Act’s registration 
+requirement if you accept a client that is not a private fund during this 
+
+10 
+SEC 1707 (07-24)  File 1 of 5 
+ 
+transition period before the SEC approves your application for registration, 
+and you must comply with all SEC reporting requirements applicable to an 
+exempt reporting adviser as such during this 90-day transition period. If you 
+have not complied with all SEC reporting requirements applicable to an 
+exempt reporting adviser as such, this 90-day transition period is not available 
+to you. Therefore, if the transition period is not available to you, and you do 
+not qualify for another exemption, your application for registration must be 
+approved by the SEC before you meet or exceed SEC rule 203(m)-1’s $150 
+million asset threshold. 
+ 
+o You will be deemed in compliance with the Form ADV filing and reporting 
+requirements until the SEC approves or denies your application. If your application is 
+approved, you will be able to continue business as a registered adviser. 
+ 
+o If you register with the SEC, you may be subject to state notice filing requirements. 
+To determine these requirements, consult the investment adviser laws or the state 
+securities authority for the particular state in which you are “doing business.” See 
+General Instruction 1. 
+ 
+Note: If you are relying on SEC rule 203(m)-1 and you accept a client that is not a 
+private fund, you will lose the exemption provided by SEC rule 203(m)-1 immediately. 
+To avoid this result, you should apply for SEC registration in advance so that the SEC 
+has approved your registration before you accept a client that is not a private fund. 
+ 
+The 90-day transition period described above also applies to investment advisers with 
+their principal offices and places of business outside of the United States with respect to 
+their clients who are United States persons (e.g., the adviser would not be eligible for the 
+90-day transition period if it accepted a client that is a United States person and is not a 
+private fund). 
+ 
+• Advisers Not Switching to SEC Registration: 
+ 
+o You may no longer be an exempt reporting adviser but may not be required to 
+register with the SEC or may be prohibited from doing so. For example, you may 
+cease to do business as an investment adviser, become eligible for an exemption that 
+does not require reporting, or be ineligible for SEC registration. In this case, you 
+must submit a final report as an exempt reporting adviser to update only Item 1 of 
+Part 1A of Form ADV. 
+ 
+o You may be subject to state registration requirements. To determine these 
+requirements, consult the investment adviser laws or the state securities authority for 
+the particular state in which you are “doing business.” See General Instruction 1. 
+ 
+16. 
+Are there filing fees? 
+ 
+Yes. These fees go to support and maintain the IARD. The IARD filing fees are in addition 
+to any registration or other fee that may be required by state law. You must pay an IARD 
+filing fee for your initial application, your initial report, and each annual updating 
+
+11 
+SEC 1707 (07-24)  File 1 of 5 
+ 
+amendment. There is no filing fee for an other-than-annual amendment, a final report as an 
+exempt reporting adviser, or Form ADV-W. The IARD filing fee schedule is published at 
+<http://www.sec.gov/iard>; <http://www.nasaa.org>; and <http://www.iard.com>. 
+ 
+If you are submitting a paper filing under a continuing hardship exemption (see Instruction 
+17), you are required to pay an additional fee. The amount of the additional fee depends on 
+whether you are filing Form ADV or Form ADV-W. (There is no additional fee for filings 
+made on Form ADV-W.) The hardship filing fee schedule is available by contacting FINRA 
+at 240.386.4848. 
+ 
+17. 
+What if I am not able to file electronically? 
+ 
+If you are required to file electronically but cannot do so, you may be eligible for one of two 
+types of hardship exemptions from the electronic filing requirements. 
+ 
+• A temporary hardship exemption is available if you file electronically, but you 
+encounter unexpected difficulties that prevent you from making a timely filing with the 
+IARD, such as a computer malfunction or electrical outage. This exemption does not 
+permit you to file on paper; instead it extends the deadline for an electronic filing for 
+seven business days. See SEC rules 203-3(a) and 204-4(e). 
+• A continuing hardship exemption may be granted if you are a small business and you 
+can demonstrate that filing electronically would impose an undue hardship. You are a 
+small business, and may be eligible for a continuing hardship exemption, if you are 
+required to answer Item 12 of Part 1A (because you have assets under management of 
+less than $25 million) and you are able to respond “no” to each question in Item 12. See 
+SEC rule 0-7. 
+ 
+If you have been granted a continuing hardship exemption, you must complete and 
+submit the paper version of Form ADV to FINRA. FINRA will enter your responses into 
+the IARD. As discussed in General Instruction 16, FINRA will charge you a fee to 
+reimburse it for the expense of data entry. 
+ 
+18. 
+I am eligible to file on paper. How do I make a paper filing? 
+ 
+When filing on paper, you must: 
+ 
+• Type all of your responses. 
+• Include your name (the same name you provide in response to Item 1.A. of Part 1A) and 
+the date on every page. 
+• If you are amending your Form ADV: 
+o complete page 1 and circle the number of any item for which you are changing your 
+response. 
+o include your SEC 801-number (if you have one), or your 802-number (if you have 
+one), and your CRD number (if you have one) on every page. 
+o complete the amended item in full and circle the number of the item for which you 
+are changing your response. 
+o to amend Schedule A or Schedule B, complete and submit Schedule C. 
+
+12 
+SEC 1707 (07-24)  File 1 of 5 
+ 
+Where you submit your paper filing depends on why you are eligible to file on paper: 
+• If you are filing on paper because you have been granted a continuing hardship 
+exemption, submit one manually signed Form ADV and one copy to: IARD Document 
+Processing, FINRA, P.O. Box 9495, Gaithersburg, MD 20898-9495. 
+ 
+If you complete Form ADV on paper and submit it to FINRA but you do not have a 
+continuing hardship exemption, the submission will be returned to you. 
+ 
+• If you are filing on paper because a state in which you are registered or in which you are 
+applying for registration allows you to submit paper instead of electronic filings, submit 
+one manually signed Form ADV and one copy to the appropriate state securities 
+authorities. 
+ 
+19. 
+Who is required to file Form ADV-NR? 
+ 
+Every non-resident general partner and managing agent of all SEC-registered advisers and 
+exempt reporting advisers, whether or not the adviser is a resident in the United States, must 
+file Form ADV-NR in connection with the adviser’s initial application or report. A general 
+partner or managing agent of an SEC-registered adviser or exempt reporting adviser who 
+becomes a non-resident after the adviser’s initial application or report has been submitted 
+must file Form ADV-NR within 30 days. Absent a temporary hardship, Form ADV-NR must 
+be filed electronically through IARD. 
+ 
+Failure to file Form ADV-NR promptly may delay SEC consideration of your initial 
+application. 
+ 
+20. 
+How is Form ADV-NR filed? 
+ 
+Form ADV-NR is filed electronically with the Investment Adviser Registration Depository 
+(IARD). Information for how to file with IARD is available on the SEC’s website at 
+<www.sec.gov/iard> and on <www.iard.com>. 
+ 
+ 
+Federal Information Law and Requirements 
+ 
+Sections 203 and 204 of the Advisers Act [15 U.S.C. §§ 80b-3 and 80b-4] authorize the SEC to 
+collect the information required by Form ADV. The SEC collects the information for regulatory 
+purposes, such as deciding whether to grant registration. Filing Form ADV is mandatory for 
+advisers who are required to register with the SEC and for exempt reporting advisers. The SEC 
+maintains the information submitted on this form and makes it publicly available. The SEC may 
+return forms that do not include required information. Intentional misstatements or omissions 
+constitute federal criminal violations under 18 U.S.C. § 1001 and 15 U.S.C. § 80b-17. 
+ 
+SEC’s Collection of Information 
+ 
+An agency may not conduct or sponsor, and a person is not required to respond to, a collection of 
+
+13 
+SEC 1707 (07-24)  File 1 of 5 
+ 
+information unless it displays a currently valid control number. The Advisers Act authorizes the 
+SEC to collect the information on Form ADV from investment advisers. See 15 U.S.C. §§ 80b-3 
+and 80b-4. Filing the form is mandatory. 
+ 
+The form enables the SEC to register investment advisers and to obtain information from and 
+about exempt reporting advisers. Every applicant for registration with the SEC as an adviser, 
+and every exempt reporting adviser, must file the form. See 17 C.F.R. §§ 275.203-1 and 204-4. 
+By accepting a form, however, the SEC does not make a finding that it has been completed or 
+submitted correctly. The form is filed annually by every adviser, no later than 90 days after the 
+end of its fiscal year, to amend its registration or its report. It is also filed during the year to 
+reflect material changes. See 17 C.F.R. § 275.204-1. The SEC maintains the information on the 
+form and makes it publicly available through the IARD. 
+ 
+Anyone may send the SEC comments on the accuracy of the burden estimate on page 1 of the 
+form, as well as suggestions for reducing the burden. The Office of Management and Budget has 
+reviewed this collection of information under 44 U.S.C. § 3507. 
+The information contained in the form is part of a system of records subject to the Privacy Act of 
+1974, as amended. The SEC has published in the Federal Register the Privacy Act System of 
+Records Notice for these records. 
+
+14 
+SEC 1707 (07-24)  File 1 of 5 
+ 
+FORM ADV (Paper Version) 
+• UNIFORM APPLICATION FOR INVESTMENT ADVISER REGISTRATION 
+AND 
+• REPORT BY EXEMPT REPORTING ADVISERS 
+Form ADV: Instructions for Part 1A 
+These instructions explain how to complete certain items in Part 1A of Form ADV. 
+ 
+1. Item 1: Identifying Information 
+ 
+Separately Identifiable Department or Division of a Bank. If you are a “separately 
+identifiable department or division” (SID) of a bank, answer Item 1.A. with the full legal name 
+of your bank, and answer Item 1.B. with your own name (the name of the department or 
+division) and all names under which you conduct your advisory business. In addition, your 
+principal office and place of business in Item 1.F. should be the principal office at which you 
+conduct your advisory business. In response to Item 1.I., the website addresses and social media 
+information you list on Schedule D should be those that provide information about your own 
+activities, rather than general information about your bank. 
+ 
+2. Item 2: SEC Registration and SEC Report by Exempt Reporting Advisers 
+ 
+If you are registered or applying for registration with the SEC, you must indicate in Item 2.A. 
+why you are eligible to register with the SEC by checking at least one of the boxes. 
+a. Item 2.A.(1): Adviser with Regulatory Assets Under Management of $100 Million 
+or More. You may check box 1 only if your response to Item 5.F.(2)(c) is $100 million 
+or more, or you are filing an annual updating amendment with the SEC and your 
+response to Item 5.F.(2)(c) is $90 million or more. While you may register with the SEC 
+if your regulatory assets under management are at least $100 million but less than $110 
+million, you must apply for registration with the SEC if your regulatory assets under 
+management are $110 million or more. If you are a SEC-registered adviser, you may 
+remain registered with the SEC if your regulatory assets under management are $90 
+million or more. See SEC rule 203A-1(a). Part 1A Instruction 5.b. explains how to 
+calculate your regulatory assets under management. 
+ 
+If you are a state-registered adviser and you report on your annual updating amendment 
+that your regulatory assets under management increased to $100 million or more, you 
+may register with the SEC. If your regulatory assets under management increased to 
+$110 million or more, you must apply for registration with the SEC within 90 days after 
+you file that annual updating amendment. See SEC rule 203A-1(b)(1) and Form ADV 
+General Instruction 11. 
+ 
+b. Item 2.A.(2): Mid-Sized Adviser. You may check box 2 only if your response to Item 
+5.F.(2)(c) is $25 million or more but less than $100 million, and you satisfy one of the 
+requirements below. Part 1A Instruction 5.b. explains how to calculate your regulatory 
+assets under management. 
+
+15 
+SEC 1707 (07-24)  File 1 of 5 
+ 
+ 
+You must register with the SEC if you meet at least one of the following requirements: 
+ 
+• You are not required to be registered as an investment adviser with the state securities 
+authority of the state where you maintain your principal office and place of business 
+pursuant to that state’s investment adviser laws. If you are exempt from registration 
+with that state or are excluded from the definition of investment adviser in that state, 
+you must register with the SEC. You should consult the investment adviser laws or 
+the state securities authority for the particular state in which you maintain your 
+principal office and place of business to determine if you are required to register in 
+that state. See General Instruction 1. 
+ 
+• You are not subject to examination by the state securities authority of the state where 
+you maintain your principal office and place of business. To determine whether such 
+state securities authority does not conduct such examinations, see: 
+https://www.sec.gov/divisions/investment/midsizedadviserinfo.htm 
+See section 203A(a)(2) of the Advisers Act. 
+ 
+c. Item 2.A.(5): Adviser to an Investment Company. You may check box 5 only if you 
+currently provide advisory services under an investment advisory contract to an 
+investment company registered under the Investment Company Act of 1940 and the 
+investment company is operational (i.e., has assets and shareholders, other than just the 
+organizing shareholders). See sections 203A(a)(1)(B) and 203A(a)(2)(A) of the Advisers 
+Act. Advising investors about the merits of investing in mutual funds or recommending 
+particular mutual funds does not make you eligible to check this box. 
+ 
+d. Item 2.A.(6): Adviser to a Business Development Company. You may check box 6 
+only if your response to Item 5.F.(2)(c) is $25 million or more of regulatory assets under 
+management, and you currently provide advisory services under an investment advisory 
+contract to a company that has elected to be a business development company pursuant to 
+section 54 of the Investment Company Act of 1940, that has not withdrawn the election, 
+and that is operational (i.e., has assets and shareholders, other than just the organizing 
+shareholders). See section 203A(a)(2)(A) of the Advisers Act. Part 1A Instruction 5.b. 
+explains how to calculate your regulatory assets under management. 
+ 
+e. Item 2.A.(7): Pension Consultant. You may check box 7 only if you are eligible for 
+the pension consultant exemption from the prohibition on SEC registration. 
+ 
+• You are eligible for this exemption if you provided investment advice to employee 
+benefit plans, governmental plans, or church plans with respect to assets having an 
+aggregate value of $200 million or more during the 12-month period that ended 
+within 90 days of filing this Form ADV. You are not eligible for this exemption if 
+you only advise plan participants on allocating their investments within their pension 
+plans. See SEC rule 203A-2(a). 
+ 
+• To calculate the value of assets for purposes of this exemption, aggregate the assets of 
+
+16 
+SEC 1707 (07-24)  File 1 of 5 
+ 
+the plans for which you provided advisory services at the end of the 12-month period. 
+If you provided advisory services to other plans during the 12-month period, but your 
+employment or contract terminated before the end of the 12-month period, you also 
+may include the value of those assets. 
+ 
+f. Item 2.A.(8): Related Adviser. You may check box 8 only if you are eligible for the 
+related adviser exemption from the prohibition on SEC registration. See SEC rule 203A- 
+2(b). You are eligible for this exemption if you control, are controlled by, or are under 
+common control with an investment adviser that is registered with the SEC, and you have 
+the same principal office and place of business as that other investment adviser. Note 
+that you may not rely on the SEC registration of an Internet adviser under rule 203A-2(e) 
+in establishing eligibility for this exemption. See SEC rule 203A-2(e)(1)(iii). If you 
+check box 8, you also must complete Section 2.A.(8) of Schedule D. 
+ 
+g. Item 2.A.(9): Adviser Expecting to be Eligible for Registration within 120 Days. 
+You may check box 9 only if you are eligible for the exemption from the prohibition on 
+SEC registration available to advisers expecting to be eligible for SEC registration within 
+120 days, such as a newly formed adviser. See SEC rule 203A-2(c). You are eligible for 
+this exemption if immediately before you file your application for registration with the 
+SEC: 
+ 
+• you were not registered or required to be registered with the SEC or a state securities 
+authority; and 
+ 
+• you have a reasonable expectation that you will be eligible to register with the SEC 
+within 120 days after the date that your registration with the SEC becomes effective. 
+ 
+If you check box 9, you also must complete Section 2.A.(9) of Schedule D. 
+ 
+You must file an amendment to Part 1A of your Form ADV that updates your response to 
+Item 2.A. within 120 days after the SEC declares your registration effective. You may 
+not check box 9 on your amendment; since this exemption is available only if you are not 
+registered, you may not “re-rely” on this exemption. If you indicate on that amendment 
+(by checking box 13) that you are not eligible to register with the SEC, you also must file 
+a Form ADV-W to withdraw your SEC registration no later than 120 days after your 
+registration was declared effective. You should contact the appropriate state securities 
+authority to determine how long it may take to become state-registered sufficiently in 
+advance of when you are required to file Form ADV-W to withdraw from SEC 
+registration. 
+Note: If you expect to be eligible for SEC registration because of the amount of your 
+regulatory assets under management, that amount must be $100 million or more no later 
+than 120 days after your registration is declared effective. 
+ 
+h. Item 2.A.(10): Multi-State Adviser. You may check box 10 only if you are eligible for 
+the multi-state adviser exemption from the prohibition on SEC registration. See SEC rule 
+203A-2(d). You are eligible for this exemption if you are required to register as an 
+investment adviser with the state securities authorities of 15 or more states. If you check 
+
+17 
+SEC 1707 (07-24)  File 1 of 5 
+ 
+box 10, you must complete Section 2.A.(10) of Schedule D. You must complete Section 
+2.A.(10) of Schedule D in each annual updating amendment you submit. 
+ 
+If you check box 10, you also must: 
+• create and maintain a list of the states in which, but for this exemption, you would be 
+required to register; 
+• update this list each time you submit an annual updating amendment in which you 
+continue to represent that you are eligible for this exemption; and 
+• maintain the list in an easily accessible place for a period of not less than five years 
+from each date on which you indicate that you are eligible for the exemption. 
+ 
+If, at the time you file your annual updating amendment, you are required to register in 
+less than 15 states and you are not otherwise eligible to register with the SEC, you must 
+check box 13 in Item 2.A. You also must file a Form ADV-W to withdraw your SEC 
+registration. See Part 1A Instruction 2.j. 
+ 
+i. Item 2.A.(11): Internet Adviser. You may check box 11 only if you are eligible for the 
+Internet adviser exemption from the prohibition on SEC registration. See SEC rule 
+203A-2(e). If you check box 11, you must complete Section 2.A.(11) of Schedule D. 
+You are eligible for this exemption if: 
+ 
+• You provide investment advice to all of your clients exclusively through an 
+operational interactive website at all times during which you rely on rule 203A-
+2(e). Other forms of online or Internet investment advice do not qualify for this 
+exemption; 
+• 
+You maintain a record demonstrating that you provide investment advice to your clients 
+exclusively through an operational interactive website in accordance with these limits. 
+ 
+j. Item 2.A.(13): Adviser No Longer Eligible to Remain Registered with the SEC. 
+You must check box 13 if: 
+ 
+• you are registered with the SEC; 
+• you are filing an annual updating amendment to Form ADV in which you indicate in 
+response to Item 5.F.(2)(c) that you have regulatory assets under management of less 
+than $90 million; and 
+• you are not eligible to check any other box (other than box 13) in Item 2.A. (and are 
+therefore no longer eligible to remain registered with the SEC). 
+ 
+You must withdraw from SEC registration within 180 days after the end of your fiscal 
+year by filing Form ADV-W. Until you file your Form ADV-W, you will remain subject 
+to SEC regulation, and you also will be subject to regulation in the states in which you 
+register. See SEC rule 203A-1(b)(2). 
+ 
+k. Item 2.B.: Reporting by Exempt Reporting Advisers. You may check box 2.B.(1) only 
+if you qualify for the exemption from SEC registration as an adviser solely to one or 
+more venture capital funds. See SEC rule 203(l)-1. You may check box 2.B.(2) only if 
+
+18 
+SEC 1707 (07-24)  File 1 of 5 
+ 
+you qualify for the exemption from SEC registration because you act solely as an adviser 
+to private funds and have assets under management in the United States of less than $150 
+million. See SEC rule 203(m)-1. You may check both boxes to indicate that you qualify 
+for both exemptions. You should check box 2.B.(3) if you act solely as an adviser to 
+private funds but you are no longer eligible to check box 2.B.(2) because you have assets 
+under management in the United States of $150 million or more. If you check box 
+2.B.(2) or (3), you also must complete Section 2.B. of Schedule D. 
+ 
+3. Item 3: Form of Organization 
+ 
+If you are a “separately identifiable department or division” (SID) of a bank, answer Item 3.A. 
+by checking “other.” In the space provided, specify that you are a “SID of” and indicate the 
+form of organization of your bank. Answer Items 3.B. and 3.C. with information about your 
+bank. 
+ 
+4. Item 4: Successions 
+ 
+a. Succession of an SEC-Registered Adviser. If you (1) have taken over the business of 
+an investment adviser or (2) have changed your structure or legal status (e.g., form of 
+organization or state of incorporation), a new organization has been created, which has 
+registration obligations under the Advisers Act. There are different ways to fulfill these 
+obligations. You may rely on the registration provisions discussed in the General 
+Instructions, or you may be able to rely on special registration provisions for “successors” 
+to SEC-registered advisers, which may ease the transition to the successor adviser’s 
+registration. 
+ 
+To determine if you may rely on these provisions, review “Registration of Successors to 
+Broker-Dealers and Investment Advisers,” Investment Advisers Act Release No. 1357 
+(Dec. 28, 1992). If you have taken over an adviser, follow Part 1A Instruction 4.a.(1), 
+Succession by Application. If you have changed your structure or legal status, follow 
+Part 1A, Instruction 4.a.(2), Succession by Amendment. If either (1) you are a 
+“separately identifiable department or division” (SID) of a bank that is currently 
+registered as an investment adviser, and you are taking over your bank’s advisory 
+business; or (2) you are a SID currently registered as an investment adviser, and your 
+bank is taking over your advisory business, then follow Part 1A Instruction 4.a.(1), 
+Succession by Application. 
+ 
+(1) Succession by Application. If you are not registered with the SEC as an adviser, 
+and you are acquiring or assuming substantially all of the assets and liabilities of the 
+advisory business of an SEC-registered adviser, file a new application for registration 
+on Form ADV. You will receive new registration numbers. You must file the new 
+application within 30 days after the succession. On the application, make sure you 
+check “yes” to Item 4.A., enter the date of the succession in Item 4.B., and complete 
+Section 4 of Schedule D. 
+ 
+Until the SEC declares your new registration effective, you may rely on the 
+registration of the adviser you are acquiring, but only if the adviser you are acquiring 
+
+19 
+SEC 1707 (07-24)  File 1 of 5 
+ 
+is no longer conducting advisory activities. Once your new registration is effective, a 
+Form ADV-W must be filed with the SEC to withdraw the registration of the acquired 
+adviser. 
+ 
+(2) Succession by Amendment. If you are a new investment adviser formed solely as a 
+result of a change in form of organization, a reorganization, or a change in the 
+composition of a partnership, and there has been no practical change in control or 
+management, you may amend the registration of the registered investment adviser to 
+reflect these changes rather than file a new application. You will keep the same 
+registration numbers, and you should not file a Form ADV-W. On the amendment, 
+make sure you check “yes” to Item 4.A., enter the date of the succession in Item 4.B., 
+and complete Section 4 of Schedule D. You must submit the amendment within 30 
+days after the change or reorganization. 
+ 
+b. Succession of a State-Registered Adviser. If you (1) have taken over the business of an 
+investment adviser or (2) have changed your structure or legal status (e.g., form of 
+organization or state of incorporation), a new organization has been created, which has 
+registration obligations under state investment adviser laws. There may be different ways 
+to fulfill these obligations. You should contact each state in which you are registered to 
+determine that state’s requirements for successor registration. See Form ADV General 
+Instruction 1. 
+ 
+5. Item 5: Information About Your Advisory Business 
+ 
+a. Newly-Formed Advisers: Several questions in Item 5 that ask about your advisory 
+business assume that you have been operating your advisory business for some time. 
+Your response to these questions should reflect your current advisory business (i.e., at the 
+time you file your Form ADV), with the following exceptions: 
+ 
+• base your response to Item 5.E. on the types of compensation you expect to accept; 
+• base your response to Item 5.G. and Item 5.J. on the types of advisory services you 
+expect to provide during the next year; and 
+• skip Item 5.H. 
+ 
+b. Item 5.F.: Calculating Your Regulatory Assets Under Management. In determining 
+the amount of your regulatory assets under management, include the securities portfolios 
+for which you provide continuous and regular supervisory or management services as of 
+the date of filing this Form ADV. 
+ 
+(1) Securities Portfolios. An account is a securities portfolio if at least 50% of the total 
+value of the account consists of securities. For purposes of this 50% test, you may 
+treat cash and cash equivalents (i.e., bank deposits, certificates of deposit, bankers 
+acceptances, and similar bank instruments) as securities. You must include securities 
+portfolios that are: 
+ 
+(a) your family or proprietary accounts; 
+ 
+
+20 
+SEC 1707 (07-24)  File 1 of 5 
+ 
+(b) accounts for which you receive no compensation for your services; and 
+ 
+(c) accounts of clients who are not United States persons. 
+ 
+For purposes of this definition, treat all of the assets of a private fund as a securities 
+portfolio, regardless of the nature of such assets. For accounts of private funds, 
+moreover, include in the securities portfolio any uncalled commitment pursuant to 
+which a person is obligated to acquire an interest in, or make a capital contribution to, 
+the private fund. 
+ 
+(2) Value of Portfolio. Include the entire value of each securities portfolio for which 
+you provide continuous and regular supervisory or management services. If you 
+provide continuous and regular supervisory or management services for only a 
+portion of a securities portfolio, include as regulatory assets under management only 
+that portion of the securities portfolio for which you provide such services. Exclude, 
+for example, the portion of an account: 
+ 
+(a) under management by another person; or 
+ 
+(b) that consists of real estate or businesses whose operations you “manage” on 
+behalf of a client but not as an investment. 
+ 
+Do not deduct any outstanding indebtedness or other accrued but unpaid liabilities. 
+ 
+(3) Continuous and Regular Supervisory or Management Services. 
+ 
+General Criteria. You provide continuous and regular supervisory or management 
+services with respect to an account if: 
+(a) you have discretionary authority over and provide ongoing supervisory or 
+management services with respect to the account; or 
+ 
+(b) you do not have discretionary authority over the account, but you have ongoing 
+responsibility to select or make recommendations, based upon the needs of the 
+client, as to specific securities or other investments the account may purchase or 
+sell and, if such recommendations are accepted by the client, you are responsible 
+for arranging or effecting the purchase or sale. 
+ 
+Factors. You should consider the following factors in evaluating whether you 
+provide continuous and regular supervisory or management services to an account. 
+ 
+(a) Terms of the advisory contract. If you agree in an advisory contract to provide 
+ongoing management services, this suggests that you provide these services for 
+the account. Other provisions in the contract, or your actual management 
+practices, however, may suggest otherwise. 
+ 
+(b) Form of compensation. If you are compensated based on the average value of 
+the client’s assets you manage over a specified period of time, that suggests that 
+
+21 
+SEC 1707 (07-24)  File 1 of 5 
+ 
+you provide continuous and regular supervisory or management services for the 
+account. If you receive compensation in a manner similar to either of the 
+following, that suggests you do not provide continuous and regular supervisory or 
+management services for the account 
+ 
+(i) you are compensated based upon the time spent with a client during a client 
+visit; or 
+ 
+(ii) you are paid a retainer based on a percentage of assets covered by a financial 
+plan. 
+ 
+(c) Management practices. The extent to which you actively manage assets or 
+provide advice bears on whether the services you provide are continuous and 
+regular supervisory or management services. The fact that you make infrequent 
+trades (e.g., based on a “buy and hold” strategy) does not mean your services are 
+not “continuous and regular.” 
+ 
+Examples. You may provide continuous and regular supervisory or management 
+services for an account if you: 
+ 
+(a) have discretionary authority to allocate client assets among various mutual 
+funds; 
+ 
+(b) do not have discretionary authority, but provide the same allocation services, and 
+satisfy the criteria set forth in Instruction 5.b.(3); 
+(c) allocate assets among other managers (a “manager of managers”), but only if you 
+have discretionary authority to hire and fire managers and reallocate assets 
+among them; or 
+ 
+(d) you are a broker-dealer and treat the account as a brokerage account, but only if 
+you have discretionary authority over the account. 
+ 
+You do not provide continuous and regular supervisory or management services for 
+an account if you: 
+ 
+(a) provide market timing recommendations (i.e., to buy or sell), but have no ongoing 
+management responsibilities; 
+ 
+(b) provide only impersonal investment advice (e.g., market newsletters); 
+ 
+(c) make an initial asset allocation, without continuous and regular monitoring and 
+reallocation; or 
+ 
+(d) provide advice on an intermittent or periodic basis (such as upon client request, in 
+response to a market event, or on a specific date (e.g., the account is reviewed and 
+adjusted quarterly)). 
+ 
+
+22 
+SEC 1707 (07-24)  File 1 of 5 
+ 
+(4) Value of Regulatory Assets Under Management. Determine your regulatory assets 
+under management based on the current market value of the assets as determined 
+within 90 days prior to the date of filing this Form ADV. Determine market value 
+using the same method you used to report account values to clients or to calculate 
+fees for investment advisory services. 
+ 
+In the case of a private fund, determine the current market value (or fair value) of the 
+private fund’s assets and the contractual amount of any uncalled commitment 
+pursuant to which a person is obligated to acquire an interest in, or make a capital 
+contribution to, the private fund. 
+ 
+(5) Example. This is an example of the method of determining whether an account of a 
+client other than a private fund may be included as regulatory assets under 
+management. 
+ 
+The client’s portfolio consists of the following: 
+$6,000,000 
+stocks and bonds 
+$1,000,000 
+cash and cash equivalents 
+$3,000,000 
+non-securities (collectibles, commodities, real estate, etc.) 
+$10,000,000 
+Total Assets 
+ 
+First, is the account a securities portfolio? The account is a securities portfolio 
+because securities as well as cash and cash equivalents (which you have chosen to 
+include as securities) ($6,000,000 + $1,000,000 = $7,000,000) comprise at least 50% of 
+the value of the account (here, 70%). (See Instruction 5.b.(1)). 
+ 
+Second, does the account receive continuous and regular supervisory or 
+management services? The entire account is managed on a discretionary basis and 
+is provided ongoing supervisory and management services, and therefore receives 
+continuous and regular supervisory or management services. (See Instruction 
+5.b.(3)). 
+ 
+Third, what is the entire value of the account? The entire value of the account 
+($10,000,000) is included in the calculation of the adviser’s total regulatory assets 
+under management. 
+ 
+6. Item 7: Financial Industry Affiliations and Private Fund Reporting 
+ 
+Item 7.A. and Section 7.A. of Schedule D ask questions about you and your related persons’ 
+financial industry affiliations. If you are filing an umbrella registration, you should not check 
+Item 7.A.(2) with respect to your relying advisers, and you do not have to complete Section 7.A. 
+in Schedule D for your relying advisers. You should complete Schedule R with respect to your 
+relying advisers. Item 7.B. and Section 7.B. of Schedule D ask questions about the private funds 
+that you advise. You are required to complete a Section 7.B.(1) of Schedule D for each private 
+fund that you advise, except in certain circumstances described under Item 7.B. and below. 
+ 
+a. If your principal office and place of business is outside the United States, for purposes of 
+
+23 
+SEC 1707 (07-24)  File 1 of 5 
+ 
+Item 7 and Section 7.B. of Schedule D you may disregard any private fund that, during 
+your last fiscal year, was not a United States person, was not offered in the United States, 
+and was not beneficially owned by any United States person. 
+ 
+b. When filing Section 7.B.(1) of Schedule D for a private fund, you must acquire an 
+identification number for the fund by logging onto the IARD website and using the 
+private fund identification number generator. You must continue to use the same 
+identification number whenever you amend Section 7.B.(1) for that fund. If you file a 
+Section 7.B.(1) for a private fund for which an identification number has already been 
+acquired by another adviser, you must not acquire a new identification number, but must 
+instead utilize the existing number. If you choose to complete a single Section 7.B.(1) for 
+a master-feeder arrangement under Instruction 6.d. below, you must acquire an 
+identification number also for each feeder fund. 
+ 
+c. If any private fund has issued two or more series (or classes) of equity interests whose 
+values are determined with respect to separate portfolios of securities and other assets, 
+then each such series (or class) should be regarded as a separate private fund. In Section 
+7.B.(1) and 7.B.(2) of Schedule D, next to the name of the private fund, list the name and 
+identification number of the specific series (or class) for which you are filing the sections. 
+This only applies with respect to series (or classes) that you manage as if they were 
+separate funds and not a fund’s side pockets or similar arrangements. 
+d. In the case of a master-feeder arrangement (see questions 6-7 of Section 7.B.(1) of 
+Schedule D), instead of completing a Section 7.B.(1) for each of the master fund and each 
+feeder fund, you may complete a single Section 7.B.(1) for the master-feeder 
+arrangement under the name of the master fund if the answers to questions 8, 10, 21 and 
+23 through 28 are the same for all of the feeder funds (or, in the case of questions 24 and 
+25, if the feeder funds do not use a prime broker or custodian). If you choose to complete 
+a single Section 7.B.(1), you should disregard the feeder funds, except for the following: 
+ 
+(1) Question 11: State the gross assets for the master-feeder arrangement as a whole. 
+ 
+(2) Question 12: List the lowest minimum investment commitment applicable to any of 
+the master fund and the feeder funds. 
+ 
+(3) Questions 13-16: Answer by aggregating all investors in the master-feeder 
+arrangement (but do not count the feeder funds themselves as investors). 
+ 
+(4) Questions 19-20: For purposes of these questions, the private fund means any of the 
+master fund or the feeder funds. In answering the questions, moreover, disregard the 
+feeder funds’ investment in the master fund. 
+ 
+(5) Question 22: List all of the Form D SEC file numbers of any of the master fund and 
+feeder funds. 
+ 
+e. Additional Instructions: 
+ 
+(1) Question 9: Investment in Registered Investment Companies: For purposes of 
+
+24 
+SEC 1707 (07-24)  File 1 of 5 
+ 
+this question, disregard any open-end management investment company regulated as 
+a money market fund under rule 2a-7 under the Investment Company Act if the 
+private fund invests in such a company in reliance on rule 12d1-1 under the same Act. 
+ 
+(2) Question 10: Type of Private Fund: For purposes of this question, the following 
+definitions apply: 
+ 
+“Hedge fund” means any private fund (other than a securitized asset fund): 
+ 
+(a) with respect to which one or more investment advisers (or related persons of 
+investment advisers) may be paid a performance fee or allocation calculated 
+by taking into account unrealized gains (other than a fee or allocation the 
+calculation of which may take into account unrealized gains solely for the 
+purpose of reducing such fee or allocation to reflect net unrealized losses); 
+ 
+(b) that may borrow an amount in excess of one-half of its net asset value 
+(including any committed capital) or may have gross notional exposure in 
+excess of twice its net asset value (including any committed capital); or 
+(c) that may sell securities or other assets short or enter into similar transactions 
+(other than for the purpose of hedging currency exposure or managing 
+duration). 
+ 
+A commodity pool is categorized as a hedge fund solely for purposes of this question. 
+For purposes of this definition, do not net long and short positions. Include any 
+borrowings or notional exposure of another person that are guaranteed by the private 
+fund or that the private fund may otherwise be obligated to satisfy. 
+ 
+“Liquidity fund” means any private fund that seeks to generate income by 
+investing in a portfolio of short-term obligations in order to maintain a stable net 
+asset value per unit or minimize principal volatility for investors. 
+ 
+“Private equity fund” means any private fund that is not a hedge fund, liquidity 
+fund, real estate fund, securitized asset fund, or venture capital fund and does not 
+provide investors with redemption rights in the ordinary course. 
+ 
+“Real estate fund” means any private fund that is not a hedge fund, that does not 
+provide investors with redemption rights in the ordinary course, and that invests 
+primarily in real estate and real estate related assets. 
+ 
+“Securitized asset fund” means any private fund whose primary purpose is to 
+issue asset backed securities and whose investors are primarily debt-holders. 
+ 
+“Venture capital fund” means any private fund meeting the definition of venture 
+capital fund in rule 203(l)-1 under the Advisers Act. 
+ 
+“Other private fund” means any private fund that is not a hedge fund, liquidity 
+fund, private equity fund, real estate fund, securitized asset fund, or venture 
+
+25 
+SEC 1707 (07-24)  File 1 of 5 
+ 
+capital fund. 
+ 
+(3) Question 11: Gross Assets. Report the assets of the private fund that you would 
+include in calculating your regulatory assets under management according to 
+Instruction 5.b. above. 
+ 
+(4) Questions 19-20: Other clients’ investments: For purposes of these questions, 
+disregard any feeder fund’s investment in its master fund. (See questions 6-7 for 
+the definition of “master fund” and “feeder fund”). 
+ 
+7. Item 10: Control Persons 
+ 
+If you are a “separately identifiable department or division” (SID) of a bank, identify on 
+Schedule A your bank’s executive officers who are directly engaged in managing, directing, or 
+supervising your investment advisory activities, and list any other persons designated by your 
+bank’s board of directors as responsible for the day-to-day conduct of your investment advisory 
+activities, including supervising employees performing investment advisory activities. 
+ 
+8. Additional Information 
+ 
+If you believe your response to an item in Form ADV Part 1A requires further explanation, or if 
+you wish to provide additional information, you may do so on Schedule D, in the Miscellaneous 
+section. Completion of this section is optional. 
+
+26 
+ 
+GLOSSARY OF TERMS 
+1. Advertisement: (i) Any direct or indirect communication an investment adviser makes to 
+more than one person, or to one or more persons if the communication includes hypothetical 
+performance, that offers the investment adviser’s investment advisory services with regard to 
+securities to prospective clients or investors in a private fund advised by the investment 
+adviser or offers new investment advisory services with regard to securities to current clients 
+or investors in a private fund advised by the investment adviser, but does not include: (A) 
+extemporaneous, live, oral communications; (B) information contained in a statutory or 
+regulatory notice, filing, or other required communication, provided that such information is 
+reasonably designed to satisfy the requirements of such notice, filing, or other required 
+communication; or (C) a communication that includes hypothetical performance that is 
+provided: (1) in response to an unsolicited request for such information from a prospective or 
+current client or investor in a private fund advised by the investment adviser; or (2) to a 
+prospective or current investor in a private fund advised by the investment adviser in a one- 
+on-one communication; and (ii) any endorsement or testimonial for which an investment 
+adviser provides compensation, directly or indirectly, but does not include any information 
+contained in a statutory or regulatory notice, filing, or other required communication, 
+provided that such information is reasonably designed to satisfy the requirements of such 
+notice, filing, or other required communication. [Used in: Part 1A, Item 5][Effective May 4, 
+2021, pursuant to Investment Adviser Marketing, Investment Advisers Act Release No. 5653 
+(Dec. 22, 2020) [86 FR 13024 (Mar. 5, 2021)].] 
+ 
+2. Advisory Affiliate: Your advisory affiliates are (1) all of your officers, partners, or directors 
+(or any person performing similar functions); (2) all persons directly or indirectly 
+controlling or controlled by you; and (3) all of your current employees (other than 
+employees performing only clerical, administrative, support or similar functions). 
+ 
+If you are a “separately identifiable department or division” (SID) of a bank, your advisory 
+affiliates are: (1) all of your bank’s employees who perform your investment advisory 
+activities (other than clerical or administrative employees); (2) all persons designated by your 
+bank’s board of directors as responsible for the day-to-day conduct of your investment 
+advisory activities (including supervising the employees who perform investment advisory 
+activities); (3) all persons who directly or indirectly control your bank, and all persons 
+whom you control in connection with your investment advisory activities; and (4) all other 
+persons who directly manage any of your investment advisory activities (including directing, 
+supervising or performing your advisory activities), all persons who directly or indirectly 
+control those management functions, and all persons whom you control in connection with 
+those management functions. [Used in: Part 1A, Items 7, 11, DRPs; Part 1B, Item 2] 
+ 
+3. Annual Updating Amendment: Within 90 days after your firm’s fiscal year end, your firm 
+must file an “annual updating amendment,” which is an amendment to your firm’s Form 
+ADV that reaffirms the eligibility information contained in Item 2 of Part 1A and updates the 
+responses to any other item for which the information is no longer accurate. [Used in: 
+General Instructions; Part 1A, Instructions, Introductory Text, Item 2; Part 2A, Instructions, 
+Appendix 1 Instructions; Part 2B, Instructions] 
+4. Borrowings: Borrowings include secured borrowings and unsecured borrowings, 
+
+27 
+ 
+collectively. Secured borrowings are obligations for borrowed money in respect of which the 
+borrower has posted collateral or other credit support and should include any reverse repos 
+(i.e., any sale of securities coupled with an agreement to repurchase the same (or similar) 
+securities at a later date at an agreed price). Unsecured borrowings are obligations for 
+borrowed money in respect of which the borrower has not posted collateral or other credit 
+support. [Used in: Part 1A, Instructions, Item 5, Schedule D] 
+ 
+5. Brochure: A written disclosure statement that you must provide to clients and prospective 
+clients. See SEC rule 204-3; Form ADV, Part 2A. [Used in: General Instructions; Used 
+throughout Part 2] 
+ 
+6. Brochure Supplement: A written disclosure statement containing information about certain 
+of your supervised persons that your firm is required by Part 2B of Form ADV to provide to 
+clients and prospective clients. See SEC rule 204-3; Form ADV, Part 2B. [Used in: 
+General Instructions; Used throughout Part 2] 
+ 
+7. Charged: Being accused of a crime in a formal complaint, information, or indictment (or 
+equivalent formal charge). [Used in: Part 1A, Item 11; DRPs] 
+ 
+8. Client: Any of your firm’s investment advisory clients. This term includes clients from 
+which your firm receives no compensation, such as family members of your supervised 
+persons. If your firm also provides other services (e.g., accounting services), this term does 
+not include clients that are not investment advisory clients. [Used throughout Form ADV 
+and Form ADV-W] 
+ 
+9. Commodity Derivative: Exposures to commodities that you do not hold physically, 
+whether held synthetically or through derivatives (whether cash or physically settled). [Used 
+in: Part 1A, Schedule D] 
+ 
+10. Control: The power, directly or indirectly, to direct the management or policies of a person, 
+whether through ownership of securities, by contract, or otherwise. 
+• Each of your firm’s officers, partners, or directors exercising executive responsibility (or 
+persons having similar status or functions) is presumed to control your firm. 
+• A person is presumed to control a corporation if the person: (i) directly or indirectly has 
+the right to vote 25 percent or more of a class of the corporation’s voting securities; or (ii) 
+has the power to sell or direct the sale of 25 percent or more of a class of the 
+corporation’s voting securities. 
+• A person is presumed to control a partnership if the person has the right to receive upon 
+dissolution, or has contributed, 25 percent or more of the capital of the partnership. 
+• A person is presumed to control a limited liability company (“LLC”) if the person: (i) 
+directly or indirectly has the right to vote 25 percent or more of a class of the interests 
+of the LLC; (ii) has the right to receive upon dissolution, or has contributed, 25 
+percent or more of the capital of the LLC; or (iii) is2a9n elected manager of the LLC. 
+• A person is presumed to control a trust if the person is a trustee or managing agent of 
+
+28 
+ 
+the trust. 
+[Used in: General Instructions; Part 1A, Instructions, Items 2, 7, 10, 11, 12, Schedules A, B, 
+C, D, R; DRPs] 
+ 
+11. Credit Derivative: Single name credit default swap, including loan credit default swap, 
+credit default swap referencing a standardized basket of credit entities, including credit 
+default swap indices and indices referencing leveraged loans, and credit default swap 
+referencing bespoke basket or tranche of collateralized debt obligations and collateralized 
+loan obligations (including cash flow and synthetic) other than mortgage backed securities. 
+[Used in: Part 1A, Schedule D] 
+ 
+12. Custody: Holding, directly or indirectly, client funds or securities, or having any authority 
+to obtain possession of them. You have custody if a related person holds, directly or 
+indirectly, client funds or securities, or has any authority to obtain possession of them, in 
+connection with advisory services you provide to clients. Custody includes: 
+ 
+• Possession of client funds or securities (but not of checks drawn by clients and made 
+payable to third parties) unless you receive them inadvertently and you return them to the 
+sender promptly, but in any case within three business days of receiving them; 
+ 
+• Any arrangement (including a general power of attorney) under which you are authorized 
+or permitted to withdraw client funds or securities maintained with a custodian upon your 
+instruction to the custodian; and 
+ 
+• Any capacity (such as general partner of a limited partnership, managing member of a 
+limited liability company or a comparable position for another type of pooled investment 
+vehicle, or trustee of a trust) that gives you or your supervised person legal ownership of 
+or access to client funds or securities. 
+ 
+[Used in: Part 1A, Item 9; Part 1B, Instructions, Item 2; Part 2A, Items 15, 18] 
+ 
+13. Digital Investment Advisory Service: Investment advice to clients that is generated by 
+the operational interactive website’s software-based models, algorithms, or applications 
+based on personal information each client supplies through the operational interactive 
+website. 
+ 
+14. Discretionary Authority or Discretionary Basis: Your firm has discretionary authority or 
+manages assets on a discretionary basis if it has the authority to decide which securities to 
+purchase and sell for the client. Your firm also has discretionary authority if it has the 
+authority to decide which investment advisers to retain on behalf of the client. [Used in: 
+Part 1A, Instructions, Item 8; Part 1B, Instructions; Part 2A, Items 4, 16, 18; Part 2B, 
+Instructions] 
+ 
+15. Employee: This term includes an independent contractor who performs advisory functions 
+on your behalf. [Used in: Part 1A, Instructions, Items 1, 5, 11; Part 2B, Instructions] 
+ 
+
+29 
+ 
+16. Endorsement: Any statement by a person other than a current client or investor in a private 
+fund advised by the investment adviser that: (i) indicates approval, support, or 
+recommendation of the investment adviser or its supervised persons or describes that 
+indirectly solicits any current or prospective client or investor to be a client of, or an investor 
+in a private fund advised by, the investment adviser; or (iii) refers any current or prospective 
+client of, or an investor in a private fund advised by, the investment adviser. [Used in: Part 
+1A, Item 5][Effective May 4, 2021, pursuant to Investment Adviser Marketing, Investment 
+Advisers Act Release No. 5653 (Dec. 22, 2020) [86 FR 13024 (Mar. 5, 2021)].] 
+ 
+17. Enjoined: This term includes being subject to a mandatory injunction, prohibitory 
+injunction, preliminary injunction, or a temporary restraining order. [Used in: Part 1A, Item 
+11; DRPs] 
+ 
+18. Equity Derivative: Includes both listed equity derivative and derivative exposure to unlisted 
+securities. Listed equity derivative includes all synthetic or derivative exposure to equities, 
+including preferred equities, listed on a regulated exchange. Listed equity derivative also 
+includes a single stock future, equity index future, dividend swap, total return swap (contract 
+for difference), warrant and right. Derivative exposure to unlisted equities includes all 
+synthetic or derivative exposure to equities, including preferred equities that are not listed on 
+a regulated exchange. Derivative exposure to unlisted securities also includes a single stock 
+future, equity index future, dividend swap, total return swap (contract for difference), warrant 
+and right. [Used in: Part 1A, Schedule D] 
+ 
+19. Exempt Reporting Adviser: An investment adviser that qualifies for the exemption from 
+registration under section 203(l) of the Advisers Act because it is an adviser solely to one or 
+more venture capital funds, or under rule 203(m)-1 of the Advisers Act because it is an 
+adviser solely to private funds and has assets under management in the United States of less 
+than $150 million. [Used in: Throughout Part 1A; General Instructions; Form ADV-H; 
+Form ADV-NR] 
+ 
+20. Felony: For jurisdictions that do not differentiate between a felony and a misdemeanor, a 
+felony is an offense punishable by a sentence of at least one year imprisonment and/or a fine 
+of at least $1,000. The term also includes a general court martial. [Used in: Part 1A, Item 
+11; DRPs; Part 2A, Item 9; Part 2B, Item 3] 
+ 
+21. Filing Adviser: An investment adviser eligible to register with the SEC that files (and 
+amends) a single umbrella registration on behalf of itself and each of its relying advisers. 
+[Used in: General Instructions; Part 1A, Items 1, 2, 3, 10 and 11; Schedule R] 
+ 
+22. FINRA CRD or CRD: The Web Central Registration Depository (“CRD”) system operated 
+by FINRA for the registration of broker-dealers and broker-dealer representatives. [Used in: 
+General Instructions; Part 1A, Item 1, Schedules A, B, C, D, R, DRPs; Form ADV-W, Item 1] 
+ 
+23. Foreign Exchange Derivative: Any derivative whose underlying asset is a currency other 
+than U.S. dollars or is an exchange rate. Cross-currency interest rate swaps should be 
+included in foreign exchange derivatives and excluded from interest rate derivatives. [Used 
+in: Part 1A, Schedule D] 
+
+30 
+ 
+ 
+24. Foreign Financial Regulatory Authority: This term includes (1) a foreign securities 
+authority; (2) another governmental body or foreign equivalent of a self-regulatory 
+organization empowered by a foreign government to administer or enforce its laws relating to 
+the regulation of investment-related activities; and (3) a foreign membership organization, a 
+function of which is to regulate the participation of its members in the activities listed above. 
+[Used in: Part 1A, Items 1, 11, DRPs; Part 2A, Item 9; Part 2B, Item 3] 
+ 
+25. Found: This term includes adverse final actions, including consent decrees in which the 
+respondent has neither admitted nor denied the findings, but does not include agreements, 
+deficiency letters, examination reports, memoranda of understanding, letters of caution, 
+admonishments, and similar informal resolutions of matters. [Used in: Part 1A, Item 11; 
+Part 1B, Item 2; Part 2A, Item 9; Part 2B, Item 3] 
+ 
+26. Government Entity: Any state or political subdivision of a state, including (i) any agency, 
+authority, or instrumentality of the state or political subdivision; (ii) a plan or pool of assets 
+controlled by the state or political subdivision or any agency, authority, or instrumentality 
+thereof; and (iii) any officer, agent, or employee of the state or political subdivision or any 
+agency, authority, or instrumentality thereof, acting in their official capacity. [Used in: Part 
+1A, Item 5] 
+ 
+27. Gross Notional Value: The gross nominal or notional value of all transactions that have 
+been entered into but not yet settled as of the reporting date. For contracts with variable 
+nominal or notional principal amounts, the basis for reporting is the nominal or notional 
+principal amounts as of the reporting date. For options, use delta adjusted notional value. 
+[Used in: Part 1A, Schedule D] 
+ 
+28. High Net Worth Individual: An individual who is a qualified client or who is a “qualified 
+purchaser” as defined in section 2(a)(51)(A) of the Investment Company Act of 1940. [Used 
+in: Part 1A, Item 5] 
+ 
+29. Home State: If your firm is registered with a state securities authority, your firm’s “home 
+state” is the state where it maintains its principal office and place of business. [Used in: 
+Part 1B, Instructions] 
+ 
+30. Hypothetical Performance: Performance results that were not actually achieved by any 
+portfolio of the investment adviser. (i) Hypothetical performance includes, but is not 
+limited to: (A) performance derived from model portfolios; (B) performance that is 
+backtested by the application of a strategy to data from prior time periods when the strategy 
+was not actually used during those time periods; and (C) targeted or projected performance 
+returns with respect to any portfolio or to the investment services offered in the 
+advertisement; however: (ii) Hypothetical performance does not include: (A) an interactive 
+analysis tool where a client or investor, or prospective client, or investor, uses the tool to 
+produce simulations and statistical analyses that present the likelihood of various investment 
+outcomes if certain investments are made or certain investment strategies or styles are 
+undertaken, thereby serving as an additional resource to investors in the evaluation of the 
+potential risks and returns of investment choices; provided that the investment adviser: (1) 
+
+31 
+ 
+provides a description of the criteria and methodology used, including the investment 
+analysis tool’s limitations and key assumptions; (2) explains that the results may vary with 
+each use and over time; (3) if applicable, describes the universe of investments considered in 
+the analysis, explains how the tool determines which investments to select, discloses if the 
+tool favors certain investments and, if so, explains the reason for the selectivity, and states 
+that other investments not considered may have characteristics similar or superior to those 
+being analyzed; and (4) discloses that the tool generates outcomes that are hypothetical in 
+nature; or (B) predecessor performance that is displayed in compliance with rule 206(4)-
+1(d)(7). [Used in: Part 1A, Item 5][Effective May 4, 2021, pursuant to Investment Adviser 
+Marketing, Investment Advisers Act Release No. 5653 (Dec. 22, 2020) [86 FR 13024 (Mar. 
+5, 2021)].] 
+ 
+31. Impersonal Investment Advice: Investment advisory services that do not purport to meet 
+the objectives or needs of specific individuals or accounts. [Used in: Part 1A, Instructions; 
+Part 2A, Instructions; Part 2B, Instructions] 
+ 
+32. Independent Public Accountant: A public accountant that meets the standards of 
+independence described in rule 2-01(b) and (c) of Regulation S-X (17 CFR 210.2-01(b) and 
+(c)). [Used in: Part 1A, Item 9; Schedule D] 
+ 
+33. Interest Rate Derivative: Any derivative whose underlying asset is the obligation to pay or 
+the right to receive a given amount of money accruing interest at a given rate. Cross- 
+currency interest rate swaps should be included in foreign exchange derivatives and 
+excluded from interest rate derivatives. This information must be presented in terms of 10- 
+year bond equivalents. [Used in: Part 1A, Schedule D] 
+ 
+34. Investment Adviser Representative: Any of your firm’s supervised persons (except those 
+that provide only impersonal investment advice) is an investment adviser representative, if  
+ 
+• the supervised person regularly solicits, meets with, or otherwise communicates with 
+your firm’s clients, 
+ 
+• the supervised person has more than five clients who are natural persons and not high 
+net worth individuals, and 
+ 
+• more than ten percent of the supervised person’s clients are natural persons and not high 
+net worth individuals. 
+ 
+NOTE: If your firm is registered with the state securities authorities and not the SEC, 
+your firm may be subject to a different state definition of “investment adviser 
+representative.” Investment adviser representatives of SEC-registered advisers may be 
+required to register in each state in which they have a place of business. 
+ 
+[Used in: General Instructions; Part 1A, Item 5; Part 2B, Item 1] 
+ 
+35. Investment-Related: Activities that pertain to securities, commodities, banking, 
+
+32 
+ 
+insurance, or real estate (including, but not limited to, acting as or being associated with 
+an investment adviser, broker-dealer, municipal securities dealer, government securities 
+broker or dealer, issuer, investment company, futures sponsor, bank, or savings 
+association). [Used in: Part 1A, Items 7, 11, Schedule D, DRPs; Part 1B, Item 2; Part 2A, 
+Items 9 and 19; Part 2B, Items 3, 4 and 7] 
+ 
+36. Involved: Engaging in any act or omission, aiding, abetting, counseling, commanding, 
+inducing, conspiring with or failing reasonably to supervise another in doing an act. [Used 
+in: Part 1A, Item 11; Part 2A, Items 9 and 10; Part 2B, Items 3 and 7] 
+ 
+37. Legal Entity Identifier: A “legal entity identifier” assigned by a utility endorsed by the 
+Global LEI Regulatory Oversight Committee (ROC) or accredited by the Global LEI 
+Foundation (GLEIF). [Used in: Part 1A, Item 1, Schedules D and R] 
+ 
+38. Management Persons: Anyone with the power to exercise, directly or indirectly, a 
+controlling influence over your firm’s management or policies, or to determine the general 
+investment advice given to the clients of your firm. 
+ 
+Generally, all of the following are management persons: 
+ 
+• Your firm’s principal executive officers, such as your chief executive officer, chief 
+financial officer, chief operations officer, chief legal officer, and chief compliance 
+officer; your directors, general partners, or trustees; and other individuals with similar 
+status or performing similar functions; 
+ 
+• The members of your firm’s investment committee or group that determines general 
+investment advice to be given to clients; and 
+ 
+• If your firm does not have an investment committee or group, the individuals who 
+determine general investment advice provided to clients (if there are more than five 
+people, you may limit your firm’s response to their supervisors). 
+ 
+[Used in: Part 1B, Item 2; Part 2A, Items 9, 10 and 19] 
+ 
+39. Managing Agent: A managing agent of an investment adviser is any person, including a 
+trustee, who directs or manages (or who participates in directing or managing) the affairs of 
+any unincorporated organization or association that is not a partnership. [Used in: General 
+Instructions; Form ADV-NR; Form ADV-W, Item 8] 
+ 
+40. Minor Rule Violation: A violation of a self-regulatory organization rule that has been 
+designated as “minor” pursuant to a plan approved by the SEC. A rule violation may be 
+designated as “minor” under a plan if the sanction imposed consists of a fine of $2,500 or 
+less, and if the sanctioned person does not contest the fine. (Check with the appropriate self- 
+regulatory organization to determine if a particular rule violation has been designated as 
+“minor” for these purposes.) [Used in: Part 1A, Item 11] 
+ 
+
+33 
+ 
+41. Misdemeanor: For jurisdictions that do not differentiate between a felony and a 
+misdemeanor, a misdemeanor is an offense punishable by a sentence of less than one year 
+imprisonment and/or a fine of less than $1,000. The term also includes a special court 
+martial. [Used in: Part 1A, Item 11; DRPs; Part 2A, Item 9; Part 2B, Item 3] 
+ 
+42. Non-Resident: (a) an individual who resides in any place not subject to the jurisdiction of 
+the United States; (b) a corporation incorporated in or that has its principal office and place 
+of business in any place not subject to the jurisdiction of the United States; and (c) a 
+partnership or other unincorporated organization or association that is formed in or has its 
+principal office and place of business in any place not subject to the jurisdiction of the 
+United States. [Used in: General Instructions; Form ADV-NR] 
+ 
+43. Notice Filing: SEC-registered advisers may have to provide state securities authorities with 
+copies of documents that are filed with the SEC. These filings are referred to as “notice 
+filings.” [Used in: General Instructions; Part 1A, Item 2; Execution Page(s); Form ADV- 
+W] 
+ 
+44. Operational Interactive Website: A website, mobile application, or similar digital 
+platform through which the investment adviser provides digital investment advisory 
+services on an ongoing basis to more than one client (except during temporary technological 
+outages of a de minimis duration). 
+ 
+45. Order: A written directive issued pursuant to statutory authority and procedures, including 
+an order of denial, exemption, suspension, or revocation. Unless included in an order, this 
+term does not include special stipulations, undertakings, or agreements relating to payments, 
+limitations on activity or other restrictions. [Used in: Part 1A, Items 2 and 11, Schedules D 
+and R; DRPs; Part 2A, Item 9; Part 2B, Item 3] 
+ 
+46. Other Derivative: Any derivative that is not a commodity derivative, credit derivative, 
+equity derivative, foreign exchange derivative or interest rate derivative. [Used in: Part 
+1A, Schedule D] 
+ 
+47. Parallel Managed Account: With respect to any registered investment company or series 
+thereof or business development company, a parallel managed account is any managed 
+account or other pool of assets that you advise and that pursues substantially the same 
+investment objective and strategy and invests side by side in substantially the same positions 
+as the identified investment company or series thereof or business development company that 
+you advise. [Used in: Part 1A, Schedule D] 
+ 
+48. Performance-Based Fee: An investment advisory fee based on a share of capital gains on, 
+or capital appreciation of, client assets. A fee that is based upon a percentage of assets that 
+you manage is not a performance-based fee. [Used in: Part 1A, Item 5; Part 2A, Items 6 and 
+19] 
+ 
+49. Person: A natural person (an individual) or a company. A company includes any 
+partnership, corporation, trust, limited liability company (“LLC”), limited liability 
+partnership (“LLP”), sole proprietorship, or other organization. [Used throughout Form 
+
+34 
+ 
+ADV and Form ADV-W] 
+ 
+50. Predecessor Performance: Investment performance achieved by a group of investments 
+consisting of an account or a private fund that was not advised at all times during the period 
+shown by the investment adviser advertising the performance. [Used in: Part 1A, Item 
+5][Effective May 4, 2021, pursuant to Investment Adviser Marketing, Investment Advisers 
+Act Release No. 5653 (Dec. 22, 2020) [86 FR 13024 (Mar. 5, 2021)].] 
+ 
+51. Principal Office and Place of Business: Your firm’s executive office from which your 
+firm’s officers, partners, or managers direct, control, and coordinate the activities of your 
+firm. [Used in: Part 1A, Instructions, Items 1 and 2; Schedules D and R; Form ADV-W, 
+Item 1] 
+ 
+52. Private Fund: An issuer that would be an investment company as defined in section 3 of the 
+Investment Company Act of 1940 but for section 3(c)(1) or 3(c)(7) of that Act. [Used in: 
+General Instructions; Part 1A, Instructions, Items 2, 5, 7, and 9; Part 1A, Schedule D] 
+ 
+53. Proceeding: This term includes a formal administrative or civil action initiated by a 
+governmental agency, self-regulatory organization or foreign financial regulatory 
+authority; a felony criminal indictment or information (or equivalent formal charge); or a 
+misdemeanor criminal information (or equivalent formal charge). This term does not 
+include other civil litigation, investigations, or arrests or similar charges effected in the 
+absence of a formal criminal indictment or information (or equivalent formal charge). [Used 
+in: Part 1A, Item 11, DRPs; Part 1B, Item 2; Part 2A, Item 9; Part 2B, Item 3] 
+ 
+54. Qualified Client: A client that satisfies the definition of qualified client in SEC rule 205-3. 
+[Used in: General Instructions; Part 1A, Schedule D] 
+ 
+55. Related Person: Any advisory affiliate and any person that is under common control with 
+your firm. [Used in: Part 1A, Items 7, 8 and 9; Schedule D; Form ADV-W, Item 3; Part 2A, 
+Items 10, 11, 12 and 14; Part 2A, Appendix 1, Item 6] 
+ 
+56. Relying Adviser: An investment adviser eligible to register with the SEC that relies on a 
+filing adviser to file (and amend) a single umbrella registration on its behalf. [Used in: 
+General Instructions; Part 1A, Items 1, 7 and 11; Schedules D and R] 
+ 
+57. Self-Regulatory Organization or SRO: Any national securities or commodities exchange, 
+registered securities association, or registered clearing agency. For example, the Chicago 
+Board of Trade (“CBOT”), FINRA and New York Stock Exchange (“NYSE”) are self- 
+regulatory organizations. [Used in: Part 1A, Item 11; DRPs; Part 1B, Item 2; Part 2A, 
+Items 9 and 19; Part 2B, Items 3 and 7] 
+ 
+58. Sovereign Bonds: Any notes, bonds and debentures issued by a national government 
+(including central government, other governments and central banks but excluding U.S. state 
+and local governments), whether denominated in a local or foreign currency. [Used in: Part 
+1A, Schedule D] 
+ 
+
+35 
+ 
+59. Sponsor: A sponsor of a wrap fee program sponsors, organizes, or administers the program 
+or selects, or provides advice to clients regarding the selection of, other investment advisers 
+in the program. [Used in: Part 1A, Item 5, Schedule D; Part 2A, Instructions, Appendix 1 
+Instructions] 
+ 
+ 
+ 
+ 
+60. State Securities Authority: The securities commissioner or commission (or any agency, 
+office or officer performing like functions) of any state of the United States, the District of 
+Columbia, Puerto Rico, the Virgin Islands, or any other possession of the United States. 
+[Used throughout Form ADV] 
+ 
+61. Supervised Person: Any of your officers, partners, directors (or other persons occupying a 
+similar status or performing similar functions), or employees, or any other person who 
+provides investment advice on your behalf and is subject to your supervision or control. 
+[Used throughout Part 2] 
+ 
+62. Testimonial: Any statement by a current client or investor in a private fund advised by the 
+investment adviser: (i) about the client or investor’s experience with the investment adviser 
+or its supervised persons (ii) that directly or indirectly solicits any current or prospective 
+client or investor to be a client of, or an investor in a private fund advised by, the investment 
+adviser; or (iii) that refers any current or prospective client or investor to be a client of, or an 
+investor in a private fund advised by, the investment adviser. [Used in: Part 1A, Item 
+5][Effective May 4, 2021, pursuant to Investment Adviser Marketing, Investment Advisers 
+Act Release No. 5653 (Dec. 22, 2020) [86 FR 13024 (Mar. 5, 2021)].] 
+ 
+63. Third-party Rating: A rating or ranking of an investment adviser provided by a person 
+who is not a related person and such person provides such ratings or rankings in the ordinary 
+course of its business. [Used in: Part 1A, Item 5][Effective May 4, 2021, pursuant to 
+Investment Adviser Marketing, Investment Advisers Act Release No. 5653 (Dec. 22, 2020) [86 
+FR 13024 (Mar. 5, 2021)].] 
+ 
+64. Umbrella Registration: A single registration by a filing adviser and one or more relying 
+advisers who collectively conduct a single advisory business and that meet the conditions set 
+forth in General Instruction 5. [Used in: General Instructions; Part 1A, Items 1, 2, 3, 7, 10 
+and 11, Schedules D and R] 
+ 
+65. United States person: This term has the same meaning as in rule 203(m)-1 under the 
+Advisers Act, which includes any natural person that is resident in the United States. [Used 
+in: Part 1A, Instructions, Item 5; Schedule D] 
+ 
+66. Wrap Brochure or Wrap Fee Program Brochure: The written disclosure statement that 
+sponsors of wrap fee programs must provide to each of their wrap fee program clients. 
+[Used in: Part 2, General Instructions; Used throughout Part 2A, Appendix 1] 
+ 
+67. Wrap Fee Program: Any advisory program under which a specified fee or fees not based 
+
+36 
+ 
+directly upon transactions in a client’s account is charged for investment advisory services 
+(which may include portfolio management or advice concerning the selection of other 
+investment advisers) and the execution of client transactions. [Used in: Part 1, Item 5; 
+Schedule D; Part 2A, Instructions, Item 4, used throughout Appendix 1; Part 2B, 
+Instructions] 

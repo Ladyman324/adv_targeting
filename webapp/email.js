@@ -1,0 +1,2025 @@
+(function (global) {
+  "use strict";
+
+  let catalog = null;
+  let detail = null;
+  let recipients = [];
+  // Addresses the rep has excluded on the setup screen. A Set of lowercase
+  // addresses rather than an index, so it survives the list being re-sorted or
+  // re-grouped underneath it.
+  let excluded = new Set();
+  let openDomain = null;   // which domain group is drilled into, if any
+  let cursor = 0;
+  let pollTimer = null;
+  let tickTimer = null;
+  // Set when the rep explicitly asks to see a finished batch's messages, so the
+  // completion panel does not immediately replace what they opened.
+  let forceDetail = false;
+  // Edits to a single message used to be lost by moving to the next recipient:
+  // the override only existed once "Save override" was pressed, and nothing on
+  // screen said so. Now the edit is the thing that matters and saving is
+  // automatic -- on blur, and before any navigation that would discard it.
+  let dirty = false;
+  let saving = false;
+
+  const esc = (v) => String(v == null ? "" : v).replace(/[&<>"']/g, (c) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  })[c]);
+  const bytes = (n) => n >= 1048576 ? `${(n / 1048576).toFixed(1)} MB` : `${Math.ceil(n / 1024)} KB`;
+
+  async function api(op, body, method = "POST") {
+    const [operation, extraQuery = ""] = String(op).split("&", 2);
+    const response = await fetch(`/api/email?op=${encodeURIComponent(operation)}${extraQuery ? `&${extraQuery}` : ""}`, {
+      method, headers: body ? { "Content-Type": "application/json" } : {},
+      body: body ? JSON.stringify({ ...body, op }) : undefined,
+    });
+    let data = {};
+    try { data = await response.json(); } catch {}
+    if (!response.ok) throw new Error(data.error || `Email service returned ${response.status}.`);
+    return data;
+  }
+
+  function shell() {
+    let back = document.getElementById("emailComposerBack");
+    if (!back) {
+      back = document.createElement("div");
+      back.id = "emailComposerBack";
+      back.className = "email-back";
+      back.hidden = true;
+      back.innerHTML = `<section class="email-compose" role="dialog" aria-modal="true" aria-labelledby="emailTitle">
+        <header class="email-head"><div><p class="eyebrow">Microsoft 365</p><h2 id="emailTitle">Email</h2></div>
+          <button type="button" class="rclose" data-email="close" aria-label="Close">&times;</button></header>
+        <div id="emailBody" class="email-body"></div></section>`;
+      document.body.appendChild(back);
+    }
+    return back;
+  }
+
+  function notice(message, bad = false) {
+    const el = document.getElementById("emailNotice");
+    if (el) { el.textContent = message || ""; el.classList.toggle("bad", bad); }
+  }
+
+  async function loadCatalog() { catalog = await api("catalog", null, "GET"); return catalog; }
+
+  function connectView(error = "") {
+    document.getElementById("emailBody").innerHTML = `<div class="email-connect">
+      <h3>Connect your Microsoft 365 mailbox</h3>
+      <p>The app will create traceable drafts in your own mailbox. It cannot create or send from another employee’s mailbox.</p>
+      ${error ? `<p class="email-error">${esc(error)}</p>` : ""}
+      <button type="button" class="ask-btn primary" data-email="connect">Connect Microsoft 365</button>
+      <p class="email-fine">Delegated permissions: User.Read, Mail.ReadWrite, and Mail.Send. Tokens remain server-side and encrypted.</p></div>`;
+  }
+
+
+  /* ---------- recipients, grouped by email domain -------------------------
+   * The failure this exists to prevent: a batch written for Morgan Stanley
+   * advisors that quietly also goes to the eight Raymond James contacts who
+   * happened to be on the same list. A flat list of sixty names does not
+   * surface that -- the wrong eight look exactly like the right fifty-two.
+   * Grouped by domain, a stray firm is a whole row that does not belong, which
+   * is a thing a person notices in one glance rather than by reading.
+   *
+   * Exclusion is client-side and pre-batch: what the rep excludes here is never
+   * sent to the server, so an excluded person never becomes a message that
+   * could later be approved by accident.
+   */
+  const domainOf = (r) => String(r.email || "").toLowerCase().split("@")[1] || "(no email)";
+  const keptRecipients = () => recipients.filter((r) => !excluded.has(String(r.email || "").toLowerCase()));
+
+  function domainGroups() {
+    const map = new Map();
+    for (const r of recipients) {
+      const d = domainOf(r);
+      if (!map.has(d)) map.set(d, []);
+      map.get(d).push(r);
+    }
+    // Biggest first: the dominant domain is almost always the intended audience,
+    // so the odd ones out fall to the bottom where they read as exceptions.
+    return [...map.entries()].map(([domain, people]) => ({ domain, people,
+      kept: people.filter((r) => !excluded.has(String(r.email || "").toLowerCase())).length }))
+      .sort((a, b) => b.people.length - a.people.length || a.domain.localeCompare(b.domain));
+  }
+
+  /* The element that actually scrolls above `el`.
+   *
+   * Not assumed to be any particular container: the composer has been reshaped
+   * more than once, and a hard-coded id would silently stop working the next
+   * time rather than obviously breaking.
+   */
+  function scrollParent(el) {
+    for (let n = el && el.parentElement; n; n = n.parentElement) {
+      const style = getComputedStyle(n);
+      if (/(auto|scroll)/.test(style.overflowY) && n.scrollHeight > n.clientHeight) return n;
+    }
+    return document.scrollingElement;
+  }
+
+  function domainPicker() {
+    const groups = domainGroups();
+    const kept = keptRecipients().length, off = recipients.length - kept;
+    return `<fieldset class="email-domains"><legend>Recipients by email domain</legend>
+      <p class="email-fine">Check a domain to include everyone on it. Open one to
+        exclude individuals. Only checked recipients are emailed.</p>
+      ${groups.length > 1 ? `<p class="email-domain-acts">
+        <button type="button" class="email-small" data-email="dom-all">Include all</button>
+        <button type="button" class="email-small" data-email="dom-none">Exclude all</button>
+        <span class="email-domain-warn">${groups.length} different domains in this list.</span>
+      </p>` : ""}
+      <ul class="email-domain-list">${groups.map((g) => {
+        const state = g.kept === g.people.length ? "all" : g.kept === 0 ? "none" : "some";
+        return `<li class="dom-${state}">
+          <div class="email-domain-row">
+            <label><input type="checkbox" data-email="dom-toggle" data-domain="${esc(g.domain)}"
+              ${state === "all" ? "checked" : ""}${state === "some" ? ' data-mixed="1"' : ""}>
+              <b>${esc(g.domain)}</b></label>
+            <span class="email-domain-count ${state === "none" ? "off" : ""}">${g.kept} of ${g.people.length}</span>
+            <button type="button" class="email-small" data-email="dom-open"
+              data-domain="${esc(g.domain)}">${openDomain === g.domain ? "Hide" : "People"}</button>
+          </div>
+          ${openDomain === g.domain ? `<ol class="email-domain-people">${g.people.map((r) => {
+            const addr = String(r.email || "").toLowerCase();
+            return `<li><label><input type="checkbox" data-email="person-toggle"
+              data-address="${esc(addr)}" ${excluded.has(addr) ? "" : "checked"}>
+              <b>${esc(r.name || "Unnamed contact")}</b>
+              <span>${esc(r.email || "No email on file")}</span></label></li>`;
+          }).join("")}</ol>` : ""}</li>`;
+      }).join("")}</ul>
+      ${off ? `<p class="email-domain-off">${off} recipient${off === 1 ? "" : "s"} excluded.</p>` : ""}
+    </fieldset>`;
+  }
+
+  // Mixed groups get the indeterminate dash rather than an unticked box, which
+  // would read as "nobody on this domain" when in fact most are included.
+  function paintMixed() {
+    for (const box of document.querySelectorAll('[data-email="dom-toggle"][data-mixed]'))
+      box.indeterminate = true;
+  }
+
+
+  /* Say it before the work, not after it.
+   *
+   * A rep who selects forty-eight people and presses on will build the batch,
+   * review forty-eight messages, press Approve & Send, confirm a dialog, and
+   * only then be told the send was never possible. The count is known right
+   * here, on the screen where the list can still cheaply be made smaller.
+   */
+  function setupSendWarning() {
+    const lim = (catalog && catalog.limits) || {};
+    const kept = keptRecipients();
+    const n = kept.length;
+    if (!n) return "";
+    const bits = [];
+    if (lim.directBatchMax && n > lim.directBatchMax) {
+      bits.push(`${n} recipients is over the ${lim.directBatchMax}-recipient limit for a single `
+        + `send. You can still create Outlook drafts for all of them, or reduce the list to `
+        + `${lim.directBatchMax} to send from the app.`);
+    } else if (lim.rollingRemaining != null && lim.rollingExternalLimit) {
+      const ext = kept.filter((r) => !INTERNAL.test(String(r.email || ""))).length;
+      if (ext > lim.rollingRemaining) {
+        bits.push(`${ext} external recipients, and you have ${lim.rollingRemaining} of `
+          + `${lim.rollingExternalLimit} left in the last 24 hours. Drafts are unaffected.`);
+      }
+    }
+    return bits.length
+      ? `<p class="email-error email-setup-warn">&#9888; ${esc(bits[0])}</p>` : "";
+  }
+
+  // Mirrors EMAIL_INTERNAL_DOMAINS on the server. Only used to estimate what
+  // counts against the rolling window before the batch exists; the server does
+  // the real arithmetic.
+  const INTERNAL = /@eicatlanta\.com$/i;
+
+  /* Who else goes on THIS batch.
+   *
+   * Separate from the two standing choices in Settings, which apply to
+   * everything a rep sends. This is the one-off: an introduction that a
+   * teammate should see, or a colleague who asked to be kept in the loop on a
+   * particular firm.
+   *
+   * CC, never To. Everything downstream -- logging, suppression, the
+   * unsubscribe footer, {{first_name}} -- is built around one recipient per
+   * message, and multiplying that is a much larger change than it looks. A CC
+   * carries none of those assumptions.
+   *
+   * Teammates are per RECIPIENT: each advisor has their own practice, so the
+   * server resolves them message by message. The colleague is per BATCH.
+   */
+  /* WHY an address is on this message.
+   *
+   * The envelope used to show Bcc with one hard-coded explanation and not show
+   * Cc at all -- so a rep who had asked for a colleague to be copied, or for
+   * their own address to be blind-copied, saw no evidence of either and had to
+   * take it on trust. Every copied address now says where it came from.
+   */
+  function ccReason(address, m, b) {
+    const a = String(address).toLowerCase();
+    if ((m.teammateCc || []).includes(a)) return " — on the advisor's team";
+    if (String(b.ccColleague || "").toLowerCase() === a) return " — the colleague you chose for this batch";
+    if (String(b.copyInternalTo || "").toLowerCase() === a && b.copyInternal === "cc")
+      return " — your standing setting: copy a colleague";
+    if (String(b.senderMail || "").toLowerCase() === a && b.copySelf === "cc")
+      return " — your standing setting: copy me";
+    return "";
+  }
+
+  function bccReason(address, b) {
+    const a = String(address).toLowerCase();
+    if (String(b.senderMail || "").toLowerCase() === a && b.copySelf === "bcc")
+      return " — your standing setting: copy me";
+    if (String(b.copyInternalTo || "").toLowerCase() === a && b.copyInternal === "bcc")
+      return " — your standing setting: copy a colleague";
+    return " — added automatically because this email carries an attachment";
+  }
+
+  /* Copy specific teammates on THIS message.
+   *
+   * The batch-level switch is all-or-nothing across every recipient. This is
+   * the per-message version, offered where the rep is actually reading the
+   * email rather than before any of them exist.
+   *
+   * The warning is stated on each teammate who is also a recipient of this
+   * batch, because ticking them DELETES their own email -- the rep's explicit
+   * choice, but not one to discover afterwards.
+   */
+  /* Which messages have had the teammate list opened.
+   *
+   * Every toggle re-renders the whole step from the server's answer, so without
+   * this the list collapsed the moment a rep ticked somebody -- and unticking
+   * the LAST one closed it under them while they were still working in it.
+   *
+   * Keyed by message id rather than a single flag: moving to the next advisor
+   * is a fresh decision, and their list should not be open because the previous
+   * one was. Same reasoning as outcomeOpen in field.js.
+   */
+  const matesOpen = new Set();
+
+  function teammatePicker(m, b, locked) {
+    const mates = (m.teammatesAvailable || []).filter((t) => t.email);
+    if (!mates.length) return "";
+    const on = new Set((m.teammateCc || []).map((a) => String(a).toLowerCase()));
+    const alsoWritten = new Set((detail.messages || [])
+      .filter((x) => x.id !== m.id)
+      .map((x) => String(x.recipientEmail || "").toLowerCase()));
+
+    /* COLLAPSED, because copying a teammate is the exception.
+     *
+     * This was a permanently expanded list, and on a twelve-person practice it
+     * pushed the subject and body -- the things a rep is actually here to edit
+     * -- off the screen entirely. Most messages copy nobody, so the default
+     * state should cost nothing.
+     *
+     * Open when somebody is already copied, so a decision already taken is
+     * never hidden behind a disclosure triangle.
+     */
+    const chosen = mates.filter((t) => on.has(String(t.email).toLowerCase()));
+    // Open if the rep opened it, or if somebody is already copied -- a decision
+    // already taken is never hidden behind a disclosure triangle.
+    const open = matesOpen.has(m.id) || chosen.length > 0;
+    return `<details class="email-mates"${open ? " open" : ""}>
+      <summary data-email="mates-open" data-id="${esc(m.id)}">
+        <span class="email-mates-title">Copy someone on their team</span>
+        <span class="email-mates-count">${chosen.length
+          ? `${chosen.length} copied`
+          : `${mates.length} on this team`}</span>
+      </summary>
+      <div class="email-mates-list">
+      ${mates.map((t) => {
+        const a = String(t.email).toLowerCase();
+        const clash = alsoWritten.has(a);
+        return `<label class="email-mate${clash ? " clash" : ""}"${
+          clash ? ' title="Also in this batch — copying them here removes their own email"' : ""}>
+          <input type="checkbox" data-email="mate-toggle" data-address="${esc(a)}"
+            ${on.has(a) ? "checked" : ""}${locked ? " disabled" : ""}>
+          <span class="email-mate-name">${esc(t.name || a)}</span>
+          <span class="email-mate-addr">${esc(a)}</span>
+          ${clash ? `<span class="email-mate-flag">replaces their own email</span>` : ""}
+        </label>`;
+      }).join("")}
+      </div>
+      <p class="email-fine">A copy is visible to the advisor. Anyone who has
+        unsubscribed is skipped.</p></details>`;
+  }
+
+  function copyPicker() {
+    const colleagues = (catalog && catalog.internalRecipients) || [];
+    /* NO TEAMMATE CONTROL HERE ANY MORE.
+     *
+     * There used to be a "the advisor's own teammates" checkbox on this step,
+     * and it was wrong in three ways at once: it sat at the BATCH level, so it
+     * applied to every recipient; it was all-or-nothing, so a rep could not
+     * pick which teammate; and it ran before anyone had seen the individual
+     * emails it would change.
+     *
+     * Copying a teammate is a per-message decision -- see teammatePicker(),
+     * which renders in Step 2 beside the message it affects, names each
+     * teammate, and says which of them would lose their own email as a result.
+     * Two controls doing the same job differently is worse than either, so this
+     * one is gone rather than left as a shortcut.
+     */
+    return `<fieldset class="email-copy"><legend>Copy someone on this batch</legend>
+      ${colleagues.length ? `<label class="email-label">An EIC colleague
+        <select id="ccColleague"><option value="">Nobody</option>${colleagues.map((r) =>
+          `<option value="${esc(r.address)}">${esc(r.name)}</option>`).join("")}</select></label>`
+        : `<p class="email-fine">No internal recipients are configured, so there is
+           nobody to copy. An administrator sets <code>EMAIL_INTERNAL_RECIPIENTS</code>
+           on the Function App.</p>`}
+    </fieldset>`;
+  }
+
+
+  function setupView(){
+    const templates = catalog.templates || [], docs = catalog.documents || [];
+    document.getElementById("emailBody").innerHTML = `<div class="email-setup">
+      <p class="email-summary"><b id="emailKeptCount">${keptRecipients().length}</b> recipient${keptRecipients().length === 1 ? "" : "s"} · From <b>${esc(catalog.connection.mailbox)}</b></p>
+      ${templates.length ? `<label class="email-label">Template<select id="emailTemplate">${templates.map((t) =>
+        `<option value="${esc(t.id)}">${esc(t.name)}</option>`).join("")}</select></label>`
+        : `<p class="email-error">There are no approved templates yet.${catalog.isAdmin
+            ? ` Use <b>Manage templates</b> below to publish one.`
+            : ` An email administrator needs to publish one before you can send.`}</p>`}
+      <p id="emailTplNotes" class="email-tpl-notes"></p>
+      <fieldset class="email-docs" id="emailDocs"><legend>Approved attachments</legend>${docs.length ? docs.map((d) =>
+        `<label data-doc="${esc(d.id)}"><input type="checkbox" value="${esc(d.id)}"> <span>${esc(d.name)}</span><small>${bytes(d.size)}</small></label>`).join("")
+        : `<p>No approved documents are configured. You can continue without attachments.</p>`}</fieldset>
+      ${catalog.isAdmin ? `<p class="email-admin-link">
+        <button type="button" class="email-small" data-email="templates">Manage templates</button>
+        <button type="button" class="email-small" data-email="docs">Manage approved documents</button></p>` : ""}
+      ${copyPicker()}
+      ${domainPicker()}
+      ${setupSendWarning()}
+      <p id="emailNotice" class="email-notice"></p>
+      <button type="button" class="ask-btn primary" data-email="create"${
+        templates.length ? "" : " disabled"}>Generate personalized emails</button></div>`;
+    // The Word templates carried instructions to the rep inside the body --
+    // "INSERT LCV PERFORMANCE PAGE HERE AND ATTACH...". Those belong on screen,
+    // not in the message, so they live on the template and are shown here.
+    // Attachments the chosen template REQUIRES are ticked and locked.
+    //
+    // They were drawn unticked, which was a straightforward lie: createBatch
+    // merges the template's requiredDocumentIds in regardless, so the document
+    // went out while the screen said it would not. A rep checking their work saw
+    // an empty box next to the one attachment compliance mandates.
+    const showRequired = () => {
+      const picker = document.getElementById("emailTemplate");
+      const chosen = picker && templates.find((x) => x.id === picker.value);
+      const required = new Set((chosen && chosen.requiredDocumentIds) || []);
+      for (const label of document.querySelectorAll("#emailDocs label[data-doc]")) {
+        const box = label.querySelector("input");
+        const isRequired = required.has(label.dataset.doc);
+        label.classList.toggle("required", isRequired);
+        if (isRequired) { box.checked = true; box.disabled = true; }
+        else if (box.disabled) { box.disabled = false; box.checked = false; }
+        let tag = label.querySelector(".email-req-tag");
+        if (isRequired && !tag) {
+          tag = document.createElement("em");
+          tag.className = "email-req-tag";
+          tag.textContent = "required by this template";
+          label.appendChild(tag);
+        } else if (!isRequired && tag) tag.remove();
+      }
+    };
+
+    const showNotes = () => {
+      const picker = document.getElementById("emailTemplate");
+      const chosen = picker && templates.find((x) => x.id === picker.value);
+      const box = document.getElementById("emailTplNotes");
+      box.textContent = (chosen && chosen.repNotes) || "";
+      box.hidden = !box.textContent;
+    };
+    const picker = document.getElementById("emailTemplate");
+    if (picker) picker.addEventListener("change", () => { showNotes(); showRequired(); });
+    showNotes();
+    showRequired();
+    paintMixed();
+  }
+
+
+  /* ---- sender health (EmailAdministrator only) ----------------------------
+   * Deliberately not a spam-complaint dashboard. Of 114,309 mailable advisor
+   * addresses, 20 are consumer mailboxes -- everyone else sits behind a
+   * corporate gateway, and corporate tenants do not run feedback loops. A
+   * complaint rate here would read zero forever and mean nothing.
+   *
+   * These four are what a corporate gateway actually tells us, and each row
+   * carries what to DO about the number, because four percentages with no
+   * interpretation just moves the problem along.
+   */
+  let healthDays = 90;
+
+  function healthView(data, message = "", bad = false) {
+    document.getElementById("emailTitle").textContent = "Sender health";
+    const reps = (data && data.reps) || [];
+    const chip = (lvl, label, value, count, total) =>
+      `<div class="hz ${esc(lvl)}"><span class="hz-n">${value}</span>
+        <span class="hz-l">${esc(label)}</span>
+        <small>${count} of ${total}</small></div>`;
+
+    document.getElementById("emailBody").innerHTML = `<div class="email-health">
+      <p class="email-next">What corporate mail gateways tell us about how our sending is
+        landing. There is no spam-complaint figure here because the firms we email do not
+        report one &mdash; these four signals are what they do send back.</p>
+      ${message ? `<p class="${bad ? "email-error" : "email-ok"}">${esc(message)}</p>` : ""}
+      <p class="email-health-range">Last
+        ${[30, 90, 180].map((d) => `<button type="button" class="email-small${
+          d === healthDays ? " on" : ""}" data-email="health-days" data-days="${d}">${d} days</button>`).join(" ")}
+        ${data ? `<span class="email-fine">${data.totals.sends.toLocaleString()} messages,
+          ${data.totals.events.toLocaleString()} delivery reports</span>` : ""}</p>
+
+      ${reps.length ? reps.map((r) => `<section class="email-health-rep">
+        <div class="email-section-head"><div>
+          <p class="eyebrow">${r.sent.toLocaleString()} sent${r.lastSentUtc
+            ? ` &middot; last ${esc(String(r.lastSentUtc).slice(0, 10))}` : ""}</p>
+          <h3>${esc(r.userName)}</h3></div></div>
+        <div class="hz-row">
+          ${chip(r.levels.hard, "hard bounces", r.rates.hard.toFixed(1) + "%", r.hard, r.sent)}
+          ${chip(r.levels.soft, "deferrals", r.rates.soft.toFixed(1) + "%", r.soft, r.sent)}
+          ${chip(r.levels.policy, "policy refusals", r.rates.policy.toFixed(1) + "%", r.policy, r.sent)}
+          ${chip(r.levels.unsubscribe, "unsubscribes", r.rates.unsubscribe.toFixed(1) + "%", r.unsubscribed, r.sent)}
+        </div>
+        <ul class="email-advice">${(r.advice || []).map((a) =>
+          `<li class="adv-${esc(a.level)}">${esc(a.text)}</li>`).join("")}</ul>
+        ${r.domains.length ? `<details class="email-jump"><summary>By recipient firm
+          (${r.domains.length})</summary>
+          <table class="email-health-table"><thead><tr><th>Domain</th><th>Sent</th>
+            <th>Hard</th><th>Deferred</th><th>Policy</th><th>Unsub</th></tr></thead><tbody>
+            ${r.domains.map((d) => `<tr>
+              <td>${esc(d.domain)}</td><td>${d.sent}</td>
+              <td class="${esc(d.levels.hard)}">${d.hard}</td>
+              <td class="${esc(d.levels.soft)}">${d.soft}</td>
+              <td class="${esc(d.levels.policy)}">${d.policy}</td>
+              <td>${d.unsubscribed}</td></tr>`).join("")}
+          </tbody></table></details>` : ""}
+        ${(r.codes || []).length ? `<p class="email-fine">Most common codes:
+          ${r.codes.map((c) => `<code>${esc(c.code)}</code> &times;${c.n}`).join(", ")}</p>` : ""}
+      </section>`).join("")
+        : `<p class="email-doc-none">No sending activity in this window yet. Delivery reports
+           are collected by the bounce sweeper, which must be switched on
+           (<code>EMAIL_BOUNCE_SWEEP_ENABLED=1</code>).</p>`}
+
+      <div class="email-done-actions">
+        <button type="button" class="ask-btn" data-email="docs-back">Back</button></div></div>`;
+  }
+
+  async function openHealth() {
+    document.getElementById("emailTitle").textContent = "Sender health";
+    document.getElementById("emailBody").innerHTML = `<p class="email-next">Loading…</p>`;
+    try {
+      healthView(await api(`sender_health&days=${healthDays}`, null, "GET"));
+    } catch (e) { healthView(null, e.message, true); }
+  }
+
+  // ---- approved document management (EmailAdministrator only) --------------
+  // Reps pick attachments from this catalog and cannot attach anything else, so
+  // publishing and withdrawing documents is the compliance control that makes
+  // the whole attachment story hold. It used to require a Cloud Shell session.
+  /* Which document a publish is REPLACING, if any.
+   *
+   * putDocument() keys on the id, so publishing with an existing id keeps that
+   * id, bumps the version, and leaves every template's requiredDocumentIds
+   * pointing at the same row -- the replacement lands exactly where the old one
+   * was. That has always worked; there was simply no button for it, only a note
+   * telling administrators to retype the display name exactly.
+   *
+   * Retyping is the part that fails: a display name off by a character
+   * publishes a SECOND document, the template still requires the first, and
+   * nothing says so.
+   */
+  let replacing = null;      // { id, name } or null
+
+  function docsView(message = "", bad = false) {
+    const docs = (catalog && catalog.documents) || [];
+    document.getElementById("emailTitle").textContent = "Approved documents";
+    document.getElementById("emailBody").innerHTML = `<div class="email-docs-admin">
+      <p class="email-next">Reps can only attach documents listed here. Publishing a new
+      version of an existing document invalidates any batch still carrying the old one.
+      <b>PDF only.</b></p>
+      ${message ? `<p class="${bad ? "email-error" : "email-ok"}">${esc(message)}</p>` : ""}
+      <ul class="email-doclist">${docs.length ? docs.map((d) => `<li>
+        <span class="email-doc-main"><b>${esc(d.name)}</b>
+          <small>${esc(d.id)} &middot; ${bytes(d.size)} &middot; v${d.version}</small></span>
+        <button type="button" class="email-small" data-email="doc-replace"
+          data-id="${esc(d.id)}" data-name="${esc(d.name)}">Replace</button>
+        <button type="button" class="grave email-small" data-email="doc-delete"
+          data-id="${esc(d.id)}" data-name="${esc(d.name)}">Remove</button></li>`).join("")
+        : `<li class="email-doc-none">No approved documents yet.</li>`}</ul>
+      <fieldset class="email-doc-add"><legend>${replacing
+        ? `Replace &ldquo;${esc(replacing.name)}&rdquo;` : "Publish a PDF"}</legend>
+        ${replacing ? `<p class="email-fine">The new file takes the same place as the old one:
+          same document id, next version, and every template that requires it keeps working.
+          Batches still carrying the old version will fail validation, which is the point.
+          <button type="button" class="link-btn" data-email="doc-replace-cancel">Cancel replacement</button></p>` : ""}
+        <label class="email-label">Display name<input id="docName" maxlength="120"
+          placeholder="EIC Value Fund Fact Sheet"></label>
+        <label class="email-label">File<input id="docFile" type="file" accept="application/pdf,.pdf"></label>
+        ${replacing ? "" : `<p class="email-fine">To replace an existing document, use its
+          <b>Replace</b> button rather than publishing a second copy.</p>`}
+        <button type="button" class="ask-btn primary" data-email="doc-upload">${
+          replacing ? "Publish replacement" : "Publish"}</button>
+      </fieldset>
+      <div class="email-done-actions"><button type="button" class="ask-btn" data-email="docs-back">Back</button></div></div>`;
+  }
+
+  // ---- template authoring (EmailAdministrator only) ------------------------
+  // The Word library carries a header block -- Title, Original Author,
+  // Document #, Attachments required, Approval Date -- and that is a compliance
+  // record, not decoration. Moving templates in here keeps it rather than
+  // reducing every template to a subject and a body.
+  let editing = null;    // the template being edited, or null
+  let lintTimer = null;
+  // A snapshot of the template as last SAVED, so the button can say whether
+  // there is anything to save. Clicking a button and getting no visible
+  // response is indistinguishable from a broken button -- which is exactly how
+  // this one read while it was silently failing on the IMAGE_TOKEN bug.
+  let savedSnapshot = null;
+  const templateFingerprint = (t) => JSON.stringify([t.name, t.documentNumber, t.author,
+    t.approvalDate, t.subject, t.bodyText, t.repNotes, [...(t.requiredDocumentIds || [])].sort()]);
+  const templateDirty = () => !savedSnapshot
+    || templateFingerprint(collectTemplate()) !== savedSnapshot;
+
+  function paintSaveState() {
+    const btn = document.getElementById("tplSave");
+    if (!btn) return;
+    const dirtyNow = templateDirty();
+    btn.textContent = dirtyNow ? "Save template" : "Saved";
+    btn.disabled = !dirtyNow;
+    btn.className = `ask-btn ${dirtyNow ? "primary" : "email-saved-btn"}`;
+  }
+
+  const SAMPLE = { name: "Dana Whitfield", firstName: "Dana", lastName: "Whitfield",
+    companyName: "Whitfield Wealth Partners" };
+  const SAMPLE_THIN = { name: "", firstName: "", lastName: "", companyName: "Northgate Advisors" };
+
+  /* The signed-in sender, from the same Microsoft 365 profile the signature is
+   * built from -- so {{sender_name}} in the preview reads exactly as the name
+   * in the signature block below it. */
+  function senderFields() {
+    const p = (catalog && catalog.connection && catalog.connection.profile) || {};
+    return { sender_name: String(p.displayName || ""),
+             sender_title: String(p.jobTitle || "") };
+  }
+
+  /* A MISSING VALUE LEAVES THE TOKEN, exactly as the server does.
+   *
+   * This used to substitute a friendly placeholder -- "your job title" for an
+   * empty jobTitle, "" for an absent first name -- and both were wrong in the
+   * same way: the preview read as a finished sentence while the SEND left
+   * "{{sender_title}}" in the text, tripped unresolved_merge_fields, and
+   * refused the batch with a 400. An administrator saw "I am EIC's your job
+   * title covering your area", thought it fine, and had no way to connect it to
+   * the refusal that followed.
+   *
+   * renderTemplate() on the server does this: an unrecognised or empty field is
+   * returned UNTOUCHED and recorded as missing. The preview now matches, and
+   * unresolvedFields() below turns the same list into something an
+   * administrator can act on.
+   */
+  function mergePreview(text, r) {
+    const values = Object.assign({
+      first_name: r.firstName, last_name: r.lastName, company_name: r.companyName,
+    }, senderFields());
+    return String(text || "").replace(/\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/g,
+      (whole, field) => {
+        const key = String(field).toLowerCase();
+        if (!(key in values)) return whole;      // image tokens, typos: untouched
+        return values[key] ? values[key] : whole;
+      });
+  }
+
+  /* Which merge fields this text cannot fill for THIS sender.
+   *
+   * Only the sender ones: a blank first name is a property of one recipient and
+   * the composer already reports those per message, while a blank job title is
+   * a property of the account and blocks every message in every batch until
+   * somebody fixes the Microsoft 365 profile. That is worth saying once, loudly,
+   * where the template is written.
+   */
+  function unresolvedSenderFields(text) {
+    const s = senderFields();
+    return Object.keys(s).filter(key =>
+      !s[key] && new RegExp(`\{\{\s*${key}\s*\}\}`, "i").test(String(text || "")));
+  }
+
+
+  /* The editor preview has to agree with what actually sends.
+   *
+   * The server turns bullet lines into real <ul>/<li>. If this pane kept
+   * rendering them as plain text, an administrator would format a list, see it
+   * unformatted, and "fix" it into something worse. Same shapes the server
+   * recognises: Word's bullet-plus-tab, dashes, stars, and numbers.
+   */
+  const P_BULLET = /^\s*(?:[\u2022\u00b7\u25e6*-]|o)[\s\t]+(.*)$/;
+  const P_NUMBER = /^\s*\d{1,2}[.)][\s\t]+(.*)$/;
+
+  function previewBlock(text) {
+    const out = [];
+    let list = null, para = [];
+    const flushList = () => {
+      if (!list) return;
+      out.push(`<${list.tag}>${list.items.map((t) => `<li>${t}</li>`).join("")}</${list.tag}>`);
+      list = null;
+    };
+    const flushPara = () => {
+      if (para.length) out.push(`<p>${para.join("<br>")}</p>`);
+      para = [];
+    };
+    for (const line of String(text).split(/\n/)) {
+      const b = line.match(P_BULLET);
+      const n = b ? null : line.match(P_NUMBER);
+      if (b || n) {
+        flushPara();
+        const tag = b ? "ul" : "ol";
+        if (list && list.tag !== tag) flushList();
+        if (!list) list = { tag, items: [] };
+        list.items.push((b ? b[1] : n[1]).trim());
+        continue;
+      }
+      flushList();
+      if (line.trim()) para.push(line);
+    }
+    flushList();
+    flushPara();
+    return out.join("");
+  }
+
+  function previewHtml(tpl, r) {
+    const images = tpl.images || [];
+    const body = mergePreview(tpl.bodyText, r);
+    const html = esc(body).split(/\n{2,}/).map(previewBlock).join("")
+      .replace(/\{\{\s*image:([a-z0-9-]+)\s*\}\}/gi, (whole, id) => {
+        const img = images.find((i) => i.id.toLowerCase() === String(id).toLowerCase());
+        return img ? `<span class="email-img-chip">&#128200; ${esc(img.name)}</span>`
+                   : `<span class="email-error">${esc(whole)} — no such chart</span>`;
+      });
+    return `<p class="email-prev-subject"><b>Subject:</b> ${esc(mergePreview(tpl.subject, r)) || "<i>empty</i>"}</p>${html}`;
+  }
+
+  function templatesView(message = "", bad = false) {
+    const list = (catalog && catalog.templates) || [];
+    document.getElementById("emailTitle").textContent = "Email templates";
+    document.getElementById("emailBody").innerHTML = `<div class="email-docs-admin">
+      <p class="email-next">Reps choose from these and cannot write their own. Required
+        attachments set here are added to every batch automatically.</p>
+      ${message ? `<p class="${bad ? "email-error" : "email-ok"}">${esc(message)}</p>` : ""}
+      <ul class="email-doclist">${list.length ? list.map((t) => `<li>
+        <span class="email-doc-main"><b>${esc(t.name)}</b>
+          <small>${esc(t.documentNumber || "no document #")}
+            ${t.approvalDate ? `&middot; approved ${esc(t.approvalDate)}` : ""}
+            &middot; v${t.version}${(t.images || []).length ? ` &middot; ${t.images.length} chart(s)` : ""}</small></span>
+        <button type="button" class="email-small" data-email="tpl-test" data-id="${esc(t.id)}"
+          data-name="${esc(t.name)}">Test to me</button>
+        <button type="button" class="email-small" data-email="tpl-edit" data-id="${esc(t.id)}">Edit</button>
+        <button type="button" class="grave email-small" data-email="tpl-delete"
+          data-id="${esc(t.id)}" data-name="${esc(t.name)}">Remove</button></li>`).join("")
+        : `<li class="email-doc-none">No templates yet.</li>`}</ul>
+      <div class="email-done-actions">
+        <button type="button" class="ask-btn primary" data-email="tpl-new">New template</button>
+        <button type="button" class="ask-btn" data-email="docs-back">Back</button></div></div>`;
+  }
+
+  function templateEditView(message = "", bad = false) {
+    const t = editing, docs = (catalog && catalog.documents) || [];
+    const req = new Set(t.requiredDocumentIds || []);
+    document.getElementById("emailTitle").textContent = t.id ? `Edit: ${t.name}` : "New template";
+    document.getElementById("emailBody").innerHTML = `<div class="email-tpl">
+      ${message ? `<p class="${bad ? "email-error" : "email-ok"}">${esc(message)}</p>` : ""}
+      <div class="email-tpl-meta">
+        <label class="email-label">Title<input id="tplName" maxlength="120" value="${esc(t.name || "")}"></label>
+        <label class="email-label">Document #<input id="tplDoc" maxlength="60" value="${esc(t.documentNumber || "")}"></label>
+        <label class="email-label">Original author<input id="tplAuthor" maxlength="60" value="${esc(t.author || "")}"></label>
+        <label class="email-label">Approval date<input id="tplApproved" maxlength="40"
+          placeholder="2026-08-17" value="${esc(t.approvalDate || "")}"></label>
+      </div>
+      <label class="email-label">Subject<input id="tplSubject" maxlength="500" value="${esc(t.subject || "")}"></label>
+      <label class="email-label">Body<textarea id="tplBody" rows="12" maxlength="30000">${esc(t.bodyText || "")}</textarea></label>
+      <p class="email-fine">Merge fields: <code>{{first_name}}</code> <code>{{last_name}}</code>
+        <code>{{company_name}}</code> <code>{{sender_name}}</code> <code>{{sender_title}}</code>.
+        Charts: <code>{{image:id}}</code>.</p>
+      <div id="tplLint" class="email-lint"></div>
+      <label class="email-label">Notes for the rep (never sent)<textarea id="tplNotes" rows="2"
+        maxlength="4000">${esc(t.repNotes || "")}</textarea></label>
+      <fieldset class="email-docs"><legend>Required attachments</legend>${docs.length ? docs.map((d) =>
+        `<label><input type="checkbox" class="tpl-req" value="${esc(d.id)}"${req.has(d.id) ? " checked" : ""}>
+          <span>${esc(d.name)}</span><small>${bytes(d.size)}</small></label>`).join("")
+        : `<p>No approved documents yet.</p>`}</fieldset>
+      <fieldset class="email-doc-add"><legend>Charts in the body</legend>
+        <ul class="email-doclist">${(t.images || []).length ? t.images.map((i) => `<li>
+          <span class="email-doc-main"><b>${esc(i.name)}</b><small><code>{{image:${esc(i.id)}}}</code>
+            &middot; ${bytes(i.size)}</small></span>
+          <button type="button" class="email-small" data-email="tpl-img-insert" data-id="${esc(i.id)}">Insert</button>
+          <button type="button" class="grave email-small" data-email="tpl-img-delete" data-id="${esc(i.id)}">Remove</button>
+          </li>`).join("") : `<li class="email-doc-none">No charts on this template.</li>`}</ul>
+        ${t.id ? `<label class="email-label">Add a chart (PNG, JPEG or GIF)
+          <input id="tplImgFile" type="file" accept="image/png,image/jpeg,image/gif"></label>
+          <label class="email-label">Chart name<input id="tplImgName" maxlength="80" placeholder="LCV performance"></label>
+          <button type="button" class="ask-btn" data-email="tpl-img-upload">Upload chart</button>`
+          : `<p class="email-fine">Save the template once before adding charts.</p>`}
+      </fieldset>
+      <div class="email-tpl-prev">
+        <div><p class="eyebrow">Preview — complete contact</p><div id="tplPrev1" class="email-rendered"></div></div>
+        <div><p class="eyebrow">Preview — missing first name</p><div id="tplPrev2" class="email-rendered"></div></div>
+      </div>
+      <div class="email-done-actions">
+        <button type="button" id="tplSave" class="ask-btn primary" data-email="tpl-save">Save template</button>
+        ${t.id ? `<button type="button" class="ask-btn" data-email="tpl-test"
+          data-id="${esc(t.id)}" data-name="${esc(t.name)}">Test to me</button>` : ""}
+        <button type="button" class="ask-btn" data-email="tpl-back">Back</button></div></div>`;
+    for (const id of ["tplSubject", "tplBody"]) {
+      const el = document.getElementById(id);
+      if (el) el.addEventListener("input", () => { clearTimeout(lintTimer); lintTimer = setTimeout(runLint, 350); });
+    }
+    // The button reflects EVERY field, not only the two that trigger linting --
+    // a changed document number is just as unsaved as a changed body.
+    for (const id of ["tplName", "tplDoc", "tplAuthor", "tplApproved",
+                      "tplSubject", "tplBody", "tplNotes"]) {
+      const el = document.getElementById(id);
+      if (el) el.addEventListener("input", paintSaveState);
+    }
+    for (const box of document.querySelectorAll(".tpl-req"))
+      box.addEventListener("change", paintSaveState);
+    runLint();
+    paintSaveState();
+  }
+
+  function collectTemplate() {
+    const g = (id) => (document.getElementById(id) || {}).value || "";
+    return { ...editing, name: g("tplName").trim(), documentNumber: g("tplDoc").trim(),
+      author: g("tplAuthor").trim(), approvalDate: g("tplApproved").trim(),
+      subject: g("tplSubject"), bodyText: g("tplBody"), repNotes: g("tplNotes"),
+      requiredDocumentIds: [...document.querySelectorAll(".tpl-req:checked")].map((x) => x.value) };
+  }
+
+  async function runLint() {
+    const t = collectTemplate();
+    document.getElementById("tplPrev1").innerHTML = previewHtml(t, SAMPLE);
+    document.getElementById("tplPrev2").innerHTML = previewHtml(t, SAMPLE_THIN);
+    const box = document.getElementById("tplLint");
+    /* A sender field the ACCOUNT cannot fill blocks every batch this template
+     * is ever used for, and the server reports it only at approval time as
+     * "Resolve template fields: sender_title" -- by which point the rep is
+     * looking at a refusal with no idea it is a profile setting. Said here
+     * instead, next to the text that uses it.
+     *
+     * Not an error on the template: the template is correct and will work the
+     * moment the profile is filled in. It is a fact about this account. */
+    const gaps = unresolvedSenderFields(`${t.subject}
+${t.bodyText}`);
+    const LABEL = { sender_name: "display name", sender_title: "job title" };
+    const gapHtml = gaps.map((key) =>
+      `<p class="bad">&#9888; Your Microsoft 365 profile has no ${esc(LABEL[key])}, so
+        <code>{{${esc(key)}}}</code> cannot be filled and this template will be
+        refused at send. Ask IT to set it on your profile — nothing here needs changing.</p>`
+    ).join("");
+    try {
+      const r = await api("lint_template", { subject: t.subject, bodyText: t.bodyText });
+      box.innerHTML = gapHtml + ([...r.errors.map((e) => `<p class="bad">&#9888; ${esc(e.message)}</p>`),
+        ...r.warnings.map((w) => `<p>&#9432; ${esc(w.message)}</p>`)].join("")
+        || (gaps.length ? "" : `<p class="ok">&#10003; No problems found.</p>`));
+    } catch (e) { box.innerHTML = `<p class="bad">${esc(e.message)}</p>`; }
+  }
+
+  function readAsBase64(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onerror = () => reject(new Error("That file could not be read."));
+      // Strip the "data:application/pdf;base64," prefix; the server wants the
+      // payload only, and decodes it to check the %PDF- header itself.
+      reader.onload = () => resolve(String(reader.result || "").split(",", 2)[1] || "");
+      reader.readAsDataURL(file);
+    });
+  }
+
+  function stateLabel(state) {
+    return ({ editing: "Editing", invalid: "Needs attention", draft_pending: "Queued for draft",
+      draft_creating: "Creating draft", draft_ambiguous: "Reconciling draft", draft_ready: "Outlook draft ready",
+      send_scheduled: "Scheduled", sending: "Submitting", send_ambiguous: "Reconciling send",
+      submitted: "Submitted — checking Sent Items", sent: "Sent · no known failure", auth_required: "Reconnect Microsoft 365",
+      failed: "Failed", canceled: "Canceled", action_required: "Action required", drafts_ready: "Drafts ready",
+      completed: "Complete", partial_failure: "Completed with failures" })[state] || state;
+  }
+
+  // Terminal states used to leave the full editor on screen with a green label
+  // buried in the recipient list, so a finished batch looked identical to a
+  // working one. Show what happened, and what to do next, instead.
+  const DONE = ["drafts_ready", "completed", "partial_failure", "canceled"];
+
+  function doneView() {
+    const b = detail.batch, counts = {};
+    for (const m of detail.messages) counts[m.state] = (counts[m.state] || 0) + 1;
+    const n = (k) => counts[k] || 0;
+    const ready = n("draft_ready"), sent = n("sent") + n("submitted");
+    const failed = n("failed"), canceled = n("canceled");
+    const headline = { drafts_ready: "Drafts are in your Outlook",
+      completed: "Batch complete", partial_failure: "Completed, with failures",
+      canceled: "Batch canceled" }[b.status] || stateLabel(b.status);
+    const rows = [
+      ready ? [`${ready} draft${ready === 1 ? "" : "s"} created`, "good"] : null,
+      sent ? [`${sent} sent`, "good"] : null,
+      failed ? [`${failed} failed`, "bad"] : null,
+      canceled ? [`${canceled} canceled`, ""] : null,
+    ].filter(Boolean);
+    document.getElementById("emailTitle").textContent = b.name || "Email batch";
+    document.getElementById("emailBody").innerHTML = `<div class="email-done">
+      <h3 class="${failed ? "bad" : "good"}">${esc(headline)}</h3>
+      <ul class="email-tally">${rows.map(([label, tone]) =>
+        `<li class="${tone}">${esc(label)}</li>`).join("")}</ul>
+      ${b.status === "drafts_ready" ? `<p class="email-next">Open Outlook and go to
+        <b>Drafts</b> to review and send. Nothing has been sent from this app.</p>` : ""}
+      ${failed ? `<p class="email-next">Open the details below to see which recipients
+        failed and why. Retrying only affects those.</p>` : ""}
+      <div class="email-done-actions">
+        <button type="button" class="ask-btn" data-email="details">Review messages</button>
+        ${failed ? `<button type="button" class="ask-btn" data-email="retry">Retry failed</button>` : ""}
+        <button type="button" class="ask-btn primary" data-email="close">Close</button>
+      </div></div>`;
+  }
+
+
+  // The recipient list used to occupy a third of a phone screen and clip after
+  // two names. A pager and an honest tally do the same job in two lines.
+  //
+  // The wording here is deliberate and was got wrong first time round. The app
+  // checks addresses, duplicates, merge fields, attachment versions and size.
+  // It has no view on whether the template suited this advisor or whether the
+  // merged sentence reads correctly -- so nothing may be labelled "ready".
+  // "No automatic problems found" says what actually happened; "not yet opened"
+  // is a fact about what the REP has done, and is the number that should feel
+  // uncomfortable when it is large.
+  function tally() {
+    const all = (detail && detail.messages) || [];
+    const blocked = all.filter((m) => (m.validation && m.validation.errors || []).length).length;
+    const reviewed = all.filter((m) => m.reviewed).length;
+    const behind = all.filter((m) => (m.validation && m.validation.warnings || [])
+      .some((w) => w.code === "behind_common_text")).length;
+    const failed = all.filter((m) => m.failureMessage).length;
+    const bounced = all.filter((m) => m.bounceKind === "hard").length;
+    return { total: all.length, blocked, reviewed, behind, failed, bounced,
+             unopened: all.length - blocked - reviewed };
+  }
+
+  function tallyRow() {
+    const c = tally();
+    return `<div class="email-tally-row">
+      <span class="count">${c.total} recipient${c.total === 1 ? "" : "s"}</span>
+      ${c.blocked ? `<button type="button" class="bad" data-email="next-problem">${c.blocked} blocked</button>` : ""}
+      ${c.reviewed ? `<span class="good">${c.reviewed} reviewed by you</span>` : ""}
+      ${c.unopened ? `<span class="warnish">${c.unopened} not yet opened</span>` : ""}
+      ${c.behind ? `<button type="button" class="bad" data-email="next-behind">${c.behind} keep own wording</button>` : ""}
+      ${c.failed ? `<button type="button" class="bad" data-email="next-failed">${c.failed} failed &mdash; see why</button>` : ""}
+      ${c.bounced ? `<span class="bad">${c.bounced} bounced</span>` : ""}
+    </div>`;
+  }
+
+  function pagerRow() {
+    const m = detail.messages[cursor], n = detail.messages.length;
+    const flag = (m.validation && m.validation.errors || []).length ? "bad"
+      : m.reviewed ? "good" : "warnish";
+    return `<div class="email-pager">
+      <button type="button" data-email="step" data-by="-1" ${cursor ? "" : "disabled"} aria-label="Previous recipient">&#9664;</button>
+      <span class="email-pager-who"><b>${esc(m.recipientName || m.recipientEmail)}</b>
+        <small class="${flag}">${cursor + 1} of ${n} &middot; ${esc(stateLabel(m.state))}</small></span>
+      <button type="button" data-email="step" data-by="1" ${cursor < n - 1 ? "" : "disabled"} aria-label="Next recipient">&#9654;</button>
+      ${["editing", "invalid"].includes(detail.batch.status) && n > 1
+        ? `<button type="button" class="email-drop" data-email="drop-recipient"
+             data-id="${esc(m.id)}" data-name="${esc(m.recipientName || m.recipientEmail)}"
+             aria-label="Remove this recipient from the batch" title="Remove from this batch">&times;</button>` : ""}
+    </div>`;
+  }
+
+
+  function markDirty(on) {
+    dirty = on;
+    const tag = document.getElementById("emailSaveState");
+    if (tag) {
+      tag.textContent = saving ? "Saving…" : on ? "Unsaved changes" : "Saved";
+      tag.className = `email-savestate ${saving ? "" : on ? "warnish" : "good"}`;
+    }
+  }
+
+
+  // Swipe between recipients on a touch screen. Guarded fairly tightly: a
+  // mostly-horizontal, deliberate movement, ignored when it starts inside a
+  // text box or the preview, because those scroll and select in their own
+  // right and stealing that gesture would make editing infuriating.
+  function wireSwipe() {
+    const area = document.getElementById("emailBody");
+    if (!area || area._swipeWired) return;
+    area._swipeWired = true;
+    let x0 = 0, y0 = 0, live = false;
+    area.addEventListener("touchstart", (e) => {
+      if (e.touches.length !== 1) { live = false; return; }
+      /* The preview is swipeable; the boxes you type in are not.
+       *
+       * .email-rendered used to be excluded alongside the text controls, on the
+       * theory that it selects and scrolls in its own right. On a phone that
+       * made the feature almost unreachable: the two textareas and the preview
+       * cover nearly the whole screen, so only the thin gaps between them
+       * responded, and swiping felt broken rather than absent.
+       *
+       * It is read-only, and the guard below already demands a deliberate,
+       * mostly-horizontal 60px movement -- while selecting text on iOS starts
+       * with a long press, which is a different gesture entirely. The text
+       * controls stay excluded, because stealing a drag from somebody midway
+       * through editing a sentence is a real cost with no upside.
+       */
+      const from = e.target.closest("input, textarea, select, .email-jump");
+      live = !from;
+      x0 = e.touches[0].clientX; y0 = e.touches[0].clientY;
+    }, { passive: true });
+    area.addEventListener("touchend", async (e) => {
+      if (!live || !detail || !detail.messages) return;
+      live = false;
+      const touch = e.changedTouches && e.changedTouches[0];
+      if (!touch) return;
+      const dx = touch.clientX - x0, dy = touch.clientY - y0;
+      // Horizontal, decisive, and clearly not a scroll.
+      if (Math.abs(dx) < 60 || Math.abs(dx) < Math.abs(dy) * 1.8) return;
+      const next = cursor + (dx < 0 ? 1 : -1);
+      if (next < 0 || next >= detail.messages.length) return;
+      if (!await saveOne()) return;
+      cursor = next;
+      swipeFrom = dx < 0 ? "left" : "right";
+      composerView();
+    }, { passive: true });
+  }
+
+  function wireAutoSave() {
+    for (const id of ["emailOneSubject", "emailOneBody"]) {
+      const el = document.getElementById(id);
+      if (!el) continue;
+      el.addEventListener("input", () => markDirty(true));
+      el.addEventListener("blur", () => { if (dirty) saveOne(); });
+    }
+    markDirty(false);
+  }
+
+  // Returns true when it is safe to move on. Any navigation away from an edited
+  // message goes through here first, so an edit cannot be silently discarded.
+  async function saveOne() {
+    if (!dirty || saving || !detail) return true;
+    const m = detail.messages[cursor];
+    const subject = document.getElementById("emailOneSubject");
+    const body = document.getElementById("emailOneBody");
+    if (!subject || !body) return true;
+    saving = true; markDirty(true);
+    try {
+      detail = await api("update_message", { batchId: detail.batch.id, messageId: m.id,
+        subject: subject.value, bodyText: body.value, reviewed: true });
+      saving = false; dirty = false;
+      composerView();
+      return true;
+    } catch (e) {
+      saving = false;
+      markDirty(true);
+      notice(`Not saved: ${e.message}`, true);
+      return false;
+    }
+  }
+
+
+  /* Make the preview show the actual charts.
+   *
+   * The message body carries <img src="cid:people@eicadvisormap">, which is
+   * correct on the wire -- it resolves to the attached part once the mail client
+   * has it. A browser cannot resolve cid: at all, so the screen whose whole job
+   * is "this is exactly what they will receive" was drawing a broken-image icon
+   * next to text claiming otherwise.
+   *
+   * Swapped for a URL that serves the same approved bytes. The message's own
+   * inlineImages list supplies the mapping, so nothing is guessed from the
+   * markup, and an unknown cid is left alone rather than pointed somewhere.
+   */
+  function previewWithImages(html, images, templateId) {
+    if (!html || !(images || []).length || !templateId) return html || "";
+    const byCid = new Map((images || []).map((i) => [String(i.cid || "").toLowerCase(), i]));
+    return String(html).replace(/src="cid:([^"]+)"/gi, (whole, cid) => {
+      const image = byCid.get(String(cid).toLowerCase());
+      if (!image) return whole;
+      const url = `/api/email?op=template_image&templateId=${encodeURIComponent(templateId)}`
+        + `&imageId=${encodeURIComponent(image.id)}`;
+      return `src="${url}"`;
+    });
+  }
+
+
+  /* Lint the rep's common text as they type.
+   *
+   * The administrator's template editor has done this since it was built; the
+   * box a rep edits had nothing. Same endpoint, same rules -- the point is that
+   * a single brace or a mistyped chart is caught before Apply, not at approval
+   * after it has been copied onto sixty messages.
+   *
+   * Advisory only. The server lints again on update_common and refuses there;
+   * this is the fast feedback, never the gate.
+   */
+  let commonLintTimer = null;
+  function wireCommonLint() {
+    const box = document.getElementById("emailCommonLint");
+    if (!box) return;
+    const run = async () => {
+      const subject = document.getElementById("emailCommonSubject");
+      const body = document.getElementById("emailCommonBody");
+      if (!subject || !body) return;
+      try {
+        const r = await api("lint_template", { subject: subject.value, bodyText: body.value });
+        const known = new Set((detail.templateImages || []).map((i) => String(i.id).toLowerCase()));
+        const bad = [...`${subject.value}
+${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
+          .map((m) => String(m[1]).trim().toLowerCase()).filter((id) => !known.has(id));
+        const errors = [...(r.errors || []),
+          ...[...new Set(bad)].map((id) => ({ message: `No chart called "${id}" on this template.` }))];
+        box.innerHTML = errors.map((e) => `<p class="bad">&#9888; ${esc(e.message)}</p>`).join("")
+          + (r.warnings || []).map((w) => `<p>&#9432; ${esc(w.message)}</p>`).join("");
+      } catch { /* advisory: the server checks again on Apply */ }
+    };
+    for (const id of ["emailCommonSubject", "emailCommonBody"]) {
+      const el = document.getElementById(id);
+      if (!el || el.disabled) continue;
+      el.addEventListener("input", () => { clearTimeout(commonLintTimer); commonLintTimer = setTimeout(run, 350); });
+    }
+    run();
+  }
+
+
+  /* Why "Approve & Send" cannot work for this batch, if it cannot.
+   *
+   * The server refuses over-sized batches at approval, which is correct but
+   * arrives far too late: a rep reviews forty-eight messages, presses the
+   * button, confirms a dialog, and only then learns the send was never possible.
+   * Everything needed to say so is known the moment the batch is built.
+   *
+   * Returns "" when direct sending is available for this batch. The server
+   * still enforces all of it; this only stops the rep wasting the work.
+   */
+  function sendBlockedReason(batch) {
+    const lim = (catalog && catalog.limits) || {};
+    const n = Number(batch.recipientCount) || 0;
+    if (!catalog.policy.directSendAvailable) {
+      return catalog.policy.directSendBlockedBy
+        || "Direct sending is switched off for this application.";
+    }
+    if (lim.directBatchMax && n > lim.directBatchMax) {
+      return `${n} recipients is over the ${lim.directBatchMax}-recipient limit for a single `
+        + `send. You can create Outlook drafts, or split this into batches of `
+        + `${lim.directBatchMax} or fewer to send from the app.`;
+    }
+    // externalCount rather than recipientCount: internal addresses do not count
+    // against the rolling window, so neither should they here.
+    const ext = Number(batch.externalCount) || 0;
+    if (lim.rollingRemaining != null && ext > lim.rollingRemaining) {
+      return `This batch has ${ext} external recipients and you have `
+        + `${lim.rollingRemaining} of ${lim.rollingExternalLimit} left in the last 24 hours. `
+        + `Outlook drafts are unaffected.`;
+    }
+    return "";
+  }
+
+
+  /* Say whether the common edit has actually been applied.
+   *
+   * Typing in the common box changes nothing until Apply is pressed, and
+   * nothing on screen said so -- a rep could rewrite the template, look at a
+   * preview showing the OLD text, and send. The button now changes state the
+   * moment the text diverges, and a line under the box says what is pending.
+   *
+   * Not auto-applied on a timer: applying resets every recipient's reviewed
+   * flag, so an autosave would quietly undo review progress while somebody was
+   * still typing.
+   */
+  let commonBaseline = null;
+
+  function commonDirty() {
+    const subject = document.getElementById("emailCommonSubject");
+    const body = document.getElementById("emailCommonBody");
+    if (!subject || !body || !commonBaseline) return false;
+    return subject.value !== commonBaseline.subject || body.value !== commonBaseline.bodyText;
+  }
+
+  function paintApplyState() {
+    const btn = document.getElementById("emailApply");
+    const note = document.getElementById("emailApplyState");
+    if (!btn) return;
+    const dirty = commonDirty();
+    const takers = detail.messages.filter((x) => !x.subjectOverridden && !x.bodyOverridden).length;
+    btn.textContent = dirty ? `Apply to ${takers} of ${detail.messages.length}` : "Applied";
+    btn.classList.toggle("primary", dirty);
+    btn.disabled = !dirty;
+    const overridden = detail.messages.length - takers;
+    if (note) {
+      note.hidden = !dirty;
+      // Two different warnings, because they are two different problems. The
+      // first is "you have not pressed the button". The second is "pressing it
+      // will not be enough", which is the one a rep can miss entirely and send
+      // stale wording to the people they took the most care over.
+      note.className = `email-applystate${dirty && overridden ? " severe" : ""}`;
+      note.innerHTML = !dirty ? ""
+        : overridden
+          ? `<b>Not applied, and ${overridden} of ${detail.messages.length} email`
+            + `${overridden === 1 ? "" : "s"} will never take this change.</b> `
+            + `Apply reaches the other ${takers}. The ${overridden} you edited individually `
+            + `keep${overridden === 1 ? "s" : ""} the wording you gave `
+            + `${overridden === 1 ? "it" : "them"}.`
+          : `Not applied yet. These changes reach all ${takers} emails when you press Apply.`;
+    }
+    // The overwrite escape hatch only appears when there is something to
+    // overwrite AND an unapplied change to overwrite it with.
+    const force = document.getElementById("emailApplyAll");
+    if (force) force.hidden = !(dirty && overridden);
+  }
+
+  function wireCommonApply() {
+    const subject = document.getElementById("emailCommonSubject");
+    const body = document.getElementById("emailCommonBody");
+    if (!subject || !body) return;
+    commonBaseline = { subject: subject.value, bodyText: body.value };
+    for (const el of [subject, body]) el.addEventListener("input", paintApplyState);
+    paintApplyState();
+  }
+
+
+  /* "Not yet opened" has to react to opening.
+   *
+   * reviewed was set only by saveOne(), which runs on an EDIT -- so a rep who
+   * read every one of forty-eight messages carefully and changed none of them
+   * still saw "48 not yet opened". The counter measured typing, while its label
+   * promised reading.
+   *
+   * Marked after a short dwell rather than instantly: stepping through six
+   * people to reach the seventh is not reading six emails, and counting it as
+   * such would put the number back to being untrue in the other direction.
+   */
+  /* Marked on sight, with no dwell.
+   *
+   * There was a 1.2-second timer here on the theory that stepping through six
+   * people to reach the seventh should not count as having read six emails.
+   * In practice it mostly meant a rep who HAD read one still saw "not yet
+   * opened" against it, which is the more damaging of the two errors: the
+   * counter is there to find the messages nobody has looked at, and one that
+   * cries wolf gets ignored. Approval does its own checking regardless. */
+  function markOpened() {
+    if (!detail || !detail.messages) return;
+    const m = detail.messages[cursor];
+    if (!m || m.reviewed) return;
+    if (!["editing", "invalid"].includes(detail.batch.status)) return;
+    const id = m.id;
+    (async () => {
+      try {
+        detail = await api("update_message", { batchId: detail.batch.id, messageId: id,
+          reviewed: true });
+        // Only repaint if the rep is still on this message -- the request is
+        // in flight while they are free to move on, and re-rendering under
+        // them would throw away where they had got to.
+        const still = detail && detail.messages && detail.messages[cursor];
+        if (still && still.id === id) composerView();
+      } catch { /* advisory; approval still checks for itself */ }
+    })();
+  }
+
+  function composerView() {
+    if (!detail || !detail.messages || !detail.messages.length) return;
+    // The countdown has to stop here too. Cancelling inside the send window
+    // ended the batch but left the ticker running, so the screen went on
+    // promising a send that had already been called off.
+    if (DONE.includes(detail.batch.status) && !forceDetail) {
+      clearTimeout(pollTimer); clearInterval(tickTimer); return doneView();
+    }
+    cursor = Math.max(0, Math.min(cursor, detail.messages.length - 1));
+    const b = detail.batch, m = detail.messages[cursor], locked = !["editing", "invalid"].includes(b.status);
+    const errors = m.validation && m.validation.errors || [], warnings = m.validation && m.validation.warnings || [];
+    const attachments = m.attachments || [];
+    // The poll below re-renders every three seconds while a batch is working.
+    // Replacing innerHTML resets scroll, which threw the rep back to the top of
+    // a long recipient list mid-read. Keep where they were.
+    const sendBlocked = locked ? "" : sendBlockedReason(b);
+    const overridden = detail.messages.filter((x) => x.subjectOverridden || x.bodyOverridden).length;
+    const takers = detail.messages.length - overridden;
+    /* Two different elements scroll, depending on the layout.
+     *
+     * On a phone .email-grid is display:block and #emailBody is the scroller.
+     * On the desktop .email-editor carries overflow:auto and does the
+     * scrolling, so restoring #emailBody's scrollTop restored a zero -- which
+     * is why stepping to the next recipient jumped to the top of the page on a
+     * desktop and behaved correctly on a phone.
+     */
+    const keepScroll = {
+      body: (document.getElementById("emailBody") || {}).scrollTop || 0,
+      editor: (document.querySelector(".email-editor") || {}).scrollTop || 0,
+    };
+    document.getElementById("emailTitle").textContent = b.name || "Email batch";
+    document.getElementById("emailBody").innerHTML = `<div class="email-grid">
+      <aside class="email-list">${b.suppressedNote
+        ? `<p class="email-suppressed">${esc(b.suppressedNote)}</p>` : ""}${b.copiedInsteadNote
+        ? `<p class="email-suppressed">${esc(b.copiedInsteadNote)}</p>` : ""}${tallyRow()}${pagerRow()}
+        <details class="email-jump"${jumpOpen() ? " open" : ""}><summary>Jump to someone</summary>
+        <ol>${detail.messages.map((x, i) => {
+          const over = x.subjectOverridden || x.bodyOverridden;
+          return `<li class="${i === cursor ? "on" : ""}">
+          <button type="button" data-email="pick" data-index="${i}">
+            <span>${esc(x.recipientName || x.recipientEmail)}</span>
+            <small>${esc(x.recipientEmail)}</small>
+            <em class="state-${esc(x.state)}">${esc(stateLabel(x.state))}${
+              over ? ` &middot; own wording` : ""}</em></button>
+          ${!locked && detail.messages.length > 1
+            ? `<button type="button" class="email-row-drop" data-email="drop-recipient"
+                 data-id="${esc(x.id)}" data-name="${esc(x.recipientName || x.recipientEmail)}"
+                 title="Remove ${esc(x.recipientName || x.recipientEmail)} from this batch"
+                 aria-label="Remove ${esc(x.recipientName || x.recipientEmail)}">&times;</button>` : ""}
+          </li>`;
+        }).join("")}</ol></details></aside>
+      <main class="email-editor">
+        <section class="email-common"><div class="email-section-head">
+          <div><p class="eyebrow">Step 1 &middot; edit all</p><h3>Common template</h3></div>
+          ${locked ? "" : `<div class="email-head-acts">
+            <button type="button" class="email-small ghost" data-email="restore-common"
+              title="Replace the common text with the approved template wording">Restore approved</button>
+            <button type="button" class="email-small" id="emailApply" data-email="save-common">Apply to ${
+              takers} of ${detail.messages.length}</button></div>`}</div>
+          <label class="email-label">Subject template<input id="emailCommonSubject" maxlength="500" value="${esc(b.commonSubject)}" ${locked ? "disabled" : ""}></label>
+          <label class="email-label email-grow">Body template<textarea id="emailCommonBody" rows="10" maxlength="50000" ${locked ? "disabled" : ""}>${esc(b.commonBodyText)}</textarea></label>
+          <div id="emailCommonLint" class="email-lint"></div>
+          <p id="emailApplyState" class="email-applystate" hidden></p>
+          <p class="email-applyall" id="emailApplyAll" hidden>
+            <button type="button" class="email-small grave" data-email="apply-all"
+              >Apply to all ${detail.messages.length}, replacing individual edits</button></p>
+          <p class="email-fine">Safe fields: {{first_name}}, {{last_name}}, {{company_name}}, {{sender_name}}, {{sender_title}}.
+            ${(detail.templateImages || []).length ? `Charts: ${detail.templateImages.map((i) =>
+              `<code>{{image:${esc(i.id)}}}</code>`).join(" ")}.` : ""}
+            ${overridden ? `${overridden} email${overridden === 1 ? " keeps its" : "s keep their"} own wording and will not take this change.` : ""}</p></section>
+        <section class="email-individual${m.subjectOverridden || m.bodyOverridden ? " overridden" : ""}">
+          <div class="email-section-head">
+            <div><p class="eyebrow">Step 2 &middot; edit one &middot; ${cursor + 1} of ${detail.messages.length}</p>
+            <h3>${esc(m.recipientName || m.recipientEmail)}</h3></div>
+            ${locked ? "" : `<span id="emailSaveState" class="email-savestate good">Saved</span>`}</div>
+          ${m.subjectOverridden || m.bodyOverridden ? `<p class="email-override">
+            <b>This email keeps its own wording.</b> Edits to the common template above are
+            not applied to it.${locked ? "" : ` <button type="button" class="email-small ghost"
+              data-email="reset-one">Use the common wording instead</button>`}</p>` : ""}
+          <label class="email-label">To<input value="${esc(m.recipientEmail)}" disabled></label>
+          ${teammatePicker(m, b, locked)}
+          <label class="email-label">Final subject<input id="emailOneSubject" maxlength="500" value="${esc(m.subject)}" ${locked ? "disabled" : ""}></label>
+          <label class="email-label email-grow">Final body<textarea id="emailOneBody" rows="12" maxlength="50000" ${locked ? "disabled" : ""}>${esc(m.bodyText)}</textarea></label>
+          <div class="email-checks">${errors.map((v) => `<p class="bad">&#9888; ${esc(v.message)}</p>`).join("")}${warnings.map((v) => `<p>&#9432; ${esc(v.message)}</p>`).join("")}</div>
+          ${m.bounceKind === "hard" ? `<div class="email-failure">
+            <p class="email-failure-head">&#9888; This address bounced</p>
+            <p class="email-failure-why">${esc(m.recipientEmail)} was permanently rejected by the
+              recipient's mail server${m.bounceReason ? ` (${esc(m.bounceReason)})` : ""}.
+              It is now suppressed and will be excluded from future batches.</p>
+          </div>` : ""}
+          ${m.failureMessage ? `<div class="email-failure">
+            <p class="email-failure-head">&#9888; This message did not go out</p>
+            <p class="email-failure-why">${esc(m.failureMessage)}</p>
+            ${m.failureCode ? `<p class="email-fine">Code: <code>${esc(m.failureCode)}</code>${
+              m.graphRequestId ? ` &middot; Microsoft request id <code>${esc(m.graphRequestId)}</code>` : ""}</p>` : ""}
+          </div>` : ""}
+        </section>
+        <section class="email-preview"><div class="email-section-head">
+          <div><p class="eyebrow">Step 3 &middot; check</p><h3>Exactly what they receive</h3></div></div><div class="email-envelope"><p><b>From:</b> ${esc(b.graphMailbox)}</p><p><b>To:</b> ${esc(m.recipientEmail)}</p>${(m.cc || []).length
+            ? `<p><b>Cc:</b> ${(m.cc || []).map((a) => `${esc(a)}<span class="env-note">${
+                esc(ccReason(a, m, b))}</span>`).join(", ")}</p>` : ""}${(m.bcc || []).length
+            ? `<p><b>Bcc:</b> ${(m.bcc || []).map((a) => `${esc(a)}<span class="env-note">${
+                esc(bccReason(a, b))}</span>`).join(", ")}</p>` : ""}
+          <p><b>Subject:</b> ${esc(m.subject)}</p><p><b>Attachments:</b> ${attachments.length ? attachments.map((a) => `${esc(a.name)} (${bytes(a.size)})`).join(", ") : "None"}</p></div>
+          <div class="email-rendered">${previewWithImages(m.bodyHtml, m.inlineImages, b.templateId)}${m.signatureHtml || ""}</div></section>
+      </main></div>
+      <footer class="email-footer"><p id="emailNotice" class="email-notice${
+        sendBlocked ? " bad" : ""}">${esc(
+        (!locked && sendBlocked) ? sendBlocked : (b.warningMessage || ""))}</p><div>
+        ${b.status === "action_required" ? `<button type="button" class="ask-btn" data-email="connect">Reconnect Microsoft 365</button><button type="button" class="ask-btn" data-email="retry">Retry remaining</button>` : ""}
+        ${locked && b.mode === "send" && !["completed", "canceled", "action_required"].includes(b.status) ? `<button type="button" class="ask-btn" data-email="pause">${b.status === "paused" ? "Resume remaining" : "Pause remaining"}</button>` : ""}
+        ${locked && !["completed", "canceled", "drafts_ready"].includes(b.status) ? `<button type="button" class="ask-btn ghost" data-email="cancel">Cancel remaining</button>` : ""}
+        ${locked ? "" : `<button type="button" class="ask-btn primary" data-email="approve-drafts">Create drafts</button>
+          ${sendBlocked
+            ? `<span class="email-sendoff" title="${esc(sendBlocked)}">Cannot send directly &#9432;</span>`
+            : `<button type="button" class="ask-btn grave" data-email="approve-send">Approve &amp; Send</button>`}`}
+      </div></footer>`;
+    // requestAnimationFrame, not a straight assignment: immediately after
+    // innerHTML the new content has no layout yet, so scrollTop is clamped to
+    // whatever height exists at that instant -- usually zero. That is why
+    // stepping to the next recipient jumped back to the top.
+    requestAnimationFrame(() => {
+      const b2 = document.getElementById("emailBody");
+      const e2 = document.querySelector(".email-editor");
+      if (b2 && keepScroll.body) b2.scrollTop = keepScroll.body;
+      if (e2 && keepScroll.editor) e2.scrollTop = keepScroll.editor;
+    });
+    wireAutoSave();
+    markOpened();
+    wireCommonApply();
+    wireCommonLint();
+    wireSwipe();
+    announceSwipe();
+    startCountdown();
+    schedulePoll();
+  }
+
+  // Which side the last swipe came from, consumed once by announceSwipe(). Null
+  // for every other kind of navigation -- tapping the arrows or picking from the
+  // jump list is already an explicit act and needs no confirmation of itself.
+  let swipeFrom = null;
+
+  function announceSwipe() {
+    if (!swipeFrom) return;
+    const side = swipeFrom; swipeFrom = null;
+    const host = document.getElementById("emailBody");
+    const m = detail.messages[cursor];
+    if (!host) return;
+    host.classList.remove("email-swipe-left", "email-swipe-right");
+    // Forces a reflow so the animation restarts on a repeat swipe in the same
+    // direction; without it the class is already present and nothing replays.
+    void host.offsetWidth;
+    host.classList.add(`email-swipe-${side}`);
+    const toast = document.createElement("div");
+    toast.className = "email-swipe-toast";
+    toast.setAttribute("role", "status");          // announced by VoiceOver too
+    toast.innerHTML = `${esc(m.recipientName || m.recipientEmail)}`
+      + `<small>${cursor + 1} of ${detail.messages.length}</small>`;
+    host.appendChild(toast);
+    setTimeout(() => toast.remove(), 1000);
+  }
+
+  // Desktop opens the list; a phone does not. On a wide screen it is a sidebar
+  // that costs nothing and saves a click. On a phone it is a full-height list
+  // pushing the actual editor below the fold, which is what it was collapsed
+  // for in the first place.
+  function jumpOpen() {
+    return global.matchMedia && global.matchMedia("(min-width: 761px)").matches;
+  }
+
+  // While a send is inside its cancellation window the batch is simply "working"
+  // on screen, which is the moment a rep most needs to know they can still stop
+  // it. Count it down visibly, once a second, updating only the banner text so
+  // the rest of the view does not flicker.
+  function startCountdown() {
+    clearInterval(tickTimer);
+    const until = detail && detail.batch && detail.batch.sendNotBeforeUtc;
+    if (!until) return;
+    const target = new Date(until).getTime();
+    if (!target || target <= Date.now()) return;
+    if (!document.getElementById("emailNotice")) return;
+    const paint = () => {
+      // Re-read the element each tick. Holding the original reference kept the
+      // ticker writing into a node that had been replaced, so a cancelled batch
+      // still looked like it was counting down to a send.
+      const host = document.getElementById("emailNotice");
+      if (!host || !detail || !detail.batch.sendNotBeforeUtc) { clearInterval(tickTimer); return; }
+      const left = Math.ceil((target - Date.now()) / 1000);
+      if (left <= 0) {
+        clearInterval(tickTimer);
+        host.innerHTML = `<span class="email-countdown gone">Sending now — the window has closed.</span>`;
+        return;
+      }
+      host.innerHTML = `<span class="email-countdown"><b>${left}s</b> to cancel before
+        ${detail.batch.recipientCount} email${detail.batch.recipientCount === 1 ? "" : "s"} send.
+        Use <b>Cancel remaining</b> below to stop.</span>`;
+    };
+    paint();
+    tickTimer = setInterval(paint, 1000);
+  }
+
+  function schedulePoll() {
+    clearTimeout(pollTimer);
+    if (!detail || ["editing", "invalid", "drafts_ready", "completed", "partial_failure", "canceled", "action_required"].includes(detail.batch.status)) return;
+    pollTimer = setTimeout(async () => {
+      try { detail = await api(`batch&id=${encodeURIComponent(detail.batch.id)}`, null, "GET"); composerView(); }
+      catch { schedulePoll(); }
+    }, 3000);
+  }
+
+  async function open(selected) {
+    excluded = new Set(); openDomain = null;
+    /* A WHITELIST, and it silently ate a feature.
+     *
+     * This rebuilds each recipient into a known shape rather than forwarding
+     * whatever the caller handed over -- right instinct, since the map's row
+     * objects carry plenty the emailer has no business posting. But teammates
+     * and teammatesFull were never added to it, so the per-message "copy
+     * someone on their team" picker had nothing to offer: the map computed all
+     * eleven of Regina Stuzin's teammates, and three lines later they were
+     * gone.
+     *
+     * The picker hides itself when the list is empty, so the feature simply
+     * never appeared and nothing anywhere reported a problem.
+     *
+     * Same failure as the Graph field whitelist in email-store.js: a hand-kept
+     * list of names, in a language with no compiler to notice the omission.
+     * Anything added to AdvisorEmailData has to be added HERE too.
+     */
+    recipients = (selected || []).map((r) => ({ contactId: r.contactId || r.crd || "", name: r.name || "",
+      email: r.email || "", firm: r.firm || r.companyName || "", firstName: r.firstName || "", lastName: r.lastName || "",
+      teammates: Array.isArray(r.teammates) ? r.teammates : [],
+      teammatesFull: Array.isArray(r.teammatesFull) ? r.teammatesFull : [] }));
+    detail = null; cursor = 0; forceDetail = false; clearTimeout(pollTimer); clearInterval(tickTimer);
+    const back = shell(); back.hidden = false;
+    document.getElementById("emailTitle").textContent = "Prepare email";
+    document.getElementById("emailBody").innerHTML = `<p class="email-loading">Loading Microsoft 365 email tools…</p>`;
+    try { await loadCatalog(); if (!catalog.connection.connected) connectView(); else setupView(); }
+    catch (e) { connectView(e.message); }
+  }
+
+  async function openHistory() {
+    const back = shell(); back.hidden = false;
+    document.getElementById("emailTitle").textContent = "Email activity";
+    try {
+      const data = await api("batches", null, "GET");
+      document.getElementById("emailBody").innerHTML = `<div class="email-history">${data.batches.length ? data.batches.map((b) =>
+        `<button type="button" data-email="open-batch" data-id="${esc(b.id)}"><b>${esc(b.name)}</b><span>${b.recipientCount} recipients · ${esc(stateLabel(b.status))}</span><small>${esc(b.createdUtc || "")}</small></button>`).join("") : "<p>No email batches yet.</p>"}</div>`;
+    } catch (e) { document.getElementById("emailBody").innerHTML = `<p class="email-error">${esc(e.message)}</p>`; }
+  }
+
+  async function act(button) {
+    const action = button.dataset.email;
+    if (action === "close") { shell().hidden = true; clearTimeout(pollTimer); clearInterval(tickTimer); forceDetail = false; return; }
+    if (action === "details") { forceDetail = true; composerView(); return; }
+    // ---- recipient domain grouping ----
+    // Every one of these re-renders the setup screen, which would otherwise
+    // discard the template and attachment choices made above it. Capture and
+    // restore them rather than moving the picker somewhere it fits worse.
+    if (["dom-toggle", "dom-open", "dom-all", "dom-none", "person-toggle"].includes(action)) {
+      const tplEl = document.getElementById("emailTemplate");
+      const keepTemplate = tplEl ? tplEl.value : "";
+      const keepDocs = [...document.querySelectorAll(".email-docs input:checked")].map((x) => x.value);
+      const addrIn = (domain) => recipients.filter((r) => domainOf(r) === domain)
+        .map((r) => String(r.email || "").toLowerCase());
+
+      if (action === "dom-open") {
+        openDomain = openDomain === button.dataset.domain ? null : button.dataset.domain;
+      } else if (action === "dom-all") {
+        excluded = new Set();
+      } else if (action === "dom-none") {
+        excluded = new Set(recipients.map((r) => String(r.email || "").toLowerCase()));
+      } else if (action === "dom-toggle") {
+        const list = addrIn(button.dataset.domain);
+        // Mixed goes to fully-included on the next click, not fully-excluded --
+        // the rep is reaching for "all of these", and losing the ones already
+        // ticked would be a surprising way to answer that.
+        const anyKept = list.some((a) => !excluded.has(a));
+        const allKept = list.every((a) => !excluded.has(a));
+        if (allKept) list.forEach((a) => excluded.add(a));
+        else if (anyKept) list.forEach((a) => excluded.delete(a));
+        else list.forEach((a) => excluded.delete(a));
+      } else {
+        const addr = button.dataset.address;
+        if (excluded.has(addr)) excluded.delete(addr); else excluded.add(addr);
+      }
+
+      /* Ticking a domain re-renders the whole setup view, which puts the
+       * scroll position back to the top -- so a rep working down a list of
+       * fifteen domains loses their place on every click and has to find it
+       * again. Captured before the re-render and restored after, on whichever
+       * ancestor is actually doing the scrolling. */
+      const scroller = scrollParent(button);
+      const wasAt = scroller ? scroller.scrollTop : 0;
+      setupView();
+      if (scroller) scroller.scrollTop = wasAt;
+      const tplBack = document.getElementById("emailTemplate");
+      if (tplBack && keepTemplate) tplBack.value = keepTemplate;
+      for (const box of document.querySelectorAll(".email-docs input"))
+        if (!box.disabled) box.checked = keepDocs.includes(box.value);
+      const notes = document.getElementById("emailTemplate");
+      if (notes) notes.dispatchEvent(new Event("change"));
+      return;
+    }
+    if (action === "mates-open") {
+      // `open` still holds the PRE-click value here; the browser flips it after.
+      const details = button.parentElement;
+      if (details && details.open) matesOpen.delete(button.dataset.id);
+      else matesOpen.add(button.dataset.id);
+      return;
+    }
+    if (action === "mate-toggle") {
+      const m = detail.messages[cursor];
+      // They are picking, so it stays open through the re-render.
+      matesOpen.add(m.id);
+      const on = new Set((m.teammateCc || []).map((a) => String(a).toLowerCase()));
+      const a = button.dataset.address;
+      if (button.checked) on.add(a); else on.delete(a);
+      button.disabled = true;
+      try {
+        const r = await api("update_message_cc",
+          { batchId: detail.batch.id, messageId: m.id, teammates: [...on] });
+        detail = r;
+        composerView();
+        if (r.ccRemovedRecipients && r.ccRemovedRecipients.length)
+          notice(`${r.ccRemovedRecipients.join(", ")} ${
+            r.ccRemovedRecipients.length === 1 ? "is" : "are"} now copied here `
+            + `instead of receiving their own email.`);
+        else if (r.ccSuppressed && r.ccSuppressed.length)
+          notice(`${r.ccSuppressed.join(", ")} could not be copied — unsubscribed.`, true);
+      } catch (e) { button.disabled = false; notice(e.message, true); }
+      return;
+    }
+    if (action === "docs") { clearTimeout(pollTimer); return docsView(); }
+    if (action === "health") { clearTimeout(pollTimer); return openHealth(); }
+    if (action === "health-days") { healthDays = Number(button.dataset.days) || 90; return openHealth(); }
+    if (action === "templates") { clearTimeout(pollTimer); return templatesView(); }
+    if (action === "tpl-new") {
+      editing = { id: "", name: "", subject: "", bodyText: "", requiredDocumentIds: [], images: [] };
+      savedSnapshot = null;          // a new template is unsaved by definition
+      return templateEditView();
+    }
+    if (action === "tpl-edit") {
+      editing = (catalog.templates || []).find((x) => x.id === button.dataset.id);
+      savedSnapshot = editing ? templateFingerprint(editing) : null;
+      return editing ? templateEditView() : templatesView("That template could not be loaded.", true);
+    }
+    /* Send this template to yourself.
+     *
+     * The people who manage templates and approved PDFs are not advisors, so
+     * they have no CRD and cannot be picked as recipients anywhere in the app.
+     * Without this the only way for a template author to see their own work
+     * arrive was to borrow a real advisor from a list and mail them -- which is
+     * exactly the accident every other control here exists to prevent.
+     *
+     * The recipient is the connected mailbox itself, taken from the server's
+     * catalog rather than typed, so this cannot be aimed at anyone else. It is
+     * an ordinary batch of one: same rendering, same attachments, same
+     * signature, same guardrails.
+     */
+    if (action === "tpl-test") {
+      const mailbox = catalog.connection && catalog.connection.mailbox;
+      if (!mailbox) return notice("Connect your Microsoft 365 mailbox first.", true);
+      const name = button.dataset.name || "this template";
+      if (!confirm(`Send "${name}" to ${mailbox}?
+
+`
+        + `A one-person batch addressed to you, with the template's required `
+        + `attachments and charts exactly as a rep would send it.`)) return;
+      button.disabled = true;
+      try {
+        const me = (catalog.connection.profile || {});
+        detail = await api("create_batch", {
+          name: `Test — ${name}`,
+          templateId: button.dataset.id,
+          attachmentIds: [],
+          recipients: [{
+            contactId: "",
+            email: mailbox,
+            name: me.displayName || mailbox,
+            firstName: (me.givenName || String(me.displayName || "").split(" ")[0] || "there"),
+            lastName: me.surname || "",
+            companyName: "Equity Investment Corporation",
+          }],
+        });
+        editing = null;
+        cursor = 0;
+        composerView();
+      } catch (e) { button.disabled = false; notice(e.message, true); }
+      return;
+    }
+    if (action === "tpl-back") { editing = null; return templatesView(); }
+    if (action === "tpl-delete") {
+      const name = button.dataset.name || button.dataset.id;
+      if (!confirm(`Remove the template "${name}"?\n\nReps will no longer be able to choose it. Batches already created are unaffected.`)) return;
+      try { const r = await api("delete_template", { id: button.dataset.id }); catalog.templates = r.templates; templatesView(`Removed ${name}.`); }
+      catch (e) { templatesView(e.message, true); }
+      return;
+    }
+    if (action === "tpl-save") {
+      button.disabled = true;
+      const draft = collectTemplate();
+      try {
+        const r = await api("put_template", draft);
+        catalog.templates = r.templates || catalog.templates || [];
+        editing = (r.templates || []).find((x) => x.id === (r.saved || {}).id) || draft;
+        savedSnapshot = templateFingerprint(editing);
+        templateEditView(`Saved as version ${r.saved.version}.`);
+      } catch (e) {
+        button.disabled = false;
+        // Redraw from the DRAFT, not from `editing`. templateEditView renders
+        // whatever `editing` holds, and for a template being created that is an
+        // empty object -- so any rejection, a lint error included, silently threw
+        // away everything the administrator had typed. Their work survives the
+        // error now, and the message tells them what to change.
+        editing = draft;
+        templateEditView(e.message, true);
+      }
+      return;
+    }
+    if (action === "tpl-img-insert") {
+      // Put the placeholder where the cursor is, rather than making an
+      // administrator hand-type a token that must match exactly.
+      const box = document.getElementById("tplBody");
+      const token = `{{image:${button.dataset.id}}}`;
+      const at = box.selectionStart == null ? box.value.length : box.selectionStart;
+      box.value = `${box.value.slice(0, at)}${token}${box.value.slice(at)}`;
+      box.focus();
+      box.selectionStart = box.selectionEnd = at + token.length;
+      runLint();
+      return;
+    }
+    if (action === "tpl-img-delete") {
+      try {
+        const r = await api("delete_template_image", { templateId: editing.id, imageId: button.dataset.id });
+        catalog.templates = r.templates;
+        editing = r.templates.find((x) => x.id === editing.id) || editing;
+        templateEditView("Chart removed.");
+      } catch (e) { templateEditView(e.message, true); }
+      return;
+    }
+    if (action === "tpl-img-upload") {
+      const input = document.getElementById("tplImgFile");
+      const file = input && input.files && input.files[0];
+      const name = (document.getElementById("tplImgName").value || "").trim();
+      if (!file) return templateEditView("Choose an image file.", true);
+      if (!name) return templateEditView("Give the chart a name — it becomes its placeholder id.", true);
+      button.disabled = true;
+      try {
+        const dataBase64 = await readAsBase64(file);
+        const r = await api("put_template_image", { templateId: editing.id, imageId: name, name, dataBase64 });
+        catalog.templates = r.templates;
+        editing = r.templates.find((x) => x.id === editing.id) || editing;
+        templateEditView(`Added ${name}. Use ${r.saved.placeholder} in the body.`);
+      } catch (e) { button.disabled = false; templateEditView(e.message, true); }
+      return;
+    }
+    // Both admin list views use docs-back. Opened from Settings there is no
+    // batch behind them, so falling through to setupView() would show a
+    // recipient list that does not exist -- go back where we came from instead.
+    if (action === "docs-back" && !detail) {
+      shell().hidden = true;
+      if (adminReturn) { const back = adminReturn; adminReturn = null; back(); }
+      return;
+    }
+    if (action === "docs-back") { return detail ? composerView() : setupView(); }
+    if (action === "doc-delete") {
+      const name = button.dataset.name || button.dataset.id;
+      if (!confirm(`Remove "${name}" from the approved catalog?\n\nReps will no longer be able to attach it. Batches already carrying it will fail validation.`)) return;
+      button.disabled = true;
+      try { const r = await api("delete_document", { id: button.dataset.id }); catalog.documents = r.documents; docsView(`Removed ${name}.`); }
+      catch (e) { docsView(e.message, true); }
+      return;
+    }
+    if (action === "doc-replace") {
+      replacing = { id: button.dataset.id, name: button.dataset.name };
+      docsView();
+      const nameBox = document.getElementById("docName");
+      if (nameBox) nameBox.value = replacing.name;
+      const file = document.getElementById("docFile");
+      if (file) { file.focus(); file.scrollIntoView({ block: "center" }); }
+      return;
+    }
+    if (action === "doc-replace-cancel") { replacing = null; return docsView(); }
+    if (action === "doc-upload") {
+      const input = document.getElementById("docFile");
+      const file = input && input.files && input.files[0];
+      const name = (document.getElementById("docName").value || "").trim();
+      if (!file) return docsView("Choose a PDF to publish.", true);
+      if (!name) return docsView("Give the document a display name.", true);
+      // Checked here for a fast, clear message; the server checks the actual
+      // bytes, which is the check that counts -- a renamed file passes this one.
+      if (!/\.pdf$/i.test(file.name) && file.type !== "application/pdf")
+        return docsView("Only PDF files can be approved as attachments.", true);
+      button.disabled = true;
+      try {
+        const dataBase64 = await readAsBase64(file);
+        // The ID is what keeps a replacement in place. Taken from the row being
+        // replaced, NOT from the display name -- an administrator who edits the
+        // name while replacing would otherwise publish a second document and
+        // leave the template pointing at the old one.
+        const target = replacing ? replacing.id : name;
+        const r = await api("put_document", { id: target, name, dataBase64 });
+        catalog.documents = r.documents;
+        const saved = r.saved;
+        const was = replacing;
+        replacing = null;
+        docsView(was
+          ? `Replaced ${esc(was.name)} — now version ${saved.version}. Templates requiring it are unchanged.`
+          : `Published ${saved.name} as version ${saved.version}.`);
+      } catch (e) { docsView(e.message, true); }
+      return;
+    }
+    /* Awaited, because the FIELD app resolves teammates from a practice file it
+     * may still have to fetch. The desk returns a plain array and awaiting that
+     * costs nothing -- one contract, both apps. */
+    if (action === "open-list") {
+      return open(global.AdvisorEmailData ? await global.AdvisorEmailData.list() : []);
+    }
+    if (action === "history") { return openHistory(); }
+    if (action === "connect") {
+      button.disabled = true;
+      try { const r = await api("connect", { returnTo: `${location.pathname}?email=connected` }); location.assign(r.authorizeUrl); }
+      catch (e) { connectView(e.message); }
+      return;
+    }
+    if (action === "create") {
+      const kept = keptRecipients();
+      if (!kept.length) return notice("Every recipient is excluded. Include at least one.", true);
+      // Confirmed by domain, not by count. "Send to 52 people?" is answered yes
+      // without reading; "morganstanley.com 52, rjf.com 8" is the moment the
+      // stray firm gets caught, which is the entire point of the grouping.
+      const groups = domainGroups().filter((g) => g.kept);
+      if (groups.length > 1 && !confirm(`This batch spans ${groups.length} email domains:
+
+`
+        + groups.map((g) => `  ${g.domain} — ${g.kept}`).join("\n")
+        + `
+
+Generate emails for all of them?`)) return;
+      button.disabled = true; notice("Generating one email per recipient…");
+      try {
+        // Includes the disabled ones: :checked is independent of :disabled, and
+        // the required documents are checked-and-disabled by design.
+        const attachmentIds = [...document.querySelectorAll(".email-docs input:checked")].map((x) => x.value);
+
+        const ccColleague = ((document.getElementById("ccColleague") || {}).value || "").trim();
+        detail = await api("create_batch", { recipients: kept,
+          templateId: (document.getElementById("emailTemplate") || {}).value || "",
+          attachmentIds, ccColleague });
+        composerView();
+      } catch (e) { button.disabled = false; notice(e.message, true); }
+      return;
+    }
+    if (action === "pick") {
+      if (!await saveOne()) return;
+      cursor = Number(button.dataset.index) || 0; composerView(); return;
+    }
+    if (action === "step") {
+      if (!await saveOne()) return;
+      const next = cursor + (Number(button.dataset.by) || 0);
+      if (next >= 0 && next < detail.messages.length) { cursor = next; composerView(); }
+      return;
+    }
+    if (action === "drop-recipient") {
+      const name = button.dataset.name;
+      if (!confirm(`Remove ${name} from this batch?
+
+They stay on your call list and keep their history — this only takes them out of this email.`)) return;
+      if (!await saveOne()) return;
+      try {
+        detail = await api("remove_recipient", { batchId: detail.batch.id, messageId: button.dataset.id });
+        cursor = Math.min(cursor, detail.messages.length - 1);
+        composerView();
+      } catch (e) { notice(e.message, true); }
+      return;
+    }
+    if (action === "next-failed") {
+      // Walks the messages that actually failed to send, wrapping, so pressing
+      // it repeatedly steps through them instead of sticking on the first.
+      forceDetail = true;
+      const n = detail.messages.length;
+      for (let step = 1; step <= n; step++) {
+        const i = (cursor + step) % n;
+        if (detail.messages[i].failureMessage) { cursor = i; composerView(); return; }
+      }
+      composerView();
+      return;
+    }
+    if (action === "next-behind") {
+      if (!await saveOne()) return;
+      const n = detail.messages.length;
+      for (let step = 1; step <= n; step++) {
+        const i = (cursor + step) % n;
+        if ((detail.messages[i].validation && detail.messages[i].validation.warnings || [])
+            .some((w) => w.code === "behind_common_text")) { cursor = i; composerView(); return; }
+      }
+      return;
+    }
+    if (action === "next-problem") {
+      if (!await saveOne()) return;
+      // Wrap from wherever they are, so pressing it repeatedly walks the
+      // blocked messages rather than sticking on the first one.
+      const n = detail.messages.length;
+      for (let step = 1; step <= n; step++) {
+        const i = (cursor + step) % n;
+        if ((detail.messages[i].validation && detail.messages[i].validation.errors || []).length) {
+          cursor = i; composerView(); return;
+        }
+      }
+      return;
+    }
+    /* Back to the wording compliance approved.
+     *
+     * The safety net that makes the rest of this bearable. A rep who is nervous
+     * about touching the common text is a rep who works around the tool; one
+     * click back to the published template makes experimenting cheap, which is
+     * usually better than making it hard.
+     *
+     * The text comes from the SERVER's copy of the template, not from anything
+     * the page is holding, so "approved" means approved.
+     */
+    if (action === "restore-common") {
+      const approved = detail.approvedText;
+      if (!approved) return notice("The approved wording for this template could not be loaded.", true);
+      if (!confirm("Replace the common subject and body with the approved template wording?"
+        + String.fromCharCode(10, 10)
+        + "Emails you edited individually keep their own text.")) return;
+      try {
+        notice("Restoring…");
+        detail = await api("update_common", { batchId: detail.batch.id,
+          subject: approved.subject, bodyText: approved.bodyText });
+        composerView();
+        notice("Restored to the approved wording.");
+      } catch (e) { notice(e.message, true); }
+      return;
+    }
+    /* Force the common wording onto everybody, individual edits included.
+     *
+     * Destructive and irreversible, so it is confirmed by COUNT and by name --
+     * "overwrite 2 emails" is answered yes reflexively, while seeing whose
+     * wording is about to be discarded is not.
+     */
+    if (action === "apply-all") {
+      const own = detail.messages.filter((x) => x.subjectOverridden || x.bodyOverridden);
+      const names = own.map((x) => x.recipientName || x.recipientEmail);
+      if (!own.length) return;
+      if (!confirm(`Replace the wording on all ${detail.messages.length} emails?`
+        + String.fromCharCode(10, 10)
+        + `${own.length} email${own.length === 1 ? " was" : "s were"} edited individually and `
+        + `will LOSE that wording: ${names.slice(0, 6).join(", ")}`
+        + `${names.length > 6 ? `, and ${names.length - 6} more` : ""}.`
+        + String.fromCharCode(10, 10) + `This cannot be undone.`)) return;
+      try {
+        notice("Applying to everybody…");
+        detail = await api("update_common", { batchId: detail.batch.id, overwriteAll: true,
+          subject: document.getElementById("emailCommonSubject").value,
+          bodyText: document.getElementById("emailCommonBody").value });
+        composerView();
+        notice(`Applied to all ${detail.messages.length}. ${own.length} individual `
+          + `edit${own.length === 1 ? " was" : "s were"} replaced.`);
+      } catch (e) { notice(e.message, true); }
+      return;
+    }
+    if (action === "save-common") {
+      try {
+        notice("Applying common edits…");
+        detail = await api("update_common", { batchId: detail.batch.id,
+          subject: document.getElementById("emailCommonSubject").value,
+          bodyText: document.getElementById("emailCommonBody").value });
+        composerView();
+        // Naming them is the point. "Applies to non-overridden emails" is true
+        // and unreadable; "Chen, Whitfield and Okafor kept their own wording"
+        // is the same fact in a form a rep will act on.
+        // A deletion is the mistake a spell-checker cannot see, and the likelier
+        // one: tidy up the greeting, lose {{first_name}}, and every email in the
+        // batch now opens "Hi ,".
+        const gone = detail.removedTokens || [];
+        if (gone.length) {
+          notice(`Heads up — your edit removed ${gone.map((t) => `{{${t}}}`).join(", ")}`
+            + ` from the approved wording. That is fine if you meant it.`, true);
+        }
+        const kept = detail.keptOwnText || [];
+        if (kept.length) notice(`${kept.length} kept their own wording and did NOT get this change: `
+          + kept.slice(0, 3).map((k) => k.name).join(", ") + (kept.length > 3 ? `, +${kept.length - 3} more` : ""), true);
+      } catch (e) { notice(e.message, true); } return;
+    }
+    if (action === "reset-one") {
+      const m = detail.messages[cursor];
+      try { detail = await api("update_message", { batchId: detail.batch.id, messageId: m.id,
+        resetSubject: true, resetBody: true, reviewed: false }); composerView(); }
+      catch (e) { notice(e.message, true); } return;
+    }
+    // "Check batch" was removed. It re-ran exactly the validation that approval
+    // runs -- approval refuses on any error -- so it could not catch anything,
+    // and every edit already re-validates on its way back from the server. Two
+    // buttons in this footer also fit a phone; three did not.
+    //
+    // The server op remains, reachable as ?op=validate, for diagnosing a batch
+    // that looks stuck without having to approve it to find out why.
+    if (action === "approve-drafts" || action === "approve-send") {
+      // Unapplied common edits are the one way to send text nobody meant to
+      // send: the box shows the new wording, the messages carry the old, and
+      // the preview agrees with the messages. Refused rather than warned about,
+      // because a warning at this point is one more thing to click past.
+      if (commonDirty()) {
+        return notice("You have unapplied changes to the common template. "
+          + "Press Apply first, or restore the approved wording.", true);
+      }
+      const mode = action === "approve-send" ? "send" : "drafts", b = detail.batch;
+      const attachmentText = b.attachmentSummary.length ? b.attachmentSummary.map((a) => `${a.name} (${bytes(a.size)})`).join("\n") : "No attachments";
+      const verb = mode === "send" ? `approve ${b.recipientCount} emails for sending after the ${catalog.limits.cancellationSeconds}-second cancellation window` : `create ${b.recipientCount} Outlook drafts`;
+      // The unreviewed count belongs in this dialog, not only in the tally row
+      // above it. This is the last moment anyone can stop the send, and "8 not
+      // yet opened" is exactly the fact a rep needs at that moment.
+      const c = tally();
+      if (!confirm(`Review confirmation\n\n${b.recipientCount} recipients\n`
+        + `${c.unopened ? `${c.unopened} never opened by you\n` : ""}`
+        + `${attachmentText}\n\n${verb}?`)) return;
+
+      // Server-enforced too; this only decides whether to ask. A rep who
+      // dismisses the prompt gets told the approval stopped rather than
+      // silently sending nothing.
+      const needsCode = catalog.limits.passcodeOver != null
+        && b.recipientCount > catalog.limits.passcodeOver;
+      let passcode = "";
+      if (needsCode) {
+        passcode = prompt(`This batch has ${b.recipientCount} recipients.\n\n`
+          + `Enter the approval passcode to continue.`) || "";
+        if (!passcode) return notice("Approval cancelled — no passcode entered.", true);
+      }
+      button.disabled = true;
+      try { detail = await api("approve", { batchId: b.id, mode, reviewed: true, passcode,
+        confirmation: { recipientCount: b.recipientCount, attachmentIds: b.attachmentIds } }); composerView(); }
+      catch (e) { button.disabled = false; notice(e.message, true); } return;
+    }
+    if (["pause", "cancel", "retry"].includes(action)) {
+      const actual = action === "pause" && detail.batch.status === "paused" ? "resume" : action;
+      if (actual === "cancel" && !confirm("Cancel every email that has not already been submitted? Sent emails will not be recalled.")) return;
+      // Stop the ticker before the round trip, not after. Cancelling inside the
+      // send window used to leave it counting down for another second or two,
+      // which is precisely the moment a rep needs to be told it stopped.
+      if (actual === "cancel") { clearInterval(tickTimer); notice("Cancelling…"); }
+      try { detail = await api(actual, { batchId: detail.batch.id }); composerView(); }
+      catch (e) { notice(e.message, true); } return;
+    }
+    if (action === "open-batch") {
+      try { await loadCatalog(); detail = await api(`batch&id=${encodeURIComponent(button.dataset.id)}`, null, "GET"); cursor = 0; forceDetail = false; composerView(); }
+      catch (e) { document.getElementById("emailBody").innerHTML = `<p class="email-error">${esc(e.message)}</p>`; }
+    }
+  }
+
+  document.addEventListener("click", async (event) => {
+    const direct = event.target.closest("[data-email]");
+    if (direct) {
+      /* preventDefault CANCELS A CHECKBOX.
+       *
+       * This dispatcher was written for buttons and links, where suppressing
+       * the default is right. On an <input type=checkbox> it stops the browser
+       * applying the tick -- so the handler then read `checked` and got the
+       * value from BEFORE the click, concluded the box was being un-ticked, and
+       * saved nothing. The teammate picker looked completely inert: the box
+       * flickered and the list came back unchanged.
+       */
+      const toggle = (direct.tagName === "INPUT"
+          && /^(checkbox|radio)$/i.test(direct.type || ""))
+        // A <summary> needs its default too, or the disclosure never opens.
+        || direct.tagName === "SUMMARY";
+      if (!toggle) event.preventDefault();
+      event.stopPropagation();
+      act(direct);
+      return;
+    }
+    const legacy = event.target.closest('[data-contact="email"], [data-dial="mailed"], [data-mail], [data-sess-mail]');
+    if (!legacy || !global.AdvisorEmailData) return;
+    event.preventDefault(); event.stopPropagation();
+    const id = legacy.dataset.advisor || legacy.dataset.crd || legacy.dataset.mail || legacy.dataset.sessMail;
+    // Awaited: see the note on open-list above.
+    const recipient = await global.AdvisorEmailData.recipientFor(id);
+    if (recipient) open([recipient]);
+  }, true);
+
+  const params = new URLSearchParams(location.search);
+  if (params.get("email") === "connected") setTimeout(() => openHistory(), 0);
+  else if (params.get("email") === "error") setTimeout(() => { shell().hidden = false; connectView(params.get("message") || "Microsoft connection failed."); }, 0);
+
+  // Opens a management screen directly, with no batch and no recipients. The
+  // admin screens were previously reachable only from the compose setup view,
+  // which needs a selected list -- so an administrator whose job is publishing
+  // templates and PDFs had to first pretend to email somebody.
+  //
+  // isAdmin is asked of the server; the boolean the catalog returns is only
+  // what decides whether to DRAW the entry, and every write is checked again
+  // server-side regardless of what the page believes.
+  /* Where "Back" goes from an admin list.
+   *
+   * templatesView and docsView are reachable two ways: from a composer (there
+   * is a batch behind them) and from Settings (there is not). The second case
+   * used to close the sheet outright, which made Back and Close the same
+   * button and lost the panel the administrator came from.
+   */
+  let adminReturn = null;
+
+  async function openAdmin(which, onBack) {
+    adminReturn = typeof onBack === "function" ? onBack : null;
+    shell().hidden = false;
+    document.getElementById("emailTitle").textContent = "Loading…";
+    document.getElementById("emailBody").innerHTML = "";
+    try {
+      await loadCatalog();
+      if (!catalog.isAdmin) {
+        document.getElementById("emailTitle").textContent = "Not available";
+        document.getElementById("emailBody").innerHTML =
+          `<p class="email-error">This area is limited to email administrators.</p>`;
+        return;
+      }
+      detail = null; cursor = 0;
+      if (which === "health") return openHealth();
+      return which === "templates" ? templatesView() : docsView();
+    } catch (e) {
+      document.getElementById("emailTitle").textContent = "Not available";
+      document.getElementById("emailBody").innerHTML = `<p class="email-error">${esc(e.message)}</p>`;
+    }
+  }
+
+  // Cached so the Settings panel can decide whether to draw the admin rows
+  // without a round trip every time it opens.
+  let adminKnown = null;
+  async function isAdmin() {
+    if (adminKnown !== null) return adminKnown;
+    try { adminKnown = !!(await loadCatalog()).isAdmin; } catch { adminKnown = false; }
+    return adminKnown;
+  }
+
+  // Exposed for the Settings panel's "copy a colleague" picker: the catalog is
+  // fetched here, and the list is the server's, not the client's.
+  const internalRecipients = () => (catalog && catalog.internalRecipients) || [];
+  /* The approved document list, for the one-to-one reply and follow-up
+   * composers on the advisor profile.
+   *
+   * Exposed rather than re-fetched: this catalog is already the server's
+   * answer, and a second copy could come to disagree with the bulk composer's
+   * picker about what a rep may attach. Empty until the catalog loads, which is
+   * harmless -- the file picker beside it still works, and the server validates
+   * every document id regardless of what the client offered. */
+  const documents = () => (catalog && catalog.documents) || [];
+  global.EmailComposer = { open, openHistory, openAdmin, isAdmin,
+                           internalRecipients, documents };
+})(window);
