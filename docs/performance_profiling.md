@@ -22,15 +22,17 @@ are security boundaries, not conveniences.
 
 The regional benchmark depends on transition signals added to `webapp/app.js`:
 transition start, first regional batch visible, and all regional batches
-settled. As of 2026-08-23, the production build predates those signals. Publish
-the instrumentation-only static change before collecting a regional baseline.
-Until then, a normal run exits with this deliberate error:
+settled. The production build includes those signals as of 2026-08-23. If a
+target deployment is older, has been rolled back, or otherwise lacks the
+instrumentation, a normal run exits with this deliberate error:
 
     deployed app lacks transition instrumentation; deploy this branch first; --smoke only validates CDP lifecycle
 
-Do not interpret an error JSON file as a partial regional baseline. Follow the
-static-site procedure in [deployment_automation.md](deployment_automation.md),
-then verify the deployed asset version before profiling.
+That error means the target deployment lacks or predates the required signals;
+publish the instrumentation before measuring regions. Do not interpret the
+error JSON file as a partial regional baseline. Follow the static-site procedure
+in [deployment_automation.md](deployment_automation.md), then verify the
+deployed asset version before profiling.
 
 ## Lifecycle smoke check
 
