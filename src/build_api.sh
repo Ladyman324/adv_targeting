@@ -8,6 +8,7 @@ DIST="$ROOT/dist"
 TEMP_BASE=$(cd "${TMPDIR:-/tmp}" && pwd -P)
 TEMP_ROOT=""
 STAGE_DIR=""
+EXPECTED_API_TEST_FILE_COUNT=24
 
 cleanup() {
   test -z "$TEMP_ROOT" && return
@@ -123,6 +124,35 @@ NODE
   done
 }
 
+run_api_tests() {
+  local tree=$1
+  local expected_count=$2
+  local test_dir="$tree/test"
+  local sentinel="$test_dir/deployment-package-guard.test.js"
+  local candidate
+  local -a test_files=()
+
+  [[ "$expected_count" =~ ^[1-9][0-9]*$ ]] \
+    || die "expected API test file count is invalid: $expected_count"
+  test -d "$test_dir" || die "API test directory is missing: $test_dir"
+  test -f "$sentinel" \
+    || die "API test sentinel is missing: ${sentinel#"$tree"/}"
+  while IFS= read -r -d '' candidate; do
+    test_files+=("$candidate")
+  done < <(find "$test_dir" -type f -name '*.test.js' -print0 | sort -z)
+  test "${#test_files[@]}" -eq "$expected_count" \
+    || die "found ${#test_files[@]} API test files; expected $expected_count"
+
+  echo "[*] running ${#test_files[@]} explicit API test files from local temp cwd"
+  (
+    # npm.cmd cannot preserve a UNC current directory and may silently fall back
+    # to a Windows system directory. Invoke Node directly with explicit files.
+    cd "$TEMP_BASE"
+    unset NODE_TEST_CONTEXT
+    API_PACKAGE_TEST_ROOT="$tree" node --test "${test_files[@]}"
+  )
+}
+
 verify_archive() {
   local archive=$1
   local expected=${2:-}
@@ -168,9 +198,14 @@ if test "${1:-}" = "--check-source"; then
   echo "[*] source package boundary is clean"
   exit 0
 fi
-test $# -eq 0 || die "usage: $0 [--verify <api.tgz> [expected-sha-or-file] | --check-source <api-directory>]"
+if test "${1:-}" = "--run-tests"; then
+  test $# -eq 3 || die "usage: $0 --run-tests <api-directory> <expected-file-count>"
+  run_api_tests "$2" "$3"
+  exit 0
+fi
+test $# -eq 0 || die "usage: $0 [--verify <api.tgz> [expected-sha-or-file] | --check-source <api-directory> | --run-tests <api-directory> <expected-file-count>]"
 
-for command in node npm git tar sha256sum mktemp find; do
+for command in node git tar sha256sum mktemp find sort diff; do
   command -v "$command" >/dev/null || die "required command is missing: $command"
 done
 NODE_VERSION=$(node -p 'process.versions.node')
@@ -183,7 +218,6 @@ fi
 test -d "$API/node_modules" \
   || die "api/node_modules is missing; run 'npm ci --prefix api' before packaging"
 validate_package_files "$API" false
-npm test --prefix "$API"
 
 COMMIT=$(git -C "$ROOT" rev-parse HEAD)
 test "${#COMMIT}" -eq 40 || die "could not resolve a full Git commit"
@@ -221,6 +255,16 @@ node -e 'const fs=require("node:fs"); fs.writeFileSync(process.argv[1], JSON.str
   "$RELEASE_FILE"
 
 validate_tree "$STAGE_DIR"
+TEST_ROOT="$TEMP_ROOT/test-workspace"
+TEST_API="$TEST_ROOT/api"
+mkdir -p "$TEST_API/test" "$TEST_ROOT/webapp"
+cp -R "$STAGE_DIR/." "$TEST_API/"
+cp -R "$API/test/." "$TEST_API/test/"
+cp "$ROOT/webapp/email.js" "$ROOT/webapp/field.js" "$TEST_ROOT/webapp/"
+API_PACKAGE_SOURCE_ROOT="$ROOT" NODE_PATH="$API/node_modules" \
+  run_api_tests "$TEST_API" "$EXPECTED_API_TEST_FILE_COUNT"
+diff -r -q --exclude=test "$STAGE_DIR" "$TEST_API" >/dev/null \
+  || die "API tests modified the staged production tree"
 mkdir -p "$DIST"
 ARCHIVE="$DIST/api-$RELEASE_ID.tgz"
 HASH_FILE="$ARCHIVE.sha256"
