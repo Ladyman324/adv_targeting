@@ -406,14 +406,54 @@ async function listDnc() {
  */
 const FLAG_KINDS = new Set(["key", "dd"]);
 
+/* A FLAG IS A SET OF REPS, not a boolean.
+ *
+ * It was one shared true/false with a single name attached, and that model
+ * broke the moment the standing lists became personal: the star on a card read
+ * "somebody marked this person", so a second rep saw it already lit, and
+ * clicking it CLEARED the first rep's flag instead of adding their own. One
+ * rep could silently delete another's, and there was no way to join.
+ *
+ * So `keyBy`/`ddBy` carry every rep who marked them, newline-separated. The
+ * flag is on when the set is non-empty; a rep's own list is the rows their
+ * name appears in; and a click adds or removes exactly one member.
+ *
+ * Bounded in practice -- a handful of reps per advisor -- and capped anyway,
+ * because a Table Storage string property is not a place to discover a limit.
+ */
+const FLAG_MEMBER_CAP = 40;
+
+function flagMembers(raw, fallback) {
+  const text = String(raw == null ? "" : raw).trim();
+  const source = text || String(fallback || "").trim();
+  const seen = new Map();
+  for (const part of source.split(/[\n;,]/)) {
+    const name = part.trim();
+    if (!name) continue;
+    // Case-insensitive identity, first spelling wins -- a UPN is not
+    // case-sensitive and two casings of one rep are one rep.
+    const key = name.toLowerCase();
+    if (!seen.has(key)) seen.set(key, name);
+  }
+  return [...seen.values()].slice(0, FLAG_MEMBER_CAP);
+}
+
+const flagMembersText = (list) => list.join(String.fromCharCode(10));
+
 async function listFlags() {
   const client = await table("contactflags");
   const out = [];
   for await (const e of client.listEntities({
     queryOptions: { filter: odata`PartitionKey eq ${"flags"}` } })) {
-    out.push({ crd: e.rowKey, key: e.keyContact === true, dd: e.dueDiligence === true,
+    // Rows written before the set existed carry one `userName`. Treated as a
+    // set of one, which is the best attribution those rows ever had.
+    const last = e.userName || "";
+    const keyBy = e.keyContact === true ? flagMembers(e.keyBy, last) : [];
+    const ddBy = e.dueDiligence === true ? flagMembers(e.ddBy, last) : [];
+    out.push({ crd: e.rowKey, key: keyBy.length > 0, dd: ddBy.length > 0,
                name: e.advisorName || "", firmCrd: e.firmCrd || "",
-               by: e.userName || "", at: e.atUtc || "" });
+               by: last, at: e.atUtc || "",
+               keyBy, ddBy });
   }
   return out;
 }
@@ -428,28 +468,42 @@ async function setFlag(who, crd, kind, on, name, firmCrd) {
   let existing = null;
   try { existing = await client.getEntity("flags", rowKey); }
   catch (e) { if (e.statusCode !== 404) throw e; }
-  const next = {
-    keyContact: kind === "key" ? !!on : (existing ? existing.keyContact === true : false),
-    dueDiligence: kind === "dd" ? !!on : (existing ? existing.dueDiligence === true : false),
+
+  const last = (existing && existing.userName) || "";
+  const members = {
+    key: existing && existing.keyContact === true ? flagMembers(existing.keyBy, last) : [],
+    dd: existing && existing.dueDiligence === true ? flagMembers(existing.ddBy, last) : [],
   };
-  // Neither flag left: remove the row rather than keeping a tombstone that says
-  // "this person is nothing", which would then ship to every client forever.
-  if (!next.keyContact && !next.dueDiligence) {
+  // ONE MEMBER CHANGES, and only ever the caller's own. Another rep's mark is
+  // not this rep's to remove.
+  const me = clean(who.name);
+  const target = kind === "key" ? "key" : "dd";
+  const without = members[target].filter((n) => n.toLowerCase() !== me.toLowerCase());
+  members[target] = on
+    ? [...without, me].slice(0, FLAG_MEMBER_CAP)
+    : without;
+
+  // Nobody left on either flag: remove the row rather than keeping a tombstone
+  // that says "this person is nothing", which would ship to every client
+  // forever. Note this now means nobody AT ALL, not merely nobody recently.
+  if (!members.key.length && !members.dd.length) {
     if (existing) await client.deleteEntity("flags", rowKey);
-    return { crd: rowKey, key: false, dd: false, removed: true };
+    return { crd: rowKey, key: false, dd: false, keyBy: [], ddBy: [], removed: true };
   }
   const at = new Date().toISOString();
   await client.upsertEntity({
     partitionKey: "flags", rowKey,
-    keyContact: next.keyContact, dueDiligence: next.dueDiligence,
+    keyContact: members.key.length > 0, dueDiligence: members.dd.length > 0,
     advisorName: clean(name || (existing && existing.advisorName), 256),
     firmCrd: clean(firmCrd || (existing && existing.firmCrd), 32),
-    userName: clean(who.name), userId: who.id, atUtc: at,
+    keyBy: flagMembersText(members.key), ddBy: flagMembersText(members.dd),
+    userName: me, userId: who.id, atUtc: at,
   }, "Replace");
-  return { crd: rowKey, key: next.keyContact, dd: next.dueDiligence,
+  return { crd: rowKey, key: members.key.length > 0, dd: members.dd.length > 0,
+           keyBy: members.key, ddBy: members.dd,
            name: clean(name || (existing && existing.advisorName), 256),
            firmCrd: clean(firmCrd || (existing && existing.firmCrd), 32),
-           by: clean(who.name), at };
+           by: me, at };
 }
 
 async function addDnc(who, crd, reason, name) {

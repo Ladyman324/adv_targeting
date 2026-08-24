@@ -865,25 +865,29 @@ const SHIELD_PATH = "M12 2.5l7.5 3v5.2c0 4.7-3.2 8.6-7.5 9.8-4.3-1.2-7.5-5.1"
                   + "-7.5-9.8V5.5z";
 const CHECK_PATH = "M8.4 12.2l2.4 2.4 4.6-4.9";
 
-function flagMarkField(crd, kind, on, label, path, extra){
-  return `<button type="button" class="flag-mark${on ? " on" : ""}"
+function flagMarkField(crd, kind, on, label, path, extra, others = []){
+  // PRESSED MEANS MINE -- see the desk's flagMark() for why a shared boolean
+  // let one rep clear another's mark. Same model, same colours.
+  const also = others.length ? ` — also marked by ${others.join(", ")}` : "";
+  return `<button type="button" class="flag-mark${on ? " on" : ""}${others.length ? " shared" : ""}"
       data-flag="${kind}" data-advisor="${esc(crd)}"
-      title="${esc(label)}${on ? " — tap to unmark" : " — tap to mark"}"
-      aria-label="${esc(label)}" aria-pressed="${on}">
+      title="${esc(label)}${on ? " — tap to unmark" : " — tap to mark"}${esc(also)}"
+      aria-label="${esc(label)}${esc(also)}" aria-pressed="${on}">
       <svg viewBox="0 0 24 24" aria-hidden="true">
         <path d="${path}" fill="${on ? "currentColor" : "none"}"
               stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>
         ${extra || ""}
-      </svg></button>`;
+      </svg>${others.length ? `<i class="flag-also" aria-hidden="true"></i>` : ""}</button>`;
 }
 
 function flagMarksField(crd){
-  const dd = Dial.isDueDiligence(crd);
+  const mine = { key: Dial.flaggedByMe(crd, "key"), dd: Dial.flaggedByMe(crd, "dd") };
+  const others = { key: Dial.flaggedByOthers(crd, "key"), dd: Dial.flaggedByOthers(crd, "dd") };
   return `<span class="contact-flags">`
-    + flagMarkField(crd, "key", Dial.isKeyContact(crd), "Key contact", STAR_PATH)
-    + flagMarkField(crd, "dd", dd, "Due diligence", SHIELD_PATH,
-        `<path d="${CHECK_PATH}" fill="none" stroke="${dd ? "var(--panel, #fff)" : "currentColor"}"
-          stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>`)
+    + flagMarkField(crd, "key", mine.key, "Key contact", STAR_PATH, "", others.key)
+    + flagMarkField(crd, "dd", mine.dd, "Due diligence", SHIELD_PATH,
+        `<path d="${CHECK_PATH}" fill="none" stroke="${mine.dd ? "var(--panel, #fff)" : "currentColor"}"
+          stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>`, others.dd)
     + `</span>`;
 }
 
@@ -891,6 +895,9 @@ function flaggedField(kind){
   const out = [];
   for (const [crd, f] of (Dial.state.flags || new Map())) {
     if (kind === "key" ? !f.key : !f.dd) continue;
+    // Mine only. dial.js owns the membership test, so the two views and
+    // the card control cannot disagree about whose flag this is.
+    if (!Dial.flaggedByMe(crd, kind)) continue;
     // The tile row when we happen to hold it, for a firm name and a number.
     // The flag entry always carries the name it was saved under, so a flagged
     // advisor is never listed as a bare CRD just because the rep is standing

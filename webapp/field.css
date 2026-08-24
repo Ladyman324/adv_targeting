@@ -547,6 +547,19 @@ body{
 .flag-mark[data-flag="key"].on{color:#d9a017}
 .flag-mark[data-flag="dd"].on{color:#2f8f6b}
 .flag-mark:disabled{opacity:.35}
+/* A COLLEAGUE HOLDS THIS TOO.
+   Deliberately NOT the same as `.on`: the button's fill says whether the flag
+   is mine, and this dot says somebody else also marked them. Merging the two
+   is what let one rep clear another's mark by pressing a star they never set.
+   The name is in the tooltip; this only has to say "look". */
+.flag-mark{position:relative}
+.flag-also{position:absolute; top:1px; right:1px; width:5px; height:5px;
+  border-radius:50%; background:currentColor; opacity:.85; pointer-events:none}
+.flag-mark.shared{opacity:.8}
+.flag-mark.shared[data-flag="key"]{color:#d9a017}
+.flag-mark.shared[data-flag="dd"]{color:#2f8f6b}
+.flag-mark.shared.on{opacity:1}
+
 .lists-row.flag-list{background:var(--panel-2); border-radius:8px; margin-bottom:4px}
 .lists-row.flag-list:last-child{margin-bottom:12px;
   border-bottom:1px solid var(--hair); border-bottom-left-radius:0;

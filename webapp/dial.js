@@ -449,6 +449,36 @@
    * value. Held firm-wide -- see api/flags/index.js for why.
    */
   const flagsOf = (crd) => state.flags.get(String(crd)) || null;
+
+  /* WHOSE flag, because "somebody marked this" and "I marked this" are
+   * different questions and the card asks both.
+   *
+   * The control has to reflect MINE -- pressing a lit star that somebody else
+   * lit used to clear THEIR mark rather than add mine, so one rep could delete
+   * another's and nobody could join a flag already set. The fact that a
+   * colleague also marked them is shown alongside, not merged into the
+   * button's state.
+   */
+  const flagMembersOf = (crd, kind) => {
+    const f = flagsOf(crd);
+    if (!f) return [];
+    const raw = kind === "key" ? f.keyBy : f.ddBy;
+    if (Array.isArray(raw)) return raw;
+    // A server that predates the set sends one name, or nothing but `by`.
+    const one = String(raw || f.by || "").trim();
+    return one ? [one] : [];
+  };
+  const meName = () => String((state.user && state.user.name) || "").trim().toLowerCase();
+  const flaggedByMe = (crd, kind) => {
+    const me = meName();
+    // Nobody signed in: claim nothing is mine rather than claiming it all is.
+    return !!me && flagMembersOf(crd, kind).some((n) => String(n).trim().toLowerCase() === me);
+  };
+  const flaggedByOthers = (crd, kind) => {
+    const me = meName();
+    return flagMembersOf(crd, kind).filter((n) => String(n).trim().toLowerCase() !== me);
+  };
+  // Anyone at all -- what the map pin and the read-only glyphs care about.
   const isKeyContact = (crd) => !!(flagsOf(crd) && flagsOf(crd).key);
   const isDueDiligence = (crd) => !!(flagsOf(crd) && flagsOf(crd).dd);
 
@@ -466,8 +496,21 @@
   async function setFlag(crd, kind, on, name, firmCrd) {
     const id = String(crd);
     const before = state.flags.get(id) || null;
-    const optimistic = { crd: id, key: kind === "key" ? on : !!(before && before.key),
-                         dd: kind === "dd" ? on : !!(before && before.dd),
+    // Optimism now has to model a SET: adding me must not drop a colleague,
+    // and removing me must not drop the flag while they still hold it.
+    const memberList = (k) => {
+      const raw = before ? (k === "key" ? before.keyBy : before.ddBy) : null;
+      if (Array.isArray(raw)) return raw.slice();
+      const one = String(raw || (before && before.by) || "").trim();
+      return before && (k === "key" ? before.key : before.dd) && one ? [one] : [];
+    };
+    const me = String((state.user && state.user.name) || "").trim();
+    const next = { key: memberList("key"), dd: memberList("dd") };
+    const target = kind === "key" ? "key" : "dd";
+    next[target] = next[target].filter((n) => n.toLowerCase() !== me.toLowerCase());
+    if (on && me) next[target].push(me);
+    const optimistic = { crd: id, key: next.key.length > 0, dd: next.dd.length > 0,
+                         keyBy: next.key, ddBy: next.dd,
                          name: name || (before && before.name) || "" };
     if (optimistic.key || optimistic.dd) state.flags.set(id, optimistic);
     else state.flags.delete(id);
@@ -1203,6 +1246,7 @@ A do-not-call is firm-wide and permanent, and cannot be added `
     log, history, fullHistory, describeHistory,
     refreshQueue, refreshDnc, dropSuppressed,
     isKeyContact, isDueDiligence, flagsOf, setFlag, fetchFlags,
+    flagMembersOf, flaggedByMe, flaggedByOthers,
     loadSettings, saveSettings, setting,
     loadLists, openList, createList, renameList, deleteList, startCycle,
     refreshProgress, preferredListId,

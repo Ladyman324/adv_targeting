@@ -1200,25 +1200,39 @@ const SHIELD_PATH = "M12 2.5l7.5 3v5.2c0 4.7-3.2 8.6-7.5 9.8-4.3-1.2-7.5-5.1"
                   + "-7.5-9.8V5.5z";
 const CHECK_PATH = "M8.4 12.2l2.4 2.4 4.6-4.9";
 
-function flagMark(crd, kind, on, label, path, extra){
-  return `<button type="button" class="flag-mark${on ? " on" : ""}"
+/* PRESSED MEANS MINE.
+ *
+ * It used to mean "somebody marked this", so a rep looking at a colleague's
+ * key contact saw a lit star -- and pressing it CLEARED the colleague's mark
+ * instead of adding their own. One rep could silently delete another's, and
+ * there was no way to join a flag that was already set.
+ *
+ * The button now carries only this rep's membership. That colleagues also hold
+ * it is shown beside the control rather than folded into its state: they are
+ * two different facts and both are worth having -- whose list this is on, and
+ * that somebody else is already working this person.
+ */
+function flagMark(crd, kind, on, label, path, extra, others = []){
+  const also = others.length ? ` — also marked by ${others.join(", ")}` : "";
+  return `<button type="button" class="flag-mark${on ? " on" : ""}${others.length ? " shared" : ""}"
       data-flag="${kind}" data-advisor="${esc(crd)}"
-      title="${esc(label)}${on ? " — click to unmark" : " — click to mark"}"
-      aria-label="${esc(label)}" aria-pressed="${on}">
+      title="${esc(label)}${on ? " — click to unmark" : " — click to mark"}${esc(also)}"
+      aria-label="${esc(label)}${esc(also)}" aria-pressed="${on}">
       <svg viewBox="0 0 24 24" aria-hidden="true">
         <path d="${path}" fill="${on ? "currentColor" : "none"}"
               stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>
         ${extra || ""}
-      </svg></button>`;
+      </svg>${others.length ? `<i class="flag-also" aria-hidden="true"></i>` : ""}</button>`;
 }
 
 function flagMarks(crd){
-  const dd = Dial.isDueDiligence(crd);
+  const mine = { key: Dial.flaggedByMe(crd, "key"), dd: Dial.flaggedByMe(crd, "dd") };
+  const others = { key: Dial.flaggedByOthers(crd, "key"), dd: Dial.flaggedByOthers(crd, "dd") };
   return `<span class="contact-flags">`
-    + flagMark(crd, "key", Dial.isKeyContact(crd), "Key contact", STAR_PATH)
-    + flagMark(crd, "dd", dd, "Due diligence", SHIELD_PATH,
-        `<path d="${CHECK_PATH}" fill="none" stroke="${dd ? "var(--panel, #fff)" : "currentColor"}"
-          stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>`)
+    + flagMark(crd, "key", mine.key, "Key contact", STAR_PATH, "", others.key)
+    + flagMark(crd, "dd", mine.dd, "Due diligence", SHIELD_PATH,
+        `<path d="${CHECK_PATH}" fill="none" stroke="${mine.dd ? "var(--panel, #fff)" : "currentColor"}"
+          stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>`, others.dd)
     + `</span>`;
 }
 
@@ -1973,7 +1987,16 @@ function renderDialer(){
   // hide whenever the open list had nobody in it, which meant creating a new
   // list made the whole dock vanish -- taking the list picker with it, so there
   // was no way back to the list you had just spent ten minutes filling.
-  dock.hidden = !n && S.lists.length < 2 && !S.problem;
+  /* The dock also survives on FLAGS ALONE.
+   *
+   * It hid whenever the open list was empty and there was no second list --
+   * and the dock carries the only route to the list manager and, now, to the
+   * two standing lists in the picker. So a rep who starred somebody and was
+   * not mid-session had no way to reach their own Key contacts at all: the
+   * list existed, was correct, and was unreachable. That is how this feature
+   * came to look like it had never been built. */
+  const standing = flaggedAdvisors("key").length + flaggedAdvisors("dd").length;
+  dock.hidden = !n && S.lists.length < 2 && !S.problem && !standing;
   if (dock.hidden) { dialMenuOpen = false; return; }
 
   const bar = document.getElementById("dialerBar");
@@ -1993,6 +2016,10 @@ function renderDialer(){
       + `<select class="dial-list" data-dial="pick" aria-label="Call list">`
         + S.lists.map(l => `<option value="${esc(l.id)}"${l.id === S.listId ? " selected" : ""}>`
             + `${esc(l.name)} (${l.count})</option>`).join("")
+        + (flaggedAdvisors("key").length
+            ? `<option value="__key">&#9733; Key contacts (${flaggedAdvisors("key").length})</option>` : "")
+        + (flaggedAdvisors("dd").length
+            ? `<option value="__dd">&#128737; Due diligence (${flaggedAdvisors("dd").length})</option>` : "")
         + `<option value="__new">+ New list…</option></select>`
       + `<span class="dial-count">${p.done} of ${n}</span>`
       + `<button type="button" class="dial-btn ghost" data-dial="menu"
@@ -2280,6 +2307,8 @@ function listRowActions(l){
     <span class="lists-acts">
       <button type="button" class="ask-btn primary" data-lists="call" data-id="${esc(l.id)}"
         ${l.count ? "" : "disabled"}>Call</button>
+      <button type="button" data-lists="edit-open" data-id="${esc(l.id)}"
+        ${l.count ? "" : "disabled"}>Edit</button>
       <button type="button" data-lists="rename" data-id="${esc(l.id)}">Rename</button>
       <button type="button" data-lists="empty" data-id="${esc(l.id)}"
         ${l.count ? "" : "disabled"}>Empty</button>
@@ -2348,11 +2377,39 @@ function flaggedAdvisors(kind){
   const out = [];
   for (const [crd, f] of Dial.state.flags) {
     if (kind === "key" ? !f.key : !f.dd) continue;
+    // Mine only. dial.js owns the membership test, so the two views and
+    // the card control cannot disagree about whose flag this is.
+    if (!Dial.flaggedByMe(crd, kind)) continue;
     const c = contactFor(crd);
     out.push({ crd, name: (c && c.n) || f.name || `CRD ${crd}`,
                firm: (c && c.cn) || "", callable: !!(c && (c.w || c.c)) });
   }
   return out.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/* Turn a standing flag list into a real, open call list.
+ *
+ * One function because there are now two ways in -- the Call button in the
+ * list manager and the entry in the dialer's picker -- and two code paths
+ * building "the same" list differently is how they end up not being the same
+ * list. `start` is the only difference: picking from the dropdown switches to
+ * a list, it does not begin dialling.
+ */
+async function openFlagList(kind, { start = false } = {}){
+  const label = kind === "key" ? "Key contacts" : "Due diligence";
+  const people = flaggedAdvisors(kind).filter(p => p.callable);
+  if (!people.length) { showNotice(`Nobody on ${label} has a number on file.`); return false; }
+  await Dial.openList(label);
+  // Emptied first: this is a SNAPSHOT of the flags as they stand now, and
+  // reopening it after unstarring somebody must not leave them behind.
+  await Dial.clear();
+  // dialSnapshot builds the same item shape every other queue add uses --
+  // name, firm, phone, city, state, email -- so a flag list behaves like any
+  // other list once it is open.
+  await Dial.addMany(people.map(p => dialSnapshot(p.crd)), { phoneOnly: true });
+  if (start) Dial.start();
+  renderDialer();
+  return true;
 }
 
 function flagListRows(){
@@ -2411,6 +2468,23 @@ document.addEventListener("click", async e => {
   try {
     if (act === "close") { listsEditMode = false; return closeListManager(); }
     if (act === "edit-back") { listsEditMode = false; return paintListManager(); }
+    /* "Edit who's on it" for a list that is NOT open.
+     *
+     * The list manager could rename, empty and delete any list but could only
+     * EDIT the open one -- that action lived solely in the dialer's own menu.
+     * So tidying a list you were not working meant opening it first, which
+     * moves the rep off the list they were actually calling.
+     *
+     * Opens it, edits, and the existing edit-back returns here.
+     */
+    if (act === "edit-open") {
+      if (!l) return;
+      if (l.id !== Dial.state.listId) await Dial.openList(l.id);
+      listsEditMode = true;
+      paintListEdit();
+      renderDialer();
+      return;
+    }
     if (act === "edit-drop") {
       // Dial.remove anchors on the person rather than the index, so taking
       // someone out from above the cursor does not skip whoever is next.
@@ -2427,7 +2501,14 @@ document.addEventListener("click", async e => {
       renderDialer();
       return;
     }
-    if (!l) return;
+    /* ABOVE the `if (!l) return` guard, and it must stay there.
+     *
+     * A flag row carries data-kind and NO data-id, so `l` is undefined and the
+     * guard swallowed the click: Call and Show did nothing at all, silently.
+     * The field view has the same handler and the same guard, and the comment
+     * there says exactly this -- it was written while fixing it, and this copy
+     * was never checked.
+     */
     /* "Call" on a flag list builds a queue from the flags as they are RIGHT NOW.
      *
      * Deliberately a snapshot into an ordinary list rather than a live view: a
@@ -2438,27 +2519,29 @@ document.addEventListener("click", async e => {
     if (act === "flag-call" || act === "flag-show"){
       const kind = b.dataset.kind;
       const label = kind === "key" ? "Key contacts" : "Due diligence";
-      const people = flaggedAdvisors(kind).filter(p => p.callable);
-      if (!people.length) { showNotice(`Nobody on ${label} has a number on file.`); return; }
+      const everyone = flaggedAdvisors(kind);
+      /* SHOW does not need a phone number.
+       *
+       * The "nobody has a number" check used to run before this branch, so
+       * asking who is on the list was refused whenever none of them were
+       * callable -- which is the moment a rep most wants to look, because the
+       * list is not behaving as expected. Only CALL needs numbers. */
       if (act === "flag-show"){
         closeListManager();
-        // One name per line, so a rep can read who is on it before committing
-        // to a session.
-        showNotice(`${label}: ${flaggedAdvisors(kind).map(p => p.name).join(", ")}`);
+        showNotice(everyone.length
+          ? `${label}: ${everyone.map(p => p.name).join(", ")}`
+          : `You have not marked anybody as ${label.toLowerCase()} yet.`);
         return;
       }
+      if (!everyone.some(p => p.callable)) {
+        showNotice(`Nobody on ${label} has a number on file.`); return;
+      }
       closeListManager();
-      try {
-        await Dial.openList(label);
-        // dialSnapshot builds the same item shape every other queue add uses --
-        // name, firm, phone, city, state, email -- so a flag list behaves like
-        // any other list once it is open.
-        await Dial.addMany(people.map(p => dialSnapshot(p.crd)), { phoneOnly: true });
-        Dial.start();
-        renderDialer();
-      } catch (err) { showNotice(err.message || "That list could not be built."); }
+      try { await openFlagList(kind, { start: true }); }
+      catch (err) { showNotice(err.message || "That list could not be built."); }
       return;
     }
+    if (!l) return;
     if (act === "call"){
       // Open it AND start, which is the whole reason a rep comes here. Opening
       // without starting would leave them looking at the same dock they were
@@ -3544,6 +3627,10 @@ document.addEventListener("change", e => {
       // Re-render on cancel, or the <select> is left showing "+ New list…".
       if (!name) { renderDialer(); return; }
       Dial.createList(name.trim()).then(renderDialer);
+    } else if (el.value === "__key" || el.value === "__dd") {
+      // Switches to the list without dialling, exactly like picking any other.
+      openFlagList(el.value === "__key" ? "key" : "dd")
+        .catch(err => { showNotice(err.message || "That list could not be built."); renderDialer(); });
     } else {
       Dial.openList(el.value).then(renderDialer);
     }

@@ -1786,6 +1786,42 @@ def _flag_lists_parity():
     if "locateFlagged" not in field:
         problems.append("the phone cannot resolve a flagged advisor it has no tile for")
 
+    # THE STANDING LISTS ARE PERSONAL, in both views.
+    #
+    # The flags stay firm-wide on a card -- shared sales knowledge -- but the
+    # lists build a CALL QUEUE, and one assembled from every rep's flags puts a
+    # key contact in another rep's territory on a stranger's screen with a Call
+    # button beside it. Both views must filter to the signed-in rep.
+    for name, src in (("desk", desk), ("field", field)):
+        if "Dial.flaggedByMe" not in src:
+            problems.append(f"{name}'s standing lists are not scoped to the signed-in rep")
+        # PRESSED MEANS MINE. If the control reads the firm-wide boolean, a rep
+        # looking at a colleague's key contact sees a lit star and pressing it
+        # clears THEIR mark instead of adding their own -- one rep deleting
+        # another's, with no way to join a flag already set.
+        marks = re.search(r"function flagMarks(?:Field)?\(crd\)\{.*?" + chr(10) + r"\}", src, re.S)
+        if not marks:
+            problems.append(f"{name} has no flag pair renderer")
+        elif "isKeyContact" in marks.group(0) or "isDueDiligence" in marks.group(0):
+            problems.append(f"{name}'s flag control is pressed by ANY rep's mark, so one rep "
+                            f"can clear another's and nobody can join one already set")
+        elif "flaggedByOthers" not in marks.group(0):
+            problems.append(f"{name} does not show that a colleague also marked them")
+
+    # And the click must reach the handler. A flag row carries no data-id, so a
+    # `if (!l) return` guard placed above it swallows Call and Show silently --
+    # which is exactly what shipped on the desk.
+    for name, src in (("desk", desk), ("field", field)):
+        body = re.search(r'if \(act === "flag-call"', src)
+        # The SHARED guard, at the dispatcher's own indentation. A nested
+        # `if (!l) return;` inside a single action's block is correct and must
+        # not be mistaken for it -- the first draft of this check matched one
+        # and reported working code as broken.
+        guard = re.search(r"(?m)^ {4}if \(!l\) return;", src)
+        if body and guard and guard.start() < body.start():
+            problems.append(f"{name}: the list-id guard sits above the flag handler, "
+                            f"so Call and Show do nothing")
+
     # SETTING a flag, not only reading one. Lists alone left the phone able to
     # act on the star but never to put one there, so a rep standing in a lobby
     # had to remember the fact until they were back at a desk.
