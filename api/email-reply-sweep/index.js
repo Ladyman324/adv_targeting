@@ -79,6 +79,28 @@ const MINUTES = 60 * 1000;
 const FIRST_RUN_HOURS = 48;
 const OVERLAP_MINUTES = 10;
 
+/* Persist one failed PASS, not one failed message.
+ *
+ * consecutiveFailures belongs to EmailSweepState. It is deliberately read from
+ * there rather than from the mailbox connection: connections describe Graph
+ * authentication and have never carried this counter. Reading the connection
+ * made every authentication lapse write `1`, however many runs it lasted.
+ *
+ * Best effort because the original failure remains the useful one to report. A
+ * storage failure while recording health is logged rather than replacing it.
+ */
+async function recordFailure(connection, code, context, deps, knownState = null) {
+  try {
+    const state = knownState || await deps.store.getSweepState(connection.userId, "reply") || {};
+    await deps.store.putSweepState(connection.userId, "reply", {
+      lastError: String(code || "reply_sweep_failed").slice(0, 500),
+      consecutiveFailures: Number(state.consecutiveFailures || 0) + 1,
+    });
+  } catch (healthErr) {
+    context.log.error(`could not persist reply sweep failure for ${connection.userId}: ${healthErr.message}`);
+  }
+}
+
 async function sweepMailbox(connection, context, deps) {
   const summary = { userId: connection.userId, mailbox: connection.mailbox,
                     scanned: 0, ours: 0, replies: 0, autoReplies: 0, bounces: 0,
@@ -107,6 +129,10 @@ async function sweepMailbox(connection, context, deps) {
    * truncated window safe rather than lossy. */
   let lastProcessed = "";
 
+  // Load health before authentication: the auth failure path needs the actual
+  // persisted counter, not a similarly named (and nonexistent) connection field.
+  const state = await deps.store.getSweepState(connection.userId, "reply") || {};
+
   let token;
   try {
     token = await deps.auth.tokenFor(connection.userId);
@@ -118,16 +144,12 @@ async function sweepMailbox(connection, context, deps) {
      * screens go on saying "no reply recorded" with total confidence. So the
      * lapse is written to sweep state, where a health check and the rep's own
      * UI can both see it and prompt them to sign in -- which is the entire fix.
-     */
+    */
     summary.skipped = err.code || "no_token";
-    await deps.store.putSweepState(connection.userId, "reply", {
-      lastError: summary.skipped,
-      consecutiveFailures: Number(connection.consecutiveFailures || 0) + 1,
-    }).catch(() => {});
+    await recordFailure(connection, summary.skipped, context, deps, state);
     return summary;
   }
 
-  const state = await deps.store.getSweepState(connection.userId, "reply");
   /* CATCHING UP ON HISTORY.
    *
    * A backfill sets the watermark back and records how far forward the catch-up
@@ -299,7 +321,9 @@ async function sweepMailbox(connection, context, deps) {
   if (advanceTo && !summary.errors) {
     await deps.store.putSweepState(connection.userId, "reply", {
       watermarkUtc: advanceTo, lastOkUtc: new Date().toISOString(),
-      lastError: truncated ? "more waiting" : "", consecutiveFailures: 0,
+      // A truncated oldest-first page is successful progress. `truncatedRuns`
+      // describes its backlog without making a healthy pass look like an error.
+      lastError: "", consecutiveFailures: 0,
       lookupHash: index.contentHash,
       seen: summary.scanned, recorded: summary.ours,
       truncatedRuns: truncated
@@ -309,13 +333,21 @@ async function sweepMailbox(connection, context, deps) {
       // without anybody having to remember to switch it off.
       ...(backfillUntil && advanceTo >= backfillUntil ? { backfillUntilUtc: "" } : {}),
     });
-  } else {
+  } else if (summary.errors) {
     // No progress to record. putSweepState MERGES, so this cannot erase the
     // watermark -- which it used to, under Replace, sending the rep back to a
     // 48-hour window every time anything went wrong.
     await deps.store.putSweepState(connection.userId, "reply", {
-      lastError: truncated ? "window truncated" : "errors during pass",
+      lastError: "errors during pass",
+      consecutiveFailures: Number(state.consecutiveFailures || 0) + 1,
       truncatedRuns: Number((state && state.truncatedRuns) || 0) + (truncated ? 1 : 0),
+    });
+  } else {
+    // A truncated empty page made no progress, but Graph completed normally.
+    // Keep it visibly in catch-up state without inflating failure accounting.
+    await deps.store.putSweepState(connection.userId, "reply", {
+      lastOkUtc: new Date().toISOString(), lastError: "", consecutiveFailures: 0,
+      truncatedRuns: Number((state && state.truncatedRuns) || 0) + 1,
     });
   }
   summary.truncated = !!truncated;
@@ -330,6 +362,8 @@ async function sweep(context, overrides = {}) {
     return [];
   }
 
+  const connections = await deps.store.listConnections();
+
   // Fails CLOSED. Without the advisor universe every address looks unknown, and
   // the sweep would conclude that nobody wrote to us -- indistinguishable from a
   // quiet week, and it would mark every message seen on the way past.
@@ -337,16 +371,19 @@ async function sweep(context, overrides = {}) {
     await deps.advisors.load();
   } catch (err) {
     context.log.error(`advisor lookup unavailable, sweep aborted: ${err.message}`);
+    for (const connection of connections) {
+      await recordFailure(connection, err.code || "advisor_lookup_unavailable", context, deps);
+    }
     return [];
   }
 
-  const connections = await deps.store.listConnections();
   const summaries = [];
   for (const connection of connections) {
     try {
       summaries.push(await sweepMailbox(connection, context, deps));
     } catch (err) {
       context.log.error(`reply sweep failed for ${connection.userId}: ${err.message}`);
+      await recordFailure(connection, err.code || "mailbox_sweep_failed", context, deps);
       summaries.push({ userId: connection.userId, errors: 1, failed: err.message });
     }
   }

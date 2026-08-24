@@ -50,6 +50,19 @@ const REASONS = [
 ];
 const REASON_RANK = new Map(REASONS.map((r, i) => [r.key, i]));
 
+/* The server owns the verbs as well as the reasons.  Clients keep a matching
+ * fallback for a staggered static/API deployment, but once this field is
+ * present they must render only these keys.  In particular, `done` cannot
+ * resolve a time-derived due/quiet row, and a bounced address must not offer a
+ * follow-up that suppression will refuse. */
+const ACTIONS_BY_REASON = Object.freeze({
+  reply_new: ["mark_reviewed", "snooze"],
+  reply_followup: ["follow_up", "done", "snooze"],
+  due: ["follow_up", "snooze"],
+  bounced: ["dismiss_bounce", "snooze"],
+  quiet_warm: ["follow_up", "snooze"],
+});
+
 const DAY = 24 * 3600 * 1000;
 const QUIET_DAYS = Number(process.env.ENGAGEMENT_QUIET_DAYS || 30);
 
@@ -87,9 +100,15 @@ function fold(entries, previous = {}) {
     // Same class as actedAt: rep decisions the log cannot re-derive.
     snoozedUntilUtc: String(previous.snoozedUntilUtc || ""),
     bounceDismissed: !!previous.bounceDismissed,
+    // Persist the legacy entity timestamp as a fixed boundary on its first
+    // new-code fold. Otherwise every later projection refresh would move
+    // updatedUtc and could hide a delayed bounce whose event time is older.
+    bounceDismissedAt: String(previous.bounceDismissedAt
+      || (previous.bounceDismissed ? previous.updatedUtc : "") || ""),
   };
   const cutoff = new Date(Date.now() - 30 * DAY).toISOString();
   let newestEmailAt = "";
+  let newestBounceAt = "";
 
   for (const e of entries) {
     const at = String(e.occurredAt || "");
@@ -115,7 +134,11 @@ function fold(entries, previous = {}) {
     state.lastInboundAt = newest(state.lastInboundAt, at);
     if (at >= cutoff) state.inbound30d++;
 
-    if (e.classification === "bounce") { state.hasBounce = true; continue; }
+    if (e.classification === "bounce") {
+      state.hasBounce = true;
+      newestBounceAt = newest(newestBounceAt, at);
+      continue;
+    }
     // An out-of-office is inbound mail and is NOT a reply. Counting it would
     // put an away message at the top of a rep's morning queue, and the first
     // time that happened they would stop trusting the queue.
@@ -153,6 +176,18 @@ function fold(entries, previous = {}) {
       state.replyState = "reviewed";
     }
   }
+
+  /* A dismissal acknowledges one observed bounce, not every future bounce.
+   *
+   * bounceDismissedAt is deliberately separate from actedAt: the latter means a
+   * rep handled a REPLY, and reusing it here could make an unread reply look
+   * reviewed. Existing boolean-only rows fall back to updatedUtc, which every
+   * stored entity already has. A bounce newer than the decision reopens address
+   * work on the next fold. */
+  if (state.bounceDismissed && newestBounceAt) {
+    const dismissedAt = state.bounceDismissedAt;
+    if (dismissedAt && newestBounceAt > dismissedAt) state.bounceDismissed = false;
+  }
   return state;
 }
 
@@ -173,14 +208,18 @@ function reason(state, now = Date.now()) {
 
   if (state.replyState === "new" && state.lastReplyAt) return "reply_new";
   if (state.replyState === "follow_up") return "reply_followup";
-  if (state.nextActionAt && new Date(state.nextActionAt).getTime() <= now) return "due";
   /* A bounce stays in the queue until somebody FIXES the address, because that
    * is the only thing that resolves it -- and `Done` must not clear it, or the
    * row would vanish with a dead address still on file. Dismissing it is what
    * `dismissed` is for: an explicit statement that the address is as good as it
    * is going to get.
+   *
+   * It also precedes `due`. Snoozing a bounce temporarily hides address work;
+   * when the snooze expires it is still address work, not permission to offer a
+   * follow-up to an address known to be bad.
    */
   if (state.hasBounce && !state.bounceDismissed) return "bounced";
+  if (state.nextActionAt && new Date(state.nextActionAt).getTime() <= now) return "due";
   /* Warm means they have answered us at some point. Somebody who has NEVER
    * replied going quiet is not a lapse -- it is the ordinary state of cold
    * outreach, and putting it in the queue would bury the real signals under
@@ -254,6 +293,7 @@ async function queue(userId, deps = {}) {
       advisorEmail: row.advisorEmail || "",
       reason: why,
       reasonLabel: (REASONS.find((r) => r.key === why) || {}).label || why,
+      actions: [...(ACTIONS_BY_REASON[why] || [])],
       replyState: row.replyState || "none",
       lastReplyAt: row.lastReplyAt || "",
       lastActivityAt: row.lastActivityAt || "",
@@ -317,9 +357,7 @@ async function snooze(userId, advisorCrd, days, deps = {}) {
     err.statusCode = 400;
     throw err;
   }
-  const current = (await st.getEngagement(userId, advisorCrd)) || {};
   return st.putEngagement(userId, advisorCrd, {
-    ...current,
     nextActionAt: new Date(Date.now() + span * DAY).toISOString(),
     nextActionType: "follow_up",
     // Stamped so a reply already seen does not immediately re-open the row the
@@ -340,17 +378,38 @@ async function setReplyState(userId, advisorCrd, next, deps = {}) {
     err.statusCode = 400;
     throw err;
   }
-  const current = (await st.getEngagement(userId, advisorCrd)) || {};
   return st.putEngagement(userId, advisorCrd, {
-    ...current, replyState: String(next), actedAt: new Date().toISOString(),
+    replyState: String(next), actedAt: new Date().toISOString(),
   });
 }
 
 async function dismissBounce(userId, advisorCrd, deps = {}) {
   const st = deps.store || store;
-  const current = (await st.getEngagement(userId, advisorCrd)) || {};
-  return st.putEngagement(userId, advisorCrd, { ...current, bounceDismissed: true });
+  return st.putEngagement(userId, advisorCrd, {
+    bounceDismissed: true,
+    bounceDismissedAt: new Date().toISOString(),
+  });
+}
+
+/* A successful reply/follow-up completes the action the queue asked for.
+ * These are deliberately partial Merge fields: carrying a previously-read
+ * projection through this write could restore stale derived mail state. */
+async function completeOutbound(userId, advisorCrd, deps = {}) {
+  const st = deps.store || store;
+  if (!String(advisorCrd || "")) {
+    const err = new Error("advisor CRD is required.");
+    err.statusCode = 400;
+    throw err;
+  }
+  return st.putEngagement(userId, advisorCrd, {
+    replyState: "done",
+    actedAt: new Date().toISOString(),
+    nextActionAt: "",
+    nextActionType: "",
+    snoozedUntilUtc: "",
+  });
 }
 
 module.exports = { fold, reason, rank, refresh, rebuild, queue, setReplyState,
-                   snooze, dismissBounce, REPLY_STATES, REASONS, stateIndex };
+                   snooze, dismissBounce, completeOutbound,
+                   REPLY_STATES, REASONS, ACTIONS_BY_REASON, stateIndex };

@@ -22,6 +22,47 @@ function isAdmin(who) {
   return roles.has("emailadministrator") || roles.has("administrator");
 }
 
+/* A successful truncated page means "working through a backlog", not "failed".
+ * Older deployments wrote that condition into lastError, so recognize both the
+ * old persisted vocabulary and the new truncatedRuns signal during rollout. */
+function replySweepHealth(connection, state) {
+  const st = state || {};
+  const lastError = String(st.lastError || "");
+  const legacyBacklog = lastError === "more waiting" || lastError === "window truncated";
+  const consecutiveFailures = Number(st.consecutiveFailures || 0);
+  const catchingUp = !!st.backfillUntilUtc || Number(st.truncatedRuns || 0) > 0 || legacyBacklog;
+  // The connection row is authoritative.  A successful OAuth callback clears
+  // needsReconnect immediately, while the sweep's lastError is only cleared by
+  // its next pass.  Letting that historical error override the connection made
+  // a freshly reconnected mailbox still look disconnected for several minutes.
+  const needsReconnect = !!connection.needsReconnect;
+  const failed = !needsReconnect && (consecutiveFailures > 0 || (!!lastError && !legacyBacklog));
+  const lastOkMs = Date.parse(String(st.lastOkUtc || ""));
+  const watermarkMs = Date.parse(String(st.watermarkUtc || ""));
+  const neverRun = !Number.isFinite(lastOkMs) || !Number.isFinite(watermarkMs);
+  const now = Date.now();
+  const stale = !neverRun && (now - lastOkMs > 60 * 60 * 1000
+    || now - watermarkMs >= 2 * 60 * 60 * 1000);
+
+  let ingestionStatus = "healthy";
+  if (needsReconnect) ingestionStatus = "reconnect_required";
+  else if (failed) ingestionStatus = "failed";
+  else if (neverRun) ingestionStatus = "never_run";
+  else if (catchingUp) ingestionStatus = "catching_up";
+  else if (stale) ingestionStatus = "stale";
+
+  return {
+    ingestionStatus,
+    // Catch-up is operational but not current. Callers can distinguish it from
+    // both a hard failure and a fully current mailbox without parsing text.
+    // Catch-up can be executing successfully while intentionally far behind;
+    // stale means unhealthy only when there is no declared backlog in progress.
+    ingestionHealthy: !needsReconnect && !failed && !neverRun && (!stale || catchingUp),
+    catchingUp,
+    hasError: needsReconnect || failed,
+  };
+}
+
 module.exports = async function (context, req) {
   try {
     const who = baseStore.identity(req);
@@ -107,6 +148,7 @@ module.exports = async function (context, req) {
           const watermark = st && st.watermarkUtc ? st.watermarkUtc : "";
           const until = st && st.backfillUntilUtc ? st.backfillUntilUtc : "";
           const behindMs = watermark ? now - new Date(watermark).getTime() : null;
+          const health = replySweepHealth(connection, st);
           rows.push({
             userId: connection.userId, mailbox: connection.mailbox,
             needsReconnect: !!connection.needsReconnect,
@@ -119,6 +161,7 @@ module.exports = async function (context, req) {
             lastError: (st && st.lastError) || "",
             consecutiveFailures: Number((st && st.consecutiveFailures) || 0),
             truncatedRuns: Number((st && st.truncatedRuns) || 0),
+            ...health,
             backfill: until
               ? { until, startedUtc: (st && st.backfillStartedUtc) || "",
                   // Whole days still to work through.

@@ -2540,45 +2540,133 @@ let setBack = null;
  * The reasons and their order come from the server, so the desk, the phone and
  * any later report cannot disagree about what matters.
  */
+const QUEUE_ACTIONS = {
+  reply_new: ["mark_reviewed", "snooze"],
+  reply_followup: ["follow_up", "done", "snooze"],
+  due: ["follow_up", "snooze"],
+  bounced: ["dismiss_bounce", "snooze"],
+  quiet_warm: ["follow_up", "snooze"],
+};
+
+function queueActionKey(value){
+  const raw = typeof value === "string" ? value
+    : String((value && (value.key || value.action || value.op)) || "");
+  return ({ reviewed: "mark_reviewed", queue_snooze: "snooze",
+    snooze_30d: "snooze", queue_dismiss_bounce: "dismiss_bounce",
+    address_ok: "dismiss_bounce", follow: "follow_up", followup: "follow_up" })[raw] || raw;
+}
+
+/* Newer APIs name the actions explicitly. During a staggered static/API
+ * deployment the older response has no `actions`, so keep the same safe table
+ * here. Server additions are intersected with that table: an unknown action
+ * must not turn into a destructive button merely because one client is old. */
+function queueActions(entry){
+  const allowed = QUEUE_ACTIONS[entry.reason] || [];
+  if (!Array.isArray(entry.actions)) return allowed;
+  return [...new Set(entry.actions.map(queueActionKey).filter(a => allowed.includes(a)))];
+}
+
+function queueActionHtml(action, entry, label){
+  const crd = esc(entry.advisorCrd);
+  const who = esc(label);
+  if (action === "follow_up") return `<button type="button" class="wq-act"
+      data-wq-action="follow_up" data-wq-crd="${crd}" data-wq-name="${who}"
+      aria-label="Follow up with ${who}">Follow up</button>`;
+  if (action === "mark_reviewed") return `<button type="button" class="wq-act"
+      data-wq-action="mark_reviewed" data-wq-crd="${crd}"
+      aria-label="Mark ${who} reviewed">Mark reviewed</button>`;
+  if (action === "done") return `<button type="button" class="wq-act ghost"
+      data-wq-action="done" data-wq-crd="${crd}"
+      aria-label="Mark work for ${who} done">Done</button>`;
+  if (action === "dismiss_bounce") return `<button type="button" class="wq-act ghost"
+      data-wq-action="dismiss_bounce" data-wq-crd="${crd}"
+      aria-label="Confirm the address for ${who} is fine"
+      title="The address is as good as it is going to get">Address is fine</button>`;
+  if (action === "snooze") return `<button type="button" class="wq-act ghost"
+      data-wq-action="snooze" data-wq-days="30" data-wq-crd="${crd}"
+      aria-label="Snooze ${who} for 30 days" title="Put aside for 30 days">Snooze</button>`;
+  return "";
+}
+
 function queueRowHtml(entry){
   const when = entry.lastReplyAt || entry.lastActivityAt;
   const name = advisorRow(entry.advisorCrd);
   const label = name && name[1] ? name[1] : (entry.advisorEmail || entry.advisorCrd);
   return `<li class="wq-row" data-wq-crd="${esc(entry.advisorCrd)}">
-      <button type="button" class="wq-name" data-wq-open="${esc(entry.advisorCrd)}"
-        >${esc(label)}</button>
+      <button type="button" class="wq-name" data-wq-action="open"
+        data-wq-crd="${esc(entry.advisorCrd)}" aria-label="Open ${esc(label)}">${esc(label)}</button>
       <span class="wq-why wq-${esc(entry.reason)}">${esc(entry.reasonLabel)}</span>
       <span class="wq-when">${esc(when ? fmtDate(when) : "")}</span>
-      <span class="wq-acts">
-        <!-- The action the queue is actually asking for. Without it a
-             quiet_warm row tells a rep to re-engage somebody and gives them
-             nowhere to do it. -->
-        <button type="button" class="wq-act" data-wq-follow="${esc(entry.advisorCrd)}"
-          data-wq-name="${esc(label)}">Follow up</button>
-        ${entry.replyState === "new"
-          ? `<button type="button" class="wq-act" data-wq-state="reviewed"
-               data-wq-crd="${esc(entry.advisorCrd)}">Mark reviewed</button>` : ""}
-        ${entry.reason === "bounced"
-          ? `<button type="button" class="wq-act ghost" data-wq-op="queue_dismiss_bounce"
-               data-wq-crd="${esc(entry.advisorCrd)}"
-               title="The address is as good as it is going to get">Address is fine</button>`
-          : entry.replyState !== "done"
-            ? `<button type="button" class="wq-act ghost" data-wq-state="done"
-                 data-wq-crd="${esc(entry.advisorCrd)}">Done</button>` : ""}
-        <!-- "Not now" without "never". Done cannot clear a quiet contact or a
-             bounce by design, so without this there was no way to set either
-             aside for a while. -->
-        <button type="button" class="wq-act ghost" data-wq-op="queue_snooze"
-          data-wq-days="30" data-wq-crd="${esc(entry.advisorCrd)}"
-          title="Put aside for 30 days">Snooze</button>
-      </span></li>`;
+      <span class="wq-acts">${queueActions(entry)
+        .map(action => queueActionHtml(action, entry, label)).join("")}</span></li>`;
 }
 
-function renderWorkQueue(box, data){
+function queueSyncState(payload, me){
+  const reps = payload && Array.isArray(payload.reps) ? payload.reps : [];
+  const myId = String((me && me.userId) || "");
+  const row = reps.find(r => myId && String(r.userId) === myId)
+    || (reps.length === 1 ? reps[0] : null);
+  if (!row) return { kind: "not-connected", trusted: false,
+    text: "Microsoft 365 is not connected, so mailbox activity may be incomplete." };
+  /* Prefer the server's explicit state. The field did not exist on the first
+   * deployment, so the checks below remain as a rollout-safe inference for an
+   * older API or a row written before the status contract was introduced. */
+  const ingestion = String(row.ingestionStatus || "");
+  const at = value => value ? fmtDate(value) : "";
+  if (ingestion === "reconnect_required") return { kind: "reconnect", trusted: false,
+    text: `${row.mailbox || "Microsoft 365"} must be reconnected before new replies can be observed.` };
+  if (ingestion === "failed") return { kind: "stale", trusted: false,
+    text: row.lastOkUtc
+      ? `Mailbox activity may be incomplete; the last successful check was ${at(row.lastOkUtc)}.`
+      : "Mailbox activity could not be checked, so this queue may be incomplete." };
+  if (ingestion === "stale") return { kind: "stale", trusted: false,
+    text: row.lastOkUtc
+      ? `Mailbox activity may be incomplete; the last successful check was ${at(row.lastOkUtc)}.`
+      : "Mailbox activity is stale, so this queue may be incomplete." };
+  if (ingestion === "never_run") return { kind: "starting", trusted: false,
+    text: "Mailbox activity tracking is starting; this list is not complete yet." };
+  if (ingestion === "catching_up") return { kind: "catching-up", trusted: false,
+    text: row.watermarkUtc
+      ? `Mailbox activity is catching up and has been processed through ${at(row.watermarkUtc)}.`
+      : "Mailbox activity is catching up; this list is not complete yet." };
+  if (ingestion === "healthy") return { kind: "current", trusted: true,
+    text: row.watermarkUtc
+      ? `Mailbox activity is current through ${at(row.watermarkUtc)}.`
+      : "Mailbox activity is current." };
+  if (row.needsReconnect) return { kind: "reconnect", trusted: false,
+    text: `${row.mailbox || "Microsoft 365"} must be reconnected before new replies can be observed.` };
+  const watermark = row.watermarkUtc ? new Date(row.watermarkUtc) : null;
+  const lastOk = row.lastOkUtc ? new Date(row.lastOkUtc) : null;
+  const validWatermark = watermark && !isNaN(watermark);
+  const validLastOk = lastOk && !isNaN(lastOk);
+  if (!validWatermark || !validLastOk) return { kind: "starting", trusted: false,
+    text: "Mailbox activity tracking is starting; this list is not complete yet." };
+  if (row.backfill || Number(row.truncatedRuns || 0) > 0 || row.lastError === "more waiting") {
+    return { kind: "catching-up", trusted: false,
+      text: `Mailbox activity is catching up and has been processed through ${fmtDate(row.watermarkUtc)}.` };
+  }
+  const stale = Date.now() - lastOk.getTime() > 60 * 60 * 1000
+    || Number(row.consecutiveFailures || 0) > 0 || Number(row.behindHours || 0) >= 2;
+  if (stale) return { kind: "stale", trusted: false,
+    text: `Mailbox activity may be incomplete; the last successful check was ${fmtDate(row.lastOkUtc)}.` };
+  return { kind: "current", trusted: true,
+    text: `Mailbox activity is current through ${fmtDate(row.watermarkUtc)}.` };
+}
+
+function queueSyncHtml(status){
+  return `<p class="wq-sync wq-sync-${esc(status.kind)}" role="status">${esc(status.text)}</p>`;
+}
+
+function renderWorkQueue(box, data, status){
+  const sync = queueSyncHtml(status);
+  if (data.error){
+    box.innerHTML = sync + `<p class="wq-error" role="status">${esc(data.error)}</p>`;
+    return;
+  }
   if (!data.count){
-    box.innerHTML = `<p class="profile-empty">Nothing waiting.
-      This covers what has been observed in your own mailbox since reply
-      tracking was switched on.</p>`;
+    box.innerHTML = sync + `<p class="profile-empty">${status.trusted
+      ? "Nothing waiting in the mailbox activity processed so far."
+      : "Nothing waiting in the mail processed so far; this is not an all-clear while sync is incomplete."}</p>`;
     return;
   }
   // The headline is what needs doing, not what has been done.
@@ -2586,61 +2674,103 @@ function renderWorkQueue(box, data){
     .filter(r => (data.counts || {})[r.key])
     .map(r => `<span class="wq-count"><b>${data.counts[r.key]}</b> ${esc(r.label)}</span>`)
     .join("");
-  box.innerHTML = `<div class="wq-heads">${heads}</div>`
+  box.innerHTML = sync + `<div class="wq-heads">${heads}</div>`
     + `<ul class="wq-list">${data.entries.map(queueRowHtml).join("")}</ul>`;
 }
 
 async function openWorkQueue(){
+  const opener = document.activeElement;
   const back = document.createElement("div");
   back.className = "ask-back";
-  back.innerHTML = `<div class="ask work-queue" role="dialog" aria-modal="true"
-      aria-label="Needs attention"><h3>Needs attention</h3>
+  back.innerHTML = `<div class="ask work-queue" role="dialog" aria-modal="true" tabindex="-1"
+      aria-labelledby="workQueueTitle"><h3 id="workQueueTitle">Needs attention</h3>
       <div class="wq-body"><p class="profile-empty">Loading…</p></div>
       <div class="profile-actions">
         <button type="button" class="ask-btn ghost" data-wq-close="1">Close</button>
       </div></div>`;
   document.body.appendChild(back);
-  const close = () => back.remove();
+  const dialog = back.querySelector(".work-queue");
+  const close = (restoreFocus = true) => {
+    if (!back.isConnected) return;
+    back.remove();
+    if (restoreFocus && opener && opener.isConnected && opener.focus) opener.focus();
+  };
   back.addEventListener("click", e => { if (e.target === back) close(); });
+  back.addEventListener("keydown", e => {
+    if (e.key === "Escape") { e.preventDefault(); close(); }
+  });
+  dialog.focus();
   const box = back.querySelector(".wq-body");
 
-  const load = async () => {
-    try {
-      const r = await fetch("/api/email?op=queue_work", { headers: { Accept: "application/json" } });
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      if (box.isConnected) renderWorkQueue(box, await r.json());
-    } catch (e) {
-      if (box.isConnected)
-        box.innerHTML = `<p class="profile-empty">The queue could not be loaded — ${esc(e.message)}</p>`;
+  const getJson = async url => {
+    const r = await fetch(url, { headers: { Accept: "application/json" } });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    return r.json();
+  };
+  const load = async focusCrd => {
+    dialog.setAttribute("aria-busy", "true");
+    const mePromise = ME ? Promise.resolve(ME) : Dial.whoAmI().then(p => (ME = p));
+    const [queueResult, statusResult] = await Promise.allSettled([
+      getJson("/api/email?op=queue_work"),
+      Promise.all([getJson("/api/email?op=sweep_status"), mePromise]),
+    ]);
+    if (!box.isConnected) return;
+    const data = queueResult.status === "fulfilled" ? queueResult.value
+      : { error: `The queue could not be loaded — ${queueResult.reason.message || "request failed"}`, count: 0 };
+    const status = statusResult.status === "fulfilled"
+      ? queueSyncState(statusResult.value[0], statusResult.value[1])
+      : { kind: "unavailable", trusted: false,
+          text: "Mailbox sync status is unavailable; the queue may be incomplete." };
+    renderWorkQueue(box, data, status);
+    dialog.removeAttribute("aria-busy");
+    if (focusCrd) {
+      const row = [...box.querySelectorAll(".wq-row")]
+        .find(el => String(el.dataset.wqCrd) === String(focusCrd));
+      const target = row && row.querySelector("[data-wq-action]");
+      (target || box.querySelector("[data-wq-action]") || dialog).focus();
     }
   };
-  await load();
 
   back.addEventListener("click", async e => {
     if (e.target.closest("[data-wq-close]")) { close(); return; }
-    const open = e.target.closest("[data-wq-open]");
-    if (open){
+    const act = e.target.closest("[data-wq-action]");
+    if (!act) return;
+    const action = act.dataset.wqAction;
+    if (action === "open"){
       // Same rule the dialer uses: the map holds one scope at a time, and an
       // advisor outside it has no feature to open. Said plainly rather than
       // failing silently, because a queue row that does nothing when tapped
       // reads as a broken queue.
-      const f = ALL.find(x => String(x.properties.id) === String(open.dataset.wqOpen));
+      const f = ALL.find(x => String(x.properties.id) === String(act.dataset.wqCrd));
       if (f){ close(); openAdvisorDetails(f); }
       else showNotice("That advisor is not in the current map scope. Switch to their state to open the card.");
       return;
     }
-    const follow = e.target.closest("[data-wq-follow]");
-    if (follow){ openFollowUp(follow.dataset.wqFollow, follow.dataset.wqName); return; }
-    const act = e.target.closest("[data-wq-state]");
-    if (act){
-      act.disabled = true;
+    if (action === "follow_up"){
+      const crd = act.dataset.wqCrd;
+      const name = act.dataset.wqName;
+      // A modal must never open on top of another modal. The queue is only a
+      // launcher here; closing it also prevents a successfully handled row from
+      // remaining visibly stale behind the composer.
+      close(false);
+      openFollowUp(crd, name);
+      return;
+    }
+    const payload = action === "snooze"
+      ? { op: "queue_snooze", crd: act.dataset.wqCrd, days: Number(act.dataset.wqDays || 30) }
+      : action === "dismiss_bounce"
+        ? { op: "queue_dismiss_bounce", crd: act.dataset.wqCrd }
+        : action === "mark_reviewed" || action === "done"
+          ? { op: "reply_state", crd: act.dataset.wqCrd,
+              state: action === "mark_reviewed" ? "reviewed" : "done" }
+          : null;
+    if (payload){
+      const rowButtons = act.closest(".wq-row").querySelectorAll("button");
+      rowButtons.forEach(button => { button.disabled = true; });
       try {
         const r = await fetch("/api/email", { method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ op: act.dataset.wqOp || "reply_state",
-                                 crd: act.dataset.wqCrd,
-                                 state: act.dataset.wqState,
-                                 days: Number(act.dataset.wqDays || 0) || undefined }) });
+          body: JSON.stringify(payload) });
         // Checked, because it was not: a 500 used to reload the list as though
         // the action had worked, and the row simply came back looking unchanged.
         if (!r.ok) {
@@ -2651,16 +2781,18 @@ async function openWorkQueue(){
         // DIFFERENT reason for still being here -- a follow-up that is due, say
         // -- and hiding it would tell the rep they were finished when they are
         // not.
-        await load();
+        await load(act.dataset.wqCrd);
       } catch (err) {
-        act.disabled = false;
+        rowButtons.forEach(button => { button.disabled = false; });
         const note = box.querySelector(".wq-error")
           || box.insertAdjacentElement("afterbegin",
                Object.assign(document.createElement("p"), { className: "wq-error" }));
+        note.setAttribute("role", "status");
         note.textContent = err.message;
       }
     }
   });
+  load();
 }
 
 /* ---- advisor email activity --------------------------------------------- */
@@ -2784,6 +2916,7 @@ async function openFollowUp(crd, name){
       </div>
       <p class="reply-note"></p></div>`;
   document.body.appendChild(back);
+  requestAnimationFrame(() => back.querySelector(".follow-subject")?.focus());
   const close = () => back.remove();
   back.addEventListener("click", async e => {
     if (e.target === back || e.target.closest("[data-follow-close]")) { close(); return; }

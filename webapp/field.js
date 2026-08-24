@@ -1028,36 +1028,128 @@ async function fillFullHistory(crd, body){
  */
 let workOpen = false;
 let workData = null;
+let workStatus = { kind: "loading", trusted: false, text: "Checking mailbox activity…" };
+let workReturnFocus = null;
+let workLoadGeneration = 0;
+
+const WORK_ACTIONS = {
+  reply_new: ["mark_reviewed", "snooze"],
+  reply_followup: ["follow_up", "done", "snooze"],
+  due: ["follow_up", "snooze"],
+  bounced: ["dismiss_bounce", "snooze"],
+  quiet_warm: ["follow_up", "snooze"],
+};
+
+function workActionKey(value){
+  const raw = typeof value === "string" ? value
+    : String((value && (value.key || value.action || value.op)) || "");
+  return ({ reviewed: "mark_reviewed", queue_snooze: "snooze",
+    snooze_30d: "snooze", queue_dismiss_bounce: "dismiss_bounce",
+    address_ok: "dismiss_bounce", follow: "follow_up", followup: "follow_up" })[raw] || raw;
+}
+
+function workActions(entry){
+  const allowed = WORK_ACTIONS[entry.reason] || [];
+  if (!Array.isArray(entry.actions)) return allowed;
+  return [...new Set(entry.actions.map(workActionKey).filter(a => allowed.includes(a)))];
+}
+
+function workActionHtml(action, entry, label){
+  const crd = esc(entry.advisorCrd);
+  const who = esc(label);
+  if (action === "follow_up") return `<button type="button" data-work-action="follow_up"
+      data-crd="${crd}" data-name="${who}" aria-label="Follow up with ${who}">Follow up</button>`;
+  if (action === "mark_reviewed") return `<button type="button" data-work-action="mark_reviewed"
+      data-crd="${crd}" aria-label="Mark ${who} reviewed">Reviewed</button>`;
+  if (action === "done") return `<button type="button" data-work-action="done"
+      data-crd="${crd}" aria-label="Mark work for ${who} done">Done</button>`;
+  if (action === "dismiss_bounce") return `<button type="button" data-work-action="dismiss_bounce"
+      data-crd="${crd}" aria-label="Confirm the address for ${who} is fine">Address OK</button>`;
+  if (action === "snooze") return `<button type="button" data-work-action="snooze"
+      data-days="30" data-crd="${crd}" aria-label="Snooze ${who} for 30 days">Snooze</button>`;
+  return "";
+}
 
 function workRowHtml(entry){
   const when = entry.lastReplyAt || entry.lastActivityAt;
+  const label = entry.advisorEmail || entry.advisorCrd;
   return `<li class="work-row">
-      <button class="work-main" data-work="open" data-crd="${esc(entry.advisorCrd)}">
-        <b>${esc(entry.advisorEmail || entry.advisorCrd)}</b>
+      <button type="button" class="work-main" data-work-action="open"
+          data-crd="${esc(entry.advisorCrd)}" aria-label="Open ${esc(label)}">
+        <b>${esc(label)}</b>
         <small class="work-why work-${esc(entry.reason)}">${esc(entry.reasonLabel)}${
           when ? ` &middot; ${esc(mailWhen(when))}` : ""}</small>
       </button>
-      <span class="work-acts">
-        <button data-work="follow" data-crd="${esc(entry.advisorCrd)}"
-          data-name="${esc(entry.advisorEmail || "")}">Follow up</button>
-        ${entry.replyState === "new"
-          ? `<button data-work="state" data-state="reviewed"
-               data-crd="${esc(entry.advisorCrd)}">Reviewed</button>` : ""}
-        ${entry.reason === "bounced"
-          ? `<button data-work="state" data-op="queue_dismiss_bounce"
-               data-crd="${esc(entry.advisorCrd)}">Address OK</button>`
-          : entry.replyState !== "done"
-            ? `<button data-work="state" data-state="done"
-                 data-crd="${esc(entry.advisorCrd)}">Done</button>` : ""}
-        <button data-work="state" data-op="queue_snooze" data-days="30"
-          data-crd="${esc(entry.advisorCrd)}">Snooze</button>
-      </span></li>`;
+      <span class="work-acts">${workActions(entry)
+        .map(action => workActionHtml(action, entry, label)).join("")}</span></li>`;
+}
+
+function workSyncState(payload){
+  const reps = payload && Array.isArray(payload.reps) ? payload.reps : [];
+  const myId = String((ME && ME.userId) || "");
+  const row = reps.find(r => myId && String(r.userId) === myId)
+    || (reps.length === 1 ? reps[0] : null);
+  if (!row) return { kind: "not-connected", trusted: false,
+    text: "Microsoft 365 is not connected, so mailbox activity may be incomplete." };
+  /* New APIs decide this once, next to the sweep state. Keep the inference
+   * below for a staggered deployment where the static client can arrive before
+   * the Function package that adds ingestionStatus. */
+  const ingestion = String(row.ingestionStatus || "");
+  const at = value => value ? mailWhen(value) : "";
+  if (ingestion === "reconnect_required") return { kind: "reconnect", trusted: false,
+    text: `${row.mailbox || "Microsoft 365"} must be reconnected before new replies can be observed.` };
+  if (ingestion === "failed") return { kind: "stale", trusted: false,
+    text: row.lastOkUtc
+      ? `Mailbox activity may be incomplete; the last successful check was ${at(row.lastOkUtc)}.`
+      : "Mailbox activity could not be checked, so this queue may be incomplete." };
+  if (ingestion === "stale") return { kind: "stale", trusted: false,
+    text: row.lastOkUtc
+      ? `Mailbox activity may be incomplete; the last successful check was ${at(row.lastOkUtc)}.`
+      : "Mailbox activity is stale, so this queue may be incomplete." };
+  if (ingestion === "never_run") return { kind: "starting", trusted: false,
+    text: "Mailbox activity tracking is starting; this list is not complete yet." };
+  if (ingestion === "catching_up") return { kind: "catching-up", trusted: false,
+    text: row.watermarkUtc
+      ? `Mailbox activity is catching up and has been processed through ${at(row.watermarkUtc)}.`
+      : "Mailbox activity is catching up; this list is not complete yet." };
+  if (ingestion === "healthy") return { kind: "current", trusted: true,
+    text: row.watermarkUtc
+      ? `Mailbox activity is current through ${at(row.watermarkUtc)}.`
+      : "Mailbox activity is current." };
+  if (row.needsReconnect) return { kind: "reconnect", trusted: false,
+    text: `${row.mailbox || "Microsoft 365"} must be reconnected before new replies can be observed.` };
+  const watermark = row.watermarkUtc ? new Date(row.watermarkUtc) : null;
+  const lastOk = row.lastOkUtc ? new Date(row.lastOkUtc) : null;
+  const validWatermark = watermark && !isNaN(watermark);
+  const validLastOk = lastOk && !isNaN(lastOk);
+  if (!validWatermark || !validLastOk) return { kind: "starting", trusted: false,
+    text: "Mailbox activity tracking is starting; this list is not complete yet." };
+  if (row.backfill || Number(row.truncatedRuns || 0) > 0 || row.lastError === "more waiting") {
+    return { kind: "catching-up", trusted: false,
+      text: `Mailbox activity is catching up and has been processed through ${mailWhen(row.watermarkUtc)}.` };
+  }
+  const stale = Date.now() - lastOk.getTime() > 60 * 60 * 1000
+    || Number(row.consecutiveFailures || 0) > 0 || Number(row.behindHours || 0) >= 2;
+  if (stale) return { kind: "stale", trusted: false,
+    text: `Mailbox activity may be incomplete; the last successful check was ${mailWhen(row.lastOkUtc)}.` };
+  return { kind: "current", trusted: true,
+    text: `Mailbox activity is current through ${mailWhen(row.watermarkUtc)}.` };
+}
+
+function closeWork(){
+  workOpen = false;
+  renderWork();
+  const target = workReturnFocus;
+  workReturnFocus = null;
+  if (target && target.isConnected && target.focus) target.focus();
 }
 
 function renderWork(){
   const el = $("work");
   el.hidden = !workOpen;
   if (!workOpen) return;
+  const sync = `<p class="work-sync work-sync-${esc(workStatus.kind)}"
+      role="status">${esc(workStatus.text)}</p>`;
   const body = !workData
     ? `<p class="lists-none">Loading…</p>`
     : workData.error
@@ -1066,28 +1158,50 @@ function renderWork(){
         /* NOT "you are all caught up". This covers one mailbox, since reply
            tracking was switched on -- an empty queue means nothing has been
            OBSERVED, and a rep should not read it as an all-clear. */
-        ? `<p class="lists-none">Nothing waiting. This covers what has been
-             observed in your own mailbox since reply tracking was switched on.</p>`
+        ? `<p class="lists-none">${workStatus.trusted
+            ? "Nothing waiting in the mailbox activity processed so far."
+            : "Nothing waiting in the mail processed so far; this is not an all-clear while sync is incomplete."}</p>`
         : `<div class="work-heads">${(workData.reasons || [])
               .filter((r) => (workData.counts || {})[r.key])
               .map((r) => `<span class="work-count"><b>${workData.counts[r.key]}</b>
                  ${esc(r.label)}</span>`).join("")}</div>
            <ul class="work-list">${workData.entries.map(workRowHtml).join("")}</ul>`;
   $("workInner").innerHTML =
-    `<button id="workClose" aria-label="Close">&times;</button>
-     <h2>Needs attention</h2>${body}`;
+    `<button type="button" id="workClose" aria-label="Close Needs attention">&times;</button>
+     <h2 id="workTitle" tabindex="-1">Needs attention</h2>${sync}${body}`;
 }
 
-async function loadWork(){
-  try {
-    const r = await fetch("/api/email?op=queue_work", { headers: { Accept: "application/json" } });
+async function loadWork(focusCrd){
+  const generation = ++workLoadGeneration;
+  const el = $("work");
+  el.setAttribute("aria-busy", "true");
+  const getJson = async url => {
+    const r = await fetch(url, { headers: { Accept: "application/json" } });
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    workData = await r.json();
-  } catch (e) {
-    workData = { error: `The queue could not be loaded — ${e.message || ""}`, count: 0 };
-  }
+    return r.json();
+  };
+  const [queueResult, statusResult] = await Promise.allSettled([
+    getJson("/api/email?op=queue_work"),
+    getJson("/api/email?op=sweep_status"),
+  ]);
+  // A visibility refresh and an explicit open can overlap. Only the newest
+  // request owns the shared badge/sheet state; otherwise a slow old response
+  // can overwrite the answer the rep just asked for.
+  if (generation !== workLoadGeneration) return;
+  workData = queueResult.status === "fulfilled" ? queueResult.value
+    : { error: `The queue could not be loaded — ${queueResult.reason.message || "request failed"}`, count: 0 };
+  workStatus = statusResult.status === "fulfilled" ? workSyncState(statusResult.value)
+    : { kind: "unavailable", trusted: false,
+        text: "Mailbox sync status is unavailable; the queue may be incomplete." };
   paintWorkBadge();
   if (workOpen) renderWork();
+  el.removeAttribute("aria-busy");
+  if (workOpen && focusCrd) {
+    const row = [...document.querySelectorAll("#work .work-row")]
+      .find(item => String(item.querySelector("[data-crd]")?.dataset.crd) === String(focusCrd));
+    const target = row && row.querySelector("[data-work-action]");
+    (target || document.querySelector("#work [data-work-action]") || $("workTitle"))?.focus();
+  }
 }
 
 /* The count on the header button.
@@ -1101,6 +1215,13 @@ function paintWorkBadge(){
   const n = workData && !workData.error ? Number(workData.count || 0) : 0;
   badge.textContent = n > 99 ? "99+" : String(n);
   badge.hidden = !n;
+  const button = $("workBtn");
+  if (!button) return;
+  const statusNote = workStatus.kind === "reconnect" ? ", Microsoft 365 reconnect required"
+    : workStatus.trusted ? "" : ", mailbox sync incomplete";
+  button.setAttribute("aria-label", workData && workData.error
+    ? "Needs attention, queue unavailable"
+    : `Needs attention, ${n} ${n === 1 ? "item" : "items"}${statusNote}`);
 }
 
 /* ---------- email activity ------------------------------------------------
@@ -1214,7 +1335,7 @@ function readMailAttachments(box){
  * the server takes it from the advisor's own timeline, so this cannot be used
  * to mail an arbitrary address from the rep's mailbox.
  */
-async function showFollowUp(crd, name){
+async function showFollowUp(crd, name, onSent){
   const back = document.createElement("div");
   back.className = "ask-back";
   back.innerHTML = `<div class="ask mail-msg" role="dialog" aria-modal="true"
@@ -1230,6 +1351,7 @@ async function showFollowUp(crd, name){
       <button class="ask-btn" data-mail-close="1">Cancel</button>
       <p class="mail-reply-note"></p></div>`;
   document.body.appendChild(back);
+  requestAnimationFrame(() => back.querySelector(".follow-subject")?.focus());
   const close = () => back.remove();
   back.addEventListener("click", async (e) => {
     if (e.target === back || e.target.closest("[data-mail-close]")) { close(); return; }
@@ -1255,6 +1377,7 @@ async function showFollowUp(crd, name){
       const j = await r.json();
       if (!r.ok) throw new Error(j.error || `HTTP ${r.status}`);
       note.textContent = `Sent to ${j.to}.`;
+      if (onSent) Promise.resolve(onSent()).catch(() => {});
       setTimeout(close, 900);
     } catch (err) {
       note.textContent = err.message;
@@ -2281,48 +2404,63 @@ document.addEventListener("click", (e) => {
 
   /* ---- needs attention ---- */
   if (e.target.closest("#workBtn")) {
+    workReturnFocus = e.target.closest("#workBtn");
     workOpen = true;
     renderWork();
+    requestAnimationFrame(() => $("workTitle")?.focus());
     // Re-read on every open. A queue on a phone is looked at between meetings,
     // and a cached one from an hour ago is exactly the wrong answer.
     loadWork();
     return;
   }
-  if (e.target.closest("#workClose")) { workOpen = false; renderWork(); return; }
-  const workAct = e.target.closest("[data-work]");
+  if (e.target.closest("#workClose")) { closeWork(); return; }
+  const workAct = e.target.closest("[data-work-action]");
   if (workAct) {
     const crd = workAct.dataset.crd;
-    if (workAct.dataset.work === "follow") {
+    const action = workAct.dataset.workAction;
+    if (action === "follow_up") {
       // The action the queue is asking for. Without it a quiet_warm row
       // tells a rep to re-engage somebody and gives them nowhere to do it.
-      showFollowUp(crd, workAct.dataset.name);
+      // The bottom sheet and composer are both modal surfaces. Close the sheet
+      // before opening the composer, then refresh the deferred badge/state only
+      // after the server confirms the follow-up.
+      closeWork();
+      showFollowUp(crd, workAct.dataset.name, () => loadWork());
       return;
     }
-    if (workAct.dataset.work === "open") {
+    if (action === "open") {
       // Straight to the card, so the queue is one tap from a call. The tile for
       // their area may not be loaded -- the field app holds a few areas, not
       // the country -- so this is best-effort and says so rather than doing
       // nothing, which would read as a broken queue.
       const r = rowByCrd(crd);
-      if (r) { workOpen = false; renderWork(); openSheet(r); }
+      if (r) { workOpen = false; renderWork(); workReturnFocus = null; openSheet(r); }
       else alert("Full details are in the tile for their area, which is not loaded here.");
       return;
     }
-    workAct.disabled = true;
+    const payload = action === "snooze"
+      ? { op: "queue_snooze", crd, days: Number(workAct.dataset.days || 30) }
+      : action === "dismiss_bounce"
+        ? { op: "queue_dismiss_bounce", crd }
+        : action === "mark_reviewed" || action === "done"
+          ? { op: "reply_state", crd,
+              state: action === "mark_reviewed" ? "reviewed" : "done" }
+          : null;
+    if (!payload) return;
+    const rowButtons = workAct.closest(".work-row").querySelectorAll("button");
+    rowButtons.forEach(button => { button.disabled = true; });
     fetch("/api/email", { method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ op: workAct.dataset.op || "reply_state", crd,
-                             state: workAct.dataset.state,
-                             days: Number(workAct.dataset.days || 0) || undefined }) })
+      body: JSON.stringify(payload) })
       // Checked, because it was not: a failed write used to reload the list as
       // though it had worked, and the row came back looking untouched.
       .then((r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); })
       // Reloaded rather than removing the row: the advisor may still be in the
       // queue for a DIFFERENT reason, and hiding them would say "done" when
       // they are not.
-      .then(loadWork)
+      .then(() => loadWork(crd))
       .catch(() => {
-        workAct.disabled = false;
+        rowButtons.forEach(button => { button.disabled = false; });
         const note = document.querySelector("#workInner .hist-notice")
           || $("workInner").insertAdjacentElement("afterbegin",
                Object.assign(document.createElement("p"), { className: "hist-notice" }));
@@ -2809,6 +2947,13 @@ document.addEventListener("visibilitychange", async () => {
 
 document.addEventListener("click", (e) => {
   if (e.target.closest("#reloadNow")) location.reload();
+});
+
+document.addEventListener("keydown", (e) => {
+  if (workOpen && e.key === "Escape") {
+    e.preventDefault();
+    closeWork();
+  }
 });
 
 (async () => {

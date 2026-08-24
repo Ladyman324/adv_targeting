@@ -125,6 +125,72 @@ test("status reports how far behind each rep is, which is the silent failure", a
   const r = await get(route, ADMIN, { op: "sweep_status" });
   const bo = r.body.reps.find((x) => x.userId === "user-bo");
   assert.equal(bo.behindHours, 5, "a watermark that stops moving is the thing to watch");
+  assert.equal(bo.ingestionStatus, "stale");
+  assert.equal(bo.ingestionHealthy, false);
+  assert.equal(bo.hasError, false, "lag is untrusted health, not a recorded sweep exception");
+});
+
+test("status distinguishes a healthy catch-up page from a failed sweep", async () => {
+  const watermark = new Date(Date.now() - 5 * 3600000).toISOString();
+  const { route } = load({ connections: CONNECTED,
+    state: { "user-bo": { watermarkUtc: watermark, lastOkUtc: watermark,
+      lastError: "", consecutiveFailures: 0, truncatedRuns: 3 } } });
+  const r = await get(route, ADMIN, { op: "sweep_status" });
+  const bo = r.body.reps.find((x) => x.userId === "user-bo");
+  assert.equal(bo.ingestionStatus, "catching_up");
+  assert.equal(bo.ingestionHealthy, true, "backlog is not an execution failure");
+  assert.equal(bo.catchingUp, true);
+  assert.equal(bo.hasError, false);
+  // Existing fields remain present for older clients during rollout.
+  assert.equal(bo.truncatedRuns, 3);
+  assert.equal(bo.lastError, "");
+});
+
+test("status exposes a persisted execution failure without parsing lag", async () => {
+  const watermark = new Date(Date.now() - 5 * 3600000).toISOString();
+  const { route } = load({ connections: CONNECTED,
+    state: { "user-bo": { watermarkUtc: watermark, lastOkUtc: watermark,
+      lastError: "errors during pass", consecutiveFailures: 2, truncatedRuns: 0 } } });
+  const r = await get(route, ADMIN, { op: "sweep_status" });
+  const bo = r.body.reps.find((x) => x.userId === "user-bo");
+  assert.equal(bo.ingestionStatus, "failed");
+  assert.equal(bo.ingestionHealthy, false);
+  assert.equal(bo.hasError, true);
+  assert.equal(bo.consecutiveFailures, 2);
+});
+
+test("status treats legacy truncated vocabulary as catch-up during rollout", async () => {
+  const watermark = new Date(Date.now() - 5 * 3600000).toISOString();
+  const { route } = load({ connections: CONNECTED,
+    state: { "user-bo": { watermarkUtc: watermark, lastOkUtc: watermark,
+      lastError: "more waiting", consecutiveFailures: 0 } } });
+  const r = await get(route, ADMIN, { op: "sweep_status" });
+  const bo = r.body.reps.find((x) => x.userId === "user-bo");
+  assert.equal(bo.ingestionStatus, "catching_up");
+  assert.equal(bo.hasError, false);
+});
+
+test("status gives reconnect precedence over stale success fields", async () => {
+  const { route } = load({ connections: [
+    { userId: "user-bo", mailbox: "bo@eicatlanta.com", needsReconnect: true }],
+    state: { "user-bo": { watermarkUtc: new Date().toISOString(),
+      lastOkUtc: new Date().toISOString(), lastError: "" } } });
+  const r = await get(route, REP, { op: "sweep_status" });
+  assert.equal(r.body.reps[0].ingestionStatus, "reconnect_required");
+  assert.equal(r.body.reps[0].ingestionHealthy, false);
+  assert.equal(r.body.reps[0].hasError, true);
+});
+
+test("status trusts a completed reconnect over the sweep's stale auth error", async () => {
+  const { route } = load({ connections: [
+    { userId: "user-bo", mailbox: "bo@eicatlanta.com", needsReconnect: false }],
+    state: { "user-bo": { watermarkUtc: new Date().toISOString(),
+      lastOkUtc: new Date().toISOString(), lastError: "graph_reconnect_required",
+      consecutiveFailures: 1 } } });
+  const r = await get(route, REP, { op: "sweep_status" });
+  assert.equal(r.body.reps[0].needsReconnect, false);
+  assert.notEqual(r.body.reps[0].ingestionStatus, "reconnect_required");
+  assert.equal(r.body.reps[0].ingestionStatus, "failed");
 });
 
 test("status shows a backfill's remaining days", async () => {
@@ -142,4 +208,6 @@ test("a rep sees only themselves in status", async () => {
   const r = await get(route, REP, { op: "sweep_status" });
   assert.equal(r.body.count, 1);
   assert.equal(r.body.reps[0].userId, "user-bo");
+  assert.equal(r.body.reps[0].ingestionStatus, "never_run");
+  assert.equal(r.body.reps[0].ingestionHealthy, false);
 });

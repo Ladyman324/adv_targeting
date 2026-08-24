@@ -36,8 +36,18 @@ function fixture(over = {}) {
     reply,
     store: {
       listConnections: async () => [{ userId: "u1", mailbox: "rep@eicatlanta.com" }],
-      getSweepState: async () => state.current || null,
-      putSweepState: async (_u, _s, v) => { state.written = v; },
+      getSweepState: async (u) => (state.byUser && state.byUser[u])
+        || (u === "u1" ? state.current : null) || null,
+      putSweepState: async (u, _s, v) => {
+        state.written = v;
+        state.writes = state.writes || [];
+        state.writes.push({ userId: u, value: v });
+        state.byUser = state.byUser || {};
+        state.byUser[u] = {
+          ...(state.byUser[u] || (u === "u1" ? state.current : null) || {}), ...v,
+        };
+        if (u === "u1") state.current = state.byUser[u];
+      },
       replyAlreadySeen: async (_u, id) => seen.includes(id),
       markReplySeen: async (_u, id, outcome) => seen.push(id, outcome),
       recordActivity: async (e) => { activity.push(e); return e; },
@@ -200,7 +210,9 @@ test("a truncated window still advances to what it actually processed", async ()
   assert.equal(f.state.written.watermarkUtc, "2026-08-22T09:00:00Z",
     "without this a busy mailbox never gets past its newest page");
   assert.equal(summary.truncated, true, "and the caller still knows there is more");
-  assert.match(String(f.state.written.lastError), /more waiting/);
+  assert.equal(f.state.written.lastError, "",
+    "a successful oldest-first page is backlog, not a failure");
+  assert.equal(f.state.written.consecutiveFailures, 0);
 });
 
 test("an ERROR mid-pass does not advance the watermark", async () => {
@@ -211,6 +223,8 @@ test("an ERROR mid-pass does not advance the watermark", async () => {
   await sweeper.sweep(f.context, f.deps);
   assert.equal(f.state.written.watermarkUtc, undefined);
   assert.match(String(f.state.written.lastError), /errors/);
+  assert.equal(f.state.written.consecutiveFailures, 1,
+    "one failed pass increments health once, regardless of failed messages");
 });
 
 test("the watermark advances on a clean pass", async () => {
@@ -232,12 +246,48 @@ test("a rep needing to reconnect is skipped LOUDLY, not silently", async () => {
     "a lapsed token must be visible; their screens still say 'no reply recorded'");
 });
 
+test("authentication failures accumulate from sweep state, not the connection", async () => {
+  const f = fixture();
+  f.deps.auth.tokenFor = async () => {
+    const e = new Error("reconnect"); e.code = "graph_reconnect_required"; throw e;
+  };
+  await sweeper.sweep(f.context, f.deps);
+  await sweeper.sweep(f.context, f.deps);
+  assert.equal(f.state.current.consecutiveFailures, 2,
+    "a prolonged token lapse must not report as one isolated failure forever");
+});
+
+test("a failure outside the message loop is persisted for that mailbox", async () => {
+  const f = fixture();
+  f.deps.graph.recentMail = async () => { throw new Error("Graph unavailable"); };
+  const [summary] = await sweeper.sweep(f.context, f.deps);
+  assert.match(summary.failed, /Graph unavailable/);
+  assert.equal(f.state.current.lastError, "mailbox_sweep_failed");
+  assert.equal(f.state.current.consecutiveFailures, 1);
+});
+
 test("the sweep aborts rather than treating everyone as a stranger", async () => {
   const f = fixture();
   f.deps.advisors.load = async () => { throw new Error("blob unavailable"); };
   const summaries = await sweeper.sweep(f.context, f.deps);
   assert.deepEqual(summaries, [], "failing open would mark every message seen and lose it");
   assert.equal(f.activity.length, 0);
+  assert.equal(f.state.current.lastError, "advisor_lookup_unavailable",
+    "a global prerequisite outage must not leave the mailbox looking healthy");
+  assert.equal(f.state.current.consecutiveFailures, 1);
+});
+
+test("an advisor-index outage marks every affected connection", async () => {
+  const f = fixture();
+  f.deps.store.listConnections = async () => [
+    { userId: "u1", mailbox: "one@eicatlanta.com" },
+    { userId: "u2", mailbox: "two@eicatlanta.com" },
+  ];
+  f.deps.advisors.load = async () => { throw new Error("blob unavailable"); };
+  await sweeper.sweep(f.context, f.deps);
+  assert.deepEqual(f.state.writes.map((w) => w.userId).sort(), ["u1", "u2"]);
+  assert.equal(f.state.byUser.u1.lastError, "advisor_lookup_unavailable");
+  assert.equal(f.state.byUser.u2.consecutiveFailures, 1);
 });
 
 test("subject text alone never creates a campaign link", () => {

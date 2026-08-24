@@ -356,11 +356,12 @@ async function reply(who, input, deps = {}) {
    * Best effort: the message is already sent, and a stale projection is a
    * nuisance where a thrown error here would look like a failed send.
    */
-  try {
-    const eng = deps.engagement || require("./email-engagement");
-    await eng.refresh(who.id, crd, { store: st });
-    await eng.setReplyState(who.id, crd, "reviewed", { store: st });
-  } catch { /* see above */ }
+  const eng = deps.engagement || require("./email-engagement");
+  // Independent best-effort writes. A refresh rebuilds derived mail state;
+  // completing the action records the rep's decision. If the former is stale or
+  // temporarily unavailable, the latter must still clear work they just did.
+  try { await eng.refresh(who.id, crd, { store: st }); } catch { /* see above */ }
+  try { await eng.completeOutbound(who.id, crd, { store: st }); } catch { /* see above */ }
 
   return { ok: true, to, suppressed, conversationId: original.conversationId || "",
            attachments: resolved.documents.length + resolved.files.length,
@@ -467,11 +468,9 @@ async function followUp(who, input, deps = {}) {
    * Best effort: the message is already sent, and a stale projection is a
    * nuisance where a thrown error here would look like a failed send.
    */
-  try {
-    const eng = deps.engagement || require("./email-engagement");
-    await eng.refresh(who.id, crd, { store: st });
-    await eng.setReplyState(who.id, crd, "reviewed", { store: st });
-  } catch { /* see above */ }
+  const eng = deps.engagement || require("./email-engagement");
+  try { await eng.refresh(who.id, crd, { store: st }); } catch { /* see above */ }
+  try { await eng.completeOutbound(who.id, crd, { store: st }); } catch { /* see above */ }
 
   return { ok: true, to, conversationId: draft.conversationId || "",
            attachments: resolved.documents.length + resolved.files.length,

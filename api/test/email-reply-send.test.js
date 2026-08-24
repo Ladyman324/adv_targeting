@@ -3,6 +3,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const send = require("../shared/email-reply-send");
+const engagement = require("../shared/email-engagement");
 
 const BO = { id: "user-bo", name: "Bo" };
 const b64 = (s) => Buffer.from(s).toString("base64");
@@ -216,4 +217,69 @@ test("both paths record the send immediately and store no body", async () => {
   for (const row of d.calls.activity)
     for (const key of ["body", "bodyPreview", "uniqueBody", "text", "files"])
       assert.ok(!(key in row), `${key} must never reach storage`);
+});
+
+test("both paths refresh then complete outbound work, clearing a due schedule", async () => {
+  const d = deps();
+  const calls = [];
+  const completed = [];
+  d.store.putEngagement = async (_userId, crd, value) => {
+    calls.push(`complete:${crd}`);
+    completed.push(value);
+    return value;
+  };
+  d.engagement = {
+    ...engagement,
+    refresh: async (_userId, crd) => { calls.push(`refresh:${crd}`); return {}; },
+  };
+
+  await send.reply(BO, REPLY, d);
+  await send.followUp(BO, FOLLOW, d);
+
+  assert.deepEqual(calls, ["refresh:111", "complete:111", "refresh:111", "complete:111"]);
+  assert.equal(completed.length, 2);
+  for (const state of completed) {
+    assert.equal(state.replyState, "done");
+    assert.ok(state.actedAt);
+    assert.equal(state.nextActionAt, "");
+    assert.equal(state.nextActionType, "");
+    assert.equal(state.snoozedUntilUtc, "");
+  }
+});
+
+test("projection completion failure remains nonfatal after either email is sent", async () => {
+  for (const [name, invoke] of [
+    ["reply", (d) => send.reply(BO, REPLY, d)],
+    ["follow-up", (d) => send.followUp(BO, FOLLOW, d)],
+  ]) {
+    const d = deps();
+    d.engagement = {
+      refresh: async () => ({}),
+      completeOutbound: async () => { throw new Error("projection unavailable"); },
+    };
+
+    const result = await invoke(d);
+    assert.equal(result.ok, true, `${name} was already sent and must remain successful`);
+    assert.equal(d.calls.sent.length, 1);
+  }
+});
+
+test("projection refresh failure cannot skip completing work already sent", async () => {
+  for (const [name, invoke] of [
+    ["reply", (d) => send.reply(BO, REPLY, d)],
+    ["follow-up", (d) => send.followUp(BO, FOLLOW, d)],
+  ]) {
+    const d = deps();
+    const calls = [];
+    d.engagement = {
+      refresh: async () => { calls.push("refresh"); throw new Error("projection stale"); },
+      completeOutbound: async (_userId, crd) => { calls.push(`complete:${crd}`); return {}; },
+    };
+
+    const result = await invoke(d);
+    assert.equal(result.ok, true, `${name} was accepted by Graph and remains successful`);
+    assert.deepEqual(calls, ["refresh", "complete:111"],
+      `${name} completion is an independent best-effort decision write`);
+    assert.equal(d.calls.sent.length, 1);
+  }
 });

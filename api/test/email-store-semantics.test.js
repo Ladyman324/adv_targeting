@@ -109,6 +109,22 @@ test("a Graph id containing a slash does not blow up a row key", async () => {
 
 /* ---- the engagement projection ------------------------------------------- */
 
+test("bounce dismissal time is serialized separately from reply actedAt", async () => {
+  const { store, restore } = loadStore();
+  try {
+    const dismissedAt = "2026-08-24T15:00:00.000Z";
+    await store.putEngagement("u1", "111", {
+      bounceDismissed: true, bounceDismissedAt: dismissedAt,
+    });
+    const after = await store.getEngagement("u1", "111");
+    assert.equal(after.bounceDismissed, true);
+    assert.equal(after.bounceDismissedAt, dismissedAt,
+      "the bounce identity must survive the storage whitelist");
+    assert.equal(after.actedAt, undefined,
+      "dismissing address work must not fabricate a handled-reply timestamp");
+  } finally { restore(); }
+});
+
 test("a reviewed reply stays reviewed across TWO persisted refreshes", async () => {
   const { store, restore } = loadStore();
   try {

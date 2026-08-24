@@ -35,6 +35,55 @@ test("a bounce is flagged and is not a reply", () => {
   assert.equal(s.everReplied, false);
 });
 
+test("a bounce dismissal acknowledges only bounces observed before it", () => {
+  const dismissedAt = ago(2);
+  const previous = { bounceDismissed: true, bounceDismissedAt: dismissedAt };
+  const old = engagement.fold([
+    ev({ classification: "bounce", occurredAt: ago(3) }),
+  ], previous);
+  assert.equal(old.bounceDismissed, true,
+    "refolding the bounce already acknowledged must not reopen it");
+
+  const newer = engagement.fold([
+    ev({ classification: "bounce", occurredAt: ago(1) }),
+    ev({ classification: "bounce", occurredAt: ago(3) }),
+  ], previous);
+  assert.equal(newer.bounceDismissed, false,
+    "a later delivery failure is new address work and must reopen the queue");
+  assert.equal(engagement.reason(newer), "bounced");
+});
+
+test("legacy dismissed rows use their persisted updated time as the boundary", () => {
+  const previous = { bounceDismissed: true, updatedUtc: ago(2) };
+  const carried = engagement.fold([
+    ev({ classification: "bounce", occurredAt: ago(3) }),
+  ], previous);
+  assert.equal(carried.bounceDismissed, true);
+  assert.equal(carried.bounceDismissedAt, previous.updatedUtc,
+    "the compatibility boundary becomes stable on the first new-code fold");
+  assert.equal(engagement.fold([
+    ev({ classification: "bounce", occurredAt: ago(1) }),
+  ], previous).bounceDismissed, false);
+});
+
+test("dismissing a bounce cannot make an unread reply look reviewed", async () => {
+  let dismissal = null;
+  await engagement.dismissBounce("u1", "111", { store: {
+    putEngagement: async (_u, _c, value) => { dismissal = value; return value; },
+  } });
+  assert.ok(dismissal.bounceDismissedAt);
+  assert.ok(!("actedAt" in dismissal), "bounce work and reply work need separate clocks");
+
+  const beforeDismissal = new Date(new Date(dismissal.bounceDismissedAt).getTime() - 1000).toISOString();
+  const state = engagement.fold([
+    ev({ classification: "reply", occurredAt: beforeDismissal }),
+    ev({ classification: "bounce", occurredAt: beforeDismissal }),
+  ], { replyState: "none", actedAt: "", ...dismissal });
+  assert.equal(state.replyState, "new", "the reply is still unread work");
+  assert.equal(state.actedAt, "");
+  assert.equal(state.bounceDismissed, true);
+});
+
 test("a reviewed conversation does not fall back to new on a later sweep", () => {
   const previous = { replyState: "reviewed", actedAt: ago(1) };
   const s = engagement.fold([ev({ occurredAt: ago(3) })], previous);
@@ -130,6 +179,37 @@ test("the queue counts by reason and excludes anyone with no reason", async () =
   assert.equal(q.counts.bounced, 1);
 });
 
+test("queue actions match the reason and never offer an ineffective verb", async () => {
+  assert.deepEqual(engagement.ACTIONS_BY_REASON, {
+    reply_new: ["mark_reviewed", "snooze"],
+    reply_followup: ["follow_up", "done", "snooze"],
+    due: ["follow_up", "snooze"],
+    bounced: ["dismiss_bounce", "snooze"],
+    quiet_warm: ["follow_up", "snooze"],
+  });
+  const q = await engagement.queue("u1", queueStore([
+    { advisorCrd: "due", nextActionAt: ago(1), lastActivityAt: ago(2) },
+    { advisorCrd: "bounce", hasBounce: true, lastActivityAt: ago(1) },
+  ]));
+  const due = q.entries.find((row) => row.advisorCrd === "due");
+  const bounce = q.entries.find((row) => row.advisorCrd === "bounce");
+  assert.deepEqual(due.actions, ["follow_up", "snooze"]);
+  assert.deepEqual(bounce.actions, ["dismiss_bounce", "snooze"]);
+  assert.ok(!bounce.actions.includes("follow_up"));
+  assert.ok(!due.actions.includes("done"));
+});
+
+test("a snoozed bounce returns as bounced, never as a follow-up due", async () => {
+  let snooze = null;
+  await engagement.snooze("u1", "111", 7, { store: {
+    putEngagement: async (_u, _c, value) => { snooze = value; return value; },
+  } });
+  const row = { ...snooze, hasBounce: true, bounceDismissed: false };
+  assert.equal(engagement.reason(row), null, "the active snooze still hides it");
+  assert.equal(engagement.reason(row, Date.now() + 8 * 86400000), "bounced",
+    "expiry cannot turn a known bad address into an invitation to follow up");
+});
+
 test("the queue reports no volume metric of any kind", async () => {
   const q = await engagement.queue("u1", queueStore([
     { advisorCrd: "a", replyState: "new", lastReplyAt: ago(1), lastActivityAt: ago(1) }]));
@@ -148,6 +228,35 @@ test("marking a reply reviewed stamps when, so it cannot re-open by itself", asy
   await engagement.setReplyState("u1", "111", "reviewed", deps);
   assert.equal(saved.replyState, "reviewed");
   assert.ok(saved.actedAt, "without this the next sweep would call it new again");
+});
+
+test("rep decisions are partial writes and cannot restore stale derived fields", async () => {
+  const writes = [];
+  const deps = { store: {
+    getEngagement: async () => assert.fail("manual decisions must not read/rewrite the projection"),
+    putEngagement: async (_u, _c, value) => { writes.push(value); return value; },
+  } };
+  await engagement.setReplyState("u1", "111", "reviewed", deps);
+  await engagement.snooze("u1", "111", 30, deps);
+  await engagement.dismissBounce("u1", "111", deps);
+  assert.deepEqual(Object.keys(writes[0]).sort(), ["actedAt", "replyState"]);
+  assert.deepEqual(Object.keys(writes[1]).sort(),
+    ["actedAt", "nextActionAt", "nextActionType", "snoozedUntilUtc"]);
+  assert.equal(writes[2].bounceDismissed, true);
+  assert.ok(writes[2].bounceDismissedAt,
+    "the dismissal needs a persisted boundary for later bounces");
+  assert.deepEqual(Object.keys(writes[2]).sort(), ["bounceDismissed", "bounceDismissedAt"]);
+});
+
+test("a completed outbound action clears an already-due schedule", async () => {
+  let saved = null;
+  const deps = { store: { putEngagement: async (_u, _c, value) => { saved = value; return value; } } };
+  await engagement.completeOutbound("u1", "111", deps);
+  assert.equal(saved.replyState, "done");
+  assert.ok(saved.actedAt);
+  assert.equal(saved.nextActionAt, "");
+  assert.equal(saved.nextActionType, "");
+  assert.equal(saved.snoozedUntilUtc, "");
 });
 
 test("an unknown reply state is refused", async () => {

@@ -883,7 +883,7 @@ async function putEngagement(userId, advisorCrd, state) {
                   advisorCrd: clean(advisorCrd, 120), updatedUtc: now() };
   for (const key of ["lastOutboundAt", "lastInboundAt", "lastReplyAt", "lastActivityAt",
                      "replyState", "nextActionAt", "nextActionType", "actedAt",
-                     "snoozedUntilUtc", "advisorEmail"])
+                     "snoozedUntilUtc", "bounceDismissedAt", "advisorEmail"])
     if (state[key] !== undefined) saved[key] = clean(state[key], 320);
   for (const key of ["outbound30d", "inbound30d"])
     if (state[key] !== undefined) saved[key] = Number(state[key]) || 0;

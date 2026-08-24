@@ -1455,6 +1455,11 @@ body.scope-pending #map{cursor:progress}
 .work-queue{width:min(760px,94vw); max-height:82vh; display:flex; flex-direction:column}
 .work-queue h3{margin:0 0 8px}
 .wq-body{flex:1; min-height:0; overflow:auto; margin:0 0 10px}
+.wq-sync{margin:0 0 10px; padding:7px 9px; border-radius:7px;
+  background:var(--panel-2); color:var(--muted); font-size:12px}
+.wq-sync-current{border-left:3px solid var(--good,#4f8a63)}
+.wq-sync-reconnect,.wq-sync-stale,.wq-sync-unavailable{border-left:3px solid var(--warn,#c2703a)}
+.wq-sync-catching-up,.wq-sync-starting,.wq-sync-not-connected{border-left:3px solid var(--accent)}
 .wq-heads{display:flex; flex-wrap:wrap; gap:6px 14px; margin:0 0 10px;
   padding:0 0 10px; border-bottom:1px solid var(--hair); font-size:12px}
 .wq-count b{font-size:15px; margin-right:4px}
@@ -1479,6 +1484,7 @@ body.scope-pending #map{cursor:progress}
 .wq-act{font:inherit; font-size:11.5px; padding:3px 9px; border-radius:6px; cursor:pointer;
   border:1px solid var(--hair); background:var(--panel-2); color:inherit; white-space:nowrap}
 .wq-act:hover{background:var(--panel)}
+.wq-name:focus-visible,.wq-act:focus-visible{outline:2px solid var(--accent); outline-offset:2px}
 .wq-act[disabled]{opacity:.5; cursor:default}
 .wq-act.ghost{color:var(--muted)}
 
