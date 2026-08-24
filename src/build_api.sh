@@ -8,7 +8,11 @@ DIST="$ROOT/dist"
 TEMP_BASE=$(cd "${TMPDIR:-/tmp}" && pwd -P)
 TEMP_ROOT=""
 STAGE_DIR=""
-EXPECTED_API_TEST_FILE_COUNT=25
+# Bumped deliberately whenever a test FILE is added or removed. That is the
+# point of it: the count is a tripwire for tests quietly falling out of the
+# package, so it must not be derived from whatever happens to be on disk.
+#   26: contact-flags.test.js -- flags as a set of reps, not a shared boolean
+EXPECTED_API_TEST_FILE_COUNT=26
 
 cleanup() {
   test -z "$TEMP_ROOT" && return
