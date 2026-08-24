@@ -85,8 +85,10 @@ that size is a marketing campaign and belongs in a platform built for it.
 |---|---|
 | `EMAIL_DIRECT_SEND_ENABLED` | `1` enables direct sending. Anything else = drafts only. |
 | `EMAIL_DIRECT_SEND_KILL_SWITCH` | `1` disables direct sending immediately, overriding the above. |
-| `EMAIL_TEST_ADDRESS_ALLOWLIST` | Comma-separated addresses. When set, a direct send fails if **any** recipient is not on it. Leave unset in normal operation. |
+| `EMAIL_TEST_ADDRESS_ALLOWLIST` | Comma-separated external addresses. When set, a direct send fails if **any external recipient** is not on it; internal compliance BCC does not need duplication here. Leave unset in normal operation. |
 | `EMAIL_INTERNAL_DOMAINS` | Defaults to `eicatlanta.com`. Decides what counts as external for the 24-hour limit. |
+| `EMAIL_REPLY_SWEEP_ENABLED` | `1` permits the reply timer to run. Leave disabled until the advisor-email lookup blob and canary list are ready. |
+| `EMAIL_REPLY_SWEEP_USER_IDS` | Optional comma/semicolon/space-separated Static Web Apps user IDs. When set, only matching connected mailboxes are swept. Use this for canary rollout before clearing it for all users. |
 
 ---
 

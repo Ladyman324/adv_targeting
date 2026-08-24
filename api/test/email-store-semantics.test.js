@@ -36,6 +36,217 @@ function loadStore() {
   } };
 }
 
+function connection(overrides = {}) {
+  return {
+    partitionKey: "u1", rowKey: "graph", userName: "Bo",
+    homeAccountId: "home-1", mailboxId: "u1", mailbox: "bo@example.test",
+    profileJson: JSON.stringify({ id: "u1", profileVersion: 2 }),
+    tokenCache: "cache-one", connectedUtc: "2026-08-24T12:00:00Z",
+    needsReconnect: false, etag: 'W/"1"',
+    ...overrides,
+  };
+}
+
+/* Load email-auth with deterministic MSAL, crypto and store seams. The module
+ * itself remains unchanged apart from its real retry logic; only its external
+ * systems are replaced. */
+function loadAuthHarness({ current: initial, acquire, put }) {
+  const store = require("../shared/email-store");
+  const crypt = require("../shared/email-crypto");
+  const msal = require("@azure/msal-node");
+  const authPath = require.resolve("../shared/email-auth");
+  const settingKeys = ["GRAPH_CLIENT_ID", "GRAPH_CLIENT_SECRET", "GRAPH_TENANT_ID", "GRAPH_REDIRECT_URI"];
+  const saved = {
+    getConnection: store.getConnection, putConnection: store.putConnection,
+    encrypt: crypt.encrypt, decrypt: crypt.decrypt,
+    cca: msal.ConfidentialClientApplication,
+    interaction: msal.InteractionRequiredAuthError,
+    env: Object.fromEntries(settingKeys.map((key) => [key, process.env[key]])),
+  };
+  let current = { ...initial };
+  const caches = [];
+  class InteractionRequiredAuthError extends Error {}
+  class FakeCca {
+    constructor() {
+      this.cache = "";
+      this.tokenCache = {
+        deserialize: (value) => { this.cache = value; },
+        getAllAccounts: async () => [{ homeAccountId: "home-1" }],
+        serialize: () => `${this.cache}-rotated`,
+      };
+    }
+    getTokenCache() { return this.tokenCache; }
+    async acquireTokenSilent() {
+      caches.push(this.cache);
+      return acquire(this.cache, InteractionRequiredAuthError);
+    }
+  }
+  store.getConnection = async () => current && { ...current };
+  store.putConnection = async (userId, value, etag) => {
+    const result = await put({ userId, value: { ...value }, etag, current: { ...current },
+      setCurrent: (next) => { current = { ...next }; } });
+    if (result) current = { ...result };
+    return current && { ...current };
+  };
+  crypt.decrypt = (value) => value;
+  crypt.encrypt = (value) => value;
+  msal.ConfidentialClientApplication = FakeCca;
+  msal.InteractionRequiredAuthError = InteractionRequiredAuthError;
+  for (const [key, value] of Object.entries({ GRAPH_CLIENT_ID: "client", GRAPH_CLIENT_SECRET: "secret",
+    GRAPH_TENANT_ID: "tenant", GRAPH_REDIRECT_URI: "https://example.test/callback" }))
+    process.env[key] = value;
+  delete require.cache[authPath];
+  const auth = require(authPath);
+  return { auth, caches, current: () => ({ ...current }), restore: () => {
+    delete require.cache[authPath];
+    store.getConnection = saved.getConnection;
+    store.putConnection = saved.putConnection;
+    crypt.encrypt = saved.encrypt;
+    crypt.decrypt = saved.decrypt;
+    msal.ConfidentialClientApplication = saved.cca;
+    msal.InteractionRequiredAuthError = saved.interaction;
+    for (const key of settingKeys) {
+      if (saved.env[key] === undefined) delete process.env[key];
+      else process.env[key] = saved.env[key];
+    }
+  } };
+}
+
+function conflict() {
+  const err = new Error("stale etag");
+  err.statusCode = 412;
+  return err;
+}
+
+/* ---- optimistic concurrency foundations -------------------------------- */
+
+test("connection replacement is conditional and returns the new etag", async () => {
+  const { store, restore } = loadStore();
+  try {
+    const first = await store.putConnection("u1", connection({ etag: undefined }));
+    assert.ok(first.etag);
+    const second = await store.putConnection("u1", { ...first, tokenCache: "cache-two" }, first.etag);
+    assert.notEqual(second.etag, first.etag);
+    await assert.rejects(
+      () => store.putConnection("u1", { ...first, tokenCache: "stale-cache" }, first.etag),
+      (err) => err.statusCode === 412);
+    assert.equal((await store.getConnection("u1")).tokenCache, "cache-two",
+      "a stale refresh must never replace the cache that won");
+  } finally { restore(); }
+});
+
+test("projection creation has one winner and stale folds cannot overwrite manual work", async () => {
+  const { store, restore } = loadStore();
+  try {
+    const created = await store.putEngagementProjection("u1", "111", {
+      lastActivityAt: "2026-08-24T12:00:00Z", replyState: "new",
+    });
+    assert.ok(created.etag);
+    await store.putEngagement("u1", "111", {
+      replyState: "done", actedAt: "2026-08-24T13:00:00Z",
+    });
+    await assert.rejects(
+      () => store.putEngagementProjection("u1", "111", {
+        lastActivityAt: "2026-08-24T14:00:00Z", replyState: "new",
+      }, created.etag),
+      (err) => err.statusCode === 412);
+    const after = await store.getEngagement("u1", "111");
+    assert.equal(after.replyState, "done");
+    assert.equal(after.actedAt, "2026-08-24T13:00:00Z");
+    await assert.rejects(
+      () => store.putEngagementProjection("u1", "111", { lastActivityAt: "later" }),
+      (err) => err.statusCode === 409,
+      "two first writers must not silently become an upsert");
+  } finally { restore(); }
+});
+
+test("the faithful double makes a transaction atomic on an etag conflict", async () => {
+  const service = new FakeTableService();
+  const table = service.table("ConcurrencyTest");
+  const one = await table.createEntity({ partitionKey: "p", rowKey: "one", value: 1 });
+  await table.createEntity({ partitionKey: "p", rowKey: "two", value: 2 });
+  await assert.rejects(() => table.submitTransaction([
+    ["update", { partitionKey: "p", rowKey: "one", value: 10 }, "Merge", { etag: one.etag }],
+    ["delete", { partitionKey: "p", rowKey: "two" }, { etag: 'W/"stale"' }],
+  ]), (err) => err.statusCode === 412);
+  assert.equal((await table.getEntity("p", "one")).value, 1,
+    "the successful first action must roll back when the second conflicts");
+  assert.equal((await table.getEntity("p", "two")).value, 2);
+});
+
+/* ---- token cache concurrency -------------------------------------------- */
+
+test("tokenFor reloads the winning cache and repeats silent acquisition after 412", async () => {
+  let writes = 0;
+  const h = loadAuthHarness({
+    current: connection(),
+    acquire: async (cache) => ({ accessToken: `token:${cache}` }),
+    put: async ({ value, etag, setCurrent }) => {
+      writes++;
+      if (writes === 1) {
+        assert.equal(etag, 'W/"1"');
+        setCurrent(connection({ tokenCache: "cache-two", etag: 'W/"2"' }));
+        throw conflict();
+      }
+      assert.equal(etag, 'W/"2"');
+      return { ...value, etag: 'W/"3"' };
+    },
+  });
+  try {
+    const result = await h.auth.tokenFor("u1");
+    assert.equal(result.accessToken, "token:cache-two");
+    assert.deepEqual(h.caches, ["cache-one", "cache-two"],
+      "a 412 retries acquisition from the new encrypted cache, not the stale write");
+    assert.equal(h.current().tokenCache, "cache-two-rotated");
+  } finally { h.restore(); }
+});
+
+test("a stale interaction-required result cannot mark a reconnected mailbox", async () => {
+  let writes = 0;
+  const h = loadAuthHarness({
+    current: connection(),
+    acquire: async (cache, Interaction) => {
+      if (cache === "cache-one") throw new Interaction("reconnect");
+      return { accessToken: `token:${cache}` };
+    },
+    put: async ({ value, etag, setCurrent }) => {
+      writes++;
+      if (writes === 1) {
+        assert.equal(value.needsReconnect, true);
+        setCurrent(connection({ tokenCache: "oauth-cache", etag: 'W/"9"', needsReconnect: false }));
+        throw conflict();
+      }
+      assert.equal(etag, 'W/"9"');
+      return { ...value, etag: 'W/"10"' };
+    },
+  });
+  try {
+    const result = await h.auth.tokenFor("u1");
+    assert.equal(result.accessToken, "token:oauth-cache");
+    assert.equal(h.current().needsReconnect, false,
+      "the OAuth callback that won must remain authoritative");
+    assert.deepEqual(h.caches, ["cache-one", "oauth-cache"]);
+  } finally { h.restore(); }
+});
+
+test("tokenFor stops after a bounded number of connection conflicts", async () => {
+  let version = 1;
+  const h = loadAuthHarness({
+    current: connection(),
+    acquire: async (cache) => ({ accessToken: `token:${cache}` }),
+    put: async ({ setCurrent }) => {
+      version++;
+      setCurrent(connection({ tokenCache: `cache-${version}`, etag: `W/"${version}"` }));
+      throw conflict();
+    },
+  });
+  try {
+    await assert.rejects(() => h.auth.tokenFor("u1"),
+      (err) => err.statusCode === 409 && err.code === "graph_connection_changed");
+    assert.equal(h.caches.length, 3, "conflict retries must be bounded");
+  } finally { h.restore(); }
+});
+
 /* ---- the watermark ------------------------------------------------------- */
 
 test("a failed sweep does not erase the watermark it had", async () => {

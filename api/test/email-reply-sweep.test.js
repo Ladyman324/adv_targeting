@@ -59,8 +59,15 @@ function fixture(over = {}) {
   return { deps, activity, seen, state, context };
 }
 
-test.beforeEach(() => { process.env.EMAIL_REPLY_SWEEP_ENABLED = "1"; });
-test.afterEach(() => { delete process.env.EMAIL_REPLY_SWEEP_ENABLED; advisors.reset(); });
+test.beforeEach(() => {
+  process.env.EMAIL_REPLY_SWEEP_ENABLED = "1";
+  delete process.env.EMAIL_REPLY_SWEEP_USER_IDS;
+});
+test.afterEach(() => {
+  delete process.env.EMAIL_REPLY_SWEEP_ENABLED;
+  delete process.env.EMAIL_REPLY_SWEEP_USER_IDS;
+  advisors.reset();
+});
 
 test("the sweep does nothing at all unless it is explicitly enabled", async () => {
   delete process.env.EMAIL_REPLY_SWEEP_ENABLED;
@@ -244,6 +251,29 @@ test("a rep needing to reconnect is skipped LOUDLY, not silently", async () => {
   assert.equal(summary.skipped, "graph_reconnect_required");
   assert.equal(f.state.written.lastError, "graph_reconnect_required",
     "a lapsed token must be visible; their screens still say 'no reply recorded'");
+});
+
+test("the optional user allowlist makes global enablement a real mailbox canary", async () => {
+  process.env.EMAIL_REPLY_SWEEP_USER_IDS = "U2";
+  const f = fixture();
+  f.deps.store.listConnections = async () => [
+    { userId: "u1", mailbox: "one@eicatlanta.com" },
+    { userId: "u2", mailbox: "two@eicatlanta.com" },
+  ];
+  const summaries = await sweeper.sweep(f.context, f.deps);
+  assert.deepEqual(summaries.map((row) => row.userId), ["u2"]);
+  assert.equal(f.activity.length, 1);
+  assert.equal(f.activity[0].userId, "u2");
+});
+
+test("an unmatched canary allowlist performs no mailbox or advisor reads", async () => {
+  process.env.EMAIL_REPLY_SWEEP_USER_IDS = "not-connected";
+  const f = fixture();
+  let loaded = false;
+  f.deps.advisors.load = async () => { loaded = true; throw new Error("must not load"); };
+  assert.deepEqual(await sweeper.sweep(f.context, f.deps), []);
+  assert.equal(loaded, false);
+  assert.equal(f.activity.length, 0);
 });
 
 test("authentication failures accumulate from sweep state, not the connection", async () => {

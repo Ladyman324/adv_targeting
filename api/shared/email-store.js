@@ -45,12 +45,18 @@ function id() { return crypto.randomUUID(); }
 function batchPartition(userId, batchId) { return `${userId}_${batchId}`; }
 
 async function table(which) {
+  const name = NAMES[which];
+  if (!name) {
+    const err = new Error(`Unknown email storage table key "${String(which)}".`);
+    err.statusCode = 500;
+    err.code = "email_table_not_declared";
+    throw err;
+  }
   if (!CONN) {
     const err = new Error("Email storage is not configured: AZURE_STORAGE_CONNECTION_STRING is unset.");
     err.statusCode = 503;
     throw err;
   }
-  const name = NAMES[which];
   if (!clients.has(name)) clients.set(name, TableClient.fromConnectionString(CONN, name, { allowInsecureConnection: false }));
   const client = clients.get(name);
   if (!ensured.has(name)) {
@@ -65,7 +71,7 @@ async function getOptional(which, partitionKey, rowKey) {
   catch (e) { if (e.statusCode === 404) return null; throw e; }
 }
 
-async function putConnection(userId, entity) {
+async function putConnection(userId, entity, etag = "") {
   // Whitelist fields so SDK metadata/etags read from Table Storage can never
   // be serialized back as token-cache properties during a refresh.
   const saved = { partitionKey: userId, rowKey: "graph", updatedUtc: now() };
@@ -73,7 +79,15 @@ async function putConnection(userId, entity) {
     "tokenCache", "connectedUtc", "needsReconnect"]) {
     if (entity[key] !== undefined) saved[key] = entity[key];
   }
-  await (await table("connections")).upsertEntity(saved, "Replace");
+  const client = await table("connections");
+  const result = etag
+    ? await client.updateEntity(saved, "Replace", { etag })
+    : await client.upsertEntity(saved, "Replace");
+  // Azure returns the new etag on a successful mutation. Keep the fallback for
+  // faithful doubles and older SDK responses, while returning a complete row
+  // to callers that need to perform another conditional write.
+  if (result && result.etag) return { ...saved, etag: result.etag };
+  return getConnection(userId);
 }
 const getConnection = (userId) => getOptional("connections", userId, "graph");
 
@@ -879,16 +893,7 @@ async function getEngagement(userId, advisorCrd) {
 }
 
 async function putEngagement(userId, advisorCrd, state) {
-  const saved = { partitionKey: userId, rowKey: clean(advisorCrd, 120),
-                  advisorCrd: clean(advisorCrd, 120), updatedUtc: now() };
-  for (const key of ["lastOutboundAt", "lastInboundAt", "lastReplyAt", "lastActivityAt",
-                     "replyState", "nextActionAt", "nextActionType", "actedAt",
-                     "snoozedUntilUtc", "bounceDismissedAt", "advisorEmail"])
-    if (state[key] !== undefined) saved[key] = clean(state[key], 320);
-  for (const key of ["outbound30d", "inbound30d"])
-    if (state[key] !== undefined) saved[key] = Number(state[key]) || 0;
-  for (const key of ["hasBounce", "everReplied", "bounceDismissed"])
-    if (state[key] !== undefined) saved[key] = !!state[key];
+  const saved = engagementEntity(userId, advisorCrd, state);
   /* MERGE, for the same reason putSweepState() does.
    *
    * This looks like a full projection write and mostly is -- fold() emits every
@@ -903,6 +908,39 @@ async function putEngagement(userId, advisorCrd, state) {
    */
   await (await table("engagement")).upsertEntity(saved, "Merge");
   return saved;
+}
+
+function engagementEntity(userId, advisorCrd, state) {
+  const saved = { partitionKey: userId, rowKey: clean(advisorCrd, 120),
+                  advisorCrd: clean(advisorCrd, 120), updatedUtc: now() };
+  for (const key of ["lastOutboundAt", "lastInboundAt", "lastReplyAt", "lastActivityAt",
+                     "replyState", "nextActionAt", "nextActionType", "actedAt",
+                     "snoozedUntilUtc", "bounceDismissedAt", "advisorEmail"])
+    if (state[key] !== undefined) saved[key] = clean(state[key], 320);
+  for (const key of ["outbound30d", "inbound30d"])
+    if (state[key] !== undefined) saved[key] = Number(state[key]) || 0;
+  for (const key of ["hasBounce", "everReplied", "bounceDismissed"])
+    if (state[key] !== undefined) saved[key] = !!state[key];
+  return saved;
+}
+
+/* The projection writer, distinct from putEngagement's manual partial writes.
+ *
+ * A refresh folds activity after reading the previous projection. If a rep
+ * snoozes or completes work between that read and this write, an unconditional
+ * Merge would replay the stale decision fields over their newer action. A
+ * conditional update refuses that lost update. A missing projection is created
+ * rather than upserted, so two first writers also have a single winner (409).
+ */
+async function putEngagementProjection(userId, advisorCrd, state, etag = "") {
+  const client = await table("engagement");
+  const saved = engagementEntity(userId, advisorCrd, state);
+  if (etag) await client.updateEntity(saved, "Merge", { etag });
+  else await client.createEntity(saved);
+  // Merge deliberately preserves manual decision fields a projection does not
+  // own. Return the full row rather than only the derived payload, so callers
+  // never mistake an omitted-but-preserved field for a deletion.
+  return getEngagement(userId, advisorCrd);
 }
 
 async function listEngagement(userId) {
@@ -957,7 +995,7 @@ async function sentByConversation(userId, sinceUtc) {
 module.exports = {
   getSweepState, putSweepState, replyAlreadySeen, markReplySeen,
   recordActivity, listActivity, activityOwner, sentByConversation,
-  getEngagement, putEngagement, listEngagement,
+  getEngagement, putEngagement, putEngagementProjection, listEngagement,
   passcodeAttempts, recordPasscodeFailure, clearPasscodeFailures,
   id, now, batchPartition, putConnection, getConnection, putAuthState, consumeAuthState,
   createBatch, getBatch, patchBatch, listBatches, createMessage, getMessage, listMessages,

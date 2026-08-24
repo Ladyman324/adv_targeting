@@ -362,7 +362,16 @@ async function sweep(context, overrides = {}) {
     return [];
   }
 
-  const connections = await deps.store.listConnections();
+  const allConnections = await deps.store.listConnections();
+  const canaryIds = new Set(String(process.env.EMAIL_REPLY_SWEEP_USER_IDS || "")
+    .split(/[;,\s]+/).map((value) => value.trim().toLowerCase()).filter(Boolean));
+  const connections = canaryIds.size
+    ? allConnections.filter((connection) => canaryIds.has(String(connection.userId || "").toLowerCase()))
+    : allConnections;
+  if (canaryIds.size && !connections.length) {
+    context.log("reply sweep canary allowlist matched no connected mailboxes");
+    return [];
+  }
 
   // Fails CLOSED. Without the advisor universe every address looks unknown, and
   // the sweep would conclude that nobody wrote to us -- indistinguishable from a

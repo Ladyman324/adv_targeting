@@ -4,28 +4,45 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const send = require("../shared/email-reply-send");
 const engagement = require("../shared/email-engagement");
+const realLimitGuard = require("../shared/email-limit-guard");
 
 const BO = { id: "user-bo", name: "Bo" };
 const b64 = (s) => Buffer.from(s).toString("base64");
 
+function directCfg(over = {}) {
+  return { maxAttachmentBytes: 10 * 1024 * 1024,
+    directSendEnvironmentEnabled: true, testAllowlist: new Set(),
+    internalDomains: new Set(["eicatlanta.com"]), rollingExternalLimit: 5000,
+    mailboxIntervalSeconds: 5, ...over };
+}
+
 function deps(over = {}) {
   const calls = { created: [], drafts: [], patched: [], sent: [], bodies: [],
-                  activity: [], docs: [], files: [] };
+                  activity: [], docs: [], files: [], reservations: [], pacing: [], waits: [],
+                  policy: 0 };
   return {
     calls,
     store: {
       activityOwner: async () => "user-bo",
       recordActivity: async (e) => { calls.activity.push(e); return e; },
+      policy: async () => { calls.policy++; return { killed: false, reason: "" }; },
       getDocuments: async (ids) => ids.map((id) => ({ id, name: `Doc ${id}`, size: 1000,
                                                       blobName: `b/${id}` })),
       listActivity: async () => ([{ userId: "user-bo", advisorEmail: "advisor@ml.com" }]),
       ...(over.store || {}),
     },
-    auth: { tokenFor: async () => ({ accessToken: "t", profile: { displayName: "Bo" } }),
+    auth: { tokenFor: async () => ({ accessToken: "t", mailbox: "bo@eicatlanta.com",
+                                      profile: { displayName: "Bo", mail: "bo@eicatlanta.com" } }),
             ...(over.auth || {}) },
+    advisors: {
+      isInternalCrd: async () => false,
+      emailForCrd: async () => "advisor@ml.com",
+      ...(over.advisors || {}),
+    },
     suppress: { blockedAmong: async () => new Map(), ...(over.suppress || {}) },
     core: {
-      config: () => ({ maxAttachmentBytes: 10 * 1024 * 1024 }),
+      config: () => directCfg(),
+      isExternal: (email, cfg) => !cfg.internalDomains.has(String(email).split("@").pop()),
       corporateSignature: () => "<div>Bo — EIC</div>",
       // The real rule: material to an external recipient is blind-copied.
       complianceBcc: (m) => (m.attachments && m.attachments.length
@@ -37,6 +54,8 @@ function deps(over = {}) {
         conversationId: "conv-1", from: { emailAddress: { address: "advisor@ml.com" } } }),
       createReply: async (_t, id, all) => { calls.created.push({ id, all }); return { id: "draft-1" }; },
       createDraft: async (_t, m) => { calls.drafts.push(m); return { id: "draft-2", conversationId: "conv-new" }; },
+      findByAppId: async () => null,
+      APP_PROPERTY_ID: "app-property",
       updateDraftBody: async (_t, id, html) => { calls.bodies.push({ id, html }); return {}; },
       attachDocuments: async (_t, id, d) => { calls.docs.push({ id, d }); },
       attachFiles: async (_t, id, f) => { calls.files.push({ id, f }); },
@@ -44,11 +63,22 @@ function deps(over = {}) {
       request: async (_t, m, p, b) => { calls.patched.push({ m, p, b }); return { data: {} }; },
       ...(over.graph || {}),
     },
+    limitGuard: {
+      reserve: async (...args) => { calls.reservations.push(args); return { alreadyReserved: false }; },
+      ...(over.limitGuard || {}),
+    },
+    mailboxGate: {
+      acquire: async (...args) => { calls.pacing.push(args); return 0; },
+      ...(over.mailboxGate || {}),
+    },
+    wait: async (ms) => { calls.waits.push(ms); },
   };
 }
 
-const REPLY = { crd: "111", id: "g1", text: "Sending the presentation now." };
-const FOLLOW = { crd: "111", subject: "Following up", text: "It has been a while." };
+const OP_REPLY = "11111111-1111-4111-8111-111111111111";
+const OP_FOLLOW = "22222222-2222-4222-8222-222222222222";
+const REPLY = { crd: "111", id: "g1", text: "Sending the presentation now.", operationId: OP_REPLY };
+const FOLLOW = { crd: "111", subject: "Following up", text: "It has been a while.", operationId: OP_FOLLOW };
 
 /* ---- reply --------------------------------------------------------------- */
 
@@ -102,6 +132,243 @@ test("another rep's message cannot be replied to", async () => {
   assert.equal(d.calls.created.length, 0);
 });
 
+/* ---- fail-closed direct-send foundation --------------------------------- */
+
+test("both paths require a valid operation UUID before any Graph mutation", async () => {
+  for (const [name, invoke] of [
+    ["reply", (d, operationId) => send.reply(BO, { ...REPLY, operationId }, d)],
+    ["follow-up", (d, operationId) => send.followUp(BO, { ...FOLLOW, operationId }, d)],
+  ]) {
+    for (const value of ["", "not-a-uuid"]) {
+      const d = deps();
+      await assert.rejects(() => invoke(d, value),
+        (err) => err.statusCode === 400 && err.code === "operation_id_required", `${name}: ${value}`);
+      assert.equal(d.calls.created.length + d.calls.drafts.length, 0);
+      assert.equal(d.calls.sent.length, 0);
+    }
+  }
+});
+
+test("advisor identity lookup failure stops both paths before a draft", async () => {
+  for (const [name, invoke] of [
+    ["reply", (d) => send.reply(BO, REPLY, d)],
+    ["follow-up", (d) => send.followUp(BO, FOLLOW, d)],
+  ]) {
+    const d = deps({ advisors: { isInternalCrd: async () => { throw new Error("lookup down"); } } });
+    await assert.rejects(() => invoke(d),
+      (err) => err.statusCode === 503 && err.code === "advisor_lookup_unavailable", name);
+    assert.equal(d.calls.created.length + d.calls.drafts.length, 0);
+    assert.equal(d.calls.sent.length, 0);
+  }
+});
+
+test("an unavailable Graph retry lookup fails closed before a draft", async () => {
+  for (const [name, invoke] of [
+    ["reply", (d) => send.reply(BO, REPLY, d)],
+    ["follow-up", (d) => send.followUp(BO, FOLLOW, d)],
+  ]) {
+    const d = deps({ graph: { findByAppId: async () => { throw new Error("Graph unavailable"); } } });
+    await assert.rejects(() => invoke(d),
+      (err) => err.statusCode === 503 && err.code === "send_status_unavailable", name);
+    assert.equal(d.calls.created.length + d.calls.drafts.length, 0);
+    assert.equal(d.calls.sent.length, 0);
+  }
+});
+
+test("an already-sent operation is replayed without another draft or send", async () => {
+  for (const [name, invoke] of [
+    ["reply", (d) => send.reply(BO, REPLY, d)],
+    ["follow-up", (d) => send.followUp(BO, FOLLOW, d)],
+  ]) {
+    const d = deps({ graph: { findByAppId: async () => ({ id: "sent-1", isDraft: false }) } });
+    const result = await invoke(d);
+    assert.equal(result.alreadySent, true, name);
+    assert.equal(d.calls.created.length + d.calls.drafts.length, 0);
+    assert.equal(d.calls.sent.length, 0);
+  }
+});
+
+test("environment and administrator kill switches stop both paths before a draft", async () => {
+  for (const [name, invoke] of [
+    ["reply", (d) => send.reply(BO, REPLY, d)],
+    ["follow-up", (d) => send.followUp(BO, FOLLOW, d)],
+  ]) {
+    const environment = deps({ core: { config: () => directCfg({ directSendEnvironmentEnabled: false }) } });
+    await assert.rejects(() => invoke(environment),
+      (err) => err.statusCode === 403 && err.code === "direct_send_disabled", `${name} environment`);
+    assert.equal(environment.calls.created.length + environment.calls.drafts.length, 0);
+
+    const admin = deps({ store: { policy: async () => ({ killed: true, reason: "Paused by admin" }) } });
+    await assert.rejects(() => invoke(admin),
+      (err) => err.statusCode === 403 && err.code === "direct_send_disabled", `${name} admin`);
+    assert.equal(admin.calls.created.length + admin.calls.drafts.length, 0);
+  }
+});
+
+test("the production allowlist covers external Reply All participants", async () => {
+  const d = deps({
+    core: { config: () => directCfg({ testAllowlist: new Set(["advisor@ml.com"]) }) },
+    graph: { getMessageContent: async () => ({ id: "g1", subject: "Thread", conversationId: "c1",
+      from: { emailAddress: { address: "advisor@ml.com" } },
+      toRecipients: [{ emailAddress: { address: "bo@eicatlanta.com" } }],
+      ccRecipients: [{ emailAddress: { address: "assistant@morganstanley.com" } }],
+    }) },
+  });
+  await assert.rejects(() => send.reply(BO, { ...REPLY, replyAll: true }, d),
+    (err) => err.statusCode === 403 && err.code === "recipient_not_allowlisted");
+  assert.equal(d.calls.created.length, 0);
+  assert.equal(d.calls.sent.length, 0);
+});
+
+test("the caller mailbox is excluded from the effective Reply All audience", async () => {
+  const d = deps({
+    auth: { tokenFor: async () => ({ accessToken: "t", mailbox: "bo@outside.example",
+      profile: { mail: "bo@outside.example" } }) },
+    core: { config: () => directCfg({ testAllowlist:
+      new Set(["advisor@ml.com", "assistant@morganstanley.com"]) }) },
+    graph: { getMessageContent: async () => ({ id: "g1", subject: "Thread", conversationId: "c1",
+      from: { emailAddress: { address: "advisor@ml.com" } },
+      toRecipients: [{ emailAddress: { address: "bo@outside.example" } }],
+      ccRecipients: [{ emailAddress: { address: "assistant@morganstanley.com" } }],
+    }) },
+  });
+  const result = await send.reply(BO, { ...REPLY, replyAll: true }, d);
+  assert.equal(result.ok, true);
+  assert.equal(d.calls.sent.length, 1);
+});
+
+test("internal compliance BCC does not have to duplicate an external canary allowlist", async () => {
+  const d = deps({ core: { config: () => directCfg({
+    testAllowlist: new Set(["advisor@ml.com"]) }) } });
+  const result = await send.reply(BO, { ...REPLY, documentIds: ["doc-1"] }, d);
+  assert.equal(result.complianceCopied, true);
+  assert.equal(d.calls.sent.length, 1);
+});
+
+test("rolling external limit refusal stops both paths before a draft", async () => {
+  for (const [name, invoke] of [
+    ["reply", (d) => send.reply(BO, REPLY, d)],
+    ["follow-up", (d) => send.followUp(BO, FOLLOW, d)],
+  ]) {
+    const d = deps({ limitGuard: { reserve: async () => {
+      const err = new Error("rolling limit"); err.statusCode = 429; throw err;
+    } } });
+    await assert.rejects(() => invoke(d), (err) => err.statusCode === 429, name);
+    assert.equal(d.calls.created.length + d.calls.drafts.length, 0);
+    assert.equal(d.calls.sent.length, 0);
+  }
+});
+
+test("a rolling-limit reservation replay is bound to its external count", () => {
+  assert.deepEqual(realLimitGuard.replayReservation({ externalCount: 2 }, 2),
+    { alreadyReserved: true, externalCount: 2 });
+  assert.throws(() => realLimitGuard.replayReservation({ externalCount: 1 }, 2),
+    (err) => err.statusCode === 409 && err.code === "idempotency_conflict");
+});
+
+test("the same operation cannot expand from Reply to Reply All after a pre-send failure", async () => {
+  const reservations = new Map();
+  const d = deps({
+    limitGuard: { reserve: async (_userId, id, count) => {
+      if (reservations.has(id)) return realLimitGuard.replayReservation(reservations.get(id), count);
+      reservations.set(id, { externalCount: count });
+      return { alreadyReserved: false, externalCount: count };
+    } },
+    graph: { getMessageContent: async () => ({ id: "g1", subject: "Thread", conversationId: "c1",
+      from: { emailAddress: { address: "advisor@ml.com" } },
+      toRecipients: [{ emailAddress: { address: "bo@eicatlanta.com" } }],
+      ccRecipients: [{ emailAddress: { address: "assistant@morganstanley.com" } }],
+    }) },
+  });
+  let policyReads = 0;
+  d.store.policy = async () => (++policyReads === 2
+    ? { killed: true, reason: "Stopped before submission" }
+    : { killed: false, reason: "" });
+
+  await assert.rejects(() => send.reply(BO, REPLY, d),
+    (err) => err.statusCode === 403 && err.code === "direct_send_disabled");
+  assert.equal(d.calls.created.length, 1, "the first attempt prepared one unsent draft");
+  assert.equal(d.calls.sent.length, 0);
+
+  await assert.rejects(() => send.reply(BO, { ...REPLY, replyAll: true }, d),
+    (err) => err.statusCode === 409 && err.code === "idempotency_conflict");
+  assert.equal(d.calls.created.length, 1, "the conflicting replay is stopped before another draft");
+  assert.equal(d.calls.sent.length, 0);
+});
+
+test("Reply All reserves every external participant but not self or internal compliance", async () => {
+  const d = deps({ graph: { getMessageContent: async () => ({ id: "g1", subject: "Thread",
+    conversationId: "c1", from: { emailAddress: { address: "advisor@ml.com" } },
+    toRecipients: [{ emailAddress: { address: "bo@eicatlanta.com" } }],
+    ccRecipients: [{ emailAddress: { address: "assistant@morganstanley.com" } }],
+  }) } });
+  await send.reply(BO, { ...REPLY, replyAll: true, documentIds: ["doc-1"] }, d);
+  assert.equal(d.calls.reservations.length, 2, "initial and immediate pre-send policy reads");
+  assert.deepEqual(d.calls.reservations.map((args) => args[2]), [2, 2]);
+});
+
+test("mailbox pacing waits and reacquires after preparation but before send", async () => {
+  for (const [name, invoke, installDraft] of [
+    ["reply", (d) => send.reply(BO, REPLY, d),
+      (d, order) => { d.graph.createReply = async () => { order.push("draft"); return { id: "d1" }; }; }],
+    ["follow-up", (d) => send.followUp(BO, FOLLOW, d),
+      (d, order) => { d.graph.createDraft = async () => { order.push("draft"); return { id: "d2" }; }; }],
+  ]) {
+    const d = deps();
+    const order = [], slots = [2, 0];
+    d.mailboxGate.acquire = async () => { order.push("pace"); return slots.shift(); };
+    d.wait = async (ms) => { order.push(`wait:${ms}`); };
+    installDraft(d, order);
+    d.graph.sendDraft = async (_token, id) => { order.push("send"); d.calls.sent.push(id); };
+    await invoke(d);
+    assert.deepEqual(order, ["draft", "pace", "wait:2000", "pace", "send"], name);
+    assert.equal(d.calls.sent.length, 1);
+  }
+});
+
+test("a mailbox that stays busy leaves the prepared draft unsent after 30 seconds", async () => {
+  for (const [name, invoke] of [
+    ["reply", (d) => send.reply(BO, REPLY, d)],
+    ["follow-up", (d) => send.followUp(BO, FOLLOW, d)],
+  ]) {
+    const d = deps({ mailboxGate: { acquire: async () => 10 } });
+    await assert.rejects(() => invoke(d),
+      (err) => err.statusCode === 429 && err.code === "mailbox_busy", name);
+    assert.deepEqual(d.calls.waits, [10000, 10000, 10000]);
+    assert.equal(d.calls.created.length + d.calls.drafts.length, 1);
+    assert.equal(d.calls.sent.length, 0);
+  }
+});
+
+test("policy is rechecked immediately before send", async () => {
+  for (const [name, invoke] of [
+    ["reply", (d) => send.reply(BO, REPLY, d)],
+    ["follow-up", (d) => send.followUp(BO, FOLLOW, d)],
+  ]) {
+    const d = deps();
+    let reads = 0;
+    d.store.policy = async () => (++reads === 1
+      ? { killed: false, reason: "" } : { killed: true, reason: "Stopped during preparation" });
+    await assert.rejects(() => invoke(d),
+      (err) => err.statusCode === 403 && err.code === "direct_send_disabled", name);
+    assert.equal(reads, 2);
+    assert.equal(d.calls.created.length + d.calls.drafts.length, 1, "the second read is after preparation");
+    assert.equal(d.calls.sent.length, 0);
+  }
+});
+
+test("operation stamping is required on both paths before send", async () => {
+  for (const [name, invoke] of [
+    ["reply", (d) => send.reply(BO, REPLY, d)],
+    ["follow-up", (d) => send.followUp(BO, FOLLOW, d)],
+  ]) {
+    const d = deps({ graph: { request: async () => { throw new Error("stamp failed"); } } });
+    await assert.rejects(() => invoke(d), /stamp failed/, name);
+    assert.equal(d.calls.created.length + d.calls.drafts.length, 1);
+    assert.equal(d.calls.sent.length, 0);
+  }
+});
+
 /* ---- attachments and the compliance copy --------------------------------- */
 
 test("NO attachment means no compliance blind copy", async () => {
@@ -148,7 +415,7 @@ test("too many attachments is refused before anything is created", async () => {
 });
 
 test("the size limit is enforced on the bytes received, not on a claimed size", async () => {
-  const d = deps({ core: { config: () => ({ maxAttachmentBytes: 10 }),
+  const d = deps({ core: { config: () => directCfg({ maxAttachmentBytes: 10 }),
                            corporateSignature: () => "", complianceBcc: () => [] } });
   await assert.rejects(() => send.reply(BO, { ...REPLY,
     files: [{ name: "big.bin", data: b64("x".repeat(50)) }] }, d),
@@ -190,7 +457,8 @@ test("the follow-up recipient comes from the activity log, never from the reques
 });
 
 test("a follow-up to an advisor with no observed address is refused", async () => {
-  const d = deps({ store: { listActivity: async () => [] } });
+  const d = deps({ advisors: { emailForCrd: async () => "" },
+                   store: { listActivity: async () => [] } });
   await assert.rejects(() => send.followUp(BO, FOLLOW, d),
     (err) => err.statusCode === 409 && err.code === "no_known_address");
 });

@@ -266,6 +266,207 @@ test("an unknown reply state is refused", async () => {
     (err) => err.statusCode === 400);
 });
 
+/* ---- projection concurrency -------------------------------------------- */
+
+function storageConflict(statusCode) {
+  return Object.assign(new Error(`storage conflict ${statusCode}`), { statusCode });
+}
+
+test("a stale refresh retries around every kind of rep decision", async (t) => {
+  const cases = [
+    {
+      name: "mark reviewed",
+      activity: [ev({ occurredAt: ago(3) })],
+      initial: { replyState: "new", actedAt: "" },
+      act: (deps) => engagement.setReplyState("u1", "111", "reviewed", deps),
+      check: (row) => {
+        assert.equal(row.replyState, "reviewed");
+        assert.ok(row.actedAt);
+      },
+    },
+    {
+      name: "snooze",
+      activity: [ev({ occurredAt: ago(3) })],
+      initial: { replyState: "new", actedAt: "" },
+      act: (deps) => engagement.snooze("u1", "111", 14, deps),
+      check: (row) => {
+        assert.ok(row.nextActionAt);
+        assert.equal(row.nextActionType, "follow_up");
+        assert.ok(row.snoozedUntilUtc);
+      },
+    },
+    {
+      name: "dismiss bounce",
+      activity: [ev({ classification: "bounce", occurredAt: ago(3) })],
+      initial: { replyState: "none", bounceDismissed: false },
+      act: (deps) => engagement.dismissBounce("u1", "111", deps),
+      check: (row) => {
+        assert.equal(row.bounceDismissed, true);
+        assert.ok(row.bounceDismissedAt);
+      },
+    },
+    {
+      name: "complete outbound",
+      activity: [ev({ occurredAt: ago(3) })],
+      initial: { replyState: "follow_up", nextActionAt: ago(1),
+                 nextActionType: "follow_up", snoozedUntilUtc: ago(1) },
+      act: (deps) => engagement.completeOutbound("u1", "111", deps),
+      check: (row) => {
+        assert.equal(row.replyState, "done");
+        assert.ok(row.actedAt);
+        assert.equal(row.nextActionAt, "");
+        assert.equal(row.nextActionType, "");
+        assert.equal(row.snoozedUntilUtc, "");
+      },
+    },
+  ];
+
+  for (const scenario of cases) await t.test(scenario.name, async () => {
+    let version = 1;
+    let row = { ...scenario.initial, etag: `v${version}` };
+    let projectionAttempts = 0;
+    const deps = { store: {
+      listActivity: async () => scenario.activity.map((item) => ({ ...item })),
+      getEngagement: async () => ({ ...row }),
+      putEngagement: async (_u, _c, patch) => {
+        row = { ...row, ...patch, etag: `v${++version}` };
+        return { ...row };
+      },
+      putEngagementProjection: async (_u, _c, folded, etag) => {
+        projectionAttempts++;
+        if (projectionAttempts === 1) {
+          assert.equal(etag, "v1");
+          await scenario.act(deps);
+          throw storageConflict(412);
+        }
+        assert.equal(etag, row.etag, "the retry must use the decision's new ETag");
+        row = { ...row, ...folded, etag: `v${++version}` };
+        return { ...row };
+      },
+    } };
+
+    const saved = await engagement.refresh("u1", "111", deps);
+    assert.equal(projectionAttempts, 2);
+    scenario.check(saved);
+  });
+});
+
+test("out-of-order refreshes cannot let an older fold replace a newer one", async () => {
+  const oldReply = ev({ occurredAt: ago(5), advisorEmail: "old@ml.com" });
+  const newReply = ev({ occurredAt: ago(1), advisorEmail: "new@ml.com" });
+  let activity = [oldReply];
+  let row = { replyState: "none", etag: "v1" };
+  let releaseOld;
+  let oldReachedWrite;
+  const oldWaiting = new Promise((resolve) => { oldReachedWrite = resolve; });
+  const release = new Promise((resolve) => { releaseOld = resolve; });
+  let heldOld = false;
+  let version = 1;
+  const deps = { store: {
+    listActivity: async () => activity.map((item) => ({ ...item })),
+    getEngagement: async () => ({ ...row }),
+    putEngagementProjection: async (_u, _c, folded, etag) => {
+      if (folded.lastReplyAt === oldReply.occurredAt && !heldOld) {
+        heldOld = true;
+        oldReachedWrite();
+        await release;
+      }
+      if (etag !== row.etag) throw storageConflict(412);
+      row = { ...row, ...folded, etag: `v${++version}` };
+      return { ...row };
+    },
+  } };
+
+  const olderRefresh = engagement.refresh("u1", "111", deps);
+  await oldWaiting;
+  activity = [newReply, oldReply];
+  const newerRefresh = engagement.refresh("u1", "111", deps);
+  await newerRefresh;
+  releaseOld();
+  await olderRefresh;
+
+  assert.equal(row.lastReplyAt, newReply.occurredAt);
+  assert.equal(row.advisorEmail, "new@ml.com");
+  assert.equal(row.etag, "v3", "the stale refresh must conflict and then refold");
+});
+
+test("a create conflict is reread and refolded instead of overwriting the winner", async () => {
+  let row = null;
+  let attempts = 0;
+  const deps = { store: {
+    listActivity: async () => [ev({ occurredAt: ago(3) })],
+    getEngagement: async () => row && { ...row },
+    putEngagementProjection: async (_u, _c, folded, etag) => {
+      attempts++;
+      if (attempts === 1) {
+        assert.equal(etag, undefined);
+        row = { replyState: "reviewed", actedAt: ago(1), etag: "v1" };
+        throw storageConflict(409);
+      }
+      assert.equal(etag, "v1");
+      row = { ...row, ...folded, etag: "v2" };
+      return { ...row };
+    },
+  } };
+  const saved = await engagement.refresh("u1", "111", deps);
+  assert.equal(attempts, 2);
+  assert.equal(saved.replyState, "reviewed");
+  assert.equal(saved.actedAt, row.actedAt);
+});
+
+test("a seeded retry keeps a newer manual action instead of moving it backward", async () => {
+  let version = 1;
+  let row = { replyState: "none", actedAt: "", etag: `v${version}` };
+  let attempts = 0;
+  let seedBoundary = "";
+  let manualAt = "";
+  const deps = { seed: true, store: {
+    listActivity: async () => [ev({ occurredAt: ago(30) })],
+    getEngagement: async () => ({ ...row }),
+    putEngagement: async (_u, _c, patch) => {
+      manualAt = new Date(new Date(seedBoundary).getTime() + 1000).toISOString();
+      row = { ...row, ...patch, actedAt: manualAt, etag: `v${++version}` };
+      return { ...row };
+    },
+    putEngagementProjection: async (_u, _c, folded, etag) => {
+      attempts++;
+      if (attempts === 1) {
+        seedBoundary = folded.actedAt;
+        assert.ok(seedBoundary, "the first fold establishes one stable seed boundary");
+        await engagement.setReplyState("u1", "111", "reviewed", deps);
+        throw storageConflict(412);
+      }
+      assert.equal(etag, row.etag);
+      row = { ...row, ...folded, etag: `v${++version}` };
+      return { ...row };
+    },
+  } };
+
+  const saved = await engagement.refresh("u1", "111", deps);
+  assert.equal(attempts, 2);
+  assert.ok(manualAt > seedBoundary);
+  assert.equal(saved.replyState, "reviewed");
+  assert.equal(saved.actedAt, manualAt,
+    "the seed is a historical floor, not permission to erase a later rep decision");
+});
+
+test("refresh stops after five projection conflicts and reports the last one", async () => {
+  let reads = 0;
+  let writes = 0;
+  const last = storageConflict(412);
+  const deps = { store: {
+    listActivity: async () => { reads++; return [ev()]; },
+    getEngagement: async () => ({ replyState: "none", etag: `v${reads}` }),
+    putEngagementProjection: async () => {
+      writes++;
+      throw writes === 5 ? last : storageConflict(writes % 2 ? 409 : 412);
+    },
+  } };
+  await assert.rejects(() => engagement.refresh("u1", "111", deps), (err) => err === last);
+  assert.equal(reads, 5, "every retry must reread activity as well as engagement");
+  assert.equal(writes, 5, "a hot row cannot spin forever inside one request");
+});
+
 test("the projection is rebuildable: fold is a pure function of the log", () => {
   const log = [ev({ occurredAt: ago(5) }), ev({ direction: "outbound", classification: "sent", occurredAt: ago(6) })];
   const a = engagement.fold(log);

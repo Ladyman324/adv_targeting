@@ -17,6 +17,7 @@ const crypt = require("./email-crypto");
  * silent token acquisition instead.
  */
 const PROFILE_VERSION = 2;
+const TOKEN_WRITE_ATTEMPTS = 3;
 
 const GRAPH_SCOPES = ["User.Read", "Mail.ReadWrite", "Mail.Send", "offline_access", "openid", "profile"];
 
@@ -105,40 +106,78 @@ async function status(userId) {
 }
 
 async function tokenFor(userId) {
-  const c = await store.getConnection(userId);
-  if (!c || c.needsReconnect) {
-    const err = new Error("Connect your Microsoft 365 mailbox before creating drafts.");
-    err.statusCode = 409; err.code = "graph_not_connected"; throw err;
-  }
-  const cache = crypt.decrypt(c.tokenCache, `${userId}|${c.mailboxId}`);
-  const cca = client(cache);
-  const accounts = await cca.getTokenCache().getAllAccounts();
-  const account = accounts.find((a) => a.homeAccountId === c.homeAccountId);
-  if (!account) throw new Error("The stored Microsoft account is missing from its token cache.");
-  try {
-    const result = await cca.acquireTokenSilent({ account, scopes: GRAPH_SCOPES });
-    const serialized = cca.getTokenCache().serialize();
-    let profile = JSON.parse(c.profileJson || "{}");
-    let profileJson = c.profileJson;
-    if (Number(profile.profileVersion || 0) !== PROFILE_VERSION) {
-      // Best effort. A failure here must not stop somebody sending mail -- the
-      // old profile still produces a correct, merely less complete, signature.
-      try {
-        profile = { ...(await graphMe(result.accessToken)), profileVersion: PROFILE_VERSION };
-        profileJson = JSON.stringify(profile);
-      } catch { /* keep what we had */ }
+  let lastConflict = null;
+  for (let attempt = 0; attempt < TOKEN_WRITE_ATTEMPTS; attempt++) {
+    const c = await store.getConnection(userId);
+    if (!c || c.needsReconnect) {
+      const err = new Error("Connect your Microsoft 365 mailbox before creating drafts.");
+      err.statusCode = 409; err.code = "graph_not_connected"; throw err;
     }
-    if (serialized !== cache || profileJson !== c.profileJson) await store.putConnection(userId, { ...c,
-      profileJson, tokenCache: crypt.encrypt(serialized, `${userId}|${c.mailboxId}`), needsReconnect: false });
-    return { accessToken: result.accessToken, mailboxId: c.mailboxId, mailbox: c.mailbox, profile };
-  } catch (e) {
-    if (e instanceof msal.InteractionRequiredAuthError || String(e.errorCode || "").includes("interaction_required")) {
-      await store.putConnection(userId, { ...c, needsReconnect: true });
-      const err = new Error("Microsoft requires this employee to reconnect their mailbox.");
-      err.statusCode = 409; err.code = "graph_reconnect_required"; throw err;
+    if (!c.etag) {
+      const err = new Error("The stored Microsoft mailbox connection has no concurrency version.");
+      err.statusCode = 503;
+      err.code = "graph_connection_version_missing";
+      throw err;
     }
-    throw e;
+    const cache = crypt.decrypt(c.tokenCache, `${userId}|${c.mailboxId}`);
+    const cca = client(cache);
+    const accounts = await cca.getTokenCache().getAllAccounts();
+    const account = accounts.find((a) => a.homeAccountId === c.homeAccountId);
+    if (!account) throw new Error("The stored Microsoft account is missing from its token cache.");
+    try {
+      const result = await cca.acquireTokenSilent({ account, scopes: GRAPH_SCOPES });
+      const serialized = cca.getTokenCache().serialize();
+      let profile = JSON.parse(c.profileJson || "{}");
+      let profileJson = c.profileJson;
+      if (Number(profile.profileVersion || 0) !== PROFILE_VERSION) {
+        // Best effort. A failure here must not stop somebody sending mail -- the
+        // old profile still produces a correct, merely less complete, signature.
+        try {
+          profile = { ...(await graphMe(result.accessToken)), profileVersion: PROFILE_VERSION };
+          profileJson = JSON.stringify(profile);
+        } catch { /* keep what we had */ }
+      }
+      if (serialized !== cache || profileJson !== c.profileJson) {
+        // The cache may contain a rotated refresh token. Replacing a row read
+        // before another invocation refreshed it would lose that newer token,
+        // so the whole acquisition is conditional on the version we decrypted.
+        await store.putConnection(userId, { ...c,
+          profileJson, tokenCache: crypt.encrypt(serialized, `${userId}|${c.mailboxId}`),
+          needsReconnect: false }, c.etag);
+      }
+      return { accessToken: result.accessToken, mailboxId: c.mailboxId,
+               mailbox: c.mailbox, profile };
+    } catch (e) {
+      if (e && e.statusCode === 412) {
+        // Do not retry the stale write. Reload the row, decrypt the cache that
+        // won, and repeat silent acquisition from that newer state.
+        lastConflict = e;
+        continue;
+      }
+      if (e instanceof msal.InteractionRequiredAuthError
+          || String(e.errorCode || "").includes("interaction_required")) {
+        try {
+          // A stale token failure must not mark a mailbox disconnected after a
+          // successful OAuth callback has already replaced the connection.
+          await store.putConnection(userId, { ...c, needsReconnect: true }, c.etag);
+        } catch (writeError) {
+          if (writeError && writeError.statusCode === 412) {
+            lastConflict = writeError;
+            continue;
+          }
+          throw writeError;
+        }
+        const err = new Error("Microsoft requires this employee to reconnect their mailbox.");
+        err.statusCode = 409; err.code = "graph_reconnect_required"; throw err;
+      }
+      throw e;
+    }
   }
+  const err = new Error("The Microsoft mailbox connection changed while its token was being refreshed. Try again.");
+  err.statusCode = 409;
+  err.code = "graph_connection_changed";
+  if (lastConflict) err.cause = lastConflict;
+  throw err;
 }
 
 /* The stored profile, refreshed first if it predates the current field set.

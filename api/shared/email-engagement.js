@@ -252,31 +252,59 @@ function rank(entry, now = Date.now()) {
   return byReason * 1e15 - age;
 }
 
-/* Recompute one advisor's state for one rep, from the log. */
+const PROJECTION_WRITE_ATTEMPTS = 5;
+
+/* Recompute one advisor's state for one rep, from the log.
+ *
+ * A projection write contains the rep's decisions as well as fields derived
+ * from mail.  It therefore cannot be an unconditional Merge: a refresh that
+ * read `new` just before the rep marked the reply reviewed would otherwise put
+ * `new` back after their click.  putEngagementProjection() creates when the row
+ * is absent and conditionally updates the ETag it was folded from when present.
+ * A conflict means somebody changed either the decision or the projection, so
+ * reread BOTH inputs and fold again rather than replaying the stale result.
+ */
 async function refresh(userId, advisorCrd, deps = {}) {
   const st = deps.store || store;
-  const rows = await st.listActivity(advisorCrd, 500);
-  const mine = rows.filter((r) => String(r.userId || "") === String(userId));
-  const previous = (await st.getEngagement(userId, advisorCrd)) || {};
+  const seededAt = deps.seed ? new Date().toISOString() : "";
+  let conflict = null;
 
-  /* SEEDING: history arrives already handled.
-   *
-   * A backfill of a year would otherwise mark every reply in it `new`, and a
-   * rep would open "Needs attention" to four hundred rows from eight months
-   * ago. They would never trust the queue again -- and the queue's entire value
-   * is that the five things in it are the five things that matter today.
-   *
-   * So during a backfill, actedAt is stamped forward past everything imported.
-   * The history is all there on the timeline; it simply does not present itself
-   * as work somebody failed to do. Genuinely new replies, arriving after the
-   * backfill catches up, still surface normally.
-   */
-  const seeded = deps.seed
-    ? { ...previous, actedAt: new Date().toISOString() }
-    : previous;
+  for (let attempt = 0; attempt < PROJECTION_WRITE_ATTEMPTS; attempt++) {
+    const rows = await st.listActivity(advisorCrd, 500);
+    const mine = rows.filter((r) => String(r.userId || "") === String(userId));
+    const current = await st.getEngagement(userId, advisorCrd);
+    const previous = current || {};
 
-  const folded = fold(mine, seeded);
-  return st.putEngagement(userId, advisorCrd, folded);
+    /* SEEDING: history arrives already handled.
+     *
+     * A backfill of a year would otherwise mark every reply in it `new`, and a
+     * rep would open "Needs attention" to four hundred rows from eight months
+     * ago. They would never trust the queue again -- and the queue's entire
+     * value is that the five things in it are the five things that matter
+     * today. Keep one timestamp across conflict retries: retrying storage must
+     * not make this logical decision drift forward in time.
+     */
+    // A conflict retry may discover that the rep acted after this refresh
+    // began. Seeding is a floor for imported history, never permission to move
+    // a real decision backward to the older seed boundary.
+    const seeded = seededAt
+      ? { ...previous, actedAt: newest(previous.actedAt, seededAt) }
+      : previous;
+    const folded = fold(mine, seeded);
+
+    try {
+      return await st.putEngagementProjection(userId, advisorCrd, folded,
+        current ? current.etag : undefined);
+    } catch (err) {
+      if (![409, 412].includes(Number(err && err.statusCode))) throw err;
+      conflict = err;
+    }
+  }
+
+  // The durable repair path will retry this refresh later.  Returning a stale
+  // fold would be worse than reporting the conflict because it could silently
+  // undo a rep's work.
+  throw conflict;
 }
 
 /* The queue: who this rep should work now, and why. */

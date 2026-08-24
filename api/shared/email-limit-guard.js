@@ -43,6 +43,27 @@ async function releaseLock(policy, userId, owner) {
   } catch { /* the short lease is the recovery path */ }
 }
 
+/* A reservation id is also an idempotency key for the amount it reserved.
+ *
+ * Returning success for the same id with a different count lets a caller first
+ * reserve one recipient and later use that reservation for Reply All. The
+ * rolling total then understates the irreversible send. The durable send
+ * ledger will bind the whole intent; until then this pure check binds the part
+ * this ledger is responsible for.
+ */
+function replayReservation(existing, requestedExternalCount) {
+  const reserved = Number(existing && existing.externalCount) || 0;
+  const requested = Number(requestedExternalCount) || 0;
+  if (reserved !== requested) {
+    const err = new Error("This operation id is already reserved for a different recipient count. "
+      + "Start a new send operation.");
+    err.statusCode = 409;
+    err.code = "idempotency_conflict";
+    throw err;
+  }
+  return { alreadyReserved: true, externalCount: reserved };
+}
+
 async function reserve(userId, batchId, externalCount, limit) {
   const { policy, ledger } = await clients();
   const owner = crypto.randomUUID();
@@ -50,7 +71,7 @@ async function reserve(userId, batchId, externalCount, limit) {
   try {
     try {
       const existing = await ledger.getEntity(userId, batchId);
-      if (existing) return { alreadyReserved: true, externalCount: Number(existing.externalCount) || 0 };
+      if (existing) return replayReservation(existing, externalCount);
     } catch (e) { if (e.statusCode !== 404) throw e; }
     const since = Date.now() - 86400000;
     let rolling = 0;
@@ -95,4 +116,4 @@ async function reserve(userId, batchId, externalCount, limit) {
   } finally { await releaseLock(policy, userId, owner); }
 }
 
-module.exports = { reserve };
+module.exports = { reserve, replayReservation };

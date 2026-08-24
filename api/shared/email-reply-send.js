@@ -51,6 +51,8 @@ const auth = require("./email-auth");
 const core = require("./email-core");
 const suppress = require("./email-suppress");
 const advisors = require("./advisor-lookup");
+const mailboxGate = require("./email-mailbox-gate");
+const limitGuard = require("./email-limit-guard");
 
 // Long enough for a real answer, short enough that nobody drafts a memo in a
 // box with no formatting and no autosave.
@@ -59,6 +61,8 @@ const MAX_SUBJECT = 200;
 // Per message, across both sources. Graph and Exchange have their own ceilings;
 // this is about keeping a phone on a bad connection from trying to push 40 MB.
 const MAX_FILES = 5;
+const MAX_MAILBOX_WAIT_SECONDS = 30;
+const OPERATION_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 function httpError(status, message, code) {
   const err = new Error(message);
@@ -152,11 +156,104 @@ async function resolveAttachments(input, deps) {
  */
 async function refuseInternal(crd, deps) {
   const ad = deps.advisors || advisors;
-  let internal = false;
-  try { internal = await ad.isInternalCrd(crd); } catch { internal = false; }
+  let internal;
+  try { internal = await ad.isInternalCrd(crd); }
+  catch {
+    throw httpError(503, "The advisor identity check is temporarily unavailable, so this message "
+      + "was not sent. Try again shortly.", "advisor_lookup_unavailable");
+  }
   if (internal) {
     throw httpError(409, "That is a colleague rather than a prospect, so this tool does not "
       + "email them. Use Outlook.", "internal_contact");
+  }
+}
+
+function operationId(input) {
+  const value = String((input || {}).operationId || "").trim();
+  if (!OPERATION_UUID.test(value)) {
+    throw httpError(400, "This send is missing a valid operation id. Refresh the app and try again.",
+      "operation_id_required");
+  }
+  return value.toLowerCase();
+}
+
+function addressOf(entry) {
+  return String((((entry || {}).emailAddress || {}).address) || "").trim().toLowerCase();
+}
+
+function uniqueAddresses(values) {
+  return [...new Set((values || []).map((value) => String(value || "").trim().toLowerCase())
+    .filter(Boolean))];
+}
+
+/* The addresses Graph will actually put on the message.
+ *
+ * Reply All is the important case: checking only the advisor who wrote to us
+ * leaves every To/Cc participant outside the production allowlist and rolling
+ * limit. Graph omits the caller's own mailbox from the effective audience, so
+ * we do the same before applying those gates.
+ */
+function effectiveReplyRecipients(original, replyAll, token, fallbackTo) {
+  if (!replyAll) return uniqueAddresses([fallbackTo]);
+  const self = new Set(uniqueAddresses([
+    token && token.mailbox,
+    token && token.profile && token.profile.mail,
+    token && token.profile && token.profile.userPrincipalName,
+  ]));
+  const all = [addressOf(original && original.from)];
+  for (const r of (original && original.toRecipients) || []) all.push(addressOf(r));
+  for (const r of (original && original.ccRecipients) || []) all.push(addressOf(r));
+  return uniqueAddresses(all).filter((address) => !self.has(address));
+}
+
+function complianceAddresses(to, resolved, deps) {
+  const cr = deps.core || core;
+  return uniqueAddresses(cr.complianceBcc({ recipientEmail: to,
+    attachments: [...resolved.documents, ...resolved.files] }));
+}
+
+async function enforceDirectSendPolicy(who, recipients, opId, deps) {
+  const cr = deps.core || core;
+  const st = deps.store || store;
+  const limiter = deps.limitGuard || limitGuard;
+  const cfg = cr.config();
+  const policy = await st.policy();
+  if (!cfg.directSendEnvironmentEnabled || (policy && policy.killed)) {
+    const reason = policy && policy.killed && policy.reason
+      ? policy.reason : "Direct sending is disabled by environment policy or the administrator kill switch.";
+    throw httpError(403, reason, "direct_send_disabled");
+  }
+  const actual = uniqueAddresses(recipients);
+  const external = actual.filter((address) => cr.isExternal(address, cfg));
+  if (cfg.testAllowlist && cfg.testAllowlist.size) {
+    // Same boundary as campaign direct send: this setting prevents a canary
+    // from reaching an external prospect. Internal compliance retention is an
+    // obligation, not another prospect that administrators must remember to
+    // duplicate into the canary list.
+    const outside = external.filter((address) => !cfg.testAllowlist.has(address));
+    if (outside.length) {
+      throw httpError(403, "At least one recipient is outside the configured production test allowlist.",
+        "recipient_not_allowlisted");
+    }
+  }
+  await limiter.reserve(who.id, opId, external.length, cfg.rollingExternalLimit);
+  return cfg;
+}
+
+async function waitForMailbox(who, cfg, deps) {
+  const gate = deps.mailboxGate || mailboxGate;
+  const pause = deps.wait || ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+  let waitedSeconds = 0;
+  for (;;) {
+    const seconds = await gate.acquire(who.id, cfg.mailboxIntervalSeconds);
+    if (!seconds) return;
+    const delay = Math.max(1, Number(seconds) || 1);
+    if (waitedSeconds + delay > MAX_MAILBOX_WAIT_SECONDS) {
+      throw httpError(429, "This mailbox is busy sending another message. The prepared Outlook "
+        + "draft was not sent; try again in a moment.", "mailbox_busy");
+    }
+    await pause(delay * 1000);
+    waitedSeconds += delay;
   }
 }
 
@@ -249,17 +346,17 @@ async function attachAll(token, draftId, resolved, deps) {
  * stamped here instead, after the body and attachments are on and immediately
  * before the send.
  *
- * Best effort. A failure here costs the retry check for this one message, and
- * is a much smaller problem than refusing to let a rep answer an advisor.
+ * Required. If the stamp cannot be written, the draft is left unsent. Sending
+ * without the one identifier a retry can reconcile would turn a Graph outage
+ * into permission to send a second copy.
  */
 async function stampOperation(token, draftId, operationId, deps) {
-  if (!operationId) return;
+  if (!operationId) throw httpError(400, "A valid operation id is required before sending.",
+    "operation_id_required");
   const gr = deps.graph || graph;
-  try {
-    await gr.request(token.accessToken, "PATCH", `/me/messages/${encodeURIComponent(draftId)}`, {
-      singleValueExtendedProperties: [{ id: gr.APP_PROPERTY_ID, value: String(operationId) }],
-    });
-  } catch { /* see above */ }
+  await gr.request(token.accessToken, "PATCH", `/me/messages/${encodeURIComponent(draftId)}`, {
+    singleValueExtendedProperties: [{ id: gr.APP_PROPERTY_ID, value: String(operationId) }],
+  });
 }
 
 async function alreadySent(token, operationId, deps) {
@@ -269,10 +366,8 @@ async function alreadySent(token, operationId, deps) {
     const found = await gr.findByAppId(token.accessToken, operationId);
     return found && !found.isDraft ? found : null;
   } catch {
-    // A failed lookup must not block a legitimate first send. The cost of being
-    // wrong here is one duplicate in a rare double failure; the cost of
-    // throwing is that nobody can reply while Graph is unhappy.
-    return null;
+    throw httpError(503, "Microsoft could not verify whether this operation was already sent, so "
+      + "it was not sent again. Try again shortly.", "send_status_unavailable");
   }
 }
 
@@ -290,6 +385,7 @@ async function reply(who, input, deps = {}) {
   const crd = String(input.crd || "").trim();
   const messageId = String(input.id || "").trim();
   const body = String(input.text || "");
+  const opId = operationId(input);
   if (!crd || !messageId) throw httpError(400, "An advisor and a message are required.");
   if (!body.trim()) throw httpError(400, "The reply is empty.");
   if (body.length > MAX_CHARS) {
@@ -310,7 +406,13 @@ async function reply(who, input, deps = {}) {
   const token = await au.tokenFor(who.id);
 
   // Before anything: did a previous attempt already send this?
-  const done = await alreadySent(token, input.operationId, deps);
+  //
+  // This lookup is deliberately fail-closed, but it is NOT a concurrency lock:
+  // two simultaneous first attempts can still both observe no message. A
+  // durable ETag-claimed operation ledger is the next package that closes that
+  // window; do not weaken this check or describe this bounded foundation as
+  // exactly-once sending in the meantime.
+  const done = await alreadySent(token, opId, deps);
   if (done) return { ok: true, alreadySent: true, to: "", conversationId: "" };
 
   const original = await gr.getMessageContent(token.accessToken, messageId);
@@ -319,6 +421,16 @@ async function reply(who, input, deps = {}) {
   const { address: to, suppressed } = await guard(
     ((original.from || {}).emailAddress || {}).address, deps, { initiating: false });
   const resolved = await resolveAttachments(input, deps);
+  const compliance = complianceAddresses(to, resolved, deps);
+  const recipients = uniqueAddresses([
+    ...effectiveReplyRecipients(original, input.replyAll === true, token, to),
+    ...compliance,
+  ]);
+
+  // An initial copy of every refusal gate runs before Graph creates a draft.
+  // The same policy is read again after preparation, immediately before
+  // submission, so a kill switch changed during this request still wins.
+  const cfg = await enforceDirectSendPolicy(who, recipients, opId, deps);
 
   const draft = await gr.createReply(token.accessToken, messageId, input.replyAll === true);
   if (!draft || !draft.id) throw httpError(502, "Microsoft did not return a reply draft.");
@@ -327,7 +439,12 @@ async function reply(who, input, deps = {}) {
   await attachAll(token, draft.id, resolved, deps);
   const bcc = await applyCompliance(token, draft.id, to,
     [...resolved.documents, ...resolved.files], deps);
-  await stampOperation(token, draft.id, input.operationId, deps);
+  await stampOperation(token, draft.id, opId, deps);
+  // Pacing is taken at the irreversible boundary, not before draft work that
+  // may take seconds. A bounded wait can leave this stamped Outlook draft
+  // unsent; durable draft ownership/cleanup remains the ledger package's job.
+  await waitForMailbox(who, cfg, deps);
+  await enforceDirectSendPolicy(who, recipients, opId, deps);
   await gr.sendDraft(token.accessToken, draft.id);
 
   /* Recorded immediately rather than waiting for the sweep.
@@ -383,6 +500,7 @@ async function followUp(who, input, deps = {}) {
   const crd = String(input.crd || "").trim();
   const subject = String(input.subject || "").trim();
   const body = String(input.text || "");
+  const opId = operationId(input);
   if (!crd) throw httpError(400, "An advisor is required.");
   if (!subject) throw httpError(400, "A subject is required.");
   if (subject.length > MAX_SUBJECT) throw httpError(400, `The subject is limited to ${MAX_SUBJECT} characters.`);
@@ -428,18 +546,23 @@ async function followUp(who, input, deps = {}) {
 
   const token = await au.tokenFor(who.id);
 
-  const done = await alreadySent(token, input.operationId, deps);
+  // See reply(): fail-closed retry detection is necessary but is not the
+  // durable claim that will make concurrent same-operation requests safe.
+  const done = await alreadySent(token, opId, deps);
   if (done) return { ok: true, alreadySent: true, to: "", conversationId: "" };
 
   // A follow-up INITIATES contact, so suppression blocks it. That is the whole
   // difference between this and a reply.
   const { address: to } = await guard(target, deps, { initiating: true });
   const resolved = await resolveAttachments(input, deps);
+  const compliance = complianceAddresses(to, resolved, deps);
+  const recipients = uniqueAddresses([to, ...compliance]);
+  const cfg = await enforceDirectSendPolicy(who, recipients, opId, deps);
 
   const draft = await gr.createDraft(token.accessToken, {
     // createDraft stamps this as both the EICMessageId extended property and an
     // X-EIC-Message-Id header, which is what makes the retry check above work.
-    id: String(input.operationId || `followup-${Date.now()}-${crd}`),
+    id: opId,
     subject, bodyHtml: textToHtml(body), signatureHtml: signatureFor(token, deps),
     recipientEmail: to, recipientName: input.name || "",
   });
@@ -448,6 +571,12 @@ async function followUp(who, input, deps = {}) {
   await attachAll(token, draft.id, resolved, deps);
   const bcc = await applyCompliance(token, draft.id, to,
     [...resolved.documents, ...resolved.files], deps);
+  // createDraft stamps atomically; repeat it here as the final required
+  // invariant shared with reply drafts. A failure leaves a real Outlook draft,
+  // never an untraceable submitted message.
+  await stampOperation(token, draft.id, opId, deps);
+  await waitForMailbox(who, cfg, deps);
+  await enforceDirectSendPolicy(who, recipients, opId, deps);
   await gr.sendDraft(token.accessToken, draft.id);
 
   await st.recordActivity({

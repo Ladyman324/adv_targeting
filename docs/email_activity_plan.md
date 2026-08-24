@@ -1,6 +1,12 @@
 # Advisor Activity Layer — build plan
 
-Status: **Phases 0-6 built; the review blockers are fixed. Not deployed.**
+Status: **Phases 0-6 built; queue/sync reliability is checkpointed. Not deployed.**
+
+The next release gate is intentionally split: ETag-safe token/projection writes
+and fail-closed one-to-one send controls come first; the durable projection
+repair worker and direct-send operation ledger follow as separate checkpoints.
+The reply sweep and one-to-one direct sends stay disabled until those durable
+workflows pass canary recovery tests.
 
 An external code review found six deployment blockers and a dozen further
 defects. All were verified against the code and all were real; the fixes are in,
@@ -18,7 +24,7 @@ false statements *in this file* rather than latent bugs.
     built     phase 6   reply and follow-up, with attachments -- desk AND field
     deleted   phase 7   application permissions -- unnecessary
 
-    202 API tests pass. Audit checks added: 14.
+    The full API suite and repository audit pass at each checkpoint.
 
 Nothing is deployed. `dist/api.tgz` carries all of this plus the older unshipped
 `store.js` TABLES fix and the CC/BCC work.
@@ -914,11 +920,18 @@ degraded state, and the same one 21,124 unmatched advisors are already in.
 1. `pip install azure-storage-blob` then
    `python src/export_advisor_emails.py --upload` — the sweep fails closed
    without the blob, deliberately, so this is a hard prerequisite.
-2. App settings: `EMAIL_REPLY_SWEEP_ENABLED=1`. Leave it off until (1) is done.
+2. Deploy the API with `EMAIL_REPLY_SWEEP_ENABLED` and
+   `EMAIL_DIRECT_SEND_ENABLED` still disabled. Verify release provenance and
+   storage health before enabling either workflow.
+3. For the reply-sweep canary, set `EMAIL_REPLY_SWEEP_ENABLED=1` and
+   `EMAIL_REPLY_SWEEP_USER_IDS` to one connected test user's Static Web Apps
+   user ID. An unmatched allowlist intentionally reads no mailbox. Clear the
+   allowlist only after the repair backlog and reconnect metrics stay healthy.
    `ADVISOR_LOOKUP_CONTAINER` / `ADVISOR_LOOKUP_BLOB` default to
    `lookups` / `advisor_emails.json.gz`.
-3. Deploy. Three new tables are created on first use, like every other one.
-4. Watch the first run's log line: `scanned` should be large, `ours` small. If
+4. Leave one-to-one direct send disabled until the durable operation ledger is
+   deployed and its lost-response/reconciliation canary has passed.
+5. Watch the first sweep log line: `scanned` should be large, `ours` small. If
    `ours` is near `scanned`, the filter is wrong and should be stopped.
 
 ## Open questions
