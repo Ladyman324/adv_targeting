@@ -515,6 +515,30 @@ test("both paths refresh then complete outbound work, clearing a due schedule", 
   }
 });
 
+test("both direct paths acknowledge the atomic dirty marker inline", async () => {
+  const d = deps();
+  const repaired = [];
+  const completed = [];
+  d.store.recordActivity = async (row) => {
+    d.calls.activity.push(row);
+    return { ...row, dirtyMarker: {
+      partitionKey: row.advisorCrd, rowKey: "zD|user-bo",
+      userId: row.userId, advisorCrd: row.advisorCrd, etag: `v${d.calls.activity.length}`,
+    } };
+  };
+  d.engagement = {
+    refresh: async () => { throw new Error("marker path must be preferred"); },
+    refreshDirty: async (marker) => { repaired.push(marker.etag); return { acknowledged: true }; },
+    completeOutbound: async (_userId, crd) => { completed.push(crd); return {}; },
+  };
+
+  await send.reply(BO, REPLY, d);
+  await send.followUp(BO, FOLLOW, d);
+
+  assert.deepEqual(repaired, ["v1", "v2"]);
+  assert.deepEqual(completed, ["111", "111"]);
+});
+
 test("projection completion failure remains nonfatal after either email is sent", async () => {
   for (const [name, invoke] of [
     ["reply", (d) => send.reply(BO, REPLY, d)],

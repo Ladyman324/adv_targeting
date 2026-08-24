@@ -8,7 +8,7 @@ DIST="$ROOT/dist"
 TEMP_BASE=$(cd "${TMPDIR:-/tmp}" && pwd -P)
 TEMP_ROOT=""
 STAGE_DIR=""
-EXPECTED_API_TEST_FILE_COUNT=24
+EXPECTED_API_TEST_FILE_COUNT=25
 
 cleanup() {
   test -z "$TEMP_ROOT" && return

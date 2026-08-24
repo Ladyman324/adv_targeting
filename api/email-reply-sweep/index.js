@@ -25,11 +25,10 @@
  * THE CRON OFFSET IS LOAD-BEARING
  * -------------------------------
  * :02, :17, :32, :47 -- deliberately never :20, where the bounce sweep runs.
- * putConnection() upserts with "Replace" and no etag, while tokenFor() reads
- * the MSAL cache, refreshes it, and writes the rotated cache back. Two
- * functions touching one mailbox in the same minute can interleave and lose a
- * rotated refresh token, which surfaces later as a spurious needsReconnect for
- * a rep who did nothing wrong.
+ * Both functions can refresh the same mailbox token and generate Graph load.
+ * Token-cache writes now use ETags and bounded conflict retries, so the offset
+ * is defense in depth as well as load spreading rather than the only thing
+ * preventing a lost refresh token.
  *
  * FOLDER-AGNOSTIC BY CONSTRUCTION
  * -------------------------------
@@ -122,6 +121,12 @@ async function sweepMailbox(connection, context, deps) {
    */
   const touchedHistoric = new Set();
   const touchedCurrent = new Set();
+  // The activity write and this marker are committed in one Table transaction.
+  // Keeping only the newest marker per advisor lets the inline refresh
+  // conditionally acknowledge everything written by this pass. If another
+  // writer touches the marker meanwhile, its ETag changes and the repair timer
+  // retains the newer work.
+  const dirtyMarkers = new Map();
   /* The timestamp of the last message this pass fully handled.
    *
    * Messages come oldest-first, so this is the end of a CONTIGUOUS block
@@ -221,7 +226,8 @@ async function sweepMailbox(connection, context, deps) {
     try {
       if (verdict.direction === "outbound") {
         for (const target of verdict.advisors) {
-          await deps.store.recordActivity({
+          const historic = isHistoric(item);
+          const recorded = await deps.store.recordActivity({
             userId: connection.userId, direction: "outbound",
             // "app" when the message carries our own X-EIC-Message-Id, so a
             // scheduled campaign is never shown as though the rep typed it.
@@ -236,14 +242,20 @@ async function sweepMailbox(connection, context, deps) {
             subject: item.subject, conversationId: verdict.conversationId,
             internetMessageId: verdict.internetMessageId, graphMessageId: item.id,
             campaignMessageId: verdict.appMessageId || "",
+            historicalImport: historic,
+            seedBeforeUtc: backfillUntil || "",
           });
-          if (target.who.crd) (isHistoric(item) ? touchedHistoric : touchedCurrent)
-            .add(target.who.crd);
+          if (target.who.crd) {
+            (historic ? touchedHistoric : touchedCurrent).add(target.who.crd);
+            if (recorded && recorded.dirtyMarker)
+              dirtyMarkers.set(target.who.crd, recorded.dirtyMarker);
+          }
         }
         summary.outbound++;
       } else {
         const answered = verdict.answers || null;
-        await deps.store.recordActivity({
+        const historic = isHistoric(item);
+        const recorded = await deps.store.recordActivity({
           userId: connection.userId, direction: "inbound", source: "outlook",
           classification: verdict.classification, route: verdict.route,
           advisorCrd: verdict.who.crd || "", firmCrd: verdict.who.firmCrd || "",
@@ -255,9 +267,14 @@ async function sweepMailbox(connection, context, deps) {
           // a campaign it may have nothing to do with would be a fabrication.
           batchId: answered ? answered.batchId : "",
           campaignMessageId: answered ? answered.id : "",
+          historicalImport: historic,
+          seedBeforeUtc: backfillUntil || "",
         });
-        if (verdict.who.crd) (isHistoric(item) ? touchedHistoric : touchedCurrent)
-          .add(verdict.who.crd);
+        if (verdict.who.crd) {
+          (historic ? touchedHistoric : touchedCurrent).add(verdict.who.crd);
+          if (recorded && recorded.dirtyMarker)
+            dirtyMarkers.set(verdict.who.crd, recorded.dirtyMarker);
+        }
         if (verdict.who.kind === "ambiguous") summary.ambiguous++;
         if (verdict.classification === "reply") summary.replies++;
         else if (verdict.classification === "auto_reply") summary.autoReplies++;
@@ -287,10 +304,15 @@ async function sweepMailbox(connection, context, deps) {
    */
   for (const advisorCrd of new Set([...touchedHistoric, ...touchedCurrent])) {
     try {
-      // Seeded only when everything we saw for them this pass was history.
-      const seed = touchedHistoric.has(advisorCrd) && !touchedCurrent.has(advisorCrd);
-      await deps.engagement.refresh(connection.userId, advisorCrd,
-        { store: deps.store, seed });
+      const marker = dirtyMarkers.get(advisorCrd);
+      if (marker && typeof deps.engagement.refreshDirty === "function") {
+        await deps.engagement.refreshDirty(marker, { store: deps.store });
+      } else {
+        // Compatibility for focused test doubles. Historical actionability is
+        // event provenance now; refresh options must never reclassify existing
+        // activity during a later backfill.
+        await deps.engagement.refresh(connection.userId, advisorCrd, { store: deps.store });
+      }
     } catch (err) {
       summary.projectionErrors = (summary.projectionErrors || 0) + 1;
       context.log.warn(`engagement refresh failed for ${advisorCrd}: ${err.message}`);
@@ -319,20 +341,33 @@ async function sweepMailbox(connection, context, deps) {
    */
   const advanceTo = lastProcessed || (truncated ? "" : started.toISOString());
   if (advanceTo && !summary.errors) {
-    await deps.store.putSweepState(connection.userId, "reply", {
-      watermarkUtc: advanceTo, lastOkUtc: new Date().toISOString(),
-      // A truncated oldest-first page is successful progress. `truncatedRuns`
-      // describes its backlog without making a healthy pass look like an error.
-      lastError: "", consecutiveFailures: 0,
-      lookupHash: index.contentHash,
-      seen: summary.scanned, recorded: summary.ours,
-      truncatedRuns: truncated
-        ? Number((state && state.truncatedRuns) || 0) + 1
-        : 0,
-      // Cleared once the watermark passes it, so the sweep returns to normal
-      // without anybody having to remember to switch it off.
-      ...(backfillUntil && advanceTo >= backfillUntil ? { backfillUntilUtc: "" } : {}),
-    });
+    try {
+      await deps.store.putSweepState(connection.userId, "reply", {
+        watermarkUtc: advanceTo, lastOkUtc: new Date().toISOString(),
+        // A truncated oldest-first page is successful progress. `truncatedRuns`
+        // describes its backlog without making a healthy pass look like an error.
+        lastError: "", consecutiveFailures: 0,
+        lookupHash: index.contentHash,
+        seen: summary.scanned, recorded: summary.ours,
+        truncatedRuns: truncated
+          ? Number((state && state.truncatedRuns) || 0) + 1
+          : 0,
+        // Cleared once the watermark passes it, so the sweep returns to normal
+        // without anybody having to remember to switch it off.
+        ...(backfillUntil && advanceTo >= backfillUntil ? { backfillUntilUtc: "" } : {}),
+      }, { ifMatch: state.etag || null });
+    } catch (err) {
+      if (![409, 412].includes(Number(err && err.statusCode))) throw err;
+      /* A newer backfill or another sweep generation won the state row.
+       *
+       * Never retry this payload against its newer ETag: it carries the old
+       * watermark and may clear the old cutoff, so replaying it could overwrite
+       * a newly requested backfill and silently skip history. Activity is
+       * already durable and idempotent; the next timer can safely reread it.
+       */
+      summary.stateConflict = true;
+      context.log.warn(`reply sweep progress not advanced for ${connection.userId}: state changed`);
+    }
   } else if (summary.errors) {
     // No progress to record. putSweepState MERGES, so this cannot erase the
     // watermark -- which it used to, under Replace, sending the rep back to a

@@ -174,6 +174,27 @@ test("the faithful double makes a transaction atomic on an etag conflict", async
   assert.equal((await table.getEntity("p", "two")).value, 2);
 });
 
+test("recordActivity rolls its event back when the marker update conflicts", async () => {
+  const { store, service, restore } = loadStore();
+  try {
+    const activity = service.table("EmailActivity");
+    const markerKey = store.dirtyMarkerKey("u1");
+    await activity.createEntity({ partitionKey: "111", rowKey: markerKey,
+      kind: "engagement_dirty", userId: "u1", advisorCrd: "111", status: "pending" });
+    const realUpdate = activity.updateEntity.bind(activity);
+    activity.updateEntity = async (entity, ...args) => {
+      if (entity.rowKey === markerKey) throw Object.assign(new Error("forced conflict"), { statusCode: 412 });
+      return realUpdate(entity, ...args);
+    };
+    await assert.rejects(() => store.recordActivity({ userId: "u1", advisorCrd: "111",
+      graphMessageId: "atomic", occurredAt: "2026-08-24T12:00:00Z",
+      direction: "inbound", classification: "reply" }),
+    (err) => err.code === "email_activity_changed");
+    assert.equal(service.all("EmailActivity").length, 1,
+      "the event action must roll back when the marker action fails");
+  } finally { restore(); }
+});
+
 /* ---- token cache concurrency -------------------------------------------- */
 
 test("tokenFor reloads the winning cache and repeats silent acquisition after 412", async () => {
@@ -254,16 +275,68 @@ test("a failed sweep does not erase the watermark it had", async () => {
   try {
     await store.putSweepState("u1", "reply", {
       watermarkUtc: "2026-08-22T10:00:00Z", lastOkUtc: "2026-08-22T10:00:05Z",
-      lookupHash: "hash-1",
+      lookupHash: "hash-1", backfillUntilUtc: "2026-08-24T12:00:00Z",
     });
     // The error path writes health fields and nothing else. Under Replace this
     // deleted the watermark and sent the rep back to a 48-hour window.
-    await store.putSweepState("u1", "reply", { lastError: "graph_reconnect_required" });
+    const written = await store.putSweepState("u1", "reply",
+      { lastError: "graph_reconnect_required" });
     const after = await store.getSweepState("u1", "reply");
     assert.equal(after.watermarkUtc, "2026-08-22T10:00:00Z",
       "one failed run must not undo days of progress");
     assert.equal(after.lastError, "graph_reconnect_required");
     assert.equal(after.lookupHash, "hash-1");
+    assert.equal(after.backfillUntilUtc, "2026-08-24T12:00:00Z");
+    assert.equal(written.etag, after.etag, "the write returns the stored generation's ETag");
+    assert.equal(written.watermarkUtc, after.watermarkUtc,
+      "the returned row includes fields preserved by Merge");
+  } finally { restore(); }
+});
+
+test("a stale sweep cannot move the watermark or clear a newer backfill generation", async () => {
+  const { store, restore } = loadStore();
+  try {
+    const atStart = await store.putSweepState("u1", "reply", {
+      watermarkUtc: "2026-08-22T10:00:00Z", backfillUntilUtc: "",
+    });
+    const newer = await store.putSweepState("u1", "reply", {
+      watermarkUtc: "2026-07-01T00:00:00Z",
+      backfillUntilUtc: "2026-08-24T12:00:00Z",
+      backfillStartedUtc: "2026-08-24T12:00:00Z",
+    });
+
+    await assert.rejects(() => store.putSweepState("u1", "reply", {
+      watermarkUtc: "2026-08-24T12:05:00Z", lastOkUtc: "2026-08-24T12:05:00Z",
+      backfillUntilUtc: "",
+    }, { ifMatch: atStart.etag }), (err) => err.statusCode === 412);
+
+    const after = await store.getSweepState("u1", "reply");
+    assert.equal(after.etag, newer.etag);
+    assert.equal(after.watermarkUtc, "2026-07-01T00:00:00Z");
+    assert.equal(after.backfillUntilUtc, "2026-08-24T12:00:00Z");
+    assert.equal(after.backfillStartedUtc, "2026-08-24T12:00:00Z");
+  } finally { restore(); }
+});
+
+test("create-only sweep progress loses to concurrent first state creation", async () => {
+  const { store, restore } = loadStore();
+  try {
+    assert.equal(await store.getSweepState("u1", "reply"), null);
+    const winner = await store.putSweepState("u1", "reply", {
+      watermarkUtc: "2026-07-01T00:00:00Z",
+      backfillUntilUtc: "2026-08-24T12:00:00Z",
+    });
+    await assert.rejects(() => store.putSweepState("u1", "reply", {
+      watermarkUtc: "2026-08-24T12:00:00Z", backfillUntilUtc: "",
+    }, { ifMatch: null }), (err) => err.statusCode === 409);
+    const after = await store.getSweepState("u1", "reply");
+    assert.equal(after.etag, winner.etag);
+    assert.equal(after.watermarkUtc, "2026-07-01T00:00:00Z");
+    assert.equal(after.backfillUntilUtc, "2026-08-24T12:00:00Z");
+    await assert.rejects(() => store.putSweepState("u2", "reply", {
+      watermarkUtc: "2026-08-24T12:00:00Z",
+    }, { ifMatch: undefined }), (err) => err.statusCode === 500
+      && err.code === "sweep_state_etag_required");
   } finally { restore(); }
 });
 
@@ -333,6 +406,103 @@ test("bounce dismissal time is serialized separately from reply actedAt", async 
       "the bounce identity must survive the storage whitelist");
     assert.equal(after.actedAt, undefined,
       "dismissing address work must not fabricate a handled-reply timestamp");
+  } finally { restore(); }
+});
+
+test("a duplicate observation preserves first provenance, marker age, and changes its ETag", async () => {
+  const { store, restore } = loadStore();
+  try {
+    const base = { userId: "u1", advisorCrd: "111", direction: "inbound",
+      classification: "reply", occurredAt: "2026-08-24T10:00:00Z", graphMessageId: "same" };
+    const first = await store.recordActivity(base);
+    const second = await store.recordActivity({ ...base, historicalImport: true,
+      seedBeforeUtc: "2026-08-24T12:00:00Z" });
+    assert.equal(second.historicalImport, false, "a later backfill cannot rewrite current provenance");
+    assert.notEqual(second.dirtyMarker.etag, first.dirtyMarker.etag);
+    assert.equal(second.dirtyMarker.dirtyAtUtc, first.dirtyMarker.dirtyAtUtc,
+      "new events in one pending generation preserve oldest-dirty telemetry");
+    assert.equal(second.dirtyMarker.historicalOnly, false);
+  } finally { restore(); }
+});
+
+test("one current event defeats historical marker seeding for the pending generation", async () => {
+  const { store, restore } = loadStore();
+  try {
+    const historical = await store.recordActivity({ userId: "u1", advisorCrd: "111",
+      direction: "inbound", classification: "reply", occurredAt: "2025-01-01T00:00:00Z",
+      graphMessageId: "history", historicalImport: true,
+      seedBeforeUtc: "2026-08-24T12:00:00Z" });
+    assert.equal(historical.dirtyMarker.historicalOnly, true);
+    const current = await store.recordActivity({ userId: "u1", advisorCrd: "111",
+      direction: "inbound", classification: "reply", occurredAt: "2026-08-24T13:00:00Z",
+      graphMessageId: "current", historicalImport: false,
+      seedBeforeUtc: "2026-08-24T12:00:00Z" });
+    assert.equal(current.dirtyMarker.historicalOnly, false);
+    assert.equal(current.dirtyMarker.seedBeforeUtc, "");
+    const laterHistory = await store.recordActivity({ userId: "u1", advisorCrd: "111",
+      direction: "outbound", classification: "sent", occurredAt: "2024-01-01T00:00:00Z",
+      graphMessageId: "more-history", historicalImport: true,
+      seedBeforeUtc: "2026-08-24T12:00:00Z" });
+    assert.equal(laterHistory.dirtyMarker.historicalOnly, false,
+      "later imported rows cannot hide current work already in the generation");
+  } finally { restore(); }
+});
+
+test("activity consumers exclude internal dirty markers", async () => {
+  const { store, restore } = loadStore();
+  try {
+    await store.recordActivity({ userId: "u1", advisorCrd: "111", direction: "inbound",
+      classification: "reply", occurredAt: "2026-08-24T10:00:00Z", graphMessageId: "visible" });
+    const rows = await store.listActivity("111", 20);
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].kind, undefined);
+    assert.equal(await store.activityOwner("111", "visible"), "u1");
+  } finally { restore(); }
+});
+
+test("projection activity is user-scoped and has no 500-row correctness cap", async () => {
+  const { store, service, restore } = loadStore();
+  try {
+    const table = service.table("EmailActivity");
+    for (let i = 0; i < 510; i++) await table.createEntity({ partitionKey: "111",
+      rowKey: `1000-${String(i).padStart(4, "0")}`, userId: "other",
+      direction: "outbound", classification: "sent", occurredAt: "2026-08-24T10:00:00Z" });
+    for (let i = 0; i < 525; i++) await table.createEntity({ partitionKey: "111",
+      rowKey: `2000-${String(i).padStart(4, "0")}`, userId: "u1",
+      direction: "outbound", classification: "sent", occurredAt: "2026-08-24T11:00:00Z" });
+    const rows = await store.listActivityForUser("111", "u1");
+    assert.equal(rows.length, 525);
+    assert.ok(rows.every((row) => row.userId === "u1"));
+    const state = await require("../shared/email-engagement").refresh("u1", "111", { store });
+    assert.equal(state.outbound30d, 525, "the fold itself receives every same-user row");
+  } finally { restore(); }
+});
+
+test("marker claims are exclusive, expire, and stale acknowledgements preserve new work", async () => {
+  const { store, restore } = loadStore();
+  try {
+    const first = await store.recordActivity({ userId: "u1", advisorCrd: "111",
+      direction: "inbound", classification: "reply", occurredAt: "2026-08-24T10:00:00Z",
+      graphMessageId: "one" });
+    const at = new Date("2026-08-24T12:00:00Z");
+    const [a, b] = await Promise.all([
+      store.claimEngagementDirty(first.dirtyMarker, { now: at, leaseSeconds: 30 }),
+      store.claimEngagementDirty(first.dirtyMarker, { now: at, leaseSeconds: 30 }),
+    ]);
+    const claimed = a || b;
+    assert.ok(claimed);
+    assert.equal(Number(!!a) + Number(!!b), 1, "only one worker owns an ETag generation");
+    assert.equal(await store.claimEngagementDirty(claimed,
+      { now: new Date(at.getTime() + 1000), leaseSeconds: 30 }), null);
+    const expired = await store.claimEngagementDirty(claimed,
+      { now: new Date(at.getTime() + 31000), leaseSeconds: 30 });
+    assert.ok(expired, "a crashed worker's lease is recoverable");
+
+    await store.recordActivity({ userId: "u1", advisorCrd: "111", direction: "inbound",
+      classification: "reply", occurredAt: "2026-08-24T13:00:00Z", graphMessageId: "two" });
+    assert.equal(await store.ackEngagementDirty(expired), false,
+      "the old generation cannot delete a marker updated by new activity");
+    assert.ok(await store.getEngagementDirty("111", "u1"));
   } finally { restore(); }
 });
 
@@ -471,9 +641,10 @@ test("a backfill records history without queueing it as work", async () => {
     // Eight months old: a real reply, long since dealt with or forgotten.
     await store.recordActivity({ userId: "u1", advisorCrd: "111", direction: "inbound",
       classification: "reply", occurredAt: new Date(Date.now() - 240 * 86400000).toISOString(),
-      graphMessageId: "old-reply", advisorEmail: "a@ml.com" });
+      graphMessageId: "old-reply", advisorEmail: "a@ml.com",
+      historicalImport: true, seedBeforeUtc: new Date().toISOString() });
 
-    await engagement.refresh("u1", "111", { store, seed: true });
+    await engagement.refresh("u1", "111", { store });
     const q = await engagement.queue("u1", { store });
     assert.equal(q.counts.reply_new, 0,
       "four hundred of these would destroy the queue on the first morning");
@@ -488,8 +659,9 @@ test("a reply arriving AFTER the backfill still surfaces", async () => {
     const engagement = require("../shared/email-engagement");
     await store.recordActivity({ userId: "u1", advisorCrd: "111", direction: "inbound",
       classification: "reply", occurredAt: new Date(Date.now() - 240 * 86400000).toISOString(),
-      graphMessageId: "old-reply", advisorEmail: "a@ml.com" });
-    await engagement.refresh("u1", "111", { store, seed: true });
+      graphMessageId: "old-reply", advisorEmail: "a@ml.com",
+      historicalImport: true, seedBeforeUtc: new Date().toISOString() });
+    await engagement.refresh("u1", "111", { store });
 
     await store.recordActivity({ userId: "u1", advisorCrd: "111", direction: "inbound",
       classification: "reply", occurredAt: new Date(Date.now() + 60000).toISOString(),

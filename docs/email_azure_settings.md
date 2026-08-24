@@ -89,6 +89,8 @@ that size is a marketing campaign and belongs in a platform built for it.
 | `EMAIL_INTERNAL_DOMAINS` | Defaults to `eicatlanta.com`. Decides what counts as external for the 24-hour limit. |
 | `EMAIL_REPLY_SWEEP_ENABLED` | `1` permits the reply timer to run. Leave disabled until the advisor-email lookup blob and canary list are ready. |
 | `EMAIL_REPLY_SWEEP_USER_IDS` | Optional comma/semicolon/space-separated Static Web Apps user IDs. When set, only matching connected mailboxes are swept. Use this for canary rollout before clearing it for all users. |
+| `EMAIL_ENGAGEMENT_REPAIR_ENABLED` | `1` permits the projection-repair timer to consume durable activity markers. Marker creation is always on; leave the timer disabled until the API is deployed and a canary user is selected. |
+| `EMAIL_ENGAGEMENT_REPAIR_USER_IDS` | Optional comma/semicolon/space-separated Static Web Apps user IDs. When set, only matching users' markers are claimed; other markers remain untouched for later rollout. |
 
 ---
 

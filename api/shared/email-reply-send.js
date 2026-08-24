@@ -451,10 +451,13 @@ async function reply(who, input, deps = {}) {
    *
    * The sweep would find it within fifteen minutes, but a rep who has just
    * pressed Send and sees no change concludes it did not work and sends again.
-   * `recordActivity` is keyed on the Graph message id, so when the sweep sees
-   * the same message it upserts over this row rather than adding a second.
+   * This local row uses API completion time; Graph later supplies the canonical
+   * sentDateTime. Those timestamps can differ, so the durable send-ledger
+   * package must reconcile them before direct send is enabled. The marker makes
+   * either projection repairable, but does not pretend two timestamped rows are
+   * already one event.
    */
-  await st.recordActivity({
+  const recorded = await st.recordActivity({
     userId: who.id, direction: "outbound", source: "app_reply",
     classification: "sent", route: "own_mailbox", recipientRole: "to",
     advisorCrd: crd, advisorEmail: to, occurredAt: new Date().toISOString(),
@@ -477,7 +480,11 @@ async function reply(who, input, deps = {}) {
   // Independent best-effort writes. A refresh rebuilds derived mail state;
   // completing the action records the rep's decision. If the former is stale or
   // temporarily unavailable, the latter must still clear work they just did.
-  try { await eng.refresh(who.id, crd, { store: st }); } catch { /* see above */ }
+  try {
+    if (recorded && recorded.dirtyMarker && typeof eng.refreshDirty === "function")
+      await eng.refreshDirty(recorded.dirtyMarker, { store: st });
+    else await eng.refresh(who.id, crd, { store: st });
+  } catch { /* the durable marker leaves this for the repair timer */ }
   try { await eng.completeOutbound(who.id, crd, { store: st }); } catch { /* see above */ }
 
   return { ok: true, to, suppressed, conversationId: original.conversationId || "",
@@ -579,7 +586,7 @@ async function followUp(who, input, deps = {}) {
   await enforceDirectSendPolicy(who, recipients, opId, deps);
   await gr.sendDraft(token.accessToken, draft.id);
 
-  await st.recordActivity({
+  const recorded = await st.recordActivity({
     userId: who.id, direction: "outbound", source: "app_followup",
     classification: "sent", route: "own_mailbox", recipientRole: "to",
     advisorCrd: crd, advisorEmail: to, occurredAt: new Date().toISOString(),
@@ -598,7 +605,11 @@ async function followUp(who, input, deps = {}) {
    * nuisance where a thrown error here would look like a failed send.
    */
   const eng = deps.engagement || require("./email-engagement");
-  try { await eng.refresh(who.id, crd, { store: st }); } catch { /* see above */ }
+  try {
+    if (recorded && recorded.dirtyMarker && typeof eng.refreshDirty === "function")
+      await eng.refreshDirty(recorded.dirtyMarker, { store: st });
+    else await eng.refresh(who.id, crd, { store: st });
+  } catch { /* the durable marker leaves this for the repair timer */ }
   try { await eng.completeOutbound(who.id, crd, { store: st }); } catch { /* see above */ }
 
   return { ok: true, to, conversationId: draft.conversationId || "",

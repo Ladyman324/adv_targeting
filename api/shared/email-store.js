@@ -770,14 +770,36 @@ async function getSweepState(userId, sweep) {
  * rewritten deliberately; it was wrong here and the difference is invisible
  * until something fails.
  */
-async function putSweepState(userId, sweep, state) {
+async function putSweepState(userId, sweep, state, options = {}) {
   const saved = { partitionKey: userId, rowKey: clean(sweep, 80), updatedUtc: now() };
   for (const key of ["watermarkUtc", "lastOkUtc", "lastError", "lookupHash",
                      "backfillUntilUtc", "backfillStartedUtc"])
     if (state[key] !== undefined) saved[key] = clean(state[key], 500);
   for (const key of ["consecutiveFailures", "seen", "recorded", "truncatedRuns"])
     if (state[key] !== undefined) saved[key] = Number(state[key]) || 0;
-  await (await table("sweepState")).upsertEntity(saved, "Merge");
+  const client = await table("sweepState");
+  /* Success progress is compare-and-swap against the state read when a sweep
+   * began. A concurrent backfill request must not be cleared by that older
+   * sweep as it finishes. Failure health remains an unconditional partial
+   * Merge, because several passes may legitimately contribute health fields.
+   *
+   * Explicit null means "there was no row at start", hence create-only. The
+   * property-presence check distinguishes that from an omitted option. */
+  if (Object.prototype.hasOwnProperty.call(options, "ifMatch")) {
+    if (options.ifMatch === null) await client.createEntity(saved);
+    else {
+      if (options.ifMatch === undefined || options.ifMatch === "") {
+        const err = new Error("Conditional sweep progress requires an ETag or explicit null.");
+        err.statusCode = 500;
+        err.code = "sweep_state_etag_required";
+        throw err;
+      }
+      await client.updateEntity(saved, "Merge", { etag: String(options.ifMatch) });
+    }
+  } else {
+    await client.upsertEntity(saved, "Merge");
+  }
+  return getSweepState(userId, sweep);
 }
 
 /* One row per message already examined.
@@ -800,6 +822,26 @@ async function putSweepState(userId, sweep, state) {
  */
 function seenKey(graphMessageId) {
   return crypto.createHash("sha256").update(String(graphMessageId || "")).digest("hex");
+}
+
+const ENGAGEMENT_DIRTY_PREFIX = "zD|";
+const ENGAGEMENT_DIRTY_END = "zE|";
+const ACTIVITY_WRITE_ATTEMPTS = 4;
+
+function dirtyMarkerKey(userId) {
+  return ENGAGEMENT_DIRTY_PREFIX + crypto.createHash("sha256")
+    .update(String(userId || "")).digest("hex");
+}
+
+function storageConflict(err) {
+  // 404 is also a retryable generation race here: a repair may conditionally
+  // delete the marker after recordActivity read it but before its transaction.
+  return [404, 409, 412].includes(Number(err && err.statusCode));
+}
+
+async function optionalFromClient(client, partitionKey, rowKey) {
+  try { return await client.getEntity(partitionKey, rowKey); }
+  catch (err) { if (Number(err && err.statusCode) === 404) return null; throw err; }
 }
 
 async function replyAlreadySeen(userId, graphMessageId) {
@@ -842,6 +884,7 @@ async function recordActivity(entry) {
   const suffix = crypto.createHash("sha256")
     .update(String(entry.graphMessageId || crypto.randomUUID())).digest("hex").slice(0, 16);
   const rowKey = `${stamp}-${suffix}`;
+  const seedBeforeUtc = clean(entry.seedBeforeUtc || entry.seedThroughUtc, 40);
   const saved = {
     partitionKey: clean(entry.advisorCrd || entry.firmCrd || "unknown", 120),
     rowKey: clean(rowKey, 500),
@@ -855,10 +898,77 @@ async function recordActivity(entry) {
     internetMessageId: clean(entry.internetMessageId, 500),
     graphMessageId: clean(entry.graphMessageId, 500),
     batchId: clean(entry.batchId, 120), campaignMessageId: clean(entry.campaignMessageId, 120),
+    // First observation owns import provenance. Re-reading current mail during
+    // a later backfill must never retroactively make it historical.
+    historicalImport: entry.historicalImport === true,
+    seedBeforeUtc,
     recordedUtc: now(),
   };
-  await (await table("activity")).upsertEntity(saved, "Replace");
-  return saved;
+  const client = await table("activity");
+
+  // Firm-only and ambiguous sightings have no advisor projection to repair.
+  if (!saved.advisorCrd || !saved.userId) {
+    const existing = await optionalFromClient(client, saved.partitionKey, saved.rowKey);
+    if (!existing) {
+      try { await client.createEntity(saved); }
+      catch (err) { if (!storageConflict(err)) throw err; }
+    }
+    return { ...(existing || saved), dirtyMarker: null };
+  }
+
+  const markerRowKey = dirtyMarkerKey(saved.userId);
+  let conflict = null;
+  for (let attempt = 0; attempt < ACTIVITY_WRITE_ATTEMPTS; attempt++) {
+    const [existingEvent, currentMarker] = await Promise.all([
+      optionalFromClient(client, saved.partitionKey, saved.rowKey),
+      optionalFromClient(client, saved.partitionKey, markerRowKey),
+    ]);
+    const event = existingEvent || saved;
+    const eventHistorical = event.historicalImport === true
+      && !!String(event.seedBeforeUtc || "")
+      && String(event.occurredAt || "") < String(event.seedBeforeUtc || "");
+    // Within one pending generation, one current event defeats every historic
+    // event. A successful conditional ack deletes the generation entirely.
+    const historicalOnly = eventHistorical && (!currentMarker || currentMarker.historicalOnly === true);
+    const marker = {
+      partitionKey: saved.partitionKey, rowKey: markerRowKey,
+      kind: "engagement_dirty", userId: saved.userId, advisorCrd: saved.advisorCrd,
+      status: "pending", historicalOnly,
+      seedBeforeUtc: historicalOnly
+        ? [String((currentMarker || {}).seedBeforeUtc || ""), String(event.seedBeforeUtc || "")]
+          .sort().pop()
+        : "",
+      // Oldest dirty age belongs to the pending generation, not its newest
+      // event. Deletion followed by recreation naturally starts a new age.
+      dirtyAtUtc: String((currentMarker || {}).dirtyAtUtc || now()),
+      latestActivityRowKey: currentMarker && currentMarker.latestActivityRowKey
+        ? [String(currentMarker.latestActivityRowKey), saved.rowKey].sort()[0]
+        : saved.rowKey,
+      attemptCount: 0, retryAfterUtc: "", leaseId: "", leaseUntilUtc: "",
+      lastAttemptUtc: "", lastErrorCode: "", updatedUtc: now(),
+    };
+    const actions = [];
+    if (!existingEvent) actions.push(["create", saved]);
+    if (currentMarker) actions.push(["update", marker, "Replace", { etag: currentMarker.etag }]);
+    else actions.push(["create", marker]);
+    try {
+      const result = await client.submitTransaction(actions);
+      const sub = (result && result.subResponses) || [];
+      const markerResponse = sub[sub.length - 1] || {};
+      const latestMarker = markerResponse.etag
+        ? { ...marker, etag: markerResponse.etag }
+        : await optionalFromClient(client, marker.partitionKey, marker.rowKey);
+      return { ...event, dirtyMarker: latestMarker };
+    } catch (err) {
+      if (!storageConflict(err)) throw err;
+      conflict = err;
+    }
+  }
+  const err = new Error("Email activity changed repeatedly while it was being recorded.");
+  err.statusCode = 409;
+  err.code = "email_activity_changed";
+  err.cause = conflict;
+  throw err;
 }
 
 /* Newest first, and the cut is now safe to make.
@@ -871,11 +981,107 @@ async function recordActivity(entry) {
 async function listActivity(advisorCrd, limit = 200) {
   const out = [];
   for await (const e of (await table("activity")).listEntities({
-    queryOptions: { filter: odata`PartitionKey eq ${String(advisorCrd)}` } })) {
+    queryOptions: { filter: odata`PartitionKey eq ${String(advisorCrd)} and RowKey lt ${ENGAGEMENT_DIRTY_PREFIX}` } })) {
     out.push(e);
     if (out.length >= limit) break;
   }
   return out;
+}
+
+/* Correctness path for projection refreshes: scoped by rep at the service and
+ * fully paginated. Another rep's volume cannot consume this rep's row budget. */
+async function listActivityForUser(advisorCrd, userId) {
+  const out = [];
+  for await (const e of (await table("activity")).listEntities({
+    queryOptions: { filter: odata`PartitionKey eq ${String(advisorCrd)} and RowKey lt ${ENGAGEMENT_DIRTY_PREFIX} and userId eq ${String(userId)}` } })) out.push(e);
+  return out;
+}
+
+async function getEngagementDirty(advisorCrd, userId) {
+  return getOptional("activity", clean(advisorCrd, 120), dirtyMarkerKey(userId));
+}
+
+async function listEngagementDirtyPage(continuationToken = "", maxPageSize = 100) {
+  const client = await table("activity");
+  const size = Math.max(1, Math.min(500, Number(maxPageSize) || 100));
+  const iter = client.listEntities({ queryOptions: {
+    filter: odata`RowKey ge ${ENGAGEMENT_DIRTY_PREFIX} and RowKey lt ${ENGAGEMENT_DIRTY_END}`,
+  } });
+  const pages = iter.byPage({ continuationToken: continuationToken || undefined, maxPageSize: size });
+  for await (const page of pages)
+    return { rows: Array.from(page), continuationToken: page.continuationToken || "" };
+  return { rows: [], continuationToken: "" };
+}
+
+function dueForClaim(marker, atMs) {
+  if (!marker || marker.status === "poison") return false;
+  if (marker.status === "processing")
+    return !marker.leaseUntilUtc || new Date(marker.leaseUntilUtc).getTime() <= atMs;
+  if (marker.status === "retry" && marker.retryAfterUtc
+      && new Date(marker.retryAfterUtc).getTime() > atMs) return false;
+  return ["", "pending", "retry"].includes(String(marker.status || ""));
+}
+
+async function claimEngagementDirty(marker, options = {}) {
+  const at = options.now instanceof Date ? options.now : new Date(options.now || Date.now());
+  if (!dueForClaim(marker, at.getTime())) return null;
+  const leaseSeconds = Math.max(30, Math.min(600, Number(options.leaseSeconds) || 180));
+  const claimed = { partitionKey: marker.partitionKey, rowKey: marker.rowKey,
+    status: "processing", leaseId: crypto.randomUUID(),
+    leaseUntilUtc: new Date(at.getTime() + leaseSeconds * 1000).toISOString(),
+    lastAttemptUtc: at.toISOString(), attemptCount: Number(marker.attemptCount || 0) + 1,
+    updatedUtc: at.toISOString() };
+  try {
+    await (await table("activity")).updateEntity(claimed, "Merge", { etag: marker.etag });
+    return getEngagementDirty(marker.advisorCrd || marker.partitionKey, marker.userId);
+  } catch (err) { if ([404, 412].includes(Number(err && err.statusCode))) return null; throw err; }
+}
+
+async function ackEngagementDirty(marker) {
+  try {
+    await (await table("activity")).deleteEntity(marker.partitionKey, marker.rowKey,
+      { etag: marker.etag });
+    return true;
+  } catch (err) {
+    if (Number(err && err.statusCode) === 404) return true;
+    if (Number(err && err.statusCode) === 412) return false;
+    throw err;
+  }
+}
+
+function repairErrorCode(err) {
+  const raw = String((err && err.code) || "");
+  if (raw && /^[A-Za-z0-9_.-]{1,80}$/.test(raw)) return raw;
+  const status = Number(err && err.statusCode);
+  return status ? `http_${status}` : "engagement_refresh_failed";
+}
+
+async function failEngagementDirty(marker, failure, options = {}) {
+  const at = options.now instanceof Date ? options.now : new Date(options.now || Date.now());
+  const attempts = Number(marker.attemptCount || 0);
+  const poisonAfter = Math.max(1, Math.min(20, Number(options.poisonAfter) || 8));
+  const delays = [15, 30, 60, 120, 240, 360, 360, 360];
+  const poisoned = attempts >= poisonAfter;
+  const patch = { partitionKey: marker.partitionKey, rowKey: marker.rowKey,
+    status: poisoned ? "poison" : "retry", leaseId: "", leaseUntilUtc: "",
+    retryAfterUtc: poisoned ? "" : new Date(at.getTime()
+      + delays[Math.min(Math.max(attempts - 1, 0), delays.length - 1)] * 60000).toISOString(),
+    lastErrorCode: repairErrorCode(failure), updatedUtc: at.toISOString() };
+  try {
+    await (await table("activity")).updateEntity(patch, "Merge", { etag: marker.etag });
+    return getEngagementDirty(marker.advisorCrd || marker.partitionKey, marker.userId);
+  } catch (err) { if ([404, 412].includes(Number(err && err.statusCode))) return null; throw err; }
+}
+
+async function getEngagementRepairCursor() {
+  return getOptional("sweepState", "engagement-repair", "cursor");
+}
+
+async function putEngagementRepairCursor(scope, continuationToken) {
+  const saved = { partitionKey: "engagement-repair", rowKey: "cursor",
+    scope: clean(scope, 200), continuationToken: clean(continuationToken, 4000), updatedUtc: now() };
+  await (await table("sweepState")).upsertEntity(saved, "Replace");
+  return saved;
 }
 
 /* ---- engagement projection ---------------------------------------------- */
@@ -914,6 +1120,7 @@ function engagementEntity(userId, advisorCrd, state) {
   const saved = { partitionKey: userId, rowKey: clean(advisorCrd, 120),
                   advisorCrd: clean(advisorCrd, 120), updatedUtc: now() };
   for (const key of ["lastOutboundAt", "lastInboundAt", "lastReplyAt", "lastActivityAt",
+                     "lastCurrentActivityAt", "historySeedBeforeUtc",
                      "replyState", "nextActionAt", "nextActionType", "actedAt",
                      "snoozedUntilUtc", "bounceDismissedAt", "advisorEmail"])
     if (state[key] !== undefined) saved[key] = clean(state[key], 320);
@@ -959,7 +1166,7 @@ async function listEngagement(userId) {
 async function activityOwner(advisorCrd, graphMessageId) {
   const wanted = String(graphMessageId || "");
   for await (const e of (await table("activity")).listEntities({
-    queryOptions: { filter: odata`PartitionKey eq ${String(advisorCrd)}` } })) {
+    queryOptions: { filter: odata`PartitionKey eq ${String(advisorCrd)} and RowKey lt ${ENGAGEMENT_DIRTY_PREFIX}` } })) {
     if (String(e.graphMessageId || "") === wanted) return String(e.userId || "");
   }
   return "";
@@ -994,7 +1201,10 @@ async function sentByConversation(userId, sinceUtc) {
 
 module.exports = {
   getSweepState, putSweepState, replyAlreadySeen, markReplySeen,
-  recordActivity, listActivity, activityOwner, sentByConversation,
+  recordActivity, listActivity, listActivityForUser, activityOwner, sentByConversation,
+  dirtyMarkerKey, getEngagementDirty, listEngagementDirtyPage,
+  claimEngagementDirty, ackEngagementDirty, failEngagementDirty,
+  getEngagementRepairCursor, putEngagementRepairCursor,
   getEngagement, putEngagement, putEngagementProjection, listEngagement,
   passcodeAttempts, recordPasscodeFailure, clearPasscodeFailures,
   id, now, batchPartition, putConnection, getConnection, putAuthState, consumeAuthState,

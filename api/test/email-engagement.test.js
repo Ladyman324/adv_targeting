@@ -414,25 +414,25 @@ test("a create conflict is reread and refolded instead of overwriting the winner
   assert.equal(saved.actedAt, row.actedAt);
 });
 
-test("a seeded retry keeps a newer manual action instead of moving it backward", async () => {
+test("a historical-import retry keeps a newer manual action", async () => {
   let version = 1;
   let row = { replyState: "none", actedAt: "", etag: `v${version}` };
   let attempts = 0;
-  let seedBoundary = "";
   let manualAt = "";
-  const deps = { seed: true, store: {
-    listActivity: async () => [ev({ occurredAt: ago(30) })],
+  const deps = { store: {
+    listActivity: async () => [ev({ occurredAt: ago(30), historicalImport: true,
+      seedBeforeUtc: ago(1) })],
     getEngagement: async () => ({ ...row }),
     putEngagement: async (_u, _c, patch) => {
-      manualAt = new Date(new Date(seedBoundary).getTime() + 1000).toISOString();
+      manualAt = new Date().toISOString();
       row = { ...row, ...patch, actedAt: manualAt, etag: `v${++version}` };
       return { ...row };
     },
     putEngagementProjection: async (_u, _c, folded, etag) => {
       attempts++;
       if (attempts === 1) {
-        seedBoundary = folded.actedAt;
-        assert.ok(seedBoundary, "the first fold establishes one stable seed boundary");
+        assert.equal(folded.replyState, "reviewed");
+        assert.equal(folded.actedAt, "", "importing history must not fabricate a rep action");
         await engagement.setReplyState("u1", "111", "reviewed", deps);
         throw storageConflict(412);
       }
@@ -444,10 +444,9 @@ test("a seeded retry keeps a newer manual action instead of moving it backward",
 
   const saved = await engagement.refresh("u1", "111", deps);
   assert.equal(attempts, 2);
-  assert.ok(manualAt > seedBoundary);
   assert.equal(saved.replyState, "reviewed");
   assert.equal(saved.actedAt, manualAt,
-    "the seed is a historical floor, not permission to erase a later rep decision");
+    "event provenance is not permission to erase a later rep decision");
 });
 
 test("refresh stops after five projection conflicts and reports the last one", async () => {

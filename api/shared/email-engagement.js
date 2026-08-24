@@ -79,6 +79,7 @@ function newest(a, b) {
 function fold(entries, previous = {}) {
   const state = {
     lastOutboundAt: "", lastInboundAt: "", lastReplyAt: "", lastActivityAt: "",
+    lastCurrentActivityAt: "",
     outbound30d: 0, inbound30d: 0,
     hasBounce: false, everReplied: false,
     replyState: String(previous.replyState || "none"),
@@ -105,13 +106,26 @@ function fold(entries, previous = {}) {
     // updatedUtc and could hide a delayed bounce whose event time is older.
     bounceDismissedAt: String(previous.bounceDismissedAt
       || (previous.bounceDismissed ? previous.updatedUtc : "") || ""),
+    // A fixed import boundary is a quiet-work baseline, not a fabricated rep
+    // action. It prevents an eight-month-old imported relationship from
+    // becoming quiet_warm on the morning it is first discovered.
+    historySeedBeforeUtc: String(previous.historySeedBeforeUtc || ""),
   };
   const cutoff = new Date(Date.now() - 30 * DAY).toISOString();
   let newestEmailAt = "";
   let newestBounceAt = "";
+  let newestActionableReplyAt = "";
 
   for (const e of entries) {
     const at = String(e.occurredAt || "");
+    // Strictly before: mail exactly on the watermark belongs to the current
+    // side. Both fields live on the event so a later backfill cannot reclassify
+    // a previously-current duplicate.
+    const historical = e.historicalImport === true && !!String(e.seedBeforeUtc || "")
+      && at < String(e.seedBeforeUtc || "");
+    if (historical) state.historySeedBeforeUtc = newest(
+      state.historySeedBeforeUtc, e.seedBeforeUtc);
+    else state.lastCurrentActivityAt = newest(state.lastCurrentActivityAt, at);
     state.lastActivityAt = newest(state.lastActivityAt, at);
 
     /* The address on the LATEST row, whichever direction it was.
@@ -135,8 +149,12 @@ function fold(entries, previous = {}) {
     if (at >= cutoff) state.inbound30d++;
 
     if (e.classification === "bounce") {
-      state.hasBounce = true;
-      newestBounceAt = newest(newestBounceAt, at);
+      // Imported delivery failures describe history; acting on them now would
+      // surface address work whose context may be years gone.
+      if (!historical) {
+        state.hasBounce = true;
+        newestBounceAt = newest(newestBounceAt, at);
+      }
       continue;
     }
     // An out-of-office is inbound mail and is NOT a reply. Counting it would
@@ -146,6 +164,7 @@ function fold(entries, previous = {}) {
 
     state.everReplied = true;
     state.lastReplyAt = newest(state.lastReplyAt, at);
+    if (!historical) newestActionableReplyAt = newest(newestActionableReplyAt, at);
   }
 
   /* A NEW reply only moves the state forward, never back.
@@ -154,9 +173,9 @@ function fold(entries, previous = {}) {
    * not undo that. But a genuinely newer reply than the one they reviewed does
    * deserve their attention again -- so the comparison is against when they
    * last acted, not against the state alone. */
-  if (state.lastReplyAt) {
+  if (newestActionableReplyAt) {
     const actedAt = String(previous.actedAt || "");
-    const unseen = !actedAt || state.lastReplyAt > actedAt;
+    const unseen = !actedAt || newestActionableReplyAt > actedAt;
     if (unseen) {
       state.replyState = "new";
     } else if (stateIndex(state.replyState) === 0) {
@@ -175,6 +194,10 @@ function fold(entries, previous = {}) {
        */
       state.replyState = "reviewed";
     }
+  } else if (state.lastReplyAt && stateIndex(state.replyState) === 0) {
+    // Historical replies still establish that this is a warm relationship,
+    // but they arrive accounted for rather than as unfinished work.
+    state.replyState = "reviewed";
   }
 
   /* A dismissal acknowledges one observed bounce, not every future bounce.
@@ -231,8 +254,9 @@ function reason(state, now = Date.now()) {
    * queue forever, which is the opposite of what a book of relationships needs.
    * Recent activity of any kind resets the clock, so acting on it removes it.
    */
-  if (state.everReplied && state.lastActivityAt
-      && now - new Date(state.lastActivityAt).getTime() > QUIET_DAYS * DAY) return "quiet_warm";
+  const quietBaseline = newest(state.lastActivityAt, state.historySeedBeforeUtc);
+  if (state.everReplied && quietBaseline
+      && now - new Date(quietBaseline).getTime() > QUIET_DAYS * DAY) return "quiet_warm";
   return null;
 }
 
@@ -266,31 +290,16 @@ const PROJECTION_WRITE_ATTEMPTS = 5;
  */
 async function refresh(userId, advisorCrd, deps = {}) {
   const st = deps.store || store;
-  const seededAt = deps.seed ? new Date().toISOString() : "";
   let conflict = null;
 
   for (let attempt = 0; attempt < PROJECTION_WRITE_ATTEMPTS; attempt++) {
-    const rows = await st.listActivity(advisorCrd, 500);
+    const rows = st.listActivityForUser
+      ? await st.listActivityForUser(advisorCrd, userId)
+      : await st.listActivity(advisorCrd);
     const mine = rows.filter((r) => String(r.userId || "") === String(userId));
     const current = await st.getEngagement(userId, advisorCrd);
     const previous = current || {};
-
-    /* SEEDING: history arrives already handled.
-     *
-     * A backfill of a year would otherwise mark every reply in it `new`, and a
-     * rep would open "Needs attention" to four hundred rows from eight months
-     * ago. They would never trust the queue again -- and the queue's entire
-     * value is that the five things in it are the five things that matter
-     * today. Keep one timestamp across conflict retries: retrying storage must
-     * not make this logical decision drift forward in time.
-     */
-    // A conflict retry may discover that the rep acted after this refresh
-    // began. Seeding is a floor for imported history, never permission to move
-    // a real decision backward to the older seed boundary.
-    const seeded = seededAt
-      ? { ...previous, actedAt: newest(previous.actedAt, seededAt) }
-      : previous;
-    const folded = fold(mine, seeded);
+    const folded = fold(mine, previous);
 
     try {
       return await st.putEngagementProjection(userId, advisorCrd, folded,
@@ -305,6 +314,22 @@ async function refresh(userId, advisorCrd, deps = {}) {
   // fold would be worse than reporting the conflict because it could silently
   // undo a rep's work.
   throw conflict;
+}
+
+/* Inline callers and the timer share the same acknowledgement protocol. The
+ * projection may be safely written even when the marker goes stale; the stale
+ * ETag then refuses deletion and guarantees a second fold sees the new event. */
+async function refreshDirty(marker, deps = {}) {
+  const st = deps.store || store;
+  if (!marker || !marker.userId || !marker.advisorCrd || !marker.etag) {
+    const err = new Error("A dirty engagement marker with an ETag is required.");
+    err.statusCode = 400;
+    err.code = "engagement_marker_required";
+    throw err;
+  }
+  const projection = await refresh(marker.userId, marker.advisorCrd, { ...deps, store: st });
+  const acknowledged = await st.ackEngagementDirty(marker);
+  return { projection, acknowledged };
 }
 
 /* The queue: who this rep should work now, and why. */
@@ -438,6 +463,6 @@ async function completeOutbound(userId, advisorCrd, deps = {}) {
   });
 }
 
-module.exports = { fold, reason, rank, refresh, rebuild, queue, setReplyState,
+module.exports = { fold, reason, rank, refresh, refreshDirty, rebuild, queue, setReplyState,
                    snooze, dismissBounce, completeOutbound,
                    REPLY_STATES, REASONS, ACTIONS_BY_REASON, stateIndex };

@@ -948,7 +948,7 @@ def _mailbox_scope():
             f"FOLDER-SCOPED: {sorted(set(scoped))} -- an Outlook rule silently ends detection")
 
 
-@check("the reply sweep cannot run on the bounce sweep's minute")
+@check("email timers use deliberate non-overlapping minutes")
 def _sweep_schedules():
     """THE BUG THIS PREVENTS: two functions racing one mailbox's token cache.
 
@@ -972,13 +972,54 @@ def _sweep_schedules():
 
     bounce = minutes("email-bounce-sweep")
     reply = minutes("email-reply-sweep")
+    repair = minutes("email-engagement-repair")
     if bounce is None or reply is None:
         return True, "reply sweep not deployed yet"
-    clash = sorted(bounce & reply)
+    pairs = [("bounce/reply", bounce & reply)]
+    if repair is not None:
+        pairs.extend([("bounce/repair", bounce & repair), ("reply/repair", reply & repair)])
+    clash = [(name, sorted(values)) for name, values in pairs if values]
     return (not clash,
-            f"bounce at :{','.join(sorted(bounce))}, reply at :{','.join(sorted(reply))} -- no overlap"
+            f"bounce :{','.join(sorted(bounce))}; reply :{','.join(sorted(reply))}; "
+            + (f"repair :{','.join(sorted(repair))} -- no overlap" if repair is not None else "repair not deployed")
             if not clash else
-            f"BOTH RUN AT :{clash} -- concurrent token-cache writes lose refresh tokens")
+            "TIMER COLLISION: " + "; ".join(f"{name} at {values}" for name, values in clash))
+
+
+@check("engagement repair is atomic, mailbox-free, and disabled by default")
+def _engagement_repair_safety():
+    """Projection repair must survive crashes without broadening mailbox access.
+
+    Activity and its dirty marker belong in one same-partition transaction. The
+    consumer is separately gated, has a user canary, and must never import Graph
+    or auth. Conditional marker acknowledgement is what prevents activity that
+    arrives during a fold from being cleared by the older worker.
+    """
+    repair_path = API / "email-engagement-repair" / "index.js"
+    config_path = API / "email-engagement-repair" / "function.json"
+    if not repair_path.exists() or not config_path.exists():
+        return True, "engagement repair not deployed yet"
+    repair = text(repair_path)
+    store_src = text(API / "shared" / "email-store.js")
+    config = json.loads(text(config_path))
+    binding = config.get("bindings", [{}])[0]
+    checks = {
+        "timer is explicitly gated": "EMAIL_ENGAGEMENT_REPAIR_ENABLED" in repair
+            and '!== "1"' in repair,
+        "timer has a user canary": "EMAIL_ENGAGEMENT_REPAIR_USER_IDS" in repair,
+        "timer never imports Graph/auth": "graph-mail" not in repair and "email-auth" not in repair,
+        "schedule is literal": bool(binding.get("schedule")) and "%" not in binding.get("schedule", ""),
+        "runOnStartup is false": binding.get("runOnStartup") is False,
+        "activity and marker share a transaction": "submitTransaction(actions)" in store_src
+            and 'kind: "engagement_dirty"' in store_src,
+        "marker acknowledgement is conditional": "ackEngagementDirty" in store_src
+            and "{ etag: marker.etag }" in store_src,
+        "projection source is user scoped": "listActivityForUser" in store_src,
+    }
+    failed = [name for name, ok in checks.items() if not ok]
+    return (not failed,
+            "atomic marker, conditional ack, user canary, literal disabled timer, no mailbox imports"
+            if not failed else "ENGAGEMENT REPAIR SAFETY MISSING: " + "; ".join(failed))
 
 
 @check("the reply sweep stores no message body")

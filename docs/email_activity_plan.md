@@ -174,19 +174,13 @@ to abort a half-finished suppression pass.
 
     email-bounce-sweep    0 20 */2 * * *     unchanged
     email-reply-sweep     0 2,17,32,47 * * * *   every 15 min, never on :20
+    email-engagement-repair 0 7,22,37,52 * * * * five minutes after reply sweep
 
-**The minute offset is not cosmetic.** `putConnection()` in `email-store.js`
-upserts with `"Replace"` and **no etag**, and `tokenFor()` reads the token cache,
-refreshes it, and writes the rotated cache back. Two functions hitting the same
-mailbox in the same minute can therefore interleave and lose one process's
-rotated refresh token, which surfaces later as a spurious `needsReconnect` for a
-rep who did nothing wrong. The bounce sweep runs at :20; the reply sweep must
-never land there.
-
-Cheap alternative if this ever needs to be robust rather than merely avoided:
-give `putConnection` an etag and retry on conflict. Not needed while the
-schedules cannot collide, and noted here so the reason the crons look odd is not
-lost.
+**The minute offset is not cosmetic.** Reply and bounce both read Graph and may
+refresh the same mailbox token, so their schedules remain separated even though
+token-cache writes now use ETags and conflict retries. The repair timer starts
+five minutes after reply sweep; it reads only Table Storage, never Graph, and
+drains any projection work the inline refresh could not acknowledge.
 
 ### Mailbox-wide watermark, NOT per-folder delta
 
@@ -588,8 +582,10 @@ send would mail ourselves.
 
 The send is recorded immediately rather than waiting up to fifteen minutes for
 the sweep, because a rep who presses Send and sees no change concludes it failed
-and sends again. `recordActivity` is keyed on the Graph message id, so when the
-sweep sees the same message it upserts over that row rather than duplicating it.
+and sends again. This immediate row uses API completion time, while the sweep
+later sees Graph's canonical `sentDateTime`; they can differ and therefore form
+two timestamped rows today. Direct send remains disabled until its durable
+operation ledger can reconcile one canonical sent event.
 
 Both clients disable the button and textarea for the whole round trip. Verified
 in-browser: a double-click sends exactly one message. A sent email has no undo.
@@ -707,11 +703,12 @@ truncated pass a contiguous block from the watermark; it advances to the last
 message actually processed, so progress is always made and nothing is skipped.
 An *error* still holds the watermark, because an error leaves a hole.
 
-**3. Activity rows were not idempotent, and this file said they were.** The key
-was `occurredAt_graphMessageId`, and an in-app send stamped API completion time
-while the sweep stamped Graph's `sentDateTime` — two keys, two rows. The key is
-now a reverse tick plus a hash of the Graph id, and in-app sends mark the message
-seen so the sweep skips it entirely.
+**3. Direct-send activity is not yet fully idempotent.** The key contains both
+reverse `occurredAt` and a hash of the Graph id. An in-app send stamps API
+completion time while the sweep stamps Graph's `sentDateTime`, so the disabled
+direct path can still produce two rows. Reverse ticks fixed newest-first reads;
+canonical operation-to-sent-event reconciliation belongs to the durable ledger
+and is a prerequisite for enabling direct send.
 
 **4. `listActivity` returned the OLDEST rows.** It stopped at a row count while
 reading ascending keys that began with a forward timestamp, then sorted what it
@@ -913,6 +910,28 @@ Result: 26,342 syncable CRDs (down 5), and the audit check passes for the first
 time. Those five now log locally and do not reach Act! — which is the correct
 degraded state, and the same one 21,124 unmatched advisors are already in.
 
+## Durable engagement repair checkpoint
+
+Every advisor-level activity write now carries its projection-repair obligation
+in the same `EmailActivity` partition. The activity row and one dirty marker per
+`(advisor, rep)` are committed in a single Table transaction, so a crash cannot
+leave durable activity with no way to rebuild its queue projection. Inline
+refresh conditionally deletes the marker; new activity changes the marker ETag
+and makes that delete fail safely. A disabled, user-allowlisted timer drains any
+markers left by storage conflicts or process failures.
+
+Historical-import provenance is stored on each event using the backfill request
+cutoff, not the later repair time. Historical replies still establish the
+relationship and appear on the timeline, but they do not become unread work;
+historical bounces do not become active address work; and old warm contacts use
+the import cutoff as their quiet baseline. Current events at or after the cutoff
+remain actionable. Projection folds now query the complete activity set for one
+rep and advisor instead of taking 500 advisor-wide rows and filtering afterward.
+
+This repairs projection failures only after an activity row exists. It does not
+close the post-Graph/pre-activity window in direct send; the operation ledger is
+still required before direct send can be enabled.
+
 ## Before this can run
 
 0. `dist/api.tgz` must be rebuilt — `api/shared/act_contacts.json` changed with
@@ -920,18 +939,26 @@ degraded state, and the same one 21,124 unmatched advisors are already in.
 1. `pip install azure-storage-blob` then
    `python src/export_advisor_emails.py --upload` — the sweep fails closed
    without the blob, deliberately, so this is a hard prerequisite.
-2. Deploy the API with `EMAIL_REPLY_SWEEP_ENABLED` and
-   `EMAIL_DIRECT_SEND_ENABLED` still disabled. Verify release provenance and
-   storage health before enabling either workflow.
-3. For the reply-sweep canary, set `EMAIL_REPLY_SWEEP_ENABLED=1` and
+2. Deploy the API with `EMAIL_REPLY_SWEEP_ENABLED`,
+   `EMAIL_ENGAGEMENT_REPAIR_ENABLED`, and `EMAIL_DIRECT_SEND_ENABLED` still
+   disabled. Verify release provenance and storage health before enabling any
+   workflow.
+3. Inspect whether production `EmailActivity` already contains pre-marker rows.
+   If it does, audit their backfill/decision provenance before migration; do not
+   silently reinterpret all old rows as current or historical.
+4. Set `EMAIL_ENGAGEMENT_REPAIR_USER_IDS` to one connected test user's Static
+   Web Apps user ID, then set `EMAIL_ENGAGEMENT_REPAIR_ENABLED=1`. An unmatched
+   allowlist claims no markers. Keep the allowlist in place through the reply
+   canary.
+5. For the reply-sweep canary, set `EMAIL_REPLY_SWEEP_ENABLED=1` and
    `EMAIL_REPLY_SWEEP_USER_IDS` to one connected test user's Static Web Apps
    user ID. An unmatched allowlist intentionally reads no mailbox. Clear the
    allowlist only after the repair backlog and reconnect metrics stay healthy.
    `ADVISOR_LOOKUP_CONTAINER` / `ADVISOR_LOOKUP_BLOB` default to
    `lookups` / `advisor_emails.json.gz`.
-4. Leave one-to-one direct send disabled until the durable operation ledger is
+6. Leave one-to-one direct send disabled until the durable operation ledger is
    deployed and its lost-response/reconciliation canary has passed.
-5. Watch the first sweep log line: `scanned` should be large, `ours` small. If
+7. Watch the first sweep log line: `scanned` should be large, `ours` small. If
    `ours` is near `scanned`, the filter is wrong and should be stopped.
 
 ## Open questions
@@ -971,17 +998,17 @@ degraded state, and the same one 21,124 unmatched advisors are already in.
 - `listEngagement()` reads a rep's whole partition per queue open. Fine at a few
   hundred advisors per rep; beyond that the queue wants a filtered query or a
   pre-computed "needs attention" flag on the row.
-- `refresh()` re-reads up to 500 activity rows per touched advisor per sweep. On
-  a busy morning with many replies that is the sweep's dominant cost, and it is
-  the first thing to measure once real traffic exists.
-- The engagement projection is only ever refreshed by the SWEEP. An advisor
-  whose queue reason is purely time-based (`quiet_warm`, `due`) will not have
-  their row recomputed until something else happens to them — but `reason()` is
-  evaluated at read time against stored timestamps, so the queue is still
-  correct. Worth keeping in mind if reasons ever move to write time.
-- The emailer does not write activity rows of its own; the sweep is the only
-  writer, so there is no double-row problem. What there WAS is an attribution
-  bug, now fixed: an app-sent campaign appearing on the timeline as though the
-  rep had typed it in Outlook. The sweep reads `X-EIC-Message-Id` from the
-  headers it already fetches and sets `source: "app"` with the campaign message
-  id attached.
+- ~~`refresh()` reads 500 advisor-wide rows before filtering the rep.~~ Fixed.
+  Projection folds now page the complete user/advisor source set. Timeline reads
+  retain their small newest-first limit because they are presentation, not a
+  correctness boundary.
+- The engagement projection is refreshed inline by reply sweep and direct
+  reply/follow-up, and repaired from durable markers by the disabled timer. An
+  advisor whose queue reason is purely time-based (`quiet_warm`, `due`) needs no
+  write-time refresh because `reason()` evaluates stored timestamps at read
+  time. Revisit that only if reasons move to write time.
+- Direct reply and follow-up now write activity immediately so the UI updates
+  after Send; reply sweep remains the discovery/reconciliation writer for
+  Outlook and campaign mail. Graph's immutable id makes repeated observations
+  idempotent when their event timestamps agree. Stable sent-time reconciliation
+  belongs with the direct-send ledger.

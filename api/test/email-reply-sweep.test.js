@@ -38,10 +38,10 @@ function fixture(over = {}) {
       listConnections: async () => [{ userId: "u1", mailbox: "rep@eicatlanta.com" }],
       getSweepState: async (u) => (state.byUser && state.byUser[u])
         || (u === "u1" ? state.current : null) || null,
-      putSweepState: async (u, _s, v) => {
+      putSweepState: async (u, _s, v, options = {}) => {
         state.written = v;
         state.writes = state.writes || [];
-        state.writes.push({ userId: u, value: v });
+        state.writes.push({ userId: u, value: v, options });
         state.byUser = state.byUser || {};
         state.byUser[u] = {
           ...(state.byUser[u] || (u === "u1" ? state.current : null) || {}), ...v,
@@ -86,6 +86,28 @@ test("a reply on a known thread is credited to the campaign it answers", async (
   assert.equal(f.activity[0].batchId, "batch-3");
   assert.equal(f.activity[0].advisorCrd, "111");
   assert.equal(f.activity[0].classification, "reply");
+});
+
+test("the sweep acknowledges the newest atomic dirty marker inline", async () => {
+  const f = fixture();
+  const repaired = [];
+  f.deps.store.recordActivity = async (row) => {
+    f.activity.push(row);
+    return { ...row, dirtyMarker: {
+      partitionKey: row.advisorCrd, rowKey: "zD|u1", userId: row.userId,
+      advisorCrd: row.advisorCrd, etag: "v1",
+    } };
+  };
+  f.deps.engagement = {
+    refresh: async () => { throw new Error("marker path must be preferred"); },
+    refreshDirty: async (marker) => { repaired.push(marker); return { acknowledged: true }; },
+  };
+
+  await sweeper.sweep(f.context, f.deps);
+
+  assert.equal(repaired.length, 1);
+  assert.equal(repaired[0].advisorCrd, "111");
+  assert.equal(repaired[0].etag, "v1");
 });
 
 test("a reply we cannot thread is recorded WITHOUT claiming a campaign", async () => {
@@ -222,6 +244,34 @@ test("a truncated window still advances to what it actually processed", async ()
   assert.equal(f.state.written.consecutiveFailures, 0);
 });
 
+test("an old sweep cannot overwrite a newer backfill generation", async () => {
+  const f = fixture();
+  const oldUntil = "2026-08-20T00:00:00Z";
+  f.state.current = {
+    etag: "v-old", watermarkUtc: "2025-09-01T00:00:00Z",
+    backfillUntilUtc: oldUntil,
+  };
+  let attempted = null;
+  f.deps.store.putSweepState = async (_userId, _sweep, value, options = {}) => {
+    attempted = { value, options };
+    const err = new Error("a newer admin backfill replaced this state");
+    err.statusCode = 412;
+    throw err;
+  };
+  f.deps.graph.recentMail = async () => ({ truncated: false, items: [
+    message({ receivedDateTime: "2026-08-21T00:00:00Z" }),
+  ] });
+
+  const [summary] = await sweeper.sweep(f.context, f.deps);
+
+  assert.equal(attempted.options.ifMatch, "v-old");
+  assert.equal(attempted.value.backfillUntilUtc, "",
+    "this stale payload would have cleared the older generation without the ETag");
+  assert.equal(summary.stateConflict, true);
+  assert.equal(summary.errors, 0,
+    "activity is durable; rereading it next timer is safe and not a mailbox failure");
+});
+
 test("an ERROR mid-pass does not advance the watermark", async () => {
   const f = fixture();
   // A message that fails to record leaves a hole, so the block is no longer
@@ -240,6 +290,8 @@ test("the watermark advances on a clean pass", async () => {
   assert.ok(f.state.written.watermarkUtc, "a clean pass must move forward");
   assert.equal(f.state.written.lastError, "");
   assert.equal(f.state.written.lookupHash, "hash-1");
+  assert.equal(f.state.writes[0].options.ifMatch, null,
+    "a first sweep creates progress instead of updating with an undefined ETag");
 });
 
 test("a rep needing to reconnect is skipped LOUDLY, not silently", async () => {
@@ -405,8 +457,8 @@ test("a reply that arrives DURING a backfill is not seeded away", async () => {
   const f = fixture();
   const backfillUntil = "2026-08-20T00:00:00Z";
   f.state.current = { watermarkUtc: "2025-09-01T00:00:00Z", backfillUntilUtc: backfillUntil };
-  const seeds = [];
-  f.deps.engagement = { refresh: async (_u, crd, o) => { seeds.push({ crd, seed: !!o.seed }); } };
+  const refreshed = [];
+  f.deps.engagement = { refresh: async (_u, crd) => { refreshed.push(crd); } };
   f.deps.graph.recentMail = async () => ({ truncated: false, items: [
     // history: predates the moment the backfill was asked for
     message({ id: "old", receivedDateTime: "2025-10-01T00:00:00Z",
@@ -415,16 +467,21 @@ test("a reply that arrives DURING a backfill is not seeded away", async () => {
     message({ id: "new", receivedDateTime: "2026-08-21T00:00:00Z",
               from: { emailAddress: { address: "other@ubs.com" } } })] });
   await sweeper.sweep(f.context, f.deps);
-  const byCrd = Object.fromEntries(seeds.map((s) => [s.crd, s.seed]));
-  assert.equal(byCrd["111"], true, "a year of history must not arrive as a year of work");
-  assert.equal(byCrd["222"], false,
-    "but a reply that came in while we were catching up is work, and must surface");
+  assert.deepEqual(refreshed.sort(), ["111", "222"]);
+  const rows = Object.fromEntries(f.activity.map((row) => [row.advisorCrd, row]));
+  assert.equal(rows["111"].historicalImport, true);
+  assert.equal(rows["222"].historicalImport, false);
+  assert.equal(rows["111"].seedBeforeUtc, backfillUntil);
+  assert.equal(rows["222"].seedBeforeUtc, backfillUntil,
+    "current events retain the run cutoff so a delayed fold can classify them exactly");
 });
 
-test("with no backfill running, nothing is ever seeded", async () => {
+test("with no backfill running, no historical boundary is attached", async () => {
   const f = fixture();
-  const seeds = [];
-  f.deps.engagement = { refresh: async (_u, crd, o) => { seeds.push(!!o.seed); } };
+  const refreshed = [];
+  f.deps.engagement = { refresh: async (_u, crd) => { refreshed.push(crd); } };
   await sweeper.sweep(f.context, f.deps);
-  assert.deepEqual(seeds, [false]);
+  assert.deepEqual(refreshed, ["111"]);
+  assert.equal(f.activity[0].historicalImport, false);
+  assert.equal(f.activity[0].seedBeforeUtc, "");
 });

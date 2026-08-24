@@ -188,19 +188,42 @@ class FakeTable {
    * Filter support covers the two shapes this codebase uses: PartitionKey
    * equality, and the ge/lt prefix range.
    */
-  async *listEntities(options = {}) {
+  listEntities(options = {}) {
     const filter = ((options.queryOptions || {}).filter) || "";
     const eq = /PartitionKey eq '([^']*)'/.exec(filter);
     const range = /PartitionKey ge '([^']*)' and PartitionKey lt '([^']*)'/.exec(filter);
+    const rowGe = /RowKey ge '([^']*)'/.exec(filter);
+    const rowLt = /RowKey lt '([^']*)'/.exec(filter);
+    const userEq = /userId eq '([^']*)'/.exec(filter);
     const rows = [...this.rows.values()].sort((a, b) =>
       String(a.partitionKey).localeCompare(String(b.partitionKey))
-      || String(a.rowKey).localeCompare(String(b.rowKey)));
-    for (const row of rows) {
-      if (eq && String(row.partitionKey) !== eq[1]) continue;
+      || String(a.rowKey).localeCompare(String(b.rowKey))).filter((row) => {
+      if (eq && String(row.partitionKey) !== eq[1]) return false;
       if (range && !(String(row.partitionKey) >= range[1]
-                     && String(row.partitionKey) < range[2])) continue;
-      yield { ...row };
-    }
+                     && String(row.partitionKey) < range[2])) return false;
+      if (rowGe && String(row.rowKey) < rowGe[1]) return false;
+      if (rowLt && String(row.rowKey) >= rowLt[1]) return false;
+      if (userEq && String(row.userId || "") !== userEq[1]) return false;
+      return true;
+    });
+    return {
+      async *[Symbol.asyncIterator]() {
+        for (const row of rows) yield { ...row };
+      },
+      byPage(settings = {}) {
+        const start = Math.max(0, Number(settings.continuationToken) || 0);
+        const size = Math.max(1, Number(settings.maxPageSize) || rows.length || 1);
+        return {
+          async *[Symbol.asyncIterator]() {
+            for (let offset = start; offset < rows.length; offset += size) {
+              const page = rows.slice(offset, offset + size).map((row) => ({ ...row }));
+              page.continuationToken = offset + size < rows.length ? String(offset + size) : undefined;
+              yield page;
+            }
+          },
+        };
+      },
+    };
   }
 }
 
