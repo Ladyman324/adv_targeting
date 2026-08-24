@@ -262,12 +262,32 @@ def main() -> None:
     # Georgia. Median shard is 10 KB and the largest -- Florida -- is 87 KB. A
     # practice with members in two states appears in both, which is correct
     # rather than wasteful: either rep should see the whole team.
+    #
+    # Since the address joined each member (below), Florida is 127 KB gzipped
+    # rather than 87 KB. Paid once per state per session, and it is what makes
+    # copying a teammate work away from the tiles the rep has loaded.
+    # THE ADDRESS TRAVELS WITH THE MEMBER, as a fourth column.
+    #
+    # It did not, and the emailer's "copy someone on their team" picker was
+    # broken on the phone because of it. A member entry was [crd, name, state],
+    # so field.js had to find each teammate's email by scanning TILE_CACHE --
+    # which holds the tiles near where the rep is STANDING. A teammate in the
+    # next city had no address and was dropped; an advisor opened from a queue
+    # built at the desk had no tile loaded at all and so had no teammates,
+    # ever. The picker hides itself when the list is empty, so on a phone the
+    # feature simply did not exist and said nothing.
+    #
+    # The desk has never had this problem: it resolves teammates out of
+    # contacts.json, which holds every advisor and which the phone deliberately
+    # never loads. This closes that gap at the only place both views agree --
+    # the file itself. Costs roughly 25 bytes per member.
     shard: dict = collections.defaultdict(dict)
     for key, rec in practices.items():
         entry = {"n": rec.get("n", ""),
-                 "m": [[crd, index_names.get(str(crd)) or advisors.get(crd, {}).get("n", ""), st]
+                 "m": [[crd, index_names.get(str(crd)) or advisors.get(crd, {}).get("n", ""), st,
+                        advisors.get(crd, {}).get("e", "")]
                        for crd, st in rec.get("m", [])]}
-        for _, _, st in entry["m"]:
+        for _, _, st, _e in entry["m"]:
             if st:
                 shard[st][key] = entry
     if PRACTICES.exists():

@@ -525,6 +525,32 @@ body{
    background. A rep scanning four rows needs to know which one they are
    standing in, and a highlighted row would compete with the Call buttons. */
 .lists-row.on{border-left:3px solid var(--accent); padding-left:9px}
+/* The two STANDING lists -- key contacts and due diligence -- are built from
+   flags rather than owned by the rep, so they carry no rename/empty/delete and
+   should not read as one of the rep's own lists sitting above them. A tinted
+   ground and a closing rule separate the two groups without a second heading
+   in a sheet that is already tall on a phone. */
+/* KEY CONTACT and DUE DILIGENCE, on the sheet beside the name.
+   Same colours as the desk so a starred advisor looks starred on either
+   device. The tap target is 40px rather than the desk's 19px icon: these sit
+   next to the advisor's name, and a thumb that misses lands on the heading.
+   var(--tap) is this file's own declared minimum -- not a number invented here. */
+.contact-flags{display:inline-flex; gap:2px; margin-left:6px; vertical-align:middle}
+.flag-mark{background:none; border:0; padding:10px; margin:-10px 0;
+  line-height:0; color:var(--muted); opacity:.55;
+  min-width:var(--tap); min-height:var(--tap); display:inline-flex;
+  align-items:center; justify-content:center;
+  /* iOS paints its own highlight over the whole heading otherwise. */
+  -webkit-tap-highlight-color:transparent}
+.flag-mark svg{width:20px; height:20px; display:block}
+.flag-mark.on{opacity:1}
+.flag-mark[data-flag="key"].on{color:#d9a017}
+.flag-mark[data-flag="dd"].on{color:#2f8f6b}
+.flag-mark:disabled{opacity:.35}
+.lists-row.flag-list{background:var(--panel-2); border-radius:8px; margin-bottom:4px}
+.lists-row.flag-list:last-child{margin-bottom:12px;
+  border-bottom:1px solid var(--hair); border-bottom-left-radius:0;
+  border-bottom-right-radius:0; padding-bottom:12px}
 .lists-main{display:block}
 .lists-main b{font-size:15px}
 .lists-main small{display:block; margin-top:2px; font-size:11.5px; color:var(--muted)}

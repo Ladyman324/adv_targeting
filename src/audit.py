@@ -1629,6 +1629,152 @@ def _act_assets_national():
 
 
 # ---------------------------------------------------------------------------
+# The phone can copy a teammate without having their tile loaded
+#
+# WHAT BROKE: a practice member shipped as [crd, name, state], so field.js had
+# to find each teammate's ADDRESS by scanning TILE_CACHE -- which holds the
+# tiles near where the rep is standing and nothing else. A teammate one city
+# over had no address and was dropped. Worse, both callers were written
+#
+#     row ? await teammatesWithEmail(...) : []
+#
+# and an advisor reached from the QUEUE has no tile row at all, because a queue
+# entry is a stored snapshot. The queue is how a rep works a list in the field,
+# so the picker was empty in precisely the case it exists for.
+#
+# It reported nothing, because the picker hides itself when the list is empty:
+# "this advisor has no teammates with an address" and "we did not look" render
+# identically. The desk was fine throughout -- it resolves teammates from
+# contacts.json, which the phone deliberately never loads -- so the two views
+# disagreed about the same advisor with nothing to say so.
+#
+# This pins the shard's shape AND the client's refusal to depend on a tile.
+# ---------------------------------------------------------------------------
+@check("the phone can copy a teammate it has not got a tile for")
+def _practice_emails():
+    shards = sorted((DATA / "practices").glob("*.json"))
+    if not shards:
+        raise FileNotFoundError(2, "not built", str(DATA / "practices"))
+    problems = []
+
+    members = withmail = short = 0
+    for shard in shards:
+        for rec in read(shard).values():
+            for m in rec.get("m", []):
+                members += 1
+                if len(m) < 4:
+                    short += 1
+                elif str(m[3] or "").strip():
+                    withmail += 1
+    if short:
+        problems.append(f"{short:,} members still carry no email column, so the "
+                        f"phone would fall back to scanning loaded tiles for them")
+    # Not every advisor has an address; plenty do. A shard where almost nobody
+    # does means the column is being written empty, which looks like success.
+    if members and withmail / members < 0.25:
+        problems.append(f"only {withmail:,} of {members:,} members carry an address; "
+                        f"the column appears to be written but not filled")
+
+    field = text(WEB / "field.js")
+    # COMMENTS STRIPPED FIRST. The fix's own comment describes the defect it
+    # removed, and the first draft of this check matched that sentence and
+    # reported the bug as still present. A check that reads prose is a check
+    # that fails on documentation.
+    code = re.sub(r"/\*.*?\*/", "", field, flags=re.S)
+    code = re.sub(r"(?m)^\s*//.*$", "", code)
+    # The exact shape of the defect: a teammate lookup conditioned on a row.
+    if re.search(r"row\s*\?\s*await teammatesWithEmail", code):
+        problems.append("a teammate lookup is still gated on a loaded tile, so an "
+                        "advisor opened from the queue has no teammates")
+    body = re.search(r"async function teammatesWithEmail\(.*?" + chr(10) + r"\}", code, re.S)
+    if not body:
+        problems.append("teammatesWithEmail() is gone")
+    else:
+        if "m[3]" not in body.group(0):
+            problems.append("the address shipped with the practice record is not read")
+        if "teamKey ?" not in body.group(0):
+            problems.append("a missing team key is not handled, which is every queue entry")
+
+    return (not problems,
+            f"{len(shards)} shards, {members:,} members, {withmail:,} with an address"
+            + ("; " + "; ".join(problems) if problems else ""))
+
+
+# ---------------------------------------------------------------------------
+# Both views offer the two standing flag lists, under the same names
+#
+# The star and the shield are firm-wide sales knowledge, saved once and read by
+# whoever opens the advisor next. The DESK grew lists off them; the field view
+# never did -- it fetched the flags on boot (dial.js does it for both apps) and
+# then had nothing that consumed them. So a rep who starred somebody at their
+# desk could not find that person again from a car, and no screen anywhere said
+# the lists were desk-only.
+#
+# THE NAMES MUST MATCH, not merely exist. Dial.openList() resolves by name, so
+# a field view calling its list "Key contact" would silently create a SECOND
+# list beside the desk's "Key contacts" -- two lists, same star, diverging.
+# ---------------------------------------------------------------------------
+@check("the star and shield lists exist on both the desk and the phone")
+def _flag_lists_parity():
+    desk, field = text(WEB / "app.js"), text(WEB / "field.js")
+    problems = []
+
+    # The labels each view will pass to openList(), taken from the source.
+    def labels(src):
+        found = re.search(r'kind === "key" \? "([^"]+)" : "([^"]+)"', src)
+        return set(found.groups()) if found else set()
+
+    desk_labels, field_labels = labels(desk), labels(field)
+    if not desk_labels:
+        problems.append("the desk no longer names its flag lists")
+    if not field_labels:
+        problems.append("the field view has no flag lists at all")
+    elif desk_labels and desk_labels != field_labels:
+        problems.append(f"the two views name them differently -- desk {sorted(desk_labels)} "
+                        f"vs field {sorted(field_labels)}; openList resolves by name, so "
+                        f"this makes two lists off one star")
+
+    # Both must actually offer the actions, not just define the strings.
+    for name, src in (("desk", desk), ("field", field)):
+        for action in ("flag-call", "flag-show"):
+            if action not in src:
+                problems.append(f"{name} has no {action} control")
+
+    # And the field view must not need a loaded tile to dial one, which is the
+    # same defect the teammate picker had.
+    if "locateFlagged" not in field:
+        problems.append("the phone cannot resolve a flagged advisor it has no tile for")
+
+    # SETTING a flag, not only reading one. Lists alone left the phone able to
+    # act on the star but never to put one there, so a rep standing in a lobby
+    # had to remember the fact until they were back at a desk.
+    for name, src in (("desk", desk), ("field", field)):
+        if 'data-flag="${kind}"' not in src:
+            problems.append(f"{name} has no flag toggle, only the lists")
+        if 'aria-pressed' not in src:
+            problems.append(f"{name}'s flag control does not report its state")
+
+    # THE TWO DRAWINGS MUST MATCH. The paths are duplicated on purpose -- the
+    # views share only dial.js, which has no DOM -- and duplicated geometry is
+    # exactly what drifts silently. A star that is a slightly different star on
+    # the phone is the kind of thing nobody reports and everybody notices.
+    for const in ("STAR_PATH", "SHIELD_PATH", "CHECK_PATH"):
+        got = []
+        for src in (desk, field):
+            found = re.search(const + r'\s*=\s*(".*?");', src, re.S)
+            got.append(re.sub(r'"\s*\+\s*"', "", found.group(1)) if found else None)
+        if got[0] is None or got[1] is None:
+            problems.append(f"{const} is missing from "
+                            + ("the desk" if got[0] is None else "the field view"))
+        elif got[0] != got[1]:
+            problems.append(f"{const} differs between the two views")
+
+    return (not problems,
+            f"desk {sorted(desk_labels)}, field {sorted(field_labels)}"
+            + ("; " + "; ".join(problems) if problems else ""))
+
+
+# ---------------------------------------------------------------------------
 # 30. The territory map is complete, exclusive, and matches its source
 #
 # WHY THIS IS THE MOST DANGEROUS FILE IN THE PROJECT: it is small, hand-

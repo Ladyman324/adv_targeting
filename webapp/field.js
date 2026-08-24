@@ -19,7 +19,7 @@ const PAGE = 200;                  // rows added per "Show more"
 // Stamped by src/web_assets.py from metadata time plus every deployed JSON
 // byte. Field data still revalidates, but the shared build ID prevents stale
 // same-day rebuilds and keeps every first-party data request explicit.
-const DATA_VERSION = "20260822T034641Z-b6e82b13c94619a6";
+const DATA_VERSION = "20260822T034641Z-20e295e9d9c755f6";
 const dataUrl = file => {
   const path = file.startsWith("data/") ? file : `data/${file}`;
   return `${path}${path.includes("?") ? "&" : "?"}v=${encodeURIComponent(DATA_VERSION)}`;
@@ -421,7 +421,7 @@ function openSheet(r){
 
   $("sheetInner").innerHTML = `
     <button id="sheetClose" aria-label="Close">&times;</button>
-    <h2>${esc(r[COL.name])}</h2>
+    <h2>${esc(r[COL.name])}${flagMarksField(r[COL.crd])}</h2>
     <div class="sub">${esc(r[COL.title] || "")}</div>
     ${owned}
     ${row("Firm", r[COL.firm])}
@@ -583,18 +583,43 @@ function snapshotOf(r){
  * practice file is fetched if it is not already cached, which covers the common
  * case of working a list inside one area.
  */
-async function teammatesWithEmail(crd, state, teamKey, teamSize){
-  if (!teamKey || Number(teamSize) < 2 || !state) return [];
+async function teammatesWithEmail(crd, state, teamKey){
+  if (!state) return [];
   let practices;
   try { practices = await practicesFor(state); } catch { return []; }
-  const rec = practices && practices[teamKey];
+  if (!practices) return [];
+  /* NO TEAM KEY IS NORMAL, and it used to mean no teammates.
+   *
+   * An advisor opened from the queue is a stored snapshot, and snapshotOf()
+   * carries no team key -- there is no room in a queue entry for a field only
+   * the emailer wants. The old guard returned [] the moment the key was
+   * missing, so working a list built at the desk -- the most common way this
+   * screen is reached -- could never offer a teammate.
+   *
+   * The practice file already knows which team somebody is on. Ask it. */
+  let rec = teamKey ? practices[teamKey] : null;
+  if (!rec) {
+    for (const candidate of Object.values(practices)) {
+      if ((candidate.m || []).some((m) => String(m[0]) === String(crd))) { rec = candidate; break; }
+    }
+  }
   if (!rec || !rec.m) return [];
   const out = [];
-  for (const [mateCrd, mateName] of rec.m) {
-    if (String(mateCrd) === String(crd)) continue;
-    const row = rowByCrd(String(mateCrd));
-    const email = row ? String(row[COL.email] || "") : "";
-    if (email) out.push({ name: mateName || String(mateCrd), email });
+  for (const m of rec.m) {
+    const mateCrd = String(m[0]);
+    if (mateCrd === String(crd)) continue;
+    /* The address now ships WITH the practice record, as a fourth column.
+     *
+     * It used to be looked up in TILE_CACHE, which holds only the tiles near
+     * where the rep is STANDING -- so a teammate one city over had no address
+     * and was silently dropped. The tile is still consulted as a fallback, for
+     * a shard built before the column existed. */
+    let email = String(m[3] || "");
+    if (!email) {
+      const row = rowByCrd(mateCrd);
+      email = row ? String(row[COL.email] || "") : "";
+    }
+    if (email) out.push({ name: m[1] || mateCrd, email });
   }
   return out;
 }
@@ -611,23 +636,32 @@ async function teammatesWithEmail(crd, state, teamKey, teamSize){
  * silently, because an empty list and no teammates look identical to it.
  */
 window.AdvisorEmailData = {
+  /* A LOADED TILE IS NOT REQUIRED, and demanding one broke this on the phone.
+   *
+   * Both of these used to skip the lookup entirely unless a tile row was in
+   * hand, so an advisor whose tile was not in memory had no teammates -- and an
+   * advisor reached from a queue never has one, because the queue is a stored
+   * snapshot rather than a tile row. The queue is how a rep works a list in the
+   * field, so the picker was empty in exactly the case it was built for.
+   *
+   * The snapshot already carries the state, which is all the practice file
+   * needs. Where a row IS loaded its team key is passed as a shortcut, and the
+   * lookup falls back to searching the state's practices when it is not. */
   recipientFor: async (crd) => {
     const row = rowByCrd(String(crd));
     const base = row ? snapshotOf(row)
       : Dial.state.items.find((it) => String(it.crd) === String(crd));
     if (!base) return base;
-    const mates = row
-      ? await teammatesWithEmail(row[COL.crd], row[COL.state], row[COL.team_key], row[COL.team_size])
-      : [];
+    const mates = await teammatesWithEmail(
+      String(crd), row ? row[COL.state] : base.state, row ? row[COL.team_key] : "");
     return { ...base, teammates: mates.map((m) => m.email), teammatesFull: mates };
   },
   list: async () => {
     const out = [];
     for (const it of Dial.state.items) {
       const row = rowByCrd(String(it.crd));
-      const mates = row
-        ? await teammatesWithEmail(row[COL.crd], row[COL.state], row[COL.team_key], row[COL.team_size])
-        : [];
+      const mates = await teammatesWithEmail(
+        String(it.crd), row ? row[COL.state] : it.state, row ? row[COL.team_key] : "");
       out.push({ ...it, teammates: mates.map((m) => m.email), teammatesFull: mates });
     }
     return out;
@@ -770,6 +804,7 @@ function renderLists(){
   $("listsInner").innerHTML = `
     <button id="listsClose" aria-label="Close">&times;</button>
     <h2>Call lists</h2>
+    <ul class="lists-ul">${flagListRowsField()}</ul>
     ${ls.length ? `<ul class="lists-ul">${ls.map((l) => `
       <li class="lists-row${l.id === S.listId ? " on" : ""}">
         <span class="lists-main"><b>${esc(l.name)}</b>
@@ -791,6 +826,135 @@ function renderLists(){
       <button data-lists="new">Create</button>
     </div>
     <p class="lm-note">Your call history is kept whatever you do here.</p>`;
+}
+
+/* KEY CONTACTS and DUE DILIGENCE, as two standing lists on the phone.
+ *
+ * The desk has had these since the flags shipped; the field view had neither
+ * the lists nor any sign the flags exist, so a rep who starred somebody at
+ * their desk could not find them again from a car. Both views read the same
+ * Dial.state.flags, which dial.js already fetches on boot here -- the data was
+ * present the whole time and nothing consumed it.
+ *
+ * Named exactly as the desk names them ("Key contacts", "Due diligence") so
+ * calling from either device opens the SAME list rather than making a second
+ * one that looks identical.
+ */
+/* THE STAR AND THE SHIELD, as controls rather than only as lists.
+ *
+ * Reading them shipped first; setting them was still desk-only, which is the
+ * wrong half. The rep who learns that this is the person who runs manager due
+ * diligence is the rep standing in their lobby, and making them remember it
+ * until they are back at a desk means it does not get recorded.
+ *
+ * SAME GEOMETRY AS THE DESK, deliberately duplicated rather than shared: the
+ * two views load different files and share only dial.js, and putting these in
+ * dial.js would give a module with no DOM of its own an opinion about markup.
+ * The paths are the thing that must not drift, so they are named constants in
+ * both places and the audit compares them.
+ *
+ * SVG, not emoji, for the reason the desk found the hard way: the shield at
+ * U+1F6E1 U+FE0F carries a variation selector that forces emoji presentation,
+ * so the browser paints its own colour and CSS `color` does nothing. It looked
+ * permanently set while the star changed colour correctly -- two controls, one
+ * of them lying about its state.
+ */
+const STAR_PATH = "M12 2.6l2.9 6 6.6.9-4.8 4.6 1.2 6.5L12 17.6 6.1 20.6l1.2-6.5"
+                + "L2.5 9.5l6.6-.9z";
+const SHIELD_PATH = "M12 2.5l7.5 3v5.2c0 4.7-3.2 8.6-7.5 9.8-4.3-1.2-7.5-5.1"
+                  + "-7.5-9.8V5.5z";
+const CHECK_PATH = "M8.4 12.2l2.4 2.4 4.6-4.9";
+
+function flagMarkField(crd, kind, on, label, path, extra){
+  return `<button type="button" class="flag-mark${on ? " on" : ""}"
+      data-flag="${kind}" data-advisor="${esc(crd)}"
+      title="${esc(label)}${on ? " — tap to unmark" : " — tap to mark"}"
+      aria-label="${esc(label)}" aria-pressed="${on}">
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path d="${path}" fill="${on ? "currentColor" : "none"}"
+              stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>
+        ${extra || ""}
+      </svg></button>`;
+}
+
+function flagMarksField(crd){
+  const dd = Dial.isDueDiligence(crd);
+  return `<span class="contact-flags">`
+    + flagMarkField(crd, "key", Dial.isKeyContact(crd), "Key contact", STAR_PATH)
+    + flagMarkField(crd, "dd", dd, "Due diligence", SHIELD_PATH,
+        `<path d="${CHECK_PATH}" fill="none" stroke="${dd ? "var(--panel, #fff)" : "currentColor"}"
+          stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>`)
+    + `</span>`;
+}
+
+function flaggedField(kind){
+  const out = [];
+  for (const [crd, f] of (Dial.state.flags || new Map())) {
+    if (kind === "key" ? !f.key : !f.dd) continue;
+    // The tile row when we happen to hold it, for a firm name and a number.
+    // The flag entry always carries the name it was saved under, so a flagged
+    // advisor is never listed as a bare CRD just because the rep is standing
+    // somewhere else.
+    const row = rowByCrd(String(crd));
+    out.push({ crd: String(crd),
+               name: (row && row[COL.name]) || f.name || `CRD ${crd}`,
+               firm: (row && row[COL.firm]) || "",
+               row });
+  }
+  return out.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/* Find a flagged advisor the rep is nowhere near.
+ *
+ * Same route the national search already uses: the name index is sharded on
+ * every token of a name, so any word of the one stored with the flag reaches
+ * the record, and the record carries the cell to hydrate from.
+ *
+ * This is why numbers are resolved when the rep taps CALL rather than while the
+ * list is drawn -- it is one fetch per person who is not already in a loaded
+ * tile, and drawing a list should not cost that.
+ */
+async function locateFlagged(crd, name){
+  await loadNameIndex();
+  const words = String(name || "").toLowerCase()
+    .replace(/[^a-z ]/g, " ").split(/\s+/).filter((w) => w.length > 1);
+  for (const word of words) {
+    const key = shardFor(word);
+    if (!key) continue;
+    const rows = await loadShard(key);
+    const hit = rows.find((r) => String(r[NAMES.C.crd]) === String(crd));
+    if (hit) return await hydrate(String(crd), hit[NAMES.C.cell]);
+  }
+  return null;
+}
+
+async function dialableFlagged(kind){
+  const out = [];
+  for (const person of flaggedField(kind)) {
+    if (person.row && person.row[COL.phone]) { out.push(snapshotOf(person.row)); continue; }
+    const full = await locateFlagged(person.crd, person.name).catch(() => null);
+    if (full && full[COL.phone]) out.push(snapshotOf(full));
+  }
+  return out;
+}
+
+const FLAG_SETS = [["key", "&#9733;", "Key contacts"],
+                   ["dd", "&#128737;&#65039;", "Due diligence"]];
+
+function flagListRowsField(){
+  return FLAG_SETS.map(([kind, icon, label]) => {
+    const people = flaggedField(kind);
+    return `<li class="lists-row flag-list">
+      <span class="lists-main"><b>${icon} ${label}</b>
+        <small>${people.length} ${people.length === 1 ? "person" : "people"}`
+      + `${people.length ? "" : " &middot; mark someone at your desk"}</small></span>
+      <span class="lists-acts">
+        <button class="primary" data-lists="flag-call" data-kind="${kind}"
+          ${people.length ? "" : "disabled"}>Call</button>
+        <button data-lists="flag-show" data-kind="${kind}"
+          ${people.length ? "" : "disabled"}>Show</button>
+      </span></li>`;
+  }).join("");
 }
 
 function defaultListName(){
@@ -1648,30 +1812,53 @@ function placeMatches(term){
 const titleCase = (s) => String(s).toLowerCase()
   .replace(/\b[a-z]/g, (c) => c.toUpperCase());
 
+/* THE INPUT IS BUILT ONCE, AND NEVER REBUILT WHILE IT IS BEING TYPED IN.
+ *
+ * This used to replace the whole sheet's innerHTML on every keystroke -- the
+ * heading, the search box and the results together -- and then put focus and
+ * the caret back afterwards. It worked, in the sense that the letters arrived.
+ * But destroying the focused input drops the sheet's scroll to zero, and the
+ * focus() that follows scrolls it back: on every single keypress the screen
+ * jumped to the top and returned. Restoring the caret hid the data loss and
+ * left the movement, which is the part a rep actually sees.
+ *
+ * So the chrome is painted once and only the RESULTS are re-rendered. Nothing
+ * the rep is touching is destroyed, so there is no focus to restore, no caret
+ * to put back, and no scroll to lose.
+ */
+function placesResultsHtml(rows){
+  return `${!GEO ? `<p class="lists-none">Loading places…</p>`
+    : placeTerm.trim().length < 2
+      ? `<p class="lists-none">Type a city or ZIP.</p>`
+      : rows.length
+        ? `<ul class="places-ul">${rows.map((r, i) => `
+            <li><button data-place="${i}">
+              <span class="place-name">${esc(r.label)}</span>
+              <span class="place-n">${r.n.toLocaleString()} advisor${r.n === 1 ? "" : "s"}</span>
+            </button></li>`).join("")}</ul>`
+        : `<p class="lists-none">No place on file matches that. We can only
+           offer places we hold advisors in.</p>`}
+    ${HERE && WHERE_LABEL ? `<button id="placeDefault" class="place-default">
+       Make ${esc(WHERE_LABEL)} my default starting point</button>` : ""}`;
+}
+
 function renderPlaces(term){
   const el = $("places");
   el.hidden = !placesOpen;
   if (!placesOpen) return;
   const rows = placeMatches(term === undefined ? placeTerm : term);
-  $("placesInner").innerHTML = `
-    <button id="placesClose" aria-label="Close">&times;</button>
-    <h2>Work from somewhere else</h2>
-    <input id="placeQ" type="search" inputmode="search" autocomplete="off"
-      placeholder="City or ZIP — e.g. Charlotte, NC"
-      aria-label="City or ZIP" value="${esc(placeTerm)}">
-    ${!GEO ? `<p class="lists-none">Loading places…</p>`
-      : placeTerm.trim().length < 2
-        ? `<p class="lists-none">Type a city or ZIP.</p>`
-        : rows.length
-          ? `<ul class="places-ul">${rows.map((r, i) => `
-              <li><button data-place="${i}">
-                <span class="place-name">${esc(r.label)}</span>
-                <span class="place-n">${r.n.toLocaleString()} advisor${r.n === 1 ? "" : "s"}</span>
-              </button></li>`).join("")}</ul>`
-          : `<p class="lists-none">No place on file matches that. We can only
-             offer places we hold advisors in.</p>`}
-    ${HERE && WHERE_LABEL ? `<button id="placeDefault" class="place-default">
-       Make ${esc(WHERE_LABEL)} my default starting point</button>` : ""}`;
+  // Painted only when it is not already there -- which is the first render of
+  // each opening, and the recovery path after a load failure replaced it.
+  if (!$("placeQ") || !$("placesResults")) {
+    $("placesInner").innerHTML = `
+      <button id="placesClose" aria-label="Close">&times;</button>
+      <h2>Work from somewhere else</h2>
+      <input id="placeQ" type="search" inputmode="search" autocomplete="off"
+        placeholder="City or ZIP — e.g. Charlotte, NC"
+        aria-label="City or ZIP" value="${esc(placeTerm)}">
+      <div id="placesResults"></div>`;
+  }
+  $("placesResults").innerHTML = placesResultsHtml(rows);
   $("placesInner")._rows = rows;
 }
 
@@ -1860,6 +2047,43 @@ document.addEventListener("click", (e) => {
     const r = [...TILE_CACHE.values()].flat()
       .find((o) => o[COL.crd] === mate.dataset.mate);
     if (r) openSheet(r);
+    return;
+  }
+
+  /* Setting a flag from the phone.
+   *
+   * Repainted IN PLACE rather than by reopening the sheet: openSheet() sets
+   * scrollTop = 0, so a rep who scrolled down to the history and then tapped
+   * the shield would be thrown back to the top of the card. Same class of
+   * jump as the place search had, and the reason to avoid a full rebuild here
+   * is the same -- do not destroy what the rep is looking at.
+   *
+   * Dial.setFlag is optimistic and rolls itself back, so the mark moves on tap
+   * and reverts if the write fails. The button is disabled meanwhile: it is a
+   * round trip to a Function App that may be cold, and a second tap would
+   * enqueue the opposite write.
+   */
+  const flag = e.target.closest("[data-flag]");
+  if (flag) {
+    const crd = flag.dataset.advisor, kind = flag.dataset.flag;
+    const on = flag.getAttribute("aria-pressed") !== "true";
+    const row = rowByCrd(String(crd));
+    const marks = flag.closest(".contact-flags");
+    flag.disabled = true;
+    Dial.setFlag(crd, kind, on, (row && row[COL.name]) || "", "")
+      .then(() => {
+        // Both marks, because they render as a pair and the other one has to
+        // keep showing what it showed.
+        if (marks) marks.outerHTML = flagMarksField(crd);
+        // The two standing lists are built from these flags; if the sheet
+        // above them is open it is now out of date.
+        if (listsOpen) renderLists();
+      })
+      .catch((err) => {
+        flag.disabled = false;
+        dialErr = err.message || "That could not be saved.";
+        renderDial();
+      });
     return;
   }
 
@@ -2152,6 +2376,43 @@ document.addEventListener("click", (e) => {
         .catch(fail);
       return;
     }
+    /* BEFORE the `if (!l) return` below, deliberately.
+     *
+     * A flag list has no list id -- it is built from the flags as they stand
+     * right now -- so it would fall straight through that guard and the tap
+     * would do nothing at all, silently. That is the same shape as the bug
+     * that hid the teammate picker.
+     *
+     * A SNAPSHOT into an ordinary list, matching the desk: a session that
+     * reordered itself because somebody starred a contact elsewhere would lose
+     * the rep's place mid-call.
+     */
+    if (act === "flag-call" || act === "flag-show") {
+      const kind = lb.dataset.kind;
+      const label = kind === "key" ? "Key contacts" : "Due diligence";
+      if (act === "flag-show") {
+        const names = flaggedField(kind).map((x) => x.name);
+        dialErr = `${label}: ${names.join(", ")}`;
+        renderDial();
+        return;
+      }
+      lb.disabled = true;
+      lb.textContent = "Finding…";
+      dialableFlagged(kind).then(async (people) => {
+        if (!people.length) {
+          // Distinguishes "nobody is flagged" from "nobody flagged has a
+          // number we can reach", which are different problems for the rep.
+          dialErr = `Nobody on ${label} has a number on file.`;
+          renderLists(); renderDial(); return;
+        }
+        listsOpen = false;
+        await Dial.openList(label);
+        await Dial.addMany(people, { phoneOnly: true });
+        Dial.start();
+        renderLists(); renderDial();
+      }).catch((err) => { renderLists(); fail(err); });
+      return;
+    }
     if (!l) return;
     if (act === "call") {
       // Open it AND start. Opening alone would close this sheet onto the same
@@ -2429,13 +2690,10 @@ document.addEventListener("input", (e) => {
   if (e.target.id === "adhocNote") adhocNote = e.target.value;
   if (e.target.id === "placeQ") {
     placeTerm = e.target.value;
-    // Re-rendered in place, then focus and caret restored -- the list has to
-    // narrow as the rep types, and rebuilding the input under them would end
-    // the typing after one letter.
-    const at = e.target.selectionStart;
+    // Only the results are re-rendered; the box the rep is typing in is left
+    // alone. No focus to restore, no caret to put back, and no scroll jump --
+    // see renderPlaces().
     renderPlaces();
-    const box = $("placeQ");
-    if (box) { box.focus(); try { box.setSelectionRange(at, at); } catch {} }
   }
 });
 

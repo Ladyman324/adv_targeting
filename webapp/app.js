@@ -39,7 +39,7 @@ const COMPARE = ["#12b39c", "#e0a53a", "#8079e0", "#e8615d", "#4aa3e0", "#9fc93c
 // of every deployed JSON path and byte. It changes for standalone shard
 // rebuilds too, and its leading date keeps the stale-build warning readable.
 // Do not edit it by hand.
-const DATA_VERSION = "20260822T034641Z-b6e82b13c94619a6";
+const DATA_VERSION = "20260822T034641Z-20e295e9d9c755f6";
 const dataUrl = file => `data/${file}?v=${DATA_VERSION}`;
 // ONE scale for every mark on the map. There used to be two, and they were not
 // comparable: buildings grew as 20 + 5.2*sqrt(n) and saturated at 56px by just
