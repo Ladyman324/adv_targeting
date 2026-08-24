@@ -66,9 +66,18 @@ def main() -> None:
 # bytes.
 #
 # At national zoom two offices a quarter-degree apart cannot be told apart, so
-# the offices collapse to a GRID of counts: 4,341 cells, 17 KB, visually the
-# same map. The firm dictionary rides along because the panel needs firm names
-# at every scope, and it is now 93% of what remains.
+# the offices collapse to a GRID of counts. The first-paint artifact carries no
+# firm dictionary: offices_national.json is the authoritative detail file and
+# already contains it. Shipping the same firms twice made almost all of the
+# opening payload irrelevant to the first paint.
+#
+# A cell stays separate by STATE, even when two states round to the same
+# quarter-degree coordinate. That lets the browser apply Continental U.S.
+# exactly rather than infer a jurisdiction from latitude/longitude. It also
+# carries two counts: every placement and placements at firms reporting ADV
+# Item 5.G(7). The latter matters because that filter is on by default; the old
+# grid displayed every firm until office detail arrived while claiming the
+# selecting-managers filter was active.
 #
 # The full office array is still written, and still fetched -- in the
 # background, after the map is already usable, so the national layer upgrades
@@ -77,16 +86,36 @@ def main() -> None:
 CELL = 0.25
 
 
+def build_national_view(national: dict) -> dict:
+    """Return the compact, filter-honest first-paint national payload.
+
+    Grid rows are ``[lat, lon, all_count, selecting_count, state_index]``.
+    ``selecting_count`` includes only offices whose firm reports ADV Item
+    5.G(7), the application's default national targeting filter.
+    """
+    grid: dict[tuple[int, float, float], list[int]] = defaultdict(
+        lambda: [0, 0]
+    )
+    firms = national["firms"]
+    for office in national["offices"]:
+        lon, lat, count, firm_index = office[:4]
+        state_index = office[6]
+        cell_lat = round(round(lat / CELL) * CELL, 3)
+        cell_lon = round(round(lon / CELL) * CELL, 3)
+        totals = grid[(state_index, cell_lat, cell_lon)]
+        totals[0] += count
+        if firms[firm_index][4]:
+            totals[1] += count
+
+    rows = [
+        [lat, lon, counts[0], counts[1], state_index]
+        for (state_index, lat, lon), counts in sorted(grid.items())
+    ]
+    return {"states": list(national["states"]), "grid": rows}
+
+
 def write_national_view(national: dict) -> None:
-    grid: dict[tuple, int] = defaultdict(int)
-    for lon, lat, n, *_rest in national["offices"]:
-        grid[(round(lat / CELL) * CELL, round(lon / CELL) * CELL)] += n
-    view = {
-        "firms": national["firms"],
-        "states": national["states"],
-        # [lat, lon, advisor placements in this cell]
-        "grid": [[round(lat, 3), round(lon, 3), n] for (lat, lon), n in grid.items()],
-    }
+    view = build_national_view(national)
     out = WEB / "national_view.json"
     temp = out.with_suffix(".json.tmp")
     temp.write_text(json.dumps(view, separators=(",", ":")), encoding="utf-8")

@@ -34,6 +34,17 @@ body{font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-se
 :root{--panel-w:420px;--filter-control-w:216px}
 #app{display:grid;grid-template-columns:var(--panel-w) 1fr;height:100vh;position:relative}
 #map{height:100vh;background:var(--panel-2)}
+.scope-loading{position:absolute;z-index:1240;top:64px;right:14px;
+  max-width:min(360px,calc(100vw - var(--panel-w) - 28px));
+  padding:9px 12px 9px 34px;border:1px solid rgba(255,255,255,.7);border-radius:999px;
+  color:#14201e;background:rgba(255,255,255,.94);box-shadow:var(--shadow);
+  font-size:12px;font-weight:700}
+.scope-loading::before{content:"";position:absolute;left:12px;top:50%;width:12px;height:12px;
+  margin-top:-7px;border:2px solid rgba(11,99,87,.25);border-top-color:var(--map-accent);
+  border-radius:50%;animation:scope-spin .7s linear infinite}
+body.scope-pending #map{cursor:progress}
+@keyframes scope-spin{to{transform:rotate(360deg)}}
+@media (prefers-reduced-motion:reduce){.scope-loading::before{animation:none}}
 
 #panel{background:var(--panel);border-right:1px solid var(--hair);display:flex;flex-direction:column;
   height:100vh;overflow-y:auto;overflow-x:hidden;overscroll-behavior:contain}
@@ -930,6 +941,7 @@ body{font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-se
 @media (max-width:760px){
   .stats-bar{left:12px;right:12px;width:min(780px,calc(100% - 24px))}
   .stat:nth-of-type(4){border-left:0;padding-left:0}
+  .scope-loading{top:64px;right:10px;max-width:calc(100vw - 20px)}
 }
 
 /* ===================== the dialer ======================================= *

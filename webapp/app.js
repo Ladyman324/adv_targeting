@@ -39,7 +39,7 @@ const COMPARE = ["#12b39c", "#e0a53a", "#8079e0", "#e8615d", "#4aa3e0", "#9fc93c
 // of every deployed JSON path and byte. It changes for standalone shard
 // rebuilds too, and its leading date keeps the stale-build warning readable.
 // Do not edit it by hand.
-const DATA_VERSION = "20260822T034641Z-20e295e9d9c755f6";
+const DATA_VERSION = "20260822T034641Z-b795708e7ba11141";
 const dataUrl = file => `data/${file}?v=${DATA_VERSION}`;
 // ONE scale for every mark on the map. There used to be two, and they were not
 // comparable: buildings grew as 20 + 5.2*sqrt(n) and saturated at 56px by just
@@ -124,6 +124,18 @@ let OWNER_ROLES = null;                         // advisor CRD -> Schedule A rol
 let BARRONS = null;                             // advisor CRD -> Barron's rankings
 let FORBES = null;                              // advisor CRD -> Forbes rankings
 let CONTACTS = null;                            // advisor CRD -> phone and email
+const SUPPORT = {
+  geo:"idle", meta:"idle", owner:"idle", barrons:"idle",
+  forbes:"idle", act:"idle", territories:"idle",
+};
+const SUPPORT_ERROR = {};
+let regionalSupportPromise = null;
+function supportStart(key){ SUPPORT[key] = "loading"; delete SUPPORT_ERROR[key]; }
+function supportReady(key){ SUPPORT[key] = "ready"; delete SUPPORT_ERROR[key]; }
+function supportFailed(key, err){
+  SUPPORT[key] = "failed";
+  SUPPORT_ERROR[key] = (err && err.message) || String(err || "unavailable");
+}
 
 let scope = "US";                   // "US" or a two-letter state code
 let NAT = null;                     // firms:[[name,crd,score,raum_m,selects,equity_m,funds_m,mapped_advisors]], offices:[[lon,lat,n,fi,m,nf,si,oi]]
@@ -227,7 +239,13 @@ function relevantAumForFirm(crd, visible, placements=false){
 }
 
 // ---- map ----
-const map = L.map("map", { preferCanvas: true, zoomAnimation: false }).setView([32.9, -83.4], 7);
+// Start where the first useful view will be. The old Georgia camera caused a
+// visible jump and fetched tiles discarded as soon as national data arrived.
+const map = L.map("map", { preferCanvas:true, zoomAnimation:false });
+if (continentalOnly) map.setView([39.5, -96.5], 4);
+else map.fitBounds([[17, -178], [72, -64]], {
+  padding:[12,12], maxZoom:3, animate:false,
+});
 L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
   maxZoom: 19, attribution: "© OpenStreetMap contributors",
 }).addTo(map);
@@ -332,6 +350,10 @@ function addMarkerBatches(target, markers, token, start=0, transition=null){
   const end = Math.min(start + MARKER_BATCH_SIZE, markers.length);
   target.addLayers(markers.slice(start, end));
   if (start === 0 && transition){
+    // The first batch is now attached in the same task that removes the old
+    // national layer. Clear the busy treatment before async callers can issue
+    // a follow-up redraw that would supersede this batch's paint callback.
+    clearScopePending(transition.request);
     afterNextPaint(() => {
       if (!activeTransitionBatch(target, token, transition)) return;
       const elapsedMs = performance.now() - transition.startedAt;
@@ -388,7 +410,28 @@ const scopeSel = document.getElementById("scope");
 const continentalBox = document.getElementById("continentalOnly");
 const noticeEl = document.getElementById("notice");
 const noticeText = document.getElementById("noticeText");
+const scopeLoadingEl = document.getElementById("scopeLoading");
 let noticeTimer = null;
+let pendingScope = null; // { request, target }
+
+function paintScopePending(target, request){
+  pendingScope = { request, target };
+  scopeLoadingEl.textContent = `Loading ${scopeLabel(target)} — keeping the current map visible…`;
+  scopeLoadingEl.hidden = false;
+  document.body.classList.add("scope-pending");
+  map.getContainer().setAttribute("aria-busy", "true");
+  scopeSel.setAttribute("aria-busy", "true");
+}
+
+function clearScopePending(request){
+  if (!pendingScope || pendingScope.request !== request) return;
+  pendingScope = null;
+  scopeLoadingEl.hidden = true;
+  document.body.classList.remove("scope-pending");
+  map.getContainer().removeAttribute("aria-busy");
+  scopeSel.removeAttribute("aria-busy");
+  scheduleSupportLoads();
+}
 
 // Sidebar tooltips are portalled to the viewport so the panel's scroll and
 // overflow boundaries can never crop their content.
@@ -528,13 +571,12 @@ function setLoading(){ countEl.hidden = true; }
 
 /* THE NATIONAL VIEW LOADS IN TWO PARTS.
  *
- * national_view.json is 249 KB: the firm dictionary, the state list, and a
- * 0.25-degree GRID of advisor counts. That is enough to draw the national heat
- * map and fill the scope picker, so the map is usable as soon as it lands.
+ * national_view.json is a compact, state-aware grid with both all-placement
+ * and selecting-manager counts. That is enough to draw an honest national
+ * heat map and fill the scope picker, so the map is usable as soon as it lands.
  *
- * offices_national.json -- 1,453 KB, 125,183 individual offices -- follows in
- * the background once the map is on screen. The layer then upgrades from grid
- * cells to individual buildings.
+ * The larger firm/office detail payload follows in the background once the map
+ * is on screen. The layer then upgrades from grid cells to buildings.
  *
  * The split is measured, not assumed. Fetching the office array cost 7,078ms
  * cold; PARSING it cost 12ms and building both index Maps from it cost 4.6ms.
@@ -548,6 +590,8 @@ function setLoading(){ countEl.hidden = true; }
  */
 let NAT_DETAIL_READY = false;
 let natDetailPromise = null;
+let NAT_DETAIL_ERROR = "";
+let NATIONAL_DETAIL_REASON = "";
 
 function loadNational(){
   setLoading();
@@ -568,14 +612,17 @@ function loadNational(){
    * emails or relationship data. A blanket one-year immutable policy was
    * rejected for that reason.
    */
-  return fetch(dataUrl("national_view.json")).then(r => r.json()).then(j => {
-    if (!j.firms.every(firm => firm.length >= 8))
-      throw new Error("National firm data is missing opportunity-pool fields; refresh the generated artifact.");
+  return fetch(dataUrl("national_view.json")).then(r => {
+    if (!r.ok) throw new Error(`national view ${r.status}`);
+    return r.json();
+  }).then(j => {
+    if (!Array.isArray(j.states) || !Array.isArray(j.grid))
+      throw new Error("National view data is incomplete; refresh the generated artifact.");
     // `offices` starts EMPTY and is filled by loadNationalDetail(). Every
     // consumer of NAT.offices must check NAT_DETAIL_READY before reporting a
     // count, or it will state "0 offices in view" while the file is in flight.
-    NAT = { firms: j.firms, states: j.states, grid: j.grid || [], offices: [] };
-    NAT_FIRM_BY_CRD = new Map(j.firms.map(firm => [String(firm[1]), firm]));
+    NAT = { firms: [], states: j.states, grid: j.grid, offices: [] };
+    NAT_FIRM_BY_CRD = new Map();
     NAT_PLACEMENTS_BY_CRD = new Map();
     const gT = document.createElement("optgroup"); gT.label = "Sales territories";
     Object.keys(TERRITORIES).sort().forEach(name => {
@@ -603,14 +650,24 @@ function loadNational(){
  *
  * Idempotent: a rep who selects a firm during the wait triggers the same
  * promise rather than a second 1.45 MB download. */
-function loadNationalDetail(){
+function loadNationalDetail(signal=null, quiet=false){
+  if (NAT_DETAIL_READY) return Promise.resolve(NAT);
   if (natDetailPromise) return natDetailPromise;
-  natDetailPromise = fetch(dataUrl("offices_national.json"))
-    .then(r => r.ok ? r.json() : null)
-    .catch(() => null)
+  NAT_DETAIL_ERROR = "";
+  natDetailPromise = fetch(dataUrl("offices_national.json"), { signal })
+    .then(r => {
+      if (!r.ok) throw new Error(`national office detail ${r.status}`);
+      return r.json();
+    })
     .then(j => {
-      if (!j || !NAT) return;
+      if (!NAT || !Array.isArray(j.firms) || !Array.isArray(j.states) ||
+          !Array.isArray(j.offices) || j.states.length !== NAT.states.length ||
+          j.states.some((state, i) => state !== NAT.states[i]) ||
+          !j.firms.every(firm => firm.length >= 8))
+        throw new Error("National office detail does not match the compact national view.");
+      NAT.firms = j.firms;
       NAT.offices = j.offices;
+      NAT_FIRM_BY_CRD = new Map(j.firms.map(firm => [String(firm[1]), firm]));
       // Per-firm placement totals need every office, so they are built here
       // rather than at boot. 4.6ms for all 125,183 of them.
       NAT_PLACEMENTS_BY_CRD = new Map();
@@ -619,19 +676,32 @@ function loadNationalDetail(){
         NAT_PLACEMENTS_BY_CRD.set(crd, (NAT_PLACEMENTS_BY_CRD.get(crd) || 0) + office[2]);
       });
       NAT_DETAIL_READY = true;
+      NAT_DETAIL_ERROR = "";
+      NATIONAL_DETAIL_REASON = "";
       // Redraw only if the national layer is what is on screen; a rep who has
       // already moved into a state should not have their view rebuilt.
-      if (scope === "US") renderAll(false);
-      else refreshPanel();
-    });
+      if (scope === "US" && !pendingScope) renderAll(false);
+      else if (scope !== "US") refreshPanel();
+      return NAT;
+    })
+    .catch(err => {
+      if (err && err.name === "AbortError") throw err;
+      NAT_DETAIL_ERROR = err.message || String(err);
+      if (!quiet)
+        showNotice(`National office detail could not be loaded (${NAT_DETAIL_ERROR}).`);
+      if (scope === "US" && !pendingScope) refreshPanel();
+      return null;
+    })
+    .finally(() => { natDetailPromise = null; });
   return natDetailPromise;
 }
 
 function loadOwnerRoles(){
+  supportStart("owner");
   return fetch(dataUrl("owner_roles.json"))
-    .then(r => r.ok ? r.json() : { titles:[], roles:{} })
-    .then(j => { OWNER_ROLES = j; })
-    .catch(() => { OWNER_ROLES = { titles:[], roles:{} }; });
+    .then(r => { if (!r.ok) throw new Error(`owner roles ${r.status}`); return r.json(); })
+    .then(j => { OWNER_ROLES = j; supportReady("owner"); })
+    .catch(err => { OWNER_ROLES = null; supportFailed("owner", err); });
 }
 
 // roles this advisor holds, decoded; [] when they hold none
@@ -647,10 +717,11 @@ function ownerRolesFor(advisorId){
 // Loaded eagerly for the same reason as owner roles: the Advanced toggle runs
 // per pin and must not pass everything while a fetch is in flight.
 function loadBarrons(){
+  supportStart("barrons");
   return fetch(dataUrl("barrons.json"))
-    .then(r => r.ok ? r.json() : { labels:{}, order:[], advisors:{} })
-    .then(j => { BARRONS = j; })
-    .catch(() => { BARRONS = { labels:{}, order:[], advisors:{} }; });
+    .then(r => { if (!r.ok) throw new Error(`Barron's rankings ${r.status}`); return r.json(); })
+    .then(j => { BARRONS = j; supportReady("barrons"); })
+    .catch(err => { BARRONS = null; supportFailed("barrons", err); });
 }
 
 // Rankings for this advisor, already sorted by scarcity -- entry 0 is the one
@@ -698,10 +769,11 @@ function barronsTag(advisorId){
 // exact -- roughly one badge in 250 is the wrong person. Every entry therefore
 // carries how it was established, and the UI must keep the two apart.
 function loadForbes(){
+  supportStart("forbes");
   return fetch(dataUrl("forbes.json"))
-    .then(r => r.ok ? r.json() : { advisors:{}, team_assets:{}, tiers:{} })
-    .then(j => { FORBES = j; })
-    .catch(() => { FORBES = { advisors:{}, team_assets:{}, tiers:{} }; });
+    .then(r => { if (!r.ok) throw new Error(`Forbes rankings ${r.status}`); return r.json(); })
+    .then(j => { FORBES = j; supportReady("forbes"); })
+    .catch(err => { FORBES = null; supportFailed("forbes", err); });
 }
 
 function forbesFor(advisorId){
@@ -789,12 +861,13 @@ let contactsPromise = null;
  * contact file and the call log, to solve a hosting problem. Sharding keeps it
  * same-origin.
  */
-function loadContacts(){
+function loadContacts(signal=null){
+  if (CONTACTS_READY) return Promise.resolve(CONTACTS);
   if (contactsPromise) return contactsPromise;
-  contactsPromise = fetch(dataUrl("contacts_base.json"))
+  contactsPromise = fetch(dataUrl("contacts_base.json"), { signal })
     .then(r => { if (!r.ok) throw new Error(`contacts_base ${r.status}`); return r.json(); })
     .then(base => Promise.all((base.shards || []).map(name =>
-        fetch(dataUrl(name))
+        fetch(dataUrl(name), { signal })
           .then(r => { if (!r.ok) throw new Error(`${name} ${r.status}`); return r.json(); })))
       .then(parts => {
         const advisors = {};
@@ -802,6 +875,10 @@ function loadContacts(){
         return { ...base, advisors };
       }))
     .catch(err => {
+      if (err && err.name === "AbortError"){
+        contactsPromise = null;
+        throw err;
+      }
       /* NOT an empty advisor set.
        *
        * Falling back to {advisors:{}} set CONTACTS_READY and let the UI answer
@@ -853,12 +930,19 @@ function contactFor(advisorId){
 // this across advisors; act_assets.json carries de-duplicated firm figures in
 // its `totals` block for that.
 let ACT_ASSETS = null;
+let ACT_ASSETS_ERROR = "";
 
 function loadActAssets(){
+  supportStart("act");
+  ACT_ASSETS_ERROR = "";
   return fetch(dataUrl("act_assets.json"))
-    .then(r => r.ok ? r.json() : { advisors:{} })
-    .then(j => { ACT_ASSETS = j; })
-    .catch(() => { ACT_ASSETS = { advisors:{} }; });
+    .then(r => { if (!r.ok) throw new Error(`EIC assets ${r.status}`); return r.json(); })
+    .then(j => { ACT_ASSETS = j; supportReady("act"); })
+    .catch(err => {
+      ACT_ASSETS = null;
+      ACT_ASSETS_ERROR = err.message || String(err);
+      supportFailed("act", err);
+    });
 }
 
 function bookFor(advisorId){
@@ -913,10 +997,11 @@ function teamBook(crds){
 let SALES_TERRITORY = null;
 
 function loadTerritories(){
+  supportStart("territories");
   return fetch(dataUrl("territories.json"))
-    .then(r => r.ok ? r.json() : null)
-    .then(j => { SALES_TERRITORY = j; })
-    .catch(() => { SALES_TERRITORY = null; });
+    .then(r => { if (!r.ok) throw new Error(`sales territories ${r.status}`); return r.json(); })
+    .then(j => { SALES_TERRITORY = j; supportReady("territories"); })
+    .catch(err => { SALES_TERRITORY = null; supportFailed("territories", err); });
 }
 
 function territoryFor(state){
@@ -3354,13 +3439,51 @@ document.addEventListener("input", e => {
 });
 
 function loadGeo(){
-  return fetch(dataUrl("geo_index.json")).then(r => r.json()).then(j => { GEO = j; });
+  supportStart("geo");
+  return fetch(dataUrl("geo_index.json"))
+    .then(r => { if (!r.ok) throw new Error(`location index ${r.status}`); return r.json(); })
+    .then(j => { GEO = j; supportReady("geo"); })
+    .catch(err => { GEO = null; supportFailed("geo", err); });
 }
 
 function loadMeta(){
-  return fetch(dataUrl("metadata.json")).then(r => r.ok ? r.json() : null).then(j => {
-    META = j; renderMetadata();
-  }).catch(() => { document.getElementById("dataMeta").textContent = "Metadata unavailable."; });
+  supportStart("meta");
+  return fetch(dataUrl("metadata.json"))
+    .then(r => { if (!r.ok) throw new Error(`metadata ${r.status}`); return r.json(); })
+    .then(j => { META = j; supportReady("meta"); renderMetadata(); })
+    .catch(err => {
+      META = null;
+      supportFailed("meta", err);
+      document.getElementById("dataMeta").textContent = "Metadata unavailable.";
+    });
+}
+
+function loadRegionalSupport(){
+  if (!regionalSupportPromise){
+    regionalSupportPromise = Promise.all([
+      PERF.time("data:geo", loadGeo), PERF.time("data:meta", loadMeta),
+      PERF.time("data:ownerRoles", loadOwnerRoles), PERF.time("data:barrons", loadBarrons),
+      PERF.time("data:forbes", loadForbes), PERF.time("data:actAssets", loadActAssets),
+      PERF.time("data:territories", loadTerritories),
+    ]).then(() => {
+      syncOwnerUI();
+      syncRankedUI();
+      syncContactSwitches();
+      if (searchBox.value.trim()) renderLocSuggest();
+      if (scope === "US" && !pendingScope) renderEicNational();
+      return SUPPORT;
+    });
+  }
+  return regionalSupportPromise;
+}
+
+function failedSupportLabels(){
+  const rows = [];
+  if (SUPPORT.owner === "failed") rows.push("ownership roles");
+  if (SUPPORT.barrons === "failed" || SUPPORT.forbes === "failed") rows.push("advisor rankings");
+  if (SUPPORT.act === "failed") rows.push("EIC assets");
+  if (SUPPORT.territories === "failed") rows.push("sales assignments");
+  return rows;
 }
 
 // disclosure labels in the same bit order as export_geojson.py's DRP dict
@@ -3402,11 +3525,11 @@ function rehydrate(c, sourceState=""){
   return out;
 }
 
-async function fetchScopeJson(st, metricPrefix, missingOk=false){
+async function fetchScopeJson(st, metricPrefix, missingOk=false, signal=null){
   const downloadStart = performance.now();
   let response, text;
   try {
-    response = await fetch(dataUrl(`pins_${st}.json`));
+    response = await fetch(dataUrl(`pins_${st}.json`), { signal });
     if (!response.ok){
       if (missingOk) return {
         data: null, downloadMs: performance.now() - downloadStart,
@@ -3415,6 +3538,13 @@ async function fetchScopeJson(st, metricPrefix, missingOk=false){
       throw new Error(`no data for ${st}`);
     }
     text = await response.text();
+  } catch (err) {
+    if (err && err.name === "AbortError") throw err;
+    if (missingOk) return {
+      data:null, downloadMs:performance.now() - downloadStart,
+      parseMs:0, downloadedAt:performance.now(),
+    };
+    throw err;
   } finally {
     PERF.add(`${metricPrefix}:download`, performance.now() - downloadStart);
   }
@@ -3432,9 +3562,8 @@ async function fetchScopeJson(st, metricPrefix, missingOk=false){
   };
 }
 
-async function loadState(st){
-  setLoading();
-  const result = await fetchScopeJson(st, `scope:${st}`);
+async function loadState(st, signal=null){
+  const result = await fetchScopeJson(st, `scope:${st}`, false, signal);
   const features = PERF.timeSync(`scope:${st}:rehydrate`,
     () => rehydrate(result.data, st));
   return {
@@ -3445,13 +3574,12 @@ async function loadState(st){
 
 // A territory is several state files stitched into one pin set, so every
 // advisor-level filter works across the whole footprint unchanged.
-async function loadTerritory(name){
+async function loadTerritory(name, signal=null){
   const sts = TERRITORIES[name] || [];
-  setLoading();
   const metric = `scope:T:${name}`;
   const startedAt = performance.now();
   const loaded = await Promise.all(sts.map(st =>
-    fetchScopeJson(st, `${metric}/${st}`, true)));
+    fetchScopeJson(st, `${metric}/${st}`, true, signal)));
   // Downloads overlap, so elapsed wall time and JSON.parse CPU are both useful;
   // summing download times would exaggerate what the rep actually waited for.
   const lastDownload = loaded.reduce((latest, row) =>
@@ -3541,50 +3669,97 @@ const dialReady = PERF.time("dial.init", () => Dial.init()).then(() => {
   PERF.mark("dialer-usable");
 });
 
-/* contacts.json is NOT in this list. It is started below, after the map is on
- * screen, so it neither delays first paint nor competes for the connection
- * while the eight datasets the national view actually needs come down. */
-Promise.all([
-  PERF.time("data:national", loadNational), PERF.time("data:geo", loadGeo),
-  PERF.time("data:meta", loadMeta), PERF.time("data:ownerRoles", loadOwnerRoles),
-  PERF.time("data:barrons", loadBarrons), PERF.time("data:forbes", loadForbes),
-  PERF.time("data:actAssets", loadActAssets),
-  PERF.time("data:territories", loadTerritories),
-]).then(() => {
-  PERF.mark("data-ready");
+let supportTimer = null;
+let backgroundIdleHandle = null;
+let backgroundIdleKind = "";
+let backgroundController = null;
+let backgroundRunning = false;
+const backgroundComplete = () =>
+  (NAT_DETAIL_READY || NAT_DETAIL_ERROR) && (CONTACTS_READY || CONTACTS_ERROR);
+
+function cancelScheduledBackground(){
+  if (supportTimer != null){
+    clearTimeout(supportTimer);
+    supportTimer = null;
+  }
+  if (backgroundIdleHandle != null){
+    if (backgroundIdleKind === "idle" && window.cancelIdleCallback)
+      cancelIdleCallback(backgroundIdleHandle);
+    else clearTimeout(backgroundIdleHandle);
+    backgroundIdleHandle = null;
+    backgroundIdleKind = "";
+  }
+  if (backgroundController){
+    backgroundController.abort();
+    backgroundController = null;
+  }
+}
+
+function runBackgroundLoads(){
+  backgroundIdleHandle = null;
+  backgroundIdleKind = "";
+  if (pendingScope || backgroundRunning || backgroundComplete()) return;
+  backgroundRunning = true;
+  const controller = new AbortController();
+  backgroundController = controller;
+  const signal = controller.signal;
+  Promise.resolve()
+    .then(() => (NAT_DETAIL_READY || NAT_DETAIL_ERROR)
+      ? NAT : PERF.time("data:nationalDetail", () => loadNationalDetail(signal, true)))
+    .then(() => {
+      if (signal.aborted || pendingScope)
+        throw new DOMException("Superseded", "AbortError");
+      return (CONTACTS_READY || CONTACTS_ERROR)
+        ? CONTACTS : PERF.time("data:contacts", () => loadContacts(signal));
+    })
+    .catch(err => { if (!err || err.name !== "AbortError") console.error(err); })
+    .finally(() => {
+      if (backgroundController === controller) backgroundController = null;
+      backgroundRunning = false;
+      if (!pendingScope) scheduleBackgroundLoads();
+    });
+}
+
+function scheduleBackgroundLoads(){
+  if (pendingScope || backgroundRunning || backgroundIdleHandle != null || backgroundComplete())
+    return;
+  if (window.requestIdleCallback){
+    backgroundIdleKind = "idle";
+    backgroundIdleHandle = requestIdleCallback(runBackgroundLoads, { timeout:1500 });
+  } else {
+    backgroundIdleKind = "timeout";
+    backgroundIdleHandle = setTimeout(runBackgroundLoads, 250);
+  }
+}
+
+function scheduleSupportLoads(){
+  if (pendingScope || supportTimer != null) return;
+  if (regionalSupportPromise){
+    regionalSupportPromise.finally(scheduleBackgroundLoads);
+    return;
+  }
+  // Give an immediate scope choice a clean network lane. The regional view can
+  // render without enrichment; its dependent filters stay disabled meanwhile.
+  supportTimer = setTimeout(() => {
+    supportTimer = null;
+    if (pendingScope) return;
+    loadRegionalSupport().finally(scheduleBackgroundLoads);
+  }, 600);
+}
+
+/* Only the compact national grid is on the first-paint critical path. Every
+ * enrichment either fills optional UI or powers a control that remains
+ * disabled until its data is ready. */
+PERF.time("data:national", loadNational).then(() => {
+  PERF.mark("national-data-ready");
   applyScopeUI();
   PERF.time("render:first", () => renderAll(true));
   PERF.mark("map-usable");
   PERF.usableAt = performance.now();
   console.info("[perf] map usable — run PERF.report() for the breakdown");
-  /* Now fetch the contact detail, in a task after this one so the browser has
-   * actually painted before an 8.95 MB response starts competing for the
-   * connection. requestIdleCallback where it exists; a plain timeout is the
-   * fallback, not a preference. */
-  /* Everything the map does NOT need to draw, fetched after it has drawn.
-   *
-   * SEQUENTIAL, not parallel. This origin serves roughly 100 kB/s per request
-   * and slows further under contention -- the whole reason the boot payload had
-   * to shrink -- so three concurrent background downloads would take the same
-   * total time while making each other slower, and would compete with a rep
-   * switching into a state. One at a time, in the order they become useful.
-   *
-   *   1. office detail   the national layer upgrades from grid cells to
-   *                      individual buildings; the KPI counts stop reading "—"
-   *   2. contacts        needed when a card is opened
-   *   3. advisor index   needed when somebody searches nationally, which used
-   *                      to mean waiting 25-30 SECONDS at the moment of use for
-   *                      a 6.9 MB file. Fetching it here does not make it
-   *                      smaller, it makes the wait happen while nobody is
-   *                      waiting. A search that starts mid-flight joins the
-   *                      same promise rather than queueing a second copy.
-   */
-  const background = () => PERF.time("data:nationalDetail", loadNationalDetail)
-    .then(() => PERF.time("data:contacts", loadContacts))
-    .then(() => PERF.time("data:advisorIndex", loadAdvisorIndex))
-    .catch(() => { /* each loader already handles its own failure */ });
-  if (window.requestIdleCallback) requestIdleCallback(background, { timeout: 1500 });
-  else setTimeout(background, 250);
+  // A real paint precedes any enrichment or contact traffic. advisor_index is
+  // intentionally absent: explicit search/card intent owns that large fetch.
+  afterNextPaint(scheduleSupportLoads);
   openFirmFromHash();
   searchFromHash();
   dialReady.then(() => {
@@ -3599,7 +3774,7 @@ Promise.all([
     if (want && want !== scope && !location.hash) switchScope(want);
   });
 }).catch(err => {
-  setBusy("Failed to load data.");
+  setBusy("Failed to load national data.");
   console.error(err);
 });
 
@@ -3756,8 +3931,15 @@ async function renderDetailEntry(entry, push=false){
 async function goBackDetails(){
   const prior = detailsHistory.pop();
   if (!prior) return;
+  const current = detailsCurrent;
+  if (prior.map.scope !== scope){
+    const outcome = await switchScope(prior.map.scope);
+    if (!outcome || outcome.status !== "applied" || detailsCurrent !== current){
+      detailsHistory.push(prior);
+      return;
+    }
+  }
   detailsCurrent = null;
-  if (prior.map.scope !== scope) await switchScope(prior.map.scope);
   if (prior.map.filters) restoreAdvisorFilters(prior.map.filters);
   focusedAdvisorId = prior.map.focusedAdvisorId || null;
   focusedAdvisorLabel = prior.map.focusedAdvisorLabel || "";
@@ -4149,6 +4331,18 @@ function openFirmOverview(crd, updateHistory=true, detailPush=true){
   document.getElementById("firmOverviewMeta").textContent = `CRD ${crd}`;
   document.getElementById("firmOverviewBody").innerHTML = `<div class="profile-empty">Loading firm details…</div>`;
   if (updateHistory) syncDetailHash({ type:"firm", crd });
+  // The compact first paint carries no firm-office destinations. Explicitly
+  // opening a firm is intent to fetch them; repaint the still-open profile when
+  // they arrive so destination buttons do not remain temporarily absent.
+  if (!NAT_DETAIL_READY){
+    loadNationalDetail(null, false).then(() => {
+      if (!NAT_DETAIL_READY || openFirmCrd !== crd) return;
+      loadFirmProfiles().then(data => {
+        if (openFirmCrd === crd && data.profiles[crd])
+          renderFirmOverview(crd, data.profiles[crd]);
+      }).catch(() => {});
+    });
+  }
   return loadFirmProfiles().then(data => {
     if (openFirmCrd !== crd) return;
     const p = data.profiles[crd];
@@ -4231,6 +4425,11 @@ function applyScopeUI(){
   const advNote = document.getElementById("advisorFilterNote");
   if (advNote) advNote.hidden = !national;
   document.querySelectorAll("[data-national-only]").forEach(el => { el.hidden = !national; });
+  // The generic scope toggle above must not re-enable a filter whose deferred
+  // dataset is still loading or failed.
+  syncOwnerUI();
+  syncRankedUI();
+  syncContactSwitches();
   syncTargetingUI();
   document.title = `Advisor Map — ${scopeLabel(scope)}`;
 }
@@ -4275,46 +4474,80 @@ function resetForScopeChange(){
 // single scope entry point: US, a state, or "T:<territory>". panTo optionally
 // recentres after the data is in (used by location search).
 let scopeRequest = 0;
-function switchScope(next, panTo){
+let scopeController = null;
+async function switchScope(next, panTo){
+  if (next === scope && !pendingScope)
+    return { status:"applied", scope:next, request:scopeRequest };
   const request = ++scopeRequest;
-  const transition = { scope: next, request, startedAt: performance.now() };
-  PERF.signal("scope:transition-start", { scope: next, request });
-  markerBatchToken++;                 // cancel marker work belonging to the prior scope
+  if (scopeController) scopeController.abort();
+  cancelScheduledBackground();
+  const controller = new AbortController();
+  scopeController = controller;
+  const transition = { scope:next, request, startedAt:performance.now() };
+  PERF.signal("scope:transition-start", { scope:next, request });
+  paintScopePending(next, request);
+  markerBatchToken++;
   map.stop();
   if (typeof cluster._animationEnd === "function") cluster._animationEnd();
-  if (OUTSIDE_CONTINENTAL.has(next) && continentalOnly){
-    setContinentalOnly(false, false);
-    showNotice(`Continental U.S. only was turned off to show ${scopeLabel(next)}.`);
-  }
-  resetForScopeChange();
-  const finish = (missing=[]) => {
-    if (request !== scopeRequest) return;
-    scope = next; scopeSel.value = next;
-    applyScopeUI();
-    // when panning to a searched location, skip the fit-to-scope so it does not
-    // override the pan and drop us back at the whole state
-    renderAll(!panTo, next === "US" ? null : transition);
-    if (panTo) map.setView(panTo, 11, { animate: false });
-    scopeNotice = missing.length ? `Missing jurisdiction data: ${missing.join(", ")}.` : "";
-    if (next === "US") afterNextPaint(() => {
-      if (request !== scopeRequest) return;
-      const elapsedMs = performance.now() - transition.startedAt;
-      PERF.add("scope:US:to national layer painted", elapsedMs);
-      PERF.signal("scope:transition-settled", {
-        scope: next, request, elapsedMs, kind: "national",
-      });
+
+  const settleNationalAfterPaint = () => afterNextPaint(() => {
+    if (!pendingScope || pendingScope.request !== request || request !== scopeRequest) return;
+    const elapsedMs = performance.now() - transition.startedAt;
+    PERF.add("scope:US:to national layer painted", elapsedMs);
+    PERF.signal("scope:transition-settled", {
+      scope:next, request, elapsedMs, kind:"national",
     });
-  };
-  scopeNotice = "";
-  if (next === "US"){ ALL = []; finish(); return Promise.resolve(); }
-  const load = next.startsWith("T:") ? loadTerritory(next.slice(2)) : loadState(next);
-  return load.then(result => {
-    if (request !== scopeRequest) return;
-    ALL = result.features; buildAddrIndex(); finish(result.missing);
-  }).catch(err => {
-    if (request !== scopeRequest) return;
-    setBusy(`No data for ${scopeLabel(next)}.`); console.error(err);
+    clearScopePending(request);
   });
+
+  try {
+    let result = { features:[], missing:[] };
+    if (next !== "US"){
+      result = await (next.startsWith("T:")
+        ? loadTerritory(next.slice(2), controller.signal)
+        : loadState(next, controller.signal));
+    }
+    if (request !== scopeRequest)
+      return { status:"superseded", scope:next, request };
+
+    // Destructive UI changes happen only after data has arrived. A failed
+    // request therefore leaves the current map, filters, lasso, and selector.
+    resetForScopeChange();
+    if (OUTSIDE_CONTINENTAL.has(next) && continentalOnly){
+      setContinentalOnly(false, false);
+      showNotice(`Continental U.S. only was turned off to show ${scopeLabel(next)}.`);
+    }
+    ALL = next === "US" ? [] : result.features;
+    if (next !== "US") buildAddrIndex();
+    scope = next;
+    scopeSel.value = next;
+    const failures = failedSupportLabels();
+    const notes = [];
+    if (result.missing.length)
+      notes.push(`Missing jurisdiction data: ${result.missing.join(", ")}.`);
+    if (failures.length)
+      notes.push(`Unavailable enrichment: ${failures.join(", ")}.`);
+    scopeNotice = notes.join(" ");
+    applyScopeUI();
+    renderAll(!panTo, next === "US" ? null : transition);
+    if (panTo) map.setView(panTo, 11, { animate:false });
+    if (failures.length)
+      showNotice(`Some enrichment is unavailable: ${failures.join(", ")}. Affected filters remain disabled.`);
+    if (next === "US") settleNationalAfterPaint();
+    return { status:"applied", scope:next, request, missing:result.missing };
+  } catch (err) {
+    if (err && err.name === "AbortError")
+      return { status:"superseded", scope:next, request };
+    if (request === scopeRequest){
+      scopeSel.value = scope;
+      clearScopePending(request);
+      showNotice(`Could not load ${scopeLabel(next)}. The current map was kept.`);
+      console.error(err);
+    }
+    return { status:"failed", scope:next, request, error:err };
+  } finally {
+    if (scopeController === controller) scopeController = null;
+  }
 }
 
 scopeSel.addEventListener("change", () => switchScope(scopeSel.value));
@@ -4347,7 +4580,7 @@ function locSuggest(q){
     if (ab === up || nm.toUpperCase().startsWith(up))
       out.push({ label: nm, tag: ab, sub:locationSub(ab), scopeVal:locationScope(ab) });
   }
-  if (/^\d+$/.test(q)){
+  if (GEO && /^\d+$/.test(q)){
     for (const z in GEO.zips){
       if (!z.startsWith(q)) continue;
       const v = GEO.zips[z];
@@ -4355,7 +4588,7 @@ function locSuggest(q){
                  scopeVal:locationScope(v[0]), pan: [v[1], v[2]] });
       if (out.length > 20) break;
     }
-  } else if (up.length >= 2){
+  } else if (GEO && up.length >= 2){
     const ch = [];
     for (const c in GEO.cities){
       if (!c.startsWith(up)) continue;
@@ -4371,30 +4604,39 @@ function locSuggest(q){
 
 function renderLocSuggest(){
   const q = searchBox.value.trim();
-  if (!q || !GEO){ locOut.hidden = true; locOut.innerHTML = ""; locSug = []; return; }
+  if (!q){ locOut.hidden = true; locOut.innerHTML = ""; locSug = []; return; }
   locSug = locSuggest(q);
+  const geoWaiting = !GEO && SUPPORT.geo !== "failed";
+  const geoStatus = !GEO && (/^\d{1,5}$/.test(q) || /^[a-z .'-]{2,}$/i.test(q))
+    ? `<p class="hint">${geoWaiting
+        ? "City and ZIP search is still loading; state search already works."
+        : "City and ZIP search is unavailable; state search still works."}</p>`
+    : "";
   locOut.hidden = false;
-  if (!locSug.length){
+  if (!locSug.length && !geoStatus){
     locOut.innerHTML = ""; locOut.hidden = true;
     return;
   }
-  locOut.innerHTML = `<p class="result-label">Locations</p>` + locSug.map((s, i) =>
+  const results = locSug.length ? `<p class="result-label">Locations</p>` + locSug.map((s, i) =>
     `<button class="lres" data-i="${i}">${s.label}<b class="lst">${s.tag}</b>` +
-    `${s.sub ? `<span class="sub">${s.sub}</span>` : ""}</button>`).join("");
+    `${s.sub ? `<span class="sub">${s.sub}</span>` : ""}</button>`).join("") : "";
+  locOut.innerHTML = results + geoStatus;
   locOut.querySelectorAll(".lres").forEach(b =>
     b.addEventListener("click", () => pickLoc(locSug[+b.dataset.i])));
 }
 
-function pickLoc(s){
+async function pickLoc(s){
   if (!s) return;
+  const outcome = await switchScope(s.scopeVal, s.pan);
+  if (!outcome || outcome.status !== "applied" || scope !== s.scopeVal) return;
   clearSearch();
   searchBox.blur();
   focusedAdvisorId = null; focusedAdvisorLabel = "";
   if (OUTSIDE_CONTINENTAL.has(s.tag) && continentalOnly){
     setContinentalOnly(false, false);
+    redraw(false);
     showNotice(`Continental U.S. only was turned off to show ${s.label}, ${s.tag}.`);
   }
-  switchScope(s.scopeVal, s.pan);
 }
 
 
@@ -4640,6 +4882,7 @@ function passesQuality(p){
 // where it matters least -- but it is a blind spot, hence the note in the UI.
 function passesOwner(p){
   if (!ownerOnly) return true;
+  if (SUPPORT.owner !== "ready") return true;
   return ownerRolesFor(p.id).some(r => String(r.firmCrd) === String(p.fc));
 }
 // Barron's and Forbes together, deliberately. From a filtering point of view
@@ -4651,6 +4894,7 @@ function passesOwner(p){
 // follows the person, so it passes on any pin for that CRD.
 function passesRanked(p){
   if (!rankedOnly) return true;
+  if (SUPPORT.barrons !== "ready" || SUPPORT.forbes !== "ready") return true;
   return barronsFor(p.id).length > 0 || forbesFor(p.id).length > 0;
 }
 // Reachable means a rep can actually act: an email or a phone. A contact
@@ -4838,7 +5082,7 @@ function renderNational(fit){
 
   /* GRID MODE: the office array has not arrived yet.
    *
-   * Draws the same heat map from 4,341 pre-aggregated cells instead of 125,183
+   * Draws the same heat map from compact per-state cells instead of individual
    * offices. No clickable dots, because a cell is not a building and offering a
    * click that opens "a quarter-degree square" would be worse than offering
    * none. loadNationalDetail() re-renders through here the moment it lands.
@@ -4846,9 +5090,22 @@ function renderNational(fit){
    * A rep who selects a firm in this window needs the real offices -- a grid
    * carries no firm identity -- so the fetch is pulled forward rather than
    * showing them an unfiltered map that looks like an answer.
-   */
+  */
   if (!NAT_DETAIL_READY){
-    if (selectedFirms.length) loadNationalDetail();
+    const needsOfficeDetail = selectedFirms.length || excludedFirms.size || raumActive();
+    if (needsOfficeDetail){
+      NATIONAL_DETAIL_REASON = NAT_DETAIL_ERROR
+        ? "Office detail is unavailable, so firm and AUM filters cannot be applied."
+        : "Loading office detail to apply firm and AUM filters.";
+      // A move/zoom redraw must not become an automatic retry loop after a
+      // recorded failure. Deliberate firm/profile actions call the retryable
+      // loader themselves.
+      if (!NAT_DETAIL_ERROR) loadNationalDetail(null, false);
+      // Retain the prior heat points. The compact grid cannot apply firm
+      // identity, exclusions, or AUM bands honestly.
+      if (!map.hasLayer(heatLayer)) heatLayer.addTo(map);
+      return;
+    }
     if (!map.hasLayer(heatLayer)) heatLayer.addTo(map);
     const bounds = map.getBounds();
     /* Through nationalHeatPoints(), NOT straight into the layer.
@@ -4862,11 +5119,18 @@ function renderNational(fit){
      * phase and the detail phase look like the SAME MAP rather than two, so the
      * upgrade a few seconds later is a sharpening rather than a redraw.
      *
-     * It reads [lon, lat, value]; grid cells are stored [lat, lon, value].
+     * It reads [lon, lat, value]. Grid cells store latitude, longitude, all
+     * placements, selecting-manager placements, and state index.
      */
-    heatLayer.setLatLngs(nationalHeatPoints(
-      NAT.grid.filter(cell => bounds.contains([cell[0], cell[1]]))
-              .map(cell => [cell[1], cell[0], cell[2]])));
+    const offices = NAT.grid
+      .filter(cell => {
+        const state = NAT.states[cell[4]];
+        const weight = selectsOnly ? cell[3] : cell[2];
+        return weight > 0 && (!continentalOnly || !OUTSIDE_CONTINENTAL.has(state)) &&
+          bounds.contains([cell[0], cell[1]]) && pointInLasso(cell[0], cell[1]);
+      })
+      .map(cell => [cell[1], cell[0], selectsOnly ? cell[3] : cell[2]]);
+    heatLayer.setLatLngs(nationalHeatPoints(offices));
     natTruncated = 0;
     return;
   }
@@ -4985,12 +5249,14 @@ function openNationalLocation(o, detailPush=true, group=null){
 }
 
 
-document.addEventListener("click", e => {
+document.addEventListener("click", async e => {
   const b = e.target.closest("[data-open]");
   if (!b) return;
-  if (detailsCurrent?.type === "national-location") closeDetails();
-  scopeSel.value = b.dataset.open;
-  scopeSel.dispatchEvent(new Event("change"));
+  const target = b.dataset.open;
+  const entry = detailsCurrent;
+  const outcome = await switchScope(target);
+  if (!outcome || outcome.status !== "applied" || scope !== target) return;
+  if (detailsCurrent === entry && entry?.type === "national-location") closeDetails();
 });
 
 // ---- markers ----
@@ -5378,7 +5644,9 @@ function renderEicNational(){
   if (!t){
     ["eicAcv", "eicLcv", "eicMf"].forEach(i => { el(i).textContent = "—"; });
     scope.hidden = true; note.hidden = true;
-    el("eicAssetsHelp").textContent = "EIC book figures are still loading.";
+    el("eicAssetsHelp").textContent = ACT_ASSETS_ERROR
+      ? "EIC book figures are unavailable."
+      : "EIC book figures are still loading.";
     return;
   }
   el("eicAcv").textContent = fmtMoney(t.acv);
@@ -5546,8 +5814,30 @@ function refreshPanelNational(){
     });
     const note = document.getElementById("kpiNote");
     note.hidden = false;
-    note.textContent = "Loading office detail — the heat map is complete, the counts are not.";
-    setScopeTotals(() => "Office detail is still loading.");
+    note.textContent = NAT_DETAIL_ERROR
+      ? `Office detail is unavailable — ${NAT_DETAIL_ERROR}. The heat map is still usable.`
+      : NATIONAL_DETAIL_REASON || (natDetailPromise
+          ? "Loading office detail — the heat map is complete, the counts are not."
+          : "The heat map is ready; office-level counts are loading separately.");
+    setScopeTotals(() => NAT_DETAIL_ERROR
+      ? "Office detail is unavailable; national totals cannot be calculated."
+      : "Office detail is still loading.");
+    ["estimatedAum", "estimatedEquities", "estimatedFunds"].forEach(id => {
+      document.getElementById(id).textContent = "—";
+    });
+    document.getElementById("estimatedAumHelp").textContent = NAT_DETAIL_ERROR
+      ? "Estimated national opportunity is unavailable because firm-office detail could not be loaded."
+      : "Estimated national opportunity will appear when firm-office detail finishes loading.";
+    // Never leave the regional viewport's EIC book under a national map.
+    renderEicNational();
+    FIRMS = [];
+    document.getElementById("firmListMeta").textContent = NAT_DETAIL_ERROR
+      ? "Firm list unavailable"
+      : "Firm list loading";
+    document.getElementById("firms").innerHTML = `<p class="hint">${NAT_DETAIL_ERROR
+      ? "National firm detail is unavailable."
+      : "Loading national firm detail…"}</p>`;
+    refreshActiveFilters();
     return;
   }
   const bounds = map.getBounds();
@@ -5748,10 +6038,10 @@ function wireContactSwitch(id, get, set, emptyMsg){
   if (!box) return () => {};
   const sync = () => {
     box.checked = get();
-    box.disabled = !CONTACTS_READY;
+    box.disabled = scope === "US" || !CONTACTS_READY;
     const shell = box.closest(".switch");
     shell.classList.toggle("on", get());
-    shell.classList.toggle("switch-waiting", !CONTACTS_READY);
+    shell.classList.toggle("switch-waiting", scope !== "US" && !CONTACTS_READY);
     shell.title = CONTACTS_READY ? ""
       : CONTACTS_ERROR ? `Contact details unavailable — ${CONTACTS_ERROR}`
       : "Loading contact details…";
@@ -5781,9 +6071,20 @@ const syncAssetsUI = wireContactSwitch("assetsOnly",
 const ownerBox = document.getElementById("ownerOnly");
 function syncOwnerUI(){
   ownerBox.checked = ownerOnly;
-  ownerBox.closest(".switch").classList.toggle("on", ownerOnly);
+  const available = SUPPORT.owner === "ready";
+  ownerBox.disabled = scope === "US" || !available;
+  const shell = ownerBox.closest(".switch");
+  shell.classList.toggle("on", ownerOnly);
+  shell.classList.toggle("switch-waiting", scope !== "US" && !available);
+  shell.title = SUPPORT.owner === "failed"
+    ? `Ownership roles unavailable — ${SUPPORT_ERROR.owner}`
+    : (!available ? "Loading ownership roles…" : "");
 }
 ownerBox.addEventListener("change", () => {
+  if (SUPPORT.owner !== "ready"){
+    ownerBox.checked = ownerOnly;
+    return;
+  }
   ownerOnly = ownerBox.checked;
   syncOwnerUI();
   redraw();
@@ -5792,13 +6093,25 @@ ownerBox.addEventListener("change", () => {
 const rankedBox = document.getElementById("rankedOnly");
 function syncRankedUI(){
   rankedBox.checked = rankedOnly;
-  rankedBox.closest(".switch").classList.toggle("on", rankedOnly);
+  const available = SUPPORT.barrons === "ready" && SUPPORT.forbes === "ready";
+  rankedBox.disabled = scope === "US" || !available;
+  const shell = rankedBox.closest(".switch");
+  shell.classList.toggle("on", rankedOnly);
+  shell.classList.toggle("switch-waiting", scope !== "US" && !available);
+  const failures = [SUPPORT_ERROR.barrons, SUPPORT_ERROR.forbes].filter(Boolean);
+  shell.title = failures.length
+    ? `Advisor rankings unavailable — ${failures.join("; ")}`
+    : (!available ? "Loading advisor rankings…" : "");
 }
 // Ranked advisors are 9,029 of 397,551 -- 2.3%, and 1.8-2.5% in every
 // territory. Still thin enough that switching this on while zoomed into a
 // metro can leave nothing on screen, which reads as a broken map rather than
 // an empty result, so fit to what survives.
 rankedBox.addEventListener("change", () => {
+  if (SUPPORT.barrons !== "ready" || SUPPORT.forbes !== "ready"){
+    rankedBox.checked = rankedOnly;
+    return;
+  }
   rankedOnly = rankedBox.checked;
   syncRankedUI();
   redraw();
@@ -5897,11 +6210,18 @@ function firmLabelForCrd(crd){
   return national ? national[0] : `CRD ${crd}`;
 }
 
+let firmNavigationRequest = 0;
+
 async function showFirmOffices(crd, targetScope=scope){
+  const intent = ++firmNavigationRequest;
   crd = String(crd);
   focusedAdvisorId = null; focusedAdvisorLabel = "";
-  if (targetScope === "US") return focusFirmNational(crd);
-  if (scope !== targetScope) await switchScope(targetScope);
+  if (targetScope === "US") return focusFirmNational(crd, false, intent);
+  if (scope !== targetScope){
+    const outcome = await switchScope(targetScope);
+    if (intent !== firmNavigationRequest || !outcome ||
+        outcome.status !== "applied" || scope !== targetScope) return false;
+  }
   const features = ALL.filter(f => String(f.properties.fc) === crd);
   if (!features.length) return false;
   const cleared = relaxFiltersForAdvisor(features, firmLabelForCrd(crd), false);
@@ -5913,10 +6233,15 @@ async function showFirmOffices(crd, targetScope=scope){
 }
 
 async function showFirmAdvisors(crd, targetScope=scope, closeDrawer=true){
+  const intent = ++firmNavigationRequest;
   crd = String(crd);
   focusedAdvisorId = null; focusedAdvisorLabel = "";
-  if (targetScope === "US") return focusFirmNational(crd, closeDrawer);
-  if (scope !== targetScope) await switchScope(targetScope);
+  if (targetScope === "US") return focusFirmNational(crd, closeDrawer, intent);
+  if (scope !== targetScope){
+    const outcome = await switchScope(targetScope);
+    if (intent !== firmNavigationRequest || !outcome ||
+        outcome.status !== "applied" || scope !== targetScope) return false;
+  }
   const features = ALL.filter(f => String(f.properties.fc) === crd);
   if (!features.length){
     showNotice(`${firmLabelForCrd(crd)} has no mapped advisors in ${scopeLabel(targetScope)}.`);
@@ -5933,15 +6258,26 @@ async function showFirmAdvisors(crd, targetScope=scope, closeDrawer=true){
   return true;
 }
 
-async function focusFirmNational(crd, closeDrawer=false){
+async function focusFirmNational(crd, closeDrawer=false, intent=null){
+  if (intent == null) intent = ++firmNavigationRequest;
+  const observedScopeRequest = scopeRequest;
   crd = String(crd);
   focusedAdvisorId = null; focusedAdvisorLabel = "";
+  if (!NAT_DETAIL_READY){
+    await loadNationalDetail(null, false);
+    if (!NAT_DETAIL_READY || intent !== firmNavigationRequest ||
+        scopeRequest !== observedScopeRequest) return false;
+  }
   const offices = nationalOfficesForFirm(crd);
   if (!offices.length){
     showNotice(`${firmLabelForCrd(crd)} has no mapped national office.`);
     return false;
   }
-  if (scope !== "US") await switchScope("US");
+  if (scope !== "US"){
+    const outcome = await switchScope("US");
+    if (intent !== firmNavigationRequest || !outcome ||
+        outcome.status !== "applied" || scope !== "US") return false;
+  }
   // Without this, selecting a firm that fails an active filter drew an empty
   // map with no explanation: renderNational fits and draws only offices that
   // pass, so a firm excluded by 5.G(7), the AUM band or the lasso simply
@@ -6265,10 +6601,26 @@ searchBox.addEventListener("keydown", e => {
     // Enter used to take whichever result rendered first in the DOM, and
     // Locations always renders first -- so a firm name that shares a prefix
     // with a city jumped to the city. Pick by what the query looks like.
-    const first = looksLikeLocation(searchBox.value.trim())
-      ? locOut.querySelector(".lres") || advOut.querySelector(".ares")
+    const query = searchBox.value.trim();
+    const locationLike = looksLikeLocation(query);
+    // A location-shaped query never falls through to an unrelated advisor or
+    // firm merely because place data has not arrived. While GEO is unavailable
+    // an alphabetic query is ambiguous; visible firm/advisor results remain
+    // clickable, but Enter waits rather than guessing.
+    if (!locationLike && SUPPORT.geo !== "ready" && /^[a-z .'-]{2,}$/i.test(query)){
+      showNotice(SUPPORT.geo === "failed"
+        ? "City search is unavailable. Choose a visible firm or advisor result, or search by state."
+        : "City search is still loading. Choose a visible firm or advisor result, or wait a moment.");
+      return;
+    }
+    const first = locationLike
+      ? locOut.querySelector(".lres")
       : advOut.querySelector(".ares") || locOut.querySelector(".lres");
     if (first) first.click();
+    else if (locationLike && SUPPORT.geo !== "ready")
+      showNotice(SUPPORT.geo === "failed"
+        ? "City and ZIP search is unavailable; state search still works."
+        : "City and ZIP search is still loading; state search already works.");
   }
 });
 // Each result type owns what happens to the query text -- a firm result clears
@@ -6303,13 +6655,18 @@ function renderAdvisorResults(){
 // Brown" and "PaineWebber" all resolve to the surviving CRD through this.
 let FIRM_ALIASES = null;
 let FIRM_ALIAS_PROMISE = null;
+let FIRM_ALIAS_ERROR = "";
 function loadFirmAliases(){
   if (FIRM_ALIASES) return Promise.resolve(FIRM_ALIASES);
   if (!FIRM_ALIAS_PROMISE){
     FIRM_ALIAS_PROMISE = fetch(dataUrl("firm_aliases.json"))
-      .then(r => r.ok ? r.json() : {})
-      .then(j => { FIRM_ALIASES = j; return j; })
-      .catch(() => (FIRM_ALIASES = {}));
+      .then(r => { if (!r.ok) throw new Error(`firm aliases ${r.status}`); return r.json(); })
+      .then(j => { FIRM_ALIAS_ERROR = ""; FIRM_ALIASES = j; return j; })
+      .catch(err => {
+        FIRM_ALIAS_ERROR = err.message || String(err);
+        FIRM_ALIASES = {};
+        return FIRM_ALIASES;
+      });
   }
   return FIRM_ALIAS_PROMISE;
 }
@@ -6351,6 +6708,7 @@ function aliasHit(crd, loose){
  * Search is the only name-keyed use, and it scans deliberately.
  */
 let ADV_BY_CRD = null;
+let ADV_INDEX_ERROR = "";
 
 function advisorRow(crd){
   if (!ADV_INDEX) return null;
@@ -6367,7 +6725,15 @@ function loadAdvisorIndex(){
     ADV_INDEX_PROMISE = fetch(dataUrl("advisor_index.json")).then(r => {
       if (!r.ok) throw new Error("national advisor index unavailable");
       return r.json();
-    }).then(j => { ADV_INDEX = j; ADV_BY_CRD = null; return j; });
+    }).then(j => {
+      ADV_INDEX_ERROR = "";
+      ADV_INDEX = j;
+      ADV_BY_CRD = null;
+      return j;
+    }).catch(err => {
+      ADV_INDEX_ERROR = err.message || String(err);
+      throw err;
+    });
   }
   return ADV_INDEX_PROMISE;
 }
@@ -6379,20 +6745,23 @@ function renderNationalSearch(){
     advOut.innerHTML = `<p class="hint">Enter at least two characters to search nationally.</p>`;
     return;
   }
-  const loose = looseName(q);
-  const firmRows = NAT.firms.filter(f =>
-    looseIncludes(f[0], loose) || String(f[1]).includes(q) ||
-    !!aliasHit(f[1], loose)).slice(0, 20);
-  if (!ADV_INDEX || !FIRM_ALIASES){
-    advOut.innerHTML = `<p class="hint">Loading national search index…</p>`;
-    Promise.all([loadAdvisorIndex(), loadFirmAliases()]).then(() => {
-      if (advQuery === q) renderAdvisorResults();
-    }).catch(() => { advOut.innerHTML = `<p class="hint">National advisor search is unavailable.</p>`; });
-    return;
+  if (!NAT_DETAIL_READY && !natDetailPromise && !NAT_DETAIL_ERROR){
+    loadNationalDetail(null, false).then(() => {
+      if (NAT_DETAIL_READY && advQuery === q) renderNationalSearch();
+    });
   }
+  const rerender = () => { if (advQuery === q) renderNationalSearch(); };
+  if (!FIRM_ALIASES) loadFirmAliases().then(rerender);
+  if (!ADV_INDEX && !ADV_INDEX_ERROR)
+    loadAdvisorIndex().then(rerender).catch(rerender);
+
+  const loose = looseName(q);
+  const firmRows = NAT_DETAIL_READY ? NAT.firms.filter(f =>
+    looseIncludes(f[0], loose) || String(f[1]).includes(q) ||
+    !!aliasHit(f[1], loose)).slice(0, 20) : [];
   const advisorRows = [];
   const numeric = /^\d+$/.test(q);
-  for (const row of ADV_INDEX.advisors){
+  for (const row of (ADV_INDEX ? ADV_INDEX.advisors : [])){
     // row[1] is the name the person goes by, row[6] the filed legal name when
     // it differs. Match both, or searching "Edison Lambeth" would miss the
     // advisor the map labels "Tate Lambeth", and vice versa.
@@ -6403,17 +6772,20 @@ function renderNationalSearch(){
       if (advisorRows.length >= 60) break;
     }
   }
-  const includeFirms = true;
-  if ((!includeFirms || !firmRows.length) && !advisorRows.length){
-    advOut.innerHTML = `<p class="hint">No nationwide advisor match for “${esc(searchBox.value)}”.</p>`;
-    return;
-  }
-  const firmsHtml = includeFirms && firmRows.length
+  const firmsHtml = firmRows.length
     ? `<p class="result-label">Firms</p>` + firmRows.map((f, i) =>
       `<button type="button" class="ares" data-national-firm="${i}"><span class="an">${esc(f[0])}</span>` +
       `<span class="af">Firm CRD ${esc(f[1])}${f[3] != null ? ` · ${fmtMoney(f[3] * 1e6)} total RAUM` : ""}` +
       `${aliasHit(f[1], loose) && !looseIncludes(f[0], loose) ? ` · formerly ${esc(aliasHit(f[1], loose))}` : ""}</span></button>`).join("")
-    : "";
+    : `<p class="result-label">Firms</p><p class="hint">${NAT_DETAIL_ERROR
+        ? "Firm search is unavailable because national office detail could not be loaded."
+        : !NAT_DETAIL_READY
+          ? "Loading firm search…"
+          : FIRM_ALIAS_ERROR
+            ? `No current-name firm match. Former-name search is unavailable (${esc(FIRM_ALIAS_ERROR)}).`
+            : !FIRM_ALIASES
+              ? "No current-name firm match; checking former names…"
+              : `No firm match for “${esc(searchBox.value)}”.`}</p>`;
   const currentTerritory = scope.startsWith("T:")
     ? scope.slice(2) : (scope === "US" ? "" : STATE_TO_TERRITORY[scope] || "");
   const advisorsHtml = advisorRows.length
@@ -6426,7 +6798,11 @@ function renderNationalSearch(){
         `${row[6] ? ` · filed as ${esc(row[6])}` : ""}</span>` +
         `<span class="ac">${esc(ADV_INDEX.cities[row[4]])}, ${esc(row[3])} · ${esc(territory)}${outside}${row[5].includes("|") ? ` · also ${esc(row[5].split("|").filter(s => s !== row[3]).join(", "))}` : ""}</span></button>`;
     }).join("")
-    : "";
+    : `<p class="result-label">Advisors</p><p class="hint">${ADV_INDEX_ERROR
+        ? "National advisor search is unavailable."
+        : !ADV_INDEX
+          ? "Loading national advisor search…"
+          : `No advisor match for “${esc(searchBox.value)}”.`}</p>`;
   advOut.innerHTML = firmsHtml + advisorsHtml;
   advOut.querySelectorAll("[data-national-firm]").forEach(el => el.addEventListener("click", () => {
     const firm = firmRows[+el.dataset.nationalFirm];
@@ -6670,7 +7046,8 @@ document.addEventListener("click", async e => {
   const want = String(b.dataset.teammateState || "");
   let feats = ALL.filter(f => String(f.properties.id) === id);
   if (!feats.length && want && want !== scope){
-    await switchScope(want);
+    const outcome = await switchScope(want);
+    if (!outcome || outcome.status !== "applied" || scope !== want) return;
     feats = ALL.filter(f => String(f.properties.id) === id);
   }
   if (!feats.length){
@@ -6691,7 +7068,10 @@ document.addEventListener("click", async e => {
   if (!b) return;
   const target = b.dataset.advisorElsewhere, id = String(b.dataset.advisorId);
   const label = focusedAdvisorLabel || b.querySelector("b")?.textContent || "this advisor";
-  if (scope !== target) await switchScope(target);
+  if (scope !== target){
+    const outcome = await switchScope(target);
+    if (!outcome || outcome.status !== "applied" || scope !== target) return;
+  }
   const feats = ALL.filter(f => String(f.properties.id) === id);
   if (!feats.length){
     showNotice(`No mapped office for ${label} in ${scopeLabel(target)}.`);

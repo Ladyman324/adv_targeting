@@ -22,6 +22,7 @@ import re
 import pandas as pd
 
 from export_geojson import display_firm, apply_placement
+from enrich_national_opportunity import write_national_view
 # ONE definition of what an advisor is called, shared with build_field_tiles.py.
 from display_name import display_name, filed_name
 from firm_names import dedupe
@@ -268,14 +269,16 @@ def main() -> None:
         for row in feats
     ]
 
+    national = {"firms": firm_list, "states": states, "offices": packed}
     national_path = WEB / "offices_national.json"
     national_path.write_text(
-        json.dumps(
-            {"firms": firm_list, "states": states, "offices": packed},
-            separators=(",", ":"),
-        ),
+        json.dumps(national, separators=(",", ":")),
         encoding="utf-8",
     )
+    # This is part of the authoritative export, not an optional enrichment.
+    # Keeping the compact first-paint artifact beside its detail writer means a
+    # normal rebuild cannot validate stale national_view.json by accident.
+    write_national_view(national)
     (WEB / "states_index.json").write_text(
         json.dumps(per_state, separators=(",", ":")), encoding="utf-8"
     )

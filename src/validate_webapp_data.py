@@ -14,6 +14,78 @@ def read(name: str):
     return json.loads((WEB / name).read_text(encoding="utf-8"))
 
 
+NATIONAL_CELL = 0.25
+
+
+def expected_national_grid(national: dict) -> list[list]:
+    """Independently derive the compact grid from authoritative detail."""
+    grid: dict[tuple[int, float, float], list[int]] = defaultdict(
+        lambda: [0, 0]
+    )
+    firms = national["firms"]
+    for office in national["offices"]:
+        lon, lat, count, firm_index = office[:4]
+        state_index = office[6]
+        cell_lat = round(round(lat / NATIONAL_CELL) * NATIONAL_CELL, 3)
+        cell_lon = round(round(lon / NATIONAL_CELL) * NATIONAL_CELL, 3)
+        totals = grid[(state_index, cell_lat, cell_lon)]
+        totals[0] += count
+        if firms[firm_index][4]:
+            totals[1] += count
+    return [
+        [lat, lon, counts[0], counts[1], state_index]
+        for (state_index, lat, lon), counts in sorted(grid.items())
+    ]
+
+
+def validate_national_view(view: dict, national: dict) -> None:
+    """Assert that first-paint data is a faithful subset of full detail."""
+    if set(view) != {"states", "grid"}:
+        raise SystemExit(
+            "national_view.json must contain only states and grid; re-run "
+            "src/enrich_national_opportunity.py")
+    if view["states"] != national["states"]:
+        raise SystemExit(
+            "national_view.json states are not the ordered states from "
+            "offices_national.json; re-run src/enrich_national_opportunity.py")
+    rows = view["grid"]
+    if not rows:
+        raise SystemExit("national_view.json carries no grid cells")
+    if any(not isinstance(cell, list) or len(cell) != 5 for cell in rows):
+        raise SystemExit("national_view.json grid rows must be 5 fields wide")
+    if any(not isinstance(cell[4], int)
+           or not 0 <= cell[4] < len(view["states"]) for cell in rows):
+        raise SystemExit("national_view.json grid has an invalid state index")
+    if any(not isinstance(cell[2], int) or cell[2] <= 0
+           or not isinstance(cell[3], int) or not 0 <= cell[3] <= cell[2]
+           for cell in rows):
+        raise SystemExit("national_view.json grid has invalid placement counts")
+    keys = [(cell[4], cell[0], cell[1]) for cell in rows]
+    if len(keys) != len(set(keys)):
+        raise SystemExit("national_view.json has duplicate state/grid cells")
+
+    expected = expected_national_grid(national)
+    all_total = sum(cell[2] for cell in rows)
+    expected_all = sum(office[2] for office in national["offices"])
+    if all_total != expected_all:
+        raise SystemExit(
+            f"national_view.json all-count totals {all_total:,} placements, "
+            f"the office array totals {expected_all:,}")
+    selecting_total = sum(cell[3] for cell in rows)
+    expected_selecting = sum(
+        office[2] for office in national["offices"]
+        if national["firms"][office[3]][4]
+    )
+    if selecting_total != expected_selecting:
+        raise SystemExit(
+            f"national_view.json selecting-count totals {selecting_total:,} "
+            f"placements, detail totals {expected_selecting:,}")
+    if rows != expected:
+        raise SystemExit(
+            "national_view.json grid is not the deterministic per-state "
+            "aggregate of offices_national.json")
+
+
 def main() -> None:
     metadata = read("metadata.json")
     national = read("offices_national.json")
@@ -22,19 +94,7 @@ def main() -> None:
     # simply fall back to an empty grid and a heat map with nothing in it --
     # so it is checked here rather than discovered by a rep.
     view = read("national_view.json")
-    if len(view["firms"]) != len(national["firms"]):
-        raise SystemExit(
-            f"national_view.json has {len(view['firms']):,} firms but "
-            f"offices_national.json has {len(national['firms']):,}; re-run "
-            f"src/enrich_national_opportunity.py")
-    if not view.get("grid"):
-        raise SystemExit("national_view.json carries no grid cells")
-    placed = sum(cell[2] for cell in view["grid"])
-    total = sum(office[2] for office in national["offices"])
-    if placed != total:
-        raise SystemExit(
-            f"national_view.json grid totals {placed:,} placements, the office "
-            f"array totals {total:,}; the grid is not a faithful aggregate")
+    validate_national_view(view, national)
     state_index = read("states_index.json")
     profiles = read("firm_profiles.json")
 
