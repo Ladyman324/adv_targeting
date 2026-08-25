@@ -891,6 +891,32 @@ function flagMarksField(crd){
     + `</span>`;
 }
 
+// Which standing flag a REAL list corresponds to, by name. Mirrors the desk;
+// the two must agree or the same list means different things per device.
+const STANDING_NAMES = { "key contacts": "key", "due diligence": "dd" };
+function standingKindOf(listId){
+  const l = (Dial.state.lists || []).find((x) => x.id === listId);
+  if (!l) return "";
+  return STANDING_NAMES[String(l.name || "").trim().toLowerCase()] || "";
+}
+
+/* Unmarking must also take them OFF the standing list.
+ *
+ * The list is materialised, not a live view, so clearing the star left the
+ * person sitting in the open queue with a Call button beside them. A rep who
+ * unstars somebody has just said "not this person".
+ *
+ * Only when the OPEN list is the matching standing list -- pulling them out of
+ * a list the rep built by hand would undo work they never asked to undo.
+ */
+async function dropFromStandingList(crd, kind, stillMine){
+  if (stillMine) return false;
+  if (standingKindOf(Dial.state.listId) !== kind) return false;
+  if (!Dial.inQueue(crd)) return false;
+  await Dial.remove(String(crd));
+  return true;
+}
+
 function flaggedField(kind){
   const out = [];
   for (const [crd, f] of (Dial.state.flags || new Map())) {
@@ -995,7 +1021,7 @@ async function onOtherList(id, fn){
  * card want the phone number, not the file.
  */
 function histRowHtml(r){
-  return `<li class="${r.crm ? "from-crm" : "from-app"}">
+  return `<li class="${r.crm ? "from-crm" : r.email ? "from-mail" : "from-app"}">
     <span class="hist-when">${esc(r.at)}</span>
     <span class="hist-what">${esc(r.what)}</span>
     ${r.who ? `<span class="hist-who">${esc(r.who)}</span>` : ""}
@@ -1006,7 +1032,7 @@ function histRowHtml(r){
 async function fillFullHistory(crd, body){
   try {
     const d = await Dial.fullHistory(crd, 40);
-    const { rows, notice } = Dial.describeHistory(d.events, d.crm);
+    const { rows, notice } = Dial.describeHistory(d.events, d.crm, d.mail);
     if (!body.isConnected) return;
     body.innerHTML =
       (notice ? `<p class="hist-notice">${esc(notice)}</p>` : "")
@@ -2201,7 +2227,9 @@ document.addEventListener("click", (e) => {
     const marks = flag.closest(".contact-flags");
     flag.disabled = true;
     Dial.setFlag(crd, kind, on, (row && row[COL.name]) || "", "")
-      .then(() => {
+      .then(() => dropFromStandingList(crd, kind, Dial.flaggedByMe(crd, kind)))
+      .then((dropped) => {
+        if (dropped) renderDial();
         // Both marks, because they render as a pair and the other one has to
         // keep showing what it showed.
         if (marks) marks.outerHTML = flagMarksField(crd);

@@ -1757,7 +1757,7 @@ document.addEventListener("click", e => {
  * hunting our own writes inside Act!'s payload would risk.
  */
 function histRowHtml(r){
-  return `<li class="${r.crm ? "from-crm" : "from-app"}">
+  return `<li class="${r.crm ? "from-crm" : r.email ? "from-mail" : "from-app"}">
     <span class="hist-when">${esc(r.at)}</span>
     <span class="hist-what">${esc(r.what)}</span>
     ${r.who ? `<span class="hist-who">${esc(r.who)}</span>` : ""}
@@ -1768,7 +1768,7 @@ function histRowHtml(r){
 async function fillFullHistory(crd, body){
   try {
     const d = await Dial.fullHistory(crd, 40);
-    const { rows, notice } = Dial.describeHistory(d.events, d.crm);
+    const { rows, notice } = Dial.describeHistory(d.events, d.crm, d.mail);
     if (!body.isConnected) return;
     body.innerHTML =
       (notice ? `<p class="hist-notice">${esc(notice)}</p>` : "")
@@ -1978,6 +1978,45 @@ function dialKindLabel(kind){
 let dialError = "";
 let dialHistory = { crd: "", text: "" };
 
+// Which standing flag a REAL list corresponds to, by name, or "" for an
+// ordinary list the rep made themselves.
+const STANDING_NAMES = { "key contacts": "key", "due diligence": "dd" };
+function standingKindOf(listId){
+  const l = (Dial.state.lists || []).find(x => x.id === listId);
+  if (!l) return "";
+  return STANDING_NAMES[String(l.name || "").trim().toLowerCase()] || "";
+}
+
+/* Unmarking must also take them OFF the standing list.
+ *
+ * The list is materialised: openFlagList() writes the flagged people into a
+ * real call list, so it is a snapshot, not a live view. Clearing the star
+ * changed the flag and left the person sitting in the open queue -- with a Call
+ * button beside them -- until something happened to rebuild it. A rep who
+ * unstars somebody has just said "not this person", and the next number the
+ * dialer serves must not be theirs.
+ *
+ * Only when the OPEN list is the matching standing list. Removing them from an
+ * ordinary list the rep built by hand would be destroying work they did not ask
+ * to undo -- their own list is theirs, whatever the flag says.
+ */
+async function dropFromStandingList(crd, kind, stillMine){
+  if (stillMine) return false;
+  if (standingKindOf(Dial.state.listId) !== kind) return false;
+  if (!Dial.inQueue(crd)) return false;
+  await Dial.remove(String(crd));
+  return true;
+}
+
+function standingOption(kind, icon, label, lists){
+  const n = flaggedAdvisors(kind).length;
+  if (!n) return "";
+  const exists = (lists || []).some(l =>
+    String(l.name || "").trim().toLowerCase() === label.toLowerCase());
+  if (exists) return "";            // the real list is already in the picker
+  return `<option value="__${kind}">${icon} ${label} (${n})</option>`;
+}
+
 function renderDialer(){
   const S = Dial.state;
   const dock = document.getElementById("dialer");
@@ -2016,10 +2055,19 @@ function renderDialer(){
       + `<select class="dial-list" data-dial="pick" aria-label="Call list">`
         + S.lists.map(l => `<option value="${esc(l.id)}"${l.id === S.listId ? " selected" : ""}>`
             + `${esc(l.name)} (${l.count})</option>`).join("")
-        + (flaggedAdvisors("key").length
-            ? `<option value="__key">&#9733; Key contacts (${flaggedAdvisors("key").length})</option>` : "")
-        + (flaggedAdvisors("dd").length
-            ? `<option value="__dd">&#128737; Due diligence (${flaggedAdvisors("dd").length})</option>` : "")
+        /* The standing entries BUILD the list; they are not a second copy of it.
+         *
+         * openFlagList() materialises a real list called "Key contacts", so
+         * after the first use that list is in S.lists and the picker showed
+         * BOTH -- and selecting the synthetic one made the <select> jump to the
+         * real one, which reads as landing on a different list entirely. The
+         * queue was right the whole time; the control was lying about it.
+         *
+         * So the synthetic entry appears only until the real list exists. From
+         * then on there is exactly one row for it, and the list manager's ★ row
+         * is what rebuilds it from the flags. */
+        + standingOption("key", "&#9733;", "Key contacts", S.lists)
+        + standingOption("dd", "&#128737;", "Due diligence", S.lists)
         + `<option value="__new">+ New list…</option></select>`
       + `<span class="dial-count">${p.done} of ${n}</span>`
       + `<button type="button" class="dial-btn ghost" data-dial="menu"
@@ -3406,10 +3454,12 @@ document.addEventListener("click", async e => {
     flag.disabled = true;
     try {
       await Dial.setFlag(id, kind, on, c.n || "", c.fc || "");
+      const dropped = await dropFromStandingList(id, kind, Dial.flaggedByMe(id, kind));
       // Redraw the card in place so both marks reflect the new state, and the
       // map so a star appears on the pin without a reload.
       if (detailsCurrent) renderDetailEntry(detailsCurrent, false);
       redraw();
+      if (dropped) renderDialer();
     } catch (err) {
       showNotice(err.message || "That could not be saved.");
     } finally { flag.disabled = false; }
@@ -3631,6 +3681,16 @@ document.addEventListener("change", e => {
       // Switches to the list without dialling, exactly like picking any other.
       openFlagList(el.value === "__key" ? "key" : "dd")
         .catch(err => { showNotice(err.message || "That list could not be built."); renderDialer(); });
+    } else if (standingKindOf(el.value)) {
+      /* The REAL "Key contacts" list, picked after it has been built once.
+       *
+       * Rebuilt from the flags rather than merely opened, so it is a live
+       * projection of the star and not a snapshot that quietly goes stale
+       * every time somebody marks or unmarks a contact. This is the whole
+       * reason it can carry the same name in two places without them
+       * disagreeing. */
+      openFlagList(standingKindOf(el.value))
+        .catch(err => { showNotice(err.message || "That list could not be rebuilt."); renderDialer(); });
     } else {
       Dial.openList(el.value).then(renderDialer);
     }

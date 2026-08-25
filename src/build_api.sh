@@ -12,7 +12,8 @@ STAGE_DIR=""
 # point of it: the count is a tripwire for tests quietly falling out of the
 # package, so it must not be derived from whatever happens to be on disk.
 #   26: contact-flags.test.js -- flags as a set of reps, not a shared boolean
-EXPECTED_API_TEST_FILE_COUNT=26
+#   27: email-follow-up.test.js -- who is left after a campaign, and who is not
+EXPECTED_API_TEST_FILE_COUNT=27
 
 cleanup() {
   test -z "$TEMP_ROOT" && return

@@ -73,6 +73,13 @@ module.exports = async function (context, req) {
       // this only decides what is drawn.
       if (op === "catalog") return ok(context, { ...await service.catalog(who), isAdmin: isAdmin(who) });
       if (op === "batch") return ok(context, await service.getBatchDetail(who, String(req.query.id || "")));
+      /* Who is left to follow up, and who came off the list and why.
+       *
+       * A GET because it computes nothing durable -- and it is asked twice, once
+       * when the rep opens the screen and again when they commit, because
+       * somebody may reply in between. */
+      if (op === "follow_up_candidates")
+        return ok(context, await service.followUpCandidates(who, String(req.query.id || "")));
       if (op === "batches") return ok(context, { batches: await store.listBatches(who.id) });
       if (op === "connection") return ok(context, await auth.status(who.id));
       if (op === "policy") return ok(context, await store.policy());
@@ -326,6 +333,10 @@ module.exports = async function (context, req) {
     }
     if (op === "connect") return ok(context, await auth.begin(who, body.returnTo));
     if (op === "create_batch") return ok(context, await service.createBatch(who, body), 201);
+    /* The bulk follow-up: a new batch derived from a campaign, holding only the
+     * people who never answered it. 201 like any other batch creation, because
+     * that is exactly what it is. */
+    if (op === "create_follow_up") return ok(context, await service.createFollowUp(who, body), 201);
     if (op === "update_common") return ok(context, await service.updateCommon(who, body));
     if (op === "update_message") return ok(context, await service.updateMessage(who, body));
     if (op === "update_message_cc") return ok(context, await service.updateMessageCc(who, body));

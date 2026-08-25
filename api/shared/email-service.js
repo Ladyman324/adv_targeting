@@ -312,6 +312,174 @@ async function validateBatch(who, batchId, options = {}) {
     templateImages: tpl ? (tpl.images || []).map(({ id, name }) => ({ id, name })) : [] };
 }
 
+/* WHO STILL NEEDS FOLLOWING UP, and who must not be.
+ *
+ * The rep's rule is "everyone who did not reply". That is right, and it is not
+ * sufficient -- three other groups have to come off the list, and each of them
+ * is a different kind of mistake if it does not:
+ *
+ *   replied      the point of the exercise. An OUT-OF-OFFICE is NOT a reply:
+ *                classify() separates them, and an auto-responder tells you
+ *                nothing about whether the person read it.
+ *   bounced      the address is dead. A second send guarantees a second bounce
+ *                and spends sender reputation to learn what we already know.
+ *   suppressed   they opted out between the send and now. Compliance, not
+ *                preference, and the one exclusion that is not a judgement call.
+ *   not sent     a message that failed or is still queued was never a first
+ *                touch, so there is nothing to follow up ON.
+ *
+ * Computed fresh every time this is asked, never cached: it is asked once when
+ * the follow-up is drafted and AGAIN immediately before the drafts are built,
+ * because a rep may sit on the review screen while somebody replies.
+ */
+async function followUpCandidates(who, batchId, deps = {}) {
+  const st = deps.store || store;
+  const batch = await st.getBatch(who.id, batchId);
+  if (!batch) throw httpError(404, "Email batch not found.");
+  if (batch.parentBatchId)
+    throw httpError(409, "This batch is already a follow-up. Follow up on the original instead.", "already_follow_up");
+
+  const messages = await st.listMessages(who.id, batchId);
+  const sent = messages.filter((m) => ["sent", "submitted"].includes(m.state));
+  const notSent = messages.length - sent.length;
+
+  const replied = [], bounced = [], pending = [];
+  for (const m of sent) {
+    if (m.bounceKind === "hard") { bounced.push(m); continue; }
+    // A reply is an INBOUND row on the conversation this message started.
+    // Keyed on conversationId rather than on the advisor, so a reply to a
+    // different campaign does not silence this one.
+    let answered = false;
+    if (m.contactId) {
+      const rows = await st.listActivity(String(m.contactId), 200).catch(() => []);
+      /* Matched on the CONVERSATION this message started, falling back to the
+       * batch it belongs to. Either is specific enough that a reply to a
+       * different campaign cannot silence this one -- which matching on the
+       * advisor alone would do. */
+      answered = rows.some((a) =>
+        String(a.direction) === "inbound"
+        && String(a.classification) === "reply"          // not auto_reply, not bounce
+        && ((m.graphConversationId && String(a.conversationId || "") === m.graphConversationId)
+            || String(a.batchId || "") === batchId));
+    }
+    (answered ? replied : pending).push(m);
+  }
+
+  // Opt-outs since the send. Checked by address AND contact id, as everywhere.
+  const blocked = pending.length
+    ? await suppress.blockedAmong(pending.map((m) => ({ email: m.recipientEmail, contactId: m.contactId })))
+    : new Set();
+  const suppressed = pending.filter((m) => blocked.has(m.recipientEmail));
+  const remaining = pending.filter((m) => !blocked.has(m.recipientEmail));
+
+  const brief = (m) => ({ messageId: m.id, crd: m.contactId || "",
+    name: m.recipientName || "", email: m.recipientEmail || "",
+    graphMessageId: m.graphMessageId || "", subject: m.subject || "" });
+
+  return {
+    batchId, batchName: batch.name || "", followUpDays: batch.followUpDays || 0,
+    followUpSentUtc: batch.followUpSentUtc || "",
+    counts: { sent: sent.length, replied: replied.length, bounced: bounced.length,
+              suppressed: suppressed.length, notSent, remaining: remaining.length },
+    replied: replied.map(brief), bounced: bounced.map(brief),
+    suppressed: suppressed.map(brief), remaining: remaining.map(brief),
+  };
+}
+
+/* Build the follow-up as a REAL BATCH, derived from the parent.
+ *
+ * Not a bespoke bulk-send path. A batch inherits everything already built and
+ * tested around one: the per-recipient preview on the review step, the
+ * suppression checks, the firm-domain pacing that stops 22 messages hitting one
+ * gateway in a row, teammate copies, the compliance blind copy, activity
+ * logging and retry idempotency. A second send path would re-implement all of
+ * that slightly differently, and the differences are where the bugs live.
+ *
+ * THE FOOTER IS THE CAMPAIGN FOOTER. A follow-up is outreach we initiated, not
+ * an answer to something they sent, so it carries its own per-recipient
+ * unsubscribe link exactly as the original did.
+ *
+ * ATTACHMENTS DEFAULT OFF. Re-sending the same PDF to people who already have
+ * it is how a thread ends up in a spam folder, and it re-triggers the forced
+ * compliance blind copy on every message. On when the document IS the point.
+ */
+const FOLLOW_UP_DEFAULT_TEXT = "Just following up on the note below in case it "
+  + "reached you at a busy moment.";
+
+async function createFollowUp(who, input, deps = {}) {
+  const st = deps.store || store;
+  const cfg = core.config();
+  const parentId = String(input.batchId || "").trim();
+  const parent = await st.getBatch(who.id, parentId);
+  if (!parent) throw httpError(404, "Email batch not found.");
+  // One follow-up per campaign. Without this, running it twice puts a THIRD
+  // touch on people who have now had two and answered neither.
+  if (parent.followUpSentUtc)
+    throw httpError(409, "A follow-up has already been created for this batch.", "follow_up_exists");
+
+  const connection = await auth.status(who.id);
+  if (!connection.connected || !connection.profile)
+    throw httpError(409, "Connect your Microsoft 365 mailbox first.", "graph_not_connected");
+  const profile = connection.profile;
+
+  // Recomputed HERE, not taken from the client. The rep may have been looking
+  // at the review screen for an hour while somebody replied.
+  const fresh = await followUpCandidates(who, parentId, deps);
+  if (!fresh.remaining.length)
+    throw httpError(409, "Everybody has replied, bounced or opted out — there is nobody to follow up.", "nobody_to_follow_up");
+
+  const note = String(input.text || FOLLOW_UP_DEFAULT_TEXT).slice(0, cfg.maxBodyChars);
+  if (!note.trim()) throw httpError(400, "The follow-up needs something to say.");
+  const withAttachments = input.includeAttachments === true;
+  const documents = withAttachments && parent.attachmentIds.length
+    ? await st.getDocuments(parent.attachmentIds) : [];
+
+  const batchId = st.id();
+  await st.createBatch(who, { id: batchId, status: "editing",
+    name: `Follow-up — ${parent.name || "campaign"}`,
+    templateId: parent.templateId, templateName: parent.templateName,
+    commonSubject: "", commonBodyText: note, commonRevision: 1,
+    attachmentIds: documents.map((d) => d.id),
+    attachmentSummary: documents.map((d) => ({ id: d.id, name: d.name, bytes: d.bytes })),
+    recipientCount: fresh.remaining.length, externalCount: fresh.remaining.length,
+    parentBatchId: parentId,
+    graphMailboxId: profile.id, graphMailbox: connection.mailbox,
+    ccTeammates: "", ccColleague: "",
+    copySelf: String(parent.copySelf || ""), copyInternal: String(parent.copyInternal || ""),
+    copyInternalTo: String(parent.copyInternalTo || ""),
+    senderMail: String(profile.mail || profile.userPrincipalName || "") });
+
+  for (let i = 0; i < fresh.remaining.length; i++) {
+    const r = fresh.remaining[i];
+    // "RE:" and the threading both come from Graph's createReply in the worker.
+    // The subject here is what the REVIEW SCREEN shows, so it has to read the
+    // way the advisor will see it.
+    const subject = /^re:/i.test(r.subject) ? r.subject : `RE: ${r.subject}`;
+    await st.createMessage(who.id, batchId, { id: st.id(), ordinal: i,
+      contactId: r.crd, recipientName: r.name, recipientEmail: r.email,
+      // The sent message this replies to. The worker needs the Graph id, not
+      // the conversation id, because it replies to a MESSAGE.
+      followUpOfGraphId: r.graphMessageId,
+      subject, bodyText: note,
+      bodyHtml: core.plainTextToSafeHtml(note, []),
+      inlineImages: [],
+      signatureHtml: core.corporateSignature(profile,
+        suppress.manageUrl(r.email, r.crd), cfg),
+      baseRevision: 1, attachments: documents,
+      validation: { errors: r.graphMessageId ? [] : [{ code: "no_original",
+        message: "The original message is no longer in the mailbox, so this cannot be threaded." }],
+        warnings: [] } });
+  }
+
+  await st.patchBatch(who.id, parentId, { followUpSentUtc: new Date().toISOString() },
+    parent.etag).catch(() => {});
+  await st.audit(who.id, batchId, "follow_up_created",
+    { parentBatchId: parentId, recipients: fresh.remaining.length,
+      replied: fresh.counts.replied, bounced: fresh.counts.bounced,
+      suppressed: fresh.counts.suppressed, attachments: documents.length });
+  return getBatchDetail(who, batchId);
+}
+
 async function createBatch(who, input) {
   const recipients = (Array.isArray(input.recipients) ? input.recipients : []).map(recipientSnapshot);
   if (!recipients.length) throw httpError(400, "Select at least one recipient.");
@@ -800,4 +968,5 @@ const attachmentLimit = () => core.config().maxAttachmentBytes;
 module.exports = {
   senderHealth, catalog, createBatch, updateCommon, updateMessage, updateMessageCc,
   validateBatch, removeRecipient,
-  approve, getBatchDetail, control, enqueue, httpError, attachmentLimit };
+  approve, getBatchDetail, control, enqueue, httpError, attachmentLimit,
+  followUpCandidates, createFollowUp };

@@ -135,6 +135,20 @@ function batchFromEntity(e) {
     copySelf: e.copySelf || "", copyInternal: e.copyInternal || "",
     ccTeammates: e.ccTeammates === "1", ccColleague: e.ccColleague || "",
     copiedInsteadNote: e.copiedInsteadNote || "",
+    /* THE FOLLOW-UP CHAIN.
+     *
+     * followUpDays is the rep's answer to "if nobody replies, remind me when" --
+     * chosen when the batch is built, because that is when they know what the
+     * email is for. 0 means no reminder, and it is the default.
+     *
+     * parentBatchId points BACK at the campaign a follow-up came from, so the
+     * chain is walkable in one direction and a follow-up can never be mistaken
+     * for an original send. followUpSentUtc on the parent is the guard against
+     * a rep running it twice and putting a third touch on 22 people.
+     */
+    followUpDays: Number(e.followUpDays) || 0,
+    parentBatchId: e.parentBatchId || "",
+    followUpSentUtc: e.followUpSentUtc || "",
     copyInternalTo: e.copyInternalTo || "", senderMail: e.senderMail || "",
     approvedUtc: e.approvedUtc || "", sendNotBeforeUtc: e.sendNotBeforeUtc || "",
     pausedUtc: e.pausedUtc || "", canceledUtc: e.canceledUtc || "",
@@ -174,10 +188,11 @@ const getBatch = async (userId, batchId) => batchFromEntity(await getOptional("b
 async function patchBatch(userId, batchId, patch, etag) {
   const entity = { partitionKey: userId, rowKey: batchId, updatedUtc: now() };
   const strings = ["status", "mode", "name", "commonSubject", "commonBodyText", "warningLevel",
-    "warningMessage", "reviewedUtc", "approvedUtc", "sendNotBeforeUtc", "pausedUtc", "canceledUtc"];
+    "warningMessage", "reviewedUtc", "approvedUtc", "sendNotBeforeUtc", "pausedUtc", "canceledUtc",
+    "parentBatchId", "followUpSentUtc"];
   for (const k of strings) if (k in patch) entity[k] = clean(patch[k], k.includes("Body") ? 50000 : 500);
   for (const k of ["commonRevision", "recipientCount", "externalCount", "sentCount",
-                   "hardBounceCount"]) if (k in patch) entity[k] = Number(patch[k]) || 0;
+                   "hardBounceCount", "followUpDays"]) if (k in patch) entity[k] = Number(patch[k]) || 0;
   for (const [key, field] of [["attachmentIds", "attachmentIdsJson"], ["attachmentSummary", "attachmentSummaryJson"]])
     if (key in patch) entity[field] = json(patch[key]);
   await (await table("batches")).updateEntity(entity, "Merge", etag ? { etag } : undefined);
@@ -206,6 +221,7 @@ function messageFromEntity(e) {
     attachments: parse(e.attachmentsJson, []), graphMessageId: e.graphMessageId || "",
     graphInternetMessageId: e.graphInternetMessageId || "",
     graphConversationId: e.graphConversationId || "", graphRequestId: e.graphRequestId || "",
+    followUpOfGraphId: e.followUpOfGraphId || "",
     draftCreatedUtc: e.draftCreatedUtc || "", queuedUtc: e.queuedUtc || "",
     sendStartedUtc: e.sendStartedUtc || "", submittedUtc: e.submittedUtc || "",
     failureCode: e.failureCode || "", failureMessage: e.failureMessage || "",
@@ -255,6 +271,9 @@ async function patchMessage(userId, batchId, messageId, patch, etag) {
   const entity = { partitionKey: batchPartition(userId, batchId), rowKey: messageId, updatedUtc: now() };
   const strings = ["subject", "bodyText", "bodyHtml", "state", "graphMessageId", "graphInternetMessageId",
     "graphConversationId",
+    // The sent message this one is a follow-up to. Carries the Graph id rather
+    // than the conversation id because the worker replies to a MESSAGE.
+    "followUpOfGraphId",
     "graphRequestId", "draftCreatedUtc", "queuedUtc", "sendStartedUtc", "submittedUtc", "failureCode",
     "failureMessage", "bounceKind", "bounceAtUtc", "bounceReason", "retryAfterUtc", "leaseUntilUtc",
     /* THE THIRD TIME THIS WHITELIST ATE A FEATURE.

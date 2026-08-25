@@ -327,6 +327,37 @@
     </fieldset>`;
   }
 
+  /* "If nobody replies, remind me when."
+   *
+   * Asked HERE, at the setup step, because this is the moment a rep knows what
+   * the email is for -- an introduction wants a week, a document somebody asked
+   * for wants three days, and a newsletter wants nothing. Asking later means
+   * asking someone who has moved on.
+   *
+   * PRESETS, NOT A NUMBER FIELD. This is a decision made once per batch and it
+   * only has to be roughly right; a free-text box is a small tax on every send
+   * and invites 1-day reminders that arrive before anyone has read the mail.
+   *
+   * DEFAULT OFF. A batch of 400 that all come due on one morning is a queue
+   * nobody reads, which is the failure the work queue is built to avoid.
+   */
+  const FOLLOW_UP_PRESETS = [
+    { days: 0, label: "No reminder" },
+    { days: 3, label: "3 days" },
+    { days: 7, label: "1 week" },
+    { days: 14, label: "2 weeks" },
+  ];
+
+  function followUpPicker(){
+    return `<fieldset class="email-copy"><legend>If nobody replies</legend>
+      <label class="email-label">Remind me to follow up
+        <select id="followUpDays">${FOLLOW_UP_PRESETS.map((p) =>
+          `<option value="${p.days}"${p.days === 0 ? " selected" : ""}>${esc(p.label)}</option>`).join("")}</select></label>
+      <p class="email-fine">Anyone who replies drops off the reminder on their own.
+        An out-of-office is not a reply.</p>
+    </fieldset>`;
+  }
+
 
   function setupView(){
     const templates = catalog.templates || [], docs = catalog.documents || [];
@@ -345,6 +376,7 @@
         <button type="button" class="email-small" data-email="templates">Manage templates</button>
         <button type="button" class="email-small" data-email="docs">Manage approved documents</button></p>` : ""}
       ${copyPicker()}
+      ${followUpPicker()}
       ${domainPicker()}
       ${setupSendWarning()}
       <p id="emailNotice" class="email-notice"></p>
@@ -1283,6 +1315,8 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
       <footer class="email-footer"><p id="emailNotice" class="email-notice${
         sendBlocked ? " bad" : ""}">${esc(
         (!locked && sendBlocked) ? sendBlocked : (b.warningMessage || ""))}</p><div>
+        ${b.status === "completed" && b.mode === "send" && !b.parentBatchId && !b.followUpSentUtc
+          ? `<button type="button" class="ask-btn" data-email="follow-up-open" data-id="${esc(b.id)}">Follow up on no reply</button>` : ""}
         ${b.status === "action_required" ? `<button type="button" class="ask-btn" data-email="connect">Reconnect Microsoft 365</button><button type="button" class="ask-btn" data-email="retry">Retry remaining</button>` : ""}
         ${locked && b.mode === "send" && !["completed", "canceled", "action_required"].includes(b.status) ? `<button type="button" class="ask-btn" data-email="pause">${b.status === "paused" ? "Resume remaining" : "Pause remaining"}</button>` : ""}
         ${locked && !["completed", "canceled", "drafts_ready"].includes(b.status) ? `<button type="button" class="ask-btn ghost" data-email="cancel">Cancel remaining</button>` : ""}
@@ -1414,6 +1448,67 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
     try { await loadCatalog(); if (!catalog.connection.connected) connectView(); else setupView(); }
     catch (e) { connectView(e.message); }
   }
+
+
+  /* THE FOLLOW-UP SCREEN.
+   *
+   * Shows the arithmetic before it shows the compose box, because the number
+   * that matters is "22 of 25 never answered" and the rep should see how it was
+   * arrived at -- including who came OFF the list and why. A screen that just
+   * said "22 recipients" would be asking them to trust a filter they cannot
+   * inspect.
+   */
+  let followUp = null;
+
+  async function openFollowUp(batchId){
+    const back = shell(); back.hidden = false;
+    document.getElementById("emailTitle").textContent = "Follow up";
+    document.getElementById("emailBody").innerHTML = `<p class="email-loading">Working out who never replied…</p>`;
+    try {
+      followUp = await api(`follow_up_candidates&id=${encodeURIComponent(batchId)}`, null, "GET");
+      followUpView();
+    } catch (e) { document.getElementById("emailBody").innerHTML =
+      `<p class="email-notice bad">${esc(e.message)}</p>`; }
+  }
+
+  function followUpView(){
+    const f = followUp, c = f.counts;
+    const off = [
+      c.replied ? `${c.replied} replied` : "",
+      c.bounced ? `${c.bounced} bounced` : "",
+      c.suppressed ? `${c.suppressed} opted out since` : "",
+      c.notSent ? `${c.notSent} never sent` : "",
+    ].filter(Boolean);
+    document.getElementById("emailBody").innerHTML = `<div class="email-setup">
+      <p class="email-summary"><b>${c.remaining}</b> of ${c.sent} never replied${
+        off.length ? ` &middot; ${esc(off.join(", "))}` : ""}</p>
+      ${c.remaining ? "" : `<p class="email-notice">There is nobody to follow up.</p>`}
+      <label class="email-label">What to say
+        <textarea id="followUpText" rows="3" maxlength="2000">${esc(FOLLOW_UP_DEFAULT)}</textarea></label>
+      <p class="email-fine">Sent as a reply on the original thread, so it arrives under
+        the email they already have, with it quoted below. It carries its own
+        unsubscribe link, because it is outreach we started.</p>
+      <label class="email-check">
+        <input type="checkbox" id="followUpAttach">
+        <span>Attach the original documents again</span></label>
+      <p class="email-fine">Off by default: re-sending a document people already
+        have is a common way into a spam folder. Turn it on when the document is
+        the reason you are writing.</p>
+      ${off.length ? `<details class="email-mates"><summary>Who came off the list</summary>
+        <div class="email-mates-list">${
+          [["replied", "Replied"], ["bounced", "Bounced"], ["suppressed", "Opted out"]]
+            .map(([k, label]) => (f[k] || []).length
+              ? `<p class="email-fine"><b>${label}:</b> ${(f[k] || []).map((x) => esc(x.name || x.email)).join(", ")}</p>`
+              : "").join("")}</div></details>` : ""}
+      <footer class="email-footer"><p id="emailNotice" class="email-notice"></p><div>
+        <button type="button" class="ask-btn ghost" data-email="close">Close</button>
+        <button type="button" class="ask-btn primary" data-email="follow-up-create"
+          ${c.remaining ? "" : "disabled"}>Prepare ${c.remaining} follow-up${c.remaining === 1 ? "" : "s"}</button>
+      </div></footer>
+      </div>`;
+  }
+
+  const FOLLOW_UP_DEFAULT = "Just following up on the note below in case it reached you at a busy moment.";
 
   async function openHistory() {
     const back = shell(); back.hidden = false;
@@ -1694,6 +1789,19 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
       return open(global.AdvisorEmailData ? await global.AdvisorEmailData.list() : []);
     }
     if (action === "history") { return openHistory(); }
+    if (action === "follow-up-open") { return openFollowUp(button.dataset.id); }
+    if (action === "follow-up-create") {
+      button.disabled = true; notice("Preparing the follow-up…");
+      try {
+        detail = await api("create_follow_up", {
+          batchId: followUp.batchId,
+          text: (document.getElementById("followUpText") || {}).value || "",
+          includeAttachments: !!(document.getElementById("followUpAttach") || {}).checked,
+        });
+        cursor = 0; composerView();
+      } catch (e) { button.disabled = false; notice(e.message, true); }
+      return;
+    }
     if (action === "connect") {
       button.disabled = true;
       try { const r = await api("connect", { returnTo: `${location.pathname}?email=connected` }); location.assign(r.authorizeUrl); }
@@ -1721,9 +1829,10 @@ Generate emails for all of them?`)) return;
         const attachmentIds = [...document.querySelectorAll(".email-docs input:checked")].map((x) => x.value);
 
         const ccColleague = ((document.getElementById("ccColleague") || {}).value || "").trim();
+        const followUpDays = Number((document.getElementById("followUpDays") || {}).value || 0);
         detail = await api("create_batch", { recipients: kept,
           templateId: (document.getElementById("emailTemplate") || {}).value || "",
-          attachmentIds, ccColleague });
+          attachmentIds, ccColleague, followUpDays });
         composerView();
       } catch (e) { button.disabled = false; notice(e.message, true); }
       return;

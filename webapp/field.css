@@ -672,6 +672,10 @@ body{
   border-left:3px solid transparent; font-size:13px}
 .hist-list li:first-child{border-top:0}
 .hist-list li.from-crm{border-left-color:var(--accent)}
+/* Email, observed in the mailbox rather than typed into a log. A third source
+   on one timeline, so it gets its own edge -- Act! is the accent, ours is the
+   default, email sits between them. */
+.hist-list li.from-mail{border-left-color:var(--warn)}
 .hist-list li.from-app{border-left-color:color-mix(in srgb,var(--muted) 45%,transparent)}
 .hist-when{color:var(--muted); font-size:11.5px; margin-right:8px}
 .hist-what{font-weight:650}
@@ -807,6 +811,30 @@ body{
   border:1px solid var(--hair); background:var(--panel-2); color:inherit;
   font:inherit; font-size:12px}
 
+/* THE MODAL SHELL, which this file did not have.
+   .ask-back / .ask / .ask-btn lived only in style.css -- the DESK stylesheet,
+   which field.html never loads. So showMailMessage() built its dialog, appended
+   it to <body>, and it rendered as an unstyled static block at the very bottom
+   of the document: no overlay, no positioning, nothing on screen. Tapping Read
+   did fire the handler and did fetch the message; the result was simply parked
+   below everything, invisible without scrolling to the end of the page.
+
+   Sized for a phone rather than copied from the desk: full-width sheet, tap-
+   height buttons, and it sits above the sheet and the dialer dock. */
+.ask-back{position:fixed; inset:0; z-index:3000; display:flex;
+  align-items:center; justify-content:center; padding:14px;
+  background:rgba(6,10,15,.62)}
+.ask{width:min(520px,100%); max-height:88vh; overflow:auto; padding:16px;
+  border-radius:14px; background:var(--panel);
+  box-shadow:0 18px 46px rgba(0,0,0,.45), inset 0 0 0 1px var(--hair)}
+.ask h3{margin:0 0 6px; font-size:16px}
+.ask p{margin:0 0 12px; font-size:13px; color:var(--muted)}
+.ask-btn{display:block; width:100%; min-height:var(--tap); margin-top:8px;
+  padding:0 12px; font:inherit; font-size:14px; font-weight:600; border:0;
+  border-radius:10px; background:var(--panel-2); color:var(--ink);
+  box-shadow:inset 0 0 0 1px var(--hair)}
+.ask-btn.primary{background:var(--accent); color:var(--accent-ink); box-shadow:none}
+.ask-btn.ghost{background:transparent; box-shadow:none; color:var(--muted)}
 .mail-msg{display:flex; flex-direction:column; max-height:82vh}
 .mail-msg h3{margin:0 0 4px; font-size:15px}
 .mail-meta{margin:0 0 8px; color:var(--muted); font-size:12px}

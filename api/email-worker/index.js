@@ -107,11 +107,41 @@ async function draft(work, deps) {
      * they were when it was built. A rep who changes the setting mid-send
      * should not end up with half a batch copied and half not.
      */
+    const copies = core.extraRecipients(claimed,
+      { copySelf: batch.copySelf, copyInternal: batch.copyInternal,
+        copyInternalTo: batch.copyInternalTo, ccColleague: batch.ccColleague },
+      { mail: batch.senderMail });
+    if (!found && claimed.followUpOfGraphId) {
+      /* A FOLLOW-UP REPLIES TO OUR OWN SENT MESSAGE, and that needs care.
+       *
+       * createReply builds a draft Exchange knows is part of the conversation:
+       * same conversationId, quoted original, correct References. The advisor's
+       * client threads it under the mail they already have, which is the whole
+       * point -- a fabricated "RE:" would start a new conversation and degrade
+       * every later reply match to references or sender-only.
+       *
+       * THE TRAP: createReply addresses the draft to the SENDER of the original.
+       * The original here is ours, so a naive reply goes to the rep. It looks
+       * entirely correct in testing -- mail arrives, it is threaded, it is from
+       * the right person -- and reaches nobody. So the recipients are set
+       * explicitly afterwards, which also drops the reply-all fan-out Graph
+       * would otherwise inherit from the original's Cc list.
+       */
+      const draft = await deps.graph.createReply(token.accessToken, claimed.followUpOfGraphId, false);
+      await deps.graph.patchDraftRecipients(token.accessToken, draft.id, {
+        toRecipients: [{ emailAddress: { address: claimed.recipientEmail } }],
+        ccRecipients: copies.cc.map((a) => ({ emailAddress: { address: a } })),
+        bccRecipients: copies.bcc.map((a) => ({ emailAddress: { address: a } })),
+        subject: claimed.subject,
+      });
+      // Prepended, so the rep's line sits above the quoted original rather than
+      // replacing it -- see updateDraftBody().
+      await deps.graph.updateDraftBody(token.accessToken, draft.id,
+        claimed.bodyHtml + (claimed.signatureHtml || ""));
+      found = await deps.graph.getMessage(token.accessToken, draft.id);
+    }
     if (!found) found = await deps.graph.createDraft(token.accessToken,
-      { ...claimed, ...core.extraRecipients(claimed,
-          { copySelf: batch.copySelf, copyInternal: batch.copyInternal,
-            copyInternalTo: batch.copyInternalTo, ccColleague: batch.ccColleague },
-          { mail: batch.senderMail }) });
+      { ...claimed, ...copies });
     await deps.store.patchMessage(work.userId, work.batchId, work.messageId, {
       graphMessageId: found.id, graphInternetMessageId: found.internetMessageId || "",
       // Captured at draft time because it is the only moment we are certain to

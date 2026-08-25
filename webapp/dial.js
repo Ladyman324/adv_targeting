@@ -35,6 +35,7 @@
     dnc: "/api/dnc",
     flags: "/api/flags",
     settings: "/api/settings",
+    email: "/api/email",
   };
 
   // Must match MAX_QUEUE in api/shared/store.js. The server trims silently past
@@ -819,10 +820,27 @@
    * has nothing on them" and "Act! could not be reached" look identical on
    * screen and mean opposite things to a rep deciding whether to cold-call.
    */
+  /* THREE SOURCES, ONE TIMELINE.
+   *
+   * "What have we done with this person" was answered from the call log and
+   * Act!, and email was missing from it entirely -- because the emailer writes
+   * neither. A campaign send is observed later by the reply sweep and lands in
+   * EmailActivity, a table this panel never read. So a rep who emailed an
+   * advisor an hour ago opened Full history and saw "Nothing recorded".
+   *
+   * Email is fetched ALONGSIDE rather than blocking: it is a different service
+   * and a different failure mode, and losing the call log because the mail
+   * timeline is slow would be a bad trade. A failure here is reported in the
+   * notice, never as an empty history.
+   */
   async function fullHistory(crd, limit) {
-    const d = await call(`${API.log}?crd=${encodeURIComponent(crd)}`
-                       + `&limit=${limit || 25}&act=1`);
-    return { events: d.events || [], crm: d.crm || { ok: false, why: "", count: 0 } };
+    const logP = call(`${API.log}?crd=${encodeURIComponent(crd)}`
+                    + `&limit=${limit || 25}&act=1`);
+    const mailP = call(`${API.email}?op=activity&crd=${encodeURIComponent(crd)}`)
+      .then((d) => ({ ok: true, entries: d.entries || [] }))
+      .catch((e) => ({ ok: false, entries: [], why: e.message || "unavailable" }));
+    const [d, mail] = await Promise.all([logP, mailP]);
+    return { events: d.events || [], crm: d.crm || { ok: false, why: "", count: 0 }, mail };
   }
 
   /* One merged history, described in words, WITHOUT any HTML.
@@ -897,11 +915,34 @@
     return s.length > HIST_TEXT_MAX ? s.slice(0, HIST_TEXT_MAX - 1).trimEnd() + "…" : s;
   }
 
-  function describeHistory(events, crm) {
+  /* Does an Act! row already describe this email?
+   *
+   * Act! carries emails a rep logged there by hand, and the sweep will also
+   * observe the same message in the mailbox. Showing both is worse than showing
+   * either: it reads as two separate contacts on the same day.
+   *
+   * Matched on the DAY plus the subject, because that is all the two sources
+   * share -- Act! has no Graph id and our row has no Act! id. Same day and same
+   * subject is one email; the false-positive case is emailing the same advisor
+   * the same subject twice in one day, which is a mailing mistake anyway.
+   */
+  function sameDay(a, b) { return String(a || "").slice(0, 10) === String(b || "").slice(0, 10); }
+  function normSubject(v) {
+    return String(v || "").toLowerCase()
+      .replace(/^\s*(re|fw|fwd)\s*:\s*/i, "").replace(/\s+/g, " ").trim();
+  }
+
+  function describeHistory(events, crm, mail) {
+    const crmEmails = (events || []).filter((e) => e.source === "act");
     const rows = (events || []).map((e) => {
       const fromCrm = e.source === "act";
       return {
         crm: fromCrm,
+        // The DATE is what shows; the full timestamp is what sorts. Sorting on
+        // the sliced date put everything logged on one day in arbitrary order,
+        // so a reply that arrived at 13:06 could sit below a call at 13:00 --
+        // and the whole point of one merged timeline is the sequence.
+        ts: String(e.at || ""),
         at: String(e.at || "").slice(0, 10),
         // The CRM's own words for what it was; ours is the outcome we recorded.
         what: fromCrm ? (plainText(e.type) || "History")
@@ -933,7 +974,30 @@
         notice = "Act! could not be reached, so its history is missing here — "
                + "this is not the full picture.";
     }
-    return { rows, notice };
+    /* Email rows, merged in and then the whole thing re-sorted. Newest first,
+     * matching what both views already render. */
+    const mailRows = ((mail && mail.entries) || [])
+      .filter((m) => !crmEmails.some((c) =>
+        sameDay(c.at, m.occurredAt) && normSubject(c.subject) === normSubject(m.subject)))
+      .map((m) => ({
+        crm: false,
+        email: true,
+        ts: String(m.occurredAt || ""),
+        at: String(m.occurredAt || "").slice(0, 10),
+        what: m.label || (m.direction === "outbound" ? "Emailed" : "Email received"),
+        // The mailbox it was seen in, so a shared timeline still says WHO.
+        who: plainText(m.who || ""),
+        text: clip(plainText(m.subject || "")),
+      }));
+
+    const all = rows.concat(mailRows)
+      .sort((a, b) => String(b.ts || b.at).localeCompare(String(a.ts || a.at)));
+
+    if (mail && mail.ok === false) {
+      notice = (notice ? notice + " " : "")
+        + "Email activity could not be loaded, so any email is missing here.";
+    }
+    return { rows: all, notice };
   }
 
   /* ---------- auto-dial ------------------------------------------------------

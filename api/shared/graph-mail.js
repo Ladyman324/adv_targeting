@@ -417,6 +417,24 @@ async function createReply(token, messageId, replyAll = false) {
  * sentence with no sign of what it answers -- which is exactly the mail people
  * find unreadable on a phone three days later.
  */
+/* Set who a reply draft actually goes to.
+ *
+ * createReply addresses its draft to the SENDER of the message it answers. For
+ * a follow-up on our own sent mail that is the rep, so the draft has to be
+ * re-addressed before it is sent. Done as an explicit PATCH rather than by
+ * building a fresh message, because the reply draft is what carries the
+ * conversationId and the quoted history -- the two things that make it thread.
+ *
+ * Cc and Bcc are SET, not merged. Graph inherits the original's recipients into
+ * a reply, and a follow-up that quietly re-copied everybody who was on the
+ * first message would fan out to people the rep never chose again.
+ */
+async function patchDraftRecipients(token, messageId, fields) {
+  const r = await request(token, "PATCH",
+    `/me/messages/${encodeURIComponent(messageId)}`, fields, { timeoutMs: 45000 });
+  return r.data;
+}
+
 async function updateDraftBody(token, messageId, html) {
   const existing = await request(token, "GET",
     `/me/messages/${encodeURIComponent(messageId)}?$select=body`);
@@ -433,5 +451,6 @@ async function sendDraft(token, messageId) {
 
 module.exports = { GraphError, APP_PROPERTY_ID, NDR_FIELDS, ACTIVITY_FIELDS,
   findByAppId, createDraft, getMessage, getMessageContent, attachDocuments,
-  attachInlineImages, attachFiles, createReply, updateDraftBody, sendDraft,
+  attachInlineImages, attachFiles, createReply, patchDraftRecipients,
+  updateDraftBody, sendDraft,
   recentMail, recentInbox, request, attachmentFileName };
