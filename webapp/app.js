@@ -39,7 +39,7 @@ const COMPARE = ["#12b39c", "#e0a53a", "#8079e0", "#e8615d", "#4aa3e0", "#9fc93c
 // of every deployed JSON path and byte. It changes for standalone shard
 // rebuilds too, and its leading date keeps the stale-build warning readable.
 // Do not edit it by hand.
-const DATA_VERSION = "20260822T034641Z-e63efcfc1cff13e9";
+const DATA_VERSION = "20260822T034641Z-d841ad43077e2639";
 const dataUrl = file => `data/${file}?v=${DATA_VERSION}`;
 // ONE scale for every mark on the map. There used to be two, and they were not
 // comparable: buildings grew as 20 + 5.2*sqrt(n) and saturated at 56px by just
@@ -1953,10 +1953,25 @@ function teammatesOf(crd){
 }
 const teammateEmails = (crd) => teammatesOf(crd).map(t => t.email);
 
+/* THE GREETING, from the CRM's own Dear field.
+ *
+ * {{first_name}} was rendered by splitting the display name, so Christopher
+ * Tolman -- "Chris" in the Dear field of his own Act! record, and "Chris" to
+ * everybody at UBS -- was greeted as Christopher on every email.
+ *
+ * Sent as firstName because email-core.mergeValues() already prefers
+ * recipient.firstName over splitting the name; nothing on the server changes.
+ * Absent for roster-sourced advisors, where the old behaviour is still right.
+ */
+const greetingFor = (crd) => {
+  const c = contactFor(crd);
+  return (c && c.sal) || "";
+};
+
 window.AdvisorEmailData = {
-  recipientFor: (id) => ({ ...dialSnapshot(id),
+  recipientFor: (id) => ({ ...dialSnapshot(id), firstName: greetingFor(id),
     teammates: teammateEmails(id), teammatesFull: teammatesOf(id) }),
-  list: () => Dial.state.items.map((it) => ({ ...it,
+  list: () => Dial.state.items.map((it) => ({ ...it, firstName: greetingFor(it.crd),
     teammates: teammateEmails(it.crd), teammatesFull: teammatesOf(it.crd) })),
 };
 

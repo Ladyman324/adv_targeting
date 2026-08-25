@@ -101,7 +101,18 @@ def sec_email_map() -> dict:
 def main() -> None:
     df = pd.read_parquet(SRC)
     total = len(df)
-    high = df[df.tier == "high"].copy()
+    # CONFIRMED COUNTS TOO, and it is the stronger of the two.
+    #
+    # This read `tier == "high"` alone. `confirmed` means the CRM itself states
+    # the CRD in its `crd` custom field and the SEC index carries that number --
+    # 8,848 contacts do, and score_contacts takes it without second-guessing
+    # because no name-similarity score is better evidence than the firm naming
+    # its own advisor's registration.
+    #
+    # Filtering to "high" therefore excluded the BEST matches in the file and
+    # cost 8,842 advisors their Act! sync, silently, the moment those rows
+    # started being labelled confirmed.
+    high = df[df.tier.isin(["confirmed", "high"])].copy()
 
     # A CRD pointing at two Act! contacts is not resolvable, and picking one is
     # how a call lands on the wrong record. Drop both and say so.

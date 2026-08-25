@@ -2126,14 +2126,22 @@ def _act_lookup():
     shipped = read(API / "shared" / "act_contacts.json")["contacts"]
     df = pd.read_parquet(ROOT / "data" / "interim" / "act_crosswalk.parquet")
 
-    high = df[df.tier == "high"]
+    # SYNCABLE MEANS confirmed OR high, not high alone.
+    #
+    # `confirmed` is the STRONGER of the two: the CRM states the CRD in its own
+    # `crd` custom field -- 8,848 contacts do -- and the SEC index carries that
+    # number. This check knew only about `high`, so when those rows started
+    # being labelled confirmed it reported the best matches in the file as
+    # "review/none-tier CRDs leaked in".
+    SYNCABLE = ["confirmed", "high"]
+    high = df[df.tier.isin(SYNCABLE)]
     ok_pairs = set(zip(high.advisor_crd.astype(str), high.act_id.astype(str)))
-    lower = {str(c) for c in df[df.tier != "high"].advisor_crd}
+    lower = {str(c) for c in df[~df.tier.isin(SYNCABLE)].advisor_crd}
 
     problems = []
     bad = [c for c, a in shipped.items() if (c, a) not in ok_pairs]
     if bad:
-        problems.append(f"{len(bad)} CRDs map to an id with no high-tier crosswalk "
+        problems.append(f"{len(bad)} CRDs map to an id with no syncable crosswalk "
                         f"row, e.g. {bad[:3]}")
     # A CRD that is ONLY review-tier must be absent entirely.
     leaked = [c for c in shipped if c in lower and c not in
@@ -2257,9 +2265,16 @@ def _first_names():
     # shipped. That made the check report hundreds of disagreements that were
     # really the wrong record being read, which is its own quiet wrongness.
     by_act = {str(r.act_id): str(r.name) for r in df.itertuples()}
+    # A CRD-STATED MATCH IS NOT A NAME MATCH, so a name test says nothing about
+    # it. The CRM names the registration number and the SEC carries it; that the
+    # contact is filed as "North Brittany" against a filed BRITTANY is a
+    # data-entry curiosity, not evidence of a wrong person.
+    stated = {str(r.act_id) for r in df.itertuples() if r.tier == "confirmed"}
 
     bad = []
     for crd, act_id in shipped.items():
+        if str(act_id) in stated:
+            continue
         act_name = by_act.get(str(act_id))
         sec = (adv.get(crd) or {}).get("n")
         if not act_name or not sec:

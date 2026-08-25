@@ -78,7 +78,14 @@ COLUMNS = ["crd", "name", "title", "firm", "city", "state", "lat", "lon",
            # the nearest advisor is often nobody in particular.
            "ranked",      # in Barron's or Forbes: a recognised, larger book
            "assets",      # dollars EIC already has with them, 0 if none
-           "office"]      # street|city|zip5 -- who else is in this building
+           "office",      # street|city|zip5 -- who else is in this building
+           # The CRM's Dear field, and ONLY when it differs from the first word
+           # of the displayed name. Storing it for everybody would put ~20 bytes
+           # on all 129,907 rows to say what the name already says; it actually
+           # differs for about 2,550 people, so the column is empty almost
+           # everywhere and costs a comma. Those 2,550 are precisely the ones
+           # being greeted wrongly today -- Christopher Tolman, who is Chris.
+           "sal"]
 
 
 def cell_of(lat: float, lon: float) -> str:
@@ -222,6 +229,10 @@ def main() -> None:
             1 if crd in ranked else 0,
             round(money),
             str(office or ""),
+            # Empty unless it says something the name does not.
+            (lambda g, n: g if g and g.split()[0].lower() != n.split()[0].lower() else "")(
+                str(c.get("sal", "") or "").strip(),
+                str(index_names.get(str(crd)) or c.get("n", "") or "x")),
         ])
 
     if TILES.exists():

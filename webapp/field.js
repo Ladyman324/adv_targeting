@@ -19,7 +19,7 @@ const PAGE = 200;                  // rows added per "Show more"
 // Stamped by src/web_assets.py from metadata time plus every deployed JSON
 // byte. Field data still revalidates, but the shared build ID prevents stale
 // same-day rebuilds and keeps every first-party data request explicit.
-const DATA_VERSION = "20260822T034641Z-e63efcfc1cff13e9";
+const DATA_VERSION = "20260822T034641Z-d841ad43077e2639";
 const dataUrl = file => {
   const path = file.startsWith("data/") ? file : `data/${file}`;
   return `${path}${path.includes("?") ? "&" : "?"}v=${encodeURIComponent(DATA_VERSION)}`;
@@ -647,14 +647,23 @@ window.AdvisorEmailData = {
    * The snapshot already carries the state, which is all the practice file
    * needs. Where a row IS loaded its team key is passed as a shortcut, and the
    * lookup falls back to searching the state's practices when it is not. */
+  /* The CRM's Dear field, when the tile carries one.
+   *
+   * COL.sal is absent from tiles built before the column existed, and a stale
+   * cached tile is the normal state of a phone -- so this reads through COL
+   * defensively rather than assuming the column is there. Empty means "the
+   * name already says it", which is true for all but ~2,550 advisors.
+   */
   recipientFor: async (crd) => {
     const row = rowByCrd(String(crd));
+    const greeting = (row && COL.sal != null && row[COL.sal]) || "";
     const base = row ? snapshotOf(row)
       : Dial.state.items.find((it) => String(it.crd) === String(crd));
     if (!base) return base;
     const mates = await teammatesWithEmail(
       String(crd), row ? row[COL.state] : base.state, row ? row[COL.team_key] : "");
-    return { ...base, teammates: mates.map((m) => m.email), teammatesFull: mates };
+    return { ...base, firstName: greeting,
+             teammates: mates.map((m) => m.email), teammatesFull: mates };
   },
   list: async () => {
     const out = [];
@@ -662,7 +671,8 @@ window.AdvisorEmailData = {
       const row = rowByCrd(String(it.crd));
       const mates = await teammatesWithEmail(
         String(it.crd), row ? row[COL.state] : it.state, row ? row[COL.team_key] : "");
-      out.push({ ...it, teammates: mates.map((m) => m.email), teammatesFull: mates });
+      out.push({ ...it, firstName: (row && COL.sal != null && row[COL.sal]) || "",
+                 teammates: mates.map((m) => m.email), teammatesFull: mates });
     }
     return out;
   },

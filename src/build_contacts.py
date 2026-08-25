@@ -69,6 +69,8 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
 import pandas as pd
 
+from nicknames import same_person
+
 from firm_rosters import FIRMS
 from web_assets import write_json_gz
 from forbes_match import (ACCEPT, MARGIN, NICKNAMES, W_SUFFIX, build_index,
@@ -386,6 +388,65 @@ def derive_domain_map() -> dict[str, str]:
     return mapping
 
 
+# ---------------------------------------------------------------------------
+# THE "DEAR" FIELD, which is the greeting a rep already chose.
+#
+# {{first_name}} in an email was rendered by splitting the DISPLAY name, so
+# Christopher Tolman -- who is "Chris" to everybody at UBS and "Chris" in the
+# Dear field of his own Act! record -- was greeted as Christopher.
+#
+# This is not derived and not guessed. `salutation` is populated on 47,419 of
+# 47,466 Act! contacts and differs from the first name on 2,550 of them, which
+# is exactly the set of people whose greeting we were getting wrong. It is not
+# competing with the SEC filing: the filing says who somebody IS, and this says
+# what they are called.
+#
+# The Excel export the rest of this module reads has no Dear column, so it is
+# joined from the JSON API pull on email address. Not through the crosswalk --
+# act_crosswalk.py imports score_contacts() from here, and depending on it back
+# would be circular.
+#
+# WHAT IS REFUSED, and why the list is short: the field is clean. 111 of 47,419
+# values are not a name, and 55 of those are a status somebody typed into the
+# greeting -- RETIRED, RETRIED, LEFT INDUSTRY. "Dear RETIRED," is the one
+# outcome worth writing code to prevent. Initials are KEPT: A.J., T.J. and J.P.
+# are how those people are addressed, and an all-caps rule would have dropped
+# them along with the statuses.
+SALUTATION_STATUSES = {"retired", "retried", "left industry", "deceased",
+                       "inactive", "do not contact", "do not mail", "no mail",
+                       "unsubscribed", "none", "n/a", "na"}
+
+
+def usable_salutation(value: str) -> str:
+    """The Dear field when it is a greeting, or "" when it is something else."""
+    v = " ".join(str(value or "").split())
+    if not v or len(v) > 20 or len(v.split()) > 2:
+        return ""
+    if v.lower() in SALUTATION_STATUSES:
+        return ""
+    if re.search(r"[0-9@/\|;:]", v):
+        return ""
+    # Must contain a letter; "&" joins two people rather than naming one.
+    if "&" in v or not re.search(r"[A-Za-z]", v):
+        return ""
+    return v
+
+
+def salutation_by_email() -> dict:
+    """email -> Dear field, from the newest Act! JSON pull."""
+    files = sorted(glob.glob(str(RAW / "act_contacts_*.json")))
+    if not files:
+        print("[*] no Act! JSON pull; greetings fall back to the first name")
+        return {}
+    out = {}
+    for row in json.loads(pathlib.Path(files[-1]).read_text(encoding="utf-8")):
+        email = clean_email(row.get("emailAddress") or "")
+        greeting = usable_salutation(row.get("salutation"))
+        if email and greeting:
+            out[email] = greeting
+    return out
+
+
 def load_crm(domains: dict[str, str]) -> pd.DataFrame:
     files = sorted(glob.glob(CRM_GLOB))
     if not files:
@@ -394,6 +455,10 @@ def load_crm(domains: dict[str, str]) -> pd.DataFrame:
     path = pathlib.Path(files[-1])
     frame = pd.read_excel(path).rename(columns=lambda c: str(c).strip())
     frame["email"] = frame.get("E-mail", "").map(clean_email)
+    greetings = salutation_by_email()
+    frame["salutation"] = frame["email"].map(lambda e: greetings.get(e, "") if e else "")
+    named = int((frame["salutation"] != "").sum())
+    print(f"[*] {named:,} CRM contacts carry a usable Dear field for the greeting")
     frame["firm_crd"] = frame["email"].map(
         lambda e: domains.get(e.split("@")[-1], "") if e else "")
 
@@ -1270,6 +1335,46 @@ def team_url_of(group: pd.DataFrame) -> str:
     return ""
 
 
+def filed_given_names() -> dict:
+    """CRD -> every given name the SEC has on file, lower-cased.
+
+    Used to CORROBORATE the CRM's Dear field before it is allowed to become a
+    greeting. See salutation_of() for why that check is not optional.
+    """
+    try:
+        adv = pd.read_parquet(ROOT / "data" / "interim" / "advisors.parquet",
+                              columns=["advisor_crd", "first_name", "middle_name",
+                                       "used_first_name"])
+    except FileNotFoundError:
+        return {}
+    out = {}
+    for r in adv.itertuples(index=False):
+        toks = []
+        for t in (r.first_name, r.middle_name, r.used_first_name):
+            if isinstance(t, str):
+                toks.extend(w.lower() for w in t.split() if w.strip())
+        if toks:
+            out[str(r.advisor_crd)] = toks
+    return out
+
+
+def salutation_of(group: pd.DataFrame) -> str:
+    """The Dear field from whichever row in this CRD's group carries one.
+
+    Read from the GROUP, not from pick_best's winner, for the same reason
+    team_url_of exists: when a roster row wins on contact detail it has no Dear
+    field at all, and reading it off the winner would lose the greeting for
+    exactly the advisors the CRM knows best.
+    """
+    if "salutation" not in group.columns:
+        return ""
+    for value in group["salutation"]:
+        text = str(value or "").strip()
+        if text and text.lower() != "nan":
+            return text[:20]
+    return ""
+
+
 def pick_best(group: pd.DataFrame) -> pd.Series:
     """Which record wins when several contacts resolve to the same CRD.
 
@@ -1374,7 +1479,12 @@ def load_people(limit: int | None = None) -> pd.DataFrame:
     keep = ["name", "title", "team", "team_url", "profile_url", "linkedin", "email",
             "phone", "phone_ext", "mobile", "city", "state",
             "office", "company", "owner", "assets", "team_key", "firm_crd",
-            "given_crd", "phone_kind", "source", "source_file"]
+            "given_crd", "phone_kind", "source", "source_file",
+            # The CRM's Dear field. Added here the moment it was added to
+            # load_crm -- it was not, the first time, and the greeting silently
+            # never reached a single record. Exactly the team_url failure this
+            # comment already describes, repeated four lines below it.
+            "salutation"]
     # Every column EXCEPT assets, which is numeric and whose NaN means "no
     # figure". Blanket-filling it with "" would make the team logic read an
     # empty string as a value and int() it.
@@ -1473,6 +1583,8 @@ def write_contact_shards(contacts: dict, payload: dict) -> list:
 
 
 def main() -> None:
+    # Used to corroborate the CRM's Dear field before it becomes a greeting.
+    filed_names = filed_given_names()
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--limit", type=int, help="only the first N contacts, for a trial")
     ap.add_argument("--report", action="store_true", help="print diagnostics and stop")
@@ -1552,6 +1664,32 @@ def main() -> None:
         # evidence available that the record belongs to somebody else -- Scott
         # Friberg's Virginia number was showing on Jennifer Friberg's Atlanta
         # card with nothing on screen to suggest a problem.
+        # THE GREETING, only when the CRM supplied one. Absent on roster-sourced
+        # advisors, and the emailer falls back to splitting the display name --
+        # which is what it did for everybody before this existed.
+        # CORROBORATED BY THE FILING, OR NOT USED AT ALL.
+        #
+        # The Dear field is usually the greeting a rep chose -- Chris for
+        # Christopher Tolman, Scott for HENRY SCOTT KRUSE, who goes by his
+        # middle name. But 1,834 of the 4,226 that differ from the display name
+        # name somebody ELSE: Michael Myers is "Deborah", Joseph Pena is
+        # "Melanie", Mitchell Stillman is "Kristin" -- a spouse, an assistant,
+        # or a household record. audit.py already cites Mitchell/Kristin
+        # Stillman as a known wrong pairing.
+        #
+        # "Hi Deborah," to Michael Myers is far worse than "Hi Michael," to a
+        # man who goes by Mike, so the greeting has to agree with a name the SEC
+        # has on file -- first, middle or used, allowing for nicknames.
+        #
+        # The cost is real and accepted: Chip for JOHN FREDERICK JOHNSON is
+        # almost certainly right and is refused, because nothing distinguishes
+        # it from Deborah except knowing the person.
+        sal = salutation_of(group)
+        if sal:
+            filed = filed_names.get(str(crd)) or []
+            first = sal.split()[0]
+            if any(same_person(first, tok) for tok in filed):
+                entry["sal"] = sal
         cs = str(row.get("state", "") or "").strip().upper()[:2]
         if cs:
             entry["cs"] = cs
