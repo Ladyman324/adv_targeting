@@ -2782,11 +2782,21 @@ def _inline_images():
 # human read a word, and the damage would be invisible: the opt-outs would be
 # indistinguishable from genuine ones.
 #
-# So: GET renders a confirmation page, POST writes. And the address comes only
-# from the signed token, never from user input, or the page becomes a way to
-# unsubscribe a third party.
+# So: GET renders a confirmation page, POST writes.
+#
+# POST-ONLY WAS NOT ENOUGH. Three Raymond James recipients were suppressed with
+# nobody clicking, and the telemetry showed the same shape each time: a GET, a
+# ~60 second dwell, a second GET, a POST six seconds later. That is a detonation
+# sandbox opening the page and pressing the only control on it. So the form now
+# asks for the address the message was sent to -- something the page does not
+# contain, so an automated submit arrives empty and does nothing.
+#
+# The typed address only GATES. What gets suppressed is still the address inside
+# the signed token, or the page becomes a way to unsubscribe a third party. And
+# the address must never be RENDERED here: printed above the box it would be
+# there for a form-filling scanner to copy, and the gate would be theatre.
 # ---------------------------------------------------------------------------
-@check("the unsubscribe link confirms before it suppresses")
+@check("the unsubscribe form needs a typed address and suppresses only the token's")
 def _unsubscribe_is_post_only():
     src = text(API / "email-preferences" / "index.js")
     suppress_src = text(API / "shared" / "email-suppress.js")
@@ -2794,9 +2804,23 @@ def _unsubscribe_is_post_only():
     post_branch = src.split('req.method === "POST"', 1)
     writes_on_post = len(post_branch) == 2 and "suppress.suppress(" in post_branch[1]
     no_write_before = "suppress.suppress(" not in post_branch[0]
-    # The address is derived from the token, never read from the request body.
-    token_only = "suppress.readToken(tokenFrom(req))" in src
-    no_address_input = not re.search(r"(body|query)\.(email|address)", src)
+    # The token still names the victim: suppress() is handed the token's address,
+    # never the typed one. Written as a positive match so that renaming the
+    # variable to the submitted value cannot pass silently.
+    token_only = ("suppress.readToken(token)" in src
+                  and re.search(r"suppress\.suppress\(\s*email\b", src) is not None
+                  and re.search(r"suppress\.suppress\(\s*typed\b", src) is None)
+    # A submitted address is REQUIRED, and must equal the token's before any
+    # write happens. Both halves matter: a comparison that is never reached, or
+    # one that lets the empty string through, is the bug this check exists for.
+    gate = post_branch[1].split("suppress.suppress(")[0] if len(post_branch) == 2 else ""
+    reads_typed = 'fieldFrom(req, "email")' in gate
+    compares = re.search(r"typed\s*!==\s*suppress\.norm\(email\)", gate) is not None
+    rejects_blank = re.search(r"!typed\s*\|\|", gate) is not None
+    typed_gate = reads_typed and compares and rejects_blank
+    # The address is never printed back -- not on the form, not on the error, not
+    # on the confirmation. esc(email) anywhere in the rendered page is the tell.
+    no_address_shown = re.search(r"esc\(\s*email\s*\)", src) is None
     signed = "createHmac" in suppress_src and "timingSafeEqual" in suppress_src
     anon = json.loads(text(API / "email-preferences" / "function.json"))
     anonymous = anon["bindings"][0].get("authLevel") == "anonymous"
@@ -2813,10 +2837,12 @@ def _unsubscribe_is_post_only():
     # First match wins, so the anonymous route must precede /api/*.
     ordered = ("/api/email-preferences" in names
                and names.index("/api/email-preferences") < names.index("/api/*"))
-    ok = all([writes_on_post, no_write_before, token_only, no_address_input,
-              signed, anonymous, ordered, not unknown])
+    ok = all([writes_on_post, no_write_before, token_only, typed_gate,
+              no_address_shown, signed, anonymous, ordered, not unknown])
     return (ok, f"writes only on POST={writes_on_post and no_write_before}, "
-                f"address from signed token only={token_only and no_address_input}, "
+                f"typed address required and must match={typed_gate}, "
+                f"suppresses the token's address={token_only}, "
+                f"address never rendered={no_address_shown}, "
                 f"HMAC + timing-safe={signed}, anonymous={anonymous}, route precedes /api/*={ordered}, "
                 f"unknown SWA route keys={sorted(unknown) or 0}")
 

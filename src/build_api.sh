@@ -15,7 +15,8 @@ STAGE_DIR=""
 #   27: email-follow-up.test.js -- who is left after a campaign, and who is not
 #   28: email-direct-store.test.js -- atomic operation ownership and outbox
 #   29: email-direct-send.test.js -- no-resubmit reconciliation boundary
-EXPECTED_API_TEST_FILE_COUNT=29
+#   30: email-preferences.test.js -- scanner-resistant unsubscribe confirmation
+EXPECTED_API_TEST_FILE_COUNT=30
 
 cleanup() {
   test -z "$TEMP_ROOT" && return
