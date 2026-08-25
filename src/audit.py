@@ -2822,6 +2822,19 @@ def _unsubscribe_is_post_only():
     # on the confirmation. esc(email) anywhere in the rendered page is the tell.
     no_address_shown = re.search(r"esc\(\s*email\s*\)", src) is None
     signed = "createHmac" in suppress_src and "timingSafeEqual" in suppress_src
+    # The typed-address gate is worthless if the address is readable in the URL:
+    # a base64 payload hands a scanner the very value the box asks for. Sealed
+    # with AES-GCM, whose tag is also the integrity check. The legacy HMAC path
+    # stays -- those links are in inboxes -- which is what `signed` still covers.
+    sealed = ("createCipheriv" in suppress_src and "aes-256-gcm" in suppress_src
+              and "getAuthTag" in suppress_src and "setAuthTag" in suppress_src
+              and re.search(r'return\s+`e\.\$\{b64url', suppress_src) is not None)
+    # Who asked. Application Insights masks client_IP and records no user agent
+    # for Functions, so without this the next incident is inferred from timestamp
+    # shapes again. The REJECTED path must log too: a blank submit is harmless
+    # now, which makes it a free scanner detector -- but only if it is recorded.
+    logs_agent = ("user-agent" in src and "x-forwarded-for" in src
+                  and re.search(r"REJECTED[^\"`]*\$\{who\(req\)\}", src) is not None)
     anon = json.loads(text(API / "email-preferences" / "function.json"))
     anonymous = anon["bindings"][0].get("authLevel") == "anonymous"
     routes = json.loads(text(WEB / "staticwebapp.config.json"))["routes"]
@@ -2838,12 +2851,16 @@ def _unsubscribe_is_post_only():
     ordered = ("/api/email-preferences" in names
                and names.index("/api/email-preferences") < names.index("/api/*"))
     ok = all([writes_on_post, no_write_before, token_only, typed_gate,
-              no_address_shown, signed, anonymous, ordered, not unknown])
+              no_address_shown, signed, sealed, logs_agent, anonymous, ordered,
+              not unknown])
     return (ok, f"writes only on POST={writes_on_post and no_write_before}, "
                 f"typed address required and must match={typed_gate}, "
                 f"suppresses the token's address={token_only}, "
                 f"address never rendered={no_address_shown}, "
-                f"HMAC + timing-safe={signed}, anonymous={anonymous}, route precedes /api/*={ordered}, "
+                f"token sealed, not merely signed={sealed}, "
+                f"legacy HMAC still timing-safe={signed}, "
+                f"requester logged incl. rejects={logs_agent}, "
+                f"anonymous={anonymous}, route precedes /api/*={ordered}, "
                 f"unknown SWA route keys={sorted(unknown) or 0}")
 
 

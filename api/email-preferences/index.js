@@ -119,14 +119,41 @@ function fieldFrom(req, name) {
 
 const tokenFrom = (req) => fieldFrom(req, "t");
 
+/* Who asked.
+ *
+ * Application Insights masks client_IP to 0.0.0.0 and records no user agent for
+ * Functions, so the platform telemetry could not tell a person from a scanner.
+ * Three advisors were wrongly suppressed and the only evidence available was the
+ * SHAPE of the timestamps -- a GET, a minute's dwell, a second GET, a POST. That
+ * is a week of inference to reach what one header would have said outright.
+ *
+ * Logged on every path, and the useful one is the REJECTED submit: a blank or
+ * mismatched address now does no harm, which turns this endpoint into a free
+ * detector. If a gateway is exercising these links, the log says so before an
+ * advisor pays for it.
+ */
+function who(req) {
+  const h = (name) => {
+    const bag = req.headers || {};
+    return String(bag[name] || bag[name.toUpperCase()] || "").slice(0, 256);
+  };
+  // x-forwarded-for is a chain; the client is the first entry, the rest are
+  // proxies. Front Door and the SWA edge both append to it.
+  const ip = h("x-forwarded-for").split(",")[0].trim().replace(/:\d+$/, "");
+  return `agent=${JSON.stringify(h("user-agent") || "-")} `
+       + `ip=${ip || "-"} ref=${JSON.stringify(h("referer") || "-")}`;
+}
+
 module.exports = async function (context, req) {
   try {
     const token = tokenFrom(req);
     const claim = suppress.readToken(token);
+    context.log(`email preference ${req.method}: ${who(req)}`);
     if (!claim) {
       // Deliberately vague and identical for a tampered token and an
       // unconfigured server: this page is public, and a precise error is a
       // free oracle for anyone poking at it.
+      context.log(`email preference: unreadable token, ${who(req)}`);
       return page(context, "This link is not valid",
         `<p>This preference link could not be read. It may have been altered in transit,
           or split across lines by an email client.</p>
@@ -144,7 +171,7 @@ module.exports = async function (context, req) {
         //
         // Status stays 200. A 4xx would let anything watching response codes
         // tell a wrong guess from a right one without reading the page.
-        context.log("email preference: submitted address did not match the token");
+        context.log(`email preference REJECTED (blank or mismatched address): ${who(req)}`);
         return page(context, "Manage your email preferences",
           `<p>To stop all further email from Equity Investment Corporation, confirm the
              address this message was sent to.</p>`,
@@ -163,7 +190,7 @@ module.exports = async function (context, req) {
       // The address written is the TOKEN's, never the typed one. The typing
       // proved a person is present; it does not get to name who is suppressed.
       const result = await suppress.suppress(email, { source: "unsubscribe-form" });
-      context.log(`email preference opt-out: ${email} (new=${result.added})`);
+      context.log(`email preference opt-out: ${email} (new=${result.added}) ${who(req)}`);
       try {
         const pushed = await act.markDoNotEmail(email, crd);
         if (pushed.ok) await suppress.markActSynced(email);

@@ -35,16 +35,28 @@ const norm = (email) => String(email || "").trim().toLowerCase();
 // input from becoming a 400 from storage rather than a clean rejection here.
 const keyFor = (email) => crypto.createHash("sha256").update(norm(email)).digest("hex");
 
-/* ---------- the signed token -------------------------------------------
+/* ---------- the sealed token -------------------------------------------
  * The preference link has to work for someone who is not signed in and never
  * will be, so the URL itself carries the authority. It names one address and is
- * signed with a server-only key: without the signature anyone could unsubscribe
- * anyone by editing a query string, which is both a nuisance and a way to
- * silence a competitor's inbox.
+ * sealed with a server-only key: without that, anyone could unsubscribe anyone
+ * by editing a query string, which is both a nuisance and a way to silence a
+ * competitor's inbox.
+ *
+ * The token is ENCRYPTED, not merely signed, and the difference matters. The
+ * unsubscribe page asks the visitor to type the address the message was sent
+ * to, because a mail-gateway sandbox will press a button but will not fill in a
+ * field it has no value for. A base64 payload handed it that value: anything
+ * holding the link could read the address straight out of the URL. AES-GCM
+ * closes that -- the token is opaque, and the tag authenticates it, so this
+ * still rejects tampering exactly as the HMAC did.
+ *
+ * It does NOT close the other route: a scanner reading the message can see the
+ * To: header. Nothing in a form can beat that, because the scanner holds the
+ * whole email. This raises the cost; it is not a wall.
  *
  * No expiry. A footer link should still work when someone digs the email out of
  * their archive a year later, and the token grants exactly one narrow power --
- * suppressing the address already written inside it.
+ * suppressing the address already sealed inside it.
  */
 function secret() {
   const raw = process.env.EMAIL_UNSUBSCRIBE_SECRET || "";
@@ -52,38 +64,79 @@ function secret() {
   return crypto.createHash("sha256").update(raw).digest();
 }
 
+// A SEPARATE key for the sealed form. One key must never drive two primitives,
+// and the HMAC key still has a job: verifying the older links already sitting
+// in advisors' inboxes.
+function boxKey() {
+  const raw = process.env.EMAIL_UNSUBSCRIBE_SECRET || "";
+  if (!raw) return null;
+  return crypto.createHash("sha256").update(`${raw}|unsubscribe-token-v2`).digest();
+}
+
 const b64url = (buf) => buf.toString("base64")
   .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 const unb64url = (s) => Buffer.from(String(s || "").replace(/-/g, "+").replace(/_/g, "/"), "base64");
 
-// The CRD rides along inside the SIGNED payload so the opt-out can be written
-// back to Act! through the proven CRD -> contact crosswalk. It is signed, not
+const IV_BYTES = 12;   // GCM's standard nonce length
+const TAG_BYTES = 16;
+
+// The CRD rides along inside the SEALED payload so the opt-out can be written
+// back to Act! through the proven CRD -> contact crosswalk. It is sealed, not
 // merely appended, so it cannot be swapped to point at another contact. The
 // suppression itself is still keyed on the address alone -- the CRD is only
 // how the CRM is told, never what decides who is suppressed.
+//
+// The "e." prefix marks the sealed form. A legacy token is two base64 segments
+// and its first segment is an encoded address, so it can never be the single
+// character "e" -- the two formats cannot be confused for one another.
 function signToken(email, crd = "") {
-  const key = secret();
+  const key = boxKey();
   if (!key) return "";
   const claim = `${norm(email)}|${String(crd || "").replace(/[^0-9]/g, "").slice(0, 12)}`;
-  const payload = b64url(Buffer.from(claim, "utf8"));
-  const mac = b64url(crypto.createHmac("sha256", key).update(payload).digest()).slice(0, 27);
-  return `${payload}.${mac}`;
+  const iv = crypto.randomBytes(IV_BYTES);
+  const cipher = crypto.createCipheriv("aes-256-gcm", key, iv);
+  const sealed = Buffer.concat([cipher.update(claim, "utf8"), cipher.final()]);
+  return `e.${b64url(Buffer.concat([iv, cipher.getAuthTag(), sealed]))}`;
 }
 
-// Returns the address the token names, or null. Timing-safe, and it verifies
-// before it decodes -- an unverified payload is attacker-controlled input and
-// nothing downstream should see it.
-function readToken(token) {
+// GCM's authentication tag IS the integrity check: final() throws on any edited
+// byte, so a forged token fails here rather than downstream.
+function openSealed(data) {
+  const key = boxKey();
+  if (!key) return null;
+  try {
+    const buf = unb64url(data);
+    if (buf.length <= IV_BYTES + TAG_BYTES) return null;
+    const decipher = crypto.createDecipheriv("aes-256-gcm", key, buf.subarray(0, IV_BYTES));
+    decipher.setAuthTag(buf.subarray(IV_BYTES, IV_BYTES + TAG_BYTES));
+    return Buffer.concat([decipher.update(buf.subarray(IV_BYTES + TAG_BYTES)),
+                          decipher.final()]).toString("utf8");
+  } catch {
+    return null;
+  }
+}
+
+// The pre-encryption format. Kept because those links are already in inboxes and
+// breaking them would silently strand every recipient of every earlier batch.
+// Timing-safe, and it verifies BEFORE it decodes -- an unverified payload is
+// attacker-controlled input and nothing downstream should see it.
+function openLegacy(token) {
   const key = secret();
   if (!key) return null;
-  const [payload, mac] = String(token || "").split(".");
+  const [payload, mac] = token.split(".");
   if (!payload || !mac) return null;
   const want = b64url(crypto.createHmac("sha256", key).update(payload).digest()).slice(0, 27);
   const a = Buffer.from(mac, "utf8"), b = Buffer.from(want, "utf8");
   if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return null;
-  const claim = unb64url(payload).toString("utf8");
-  // Tokens minted before the CRD was added carry the bare address. Still valid:
-  // those emails are already in inboxes and their links must keep working.
+  return unb64url(payload).toString("utf8");
+}
+
+// Returns the address the token names, or null.
+function readToken(token) {
+  const raw = String(token || "");
+  const claim = raw.startsWith("e.") ? openSealed(raw.slice(2)) : openLegacy(raw);
+  if (!claim) return null;
+  // Tokens minted before the CRD was added carry the bare address. Still valid.
   const [email, crd = ""] = claim.split("|");
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 254) return null;
   return { email, crd };
