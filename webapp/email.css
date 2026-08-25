@@ -169,7 +169,21 @@
  * Putting overflow on the details sidesteps the anonymous box entirely, and the
  * summary is made sticky so the "Jump to someone" header stays put instead of
  * scrolling away with the names. */
-.email-list .email-jump{display:block;flex:1;min-height:0;overflow:auto}
+/* NEVER SIDEWAYS. `overflow:auto` gave this box a horizontal scrollbar as well
+   as a vertical one, and a horizontal scrollbar is drawn INSIDE the box: it ate
+   ~15px off the bottom, so the last recipient sat under it, half-visible and
+   impossible to scroll to -- the list was already at its maximum scroll. With
+   sixty names it hid whoever happened to be last.
+
+   There is nothing to scroll to sideways in any case: names wrap
+   (overflow-wrap:anywhere) and addresses ellipsize, so any horizontal overflow
+   is a rounding artefact rather than content a rep needs to reach.
+
+   scroll-padding-bottom keeps a scrolled-to row clear of the lower edge rather
+   than flush against it. */
+.email-list .email-jump{display:block;flex:1;min-height:0;
+  overflow-y:auto;overflow-x:hidden;scroll-padding-bottom:12px}
+.email-list .email-jump ol{padding-bottom:10px}
 .email-list .email-jump summary{position:sticky;top:0;z-index:1;
   padding:2px 0 4px;background:var(--panel-2)}
 .email-list .email-jump ol{max-height:none;overflow:visible;flex:none;margin:6px 0 0}

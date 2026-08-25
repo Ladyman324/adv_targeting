@@ -39,7 +39,7 @@ const COMPARE = ["#12b39c", "#e0a53a", "#8079e0", "#e8615d", "#4aa3e0", "#9fc93c
 // of every deployed JSON path and byte. It changes for standalone shard
 // rebuilds too, and its leading date keeps the stale-build warning readable.
 // Do not edit it by hand.
-const DATA_VERSION = "20260822T034641Z-b795708e7ba11141";
+const DATA_VERSION = "20260822T034641Z-e63efcfc1cff13e9";
 const dataUrl = file => `data/${file}?v=${DATA_VERSION}`;
 // ONE scale for every mark on the map. There used to be two, and they were not
 // comparable: buildings grew as 20 + 5.2*sqrt(n) and saturated at 56px by just
@@ -1909,6 +1909,18 @@ function dialSnapshot(id){
      * no suspicion. _state is the state file the pin was loaded from, which is
      * the office location by construction.
      */
+    /* STILL ONLY _state, and deliberately.
+     *
+     * I briefly added `|| c.cs` here so an advisor queued from outside the
+     * loaded scope carried somewhere to switch the map to. That is the wrong
+     * place for it: c.cs is the CRM's state, not the office location, and
+     * pairing it with the office city stored above is precisely the
+     * "Atlanta, TX" failure this comment already warns about. The audit check
+     * caught it.
+     *
+     * The scope fallback lives at the point of USE instead -- see
+     * openAdvisorAnywhere() -- where it decides which map to load and never
+     * becomes part of the stored record. */
     state: (p && p._state) || "",
     email: (c && c.e) || "",
     // Carried on the queue entry so the dialer, which shows only a name and a
@@ -2872,9 +2884,13 @@ async function openWorkQueue(){
       // advisor outside it has no feature to open. Said plainly rather than
       // failing silently, because a queue row that does nothing when tapped
       // reads as a broken queue.
-      const f = ALL.find(x => String(x.properties.id) === String(act.dataset.wqCrd));
-      if (f){ close(); openAdvisorDetails(f); }
-      else showNotice("That advisor is not in the current map scope. Switch to their state to open the card.");
+      const crd = act.dataset.wqCrd;
+      const c = contactFor(crd) || {};
+      close();
+      // c.cs is the CRM's state for this contact. The pin's own state is
+      // unavailable here by definition -- the pin is not loaded, which is the
+      // whole reason we are switching.
+      await openAdvisorAnywhere(crd, c.cs || "");
       return;
     }
     if (action === "follow_up"){
@@ -3659,9 +3675,10 @@ document.addEventListener("click", async e => {
     renderDialer();
   } else if (act === "auto-cancel") { Dial.cancelAuto(); }
   else if (act === "open") {
-    const f = ALL.find(x => String(x.properties.id) === String(crd));
-    if (f) openAdvisorDetails(f);
-    else showNotice("That advisor is not in the current map scope. Switch to their state to open the card.");
+    // The queue entry carries the state, which is all the switch needs.
+    const q = (Dial.state.items || []).find(i => String(i.crd) === String(crd));
+    const c = contactFor(crd) || {};
+    await openAdvisorAnywhere(crd, (q && q.state) || c.cs || "");
   }
 });
 
@@ -4755,6 +4772,53 @@ function resetForScopeChange(){
 // recentres after the data is in (used by location search).
 let scopeRequest = 0;
 let scopeController = null;
+/* Open an advisor who is NOT in the scope currently on screen.
+ *
+ * The map holds one scope at a time, so "Show on map" used to look the advisor
+ * up in what happened to be loaded and, failing, tell the rep to go and switch
+ * territory themselves. That is the app describing its own implementation:
+ * every fact needed to make the switch -- the advisor's state, and which
+ * territory owns it -- is already here, and a rep working a national call list
+ * hits it constantly because a list is not confined to one territory.
+ *
+ * Prefers the TERRITORY over the bare state, because that is the scope a rep
+ * actually works in and switching to it keeps their neighbours on screen.
+ */
+function scopeForState(state){
+  const st = String(state || "").toUpperCase();
+  if (!st) return "";
+  for (const [name, states] of Object.entries(TERRITORIES))
+    if (states.includes(st)) return terrKey(name);
+  // A state in no territory is still a scope of its own.
+  return st;
+}
+
+async function openAdvisorAnywhere(crd, state){
+  const here = ALL.find(x => String(x.properties.id) === String(crd));
+  if (here) { openAdvisorDetails(here); return true; }
+
+  const want = scopeForState(state);
+  if (!want || want === scope) {
+    showNotice(state
+      ? `That advisor is not on the map for ${esc(String(state).toUpperCase())}.`
+      : "That advisor has no location on file, so there is nothing to show on the map.");
+    return false;
+  }
+  showNotice(`Switching to ${want.startsWith("T:") ? want.slice(2) : want} to show them…`);
+  try {
+    await switchScope(want, true);
+    const found = ALL.find(x => String(x.properties.id) === String(crd));
+    if (found) { openAdvisorDetails(found); return true; }
+    // Switched, and they are still not there. Say which of the two it is
+    // rather than repeating "not in scope" at somebody who just watched the
+    // scope change.
+    showNotice("Switched to their territory, but this advisor has no mapped office there.");
+  } catch (e) {
+    showNotice(e.message || "That territory could not be loaded.");
+  }
+  return false;
+}
+
 async function switchScope(next, panTo){
   if (next === scope && !pendingScope)
     return { status:"applied", scope:next, request:scopeRequest };

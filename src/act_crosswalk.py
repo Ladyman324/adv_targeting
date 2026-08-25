@@ -55,6 +55,24 @@ INTERIM = ROOT / "data" / "interim"
 OUT = INTERIM / "act_crosswalk.parquet"
 
 
+def _given_of(full_name: str) -> str:
+    """The comparable given name from an Act! record, or "" when there is none.
+
+    Returns "" for a bare initial or a suffix-only name -- the gate treats that
+    as no evidence rather than as disagreement.
+    """
+    import re as _re
+    s = _re.sub(r"^(mr|mrs|ms|dr|miss|rev|sir)\.?\s*", "", str(full_name or "").strip(),
+                flags=_re.I)
+    s = _re.sub(r"(jr|sr|ii|iii|iv)\.?", " ", s, flags=_re.I)
+    parts = [_re.sub(r"[^a-z]", "", w.lower()) for w in _re.split(r"[\s.,]+", s)]
+    parts = [w for w in parts if w]
+    if len(parts) < 2:
+        return ""                     # only a surname, or nothing usable
+    first = parts[0]
+    return first if len(first) > 1 else ""
+
+
 def newest_pull() -> pathlib.Path:
     files = sorted(glob.glob(str(RAW / "act_contacts_*.json")))
     if not files:
@@ -160,6 +178,46 @@ def main() -> None:
         for crd, firsts, _meta in recs:
             sec_tokens.setdefault(str(crd), set()).update(firsts)
 
+    # AND STRAIGHT FROM THE FILING, for everyone the index does not carry.
+    #
+    # The index only holds advisors the matcher had reason to build a surname
+    # entry for. For anyone else the gate fell through to the DISPLAYED name --
+    # which reconcile_display_names.py may have taken from the CRM, so Act!
+    # ended up vouching for itself again. CRD 843291 is filed WAYNE CAMPBELL,
+    # displays as Marlyn Campbell, and sailed through on that fallback.
+    #
+    # The MIDDLE name is included deliberately. Going by it is common and
+    # entirely ordinary -- KEVIN JAMES NOWAKOWSKI is "James" in the CRM, DAVID
+    # BRANDT HARING is "Brandt" -- and treating those as different people would
+    # demote hundreds of correct matches while calling it safety.
+    filed_names: dict[str, list[str]] = {}
+    try:
+        filed = pd.read_parquet(INTERIM / "advisors.parquet",
+                                columns=["advisor_crd", "first_name", "middle_name",
+                                         "used_first_name"])
+        for r in filed.itertuples(index=False):
+            # SPLIT ON WHITESPACE. "KEVIN MICHAEL" arrives in one field, and
+            # comparing it whole made "Mike Lavery" look like a stranger -- 39
+            # correct matches were demoted for nothing but an unsplit field.
+            #
+            # `isinstance(t, str)` rather than `if t`: bool(float("nan")) is
+            # True, so a NaN would enter as the literal word "nan" and match an
+            # Act! record named Nan.
+            #
+            # ORDERED, not a set. The initialism test below walks these in
+            # order, and a set makes the result depend on PYTHONHASHSEED --
+            # two runs of the evaluation harness disagreed by two rows before
+            # this was pinned down.
+            toks = []
+            for t in (r.first_name, r.middle_name, r.used_first_name):
+                if isinstance(t, str):
+                    toks.extend(w.lower() for w in t.split() if w.strip())
+            if toks:
+                filed_names.setdefault(str(r.advisor_crd), []).extend(toks)
+    except FileNotFoundError:
+        print("[!] advisors.parquet missing — the first-name gate falls back to "
+              "the displayed name, which Act! may itself have supplied")
+
     # The index does not cover every advisor in the map, and an empty token set
     # used to mean "nothing to disagree with" -- which let 599 genuine mismatches
     # straight through the gate, Mitchell vs Kristin Stillman among them. A
@@ -170,35 +228,96 @@ def main() -> None:
     # sees on the card, which makes it the right thing for an Act! record to have
     # to agree with, and it is what audit.py checks -- gate and check now ask the
     # same question of the same data.
+    # THE NAME THE DESK SHOWS, from advisor_index.json -- NOT contacts.json.
+    #
+    # This read contacts.json's `n`, and that field is whichever CRM or roster
+    # row won pick_best. For a contact that CAME FROM Act!, `n` IS the Act!
+    # name -- so the gate was asking an Act! record to agree with itself, and
+    # it always did. 1,688 high-tier pairs survived it whose given names cannot
+    # be reconciled at all: Dave Harris matched to Shanicia Harris, Jason Main
+    # to Marissa Main, both at score 1.00, both displaying money on a card.
+    #
+    # advisor_index.json is the desktop's own artifact, written after
+    # reconcile_display_names.py, and it is what the rep is looking at when
+    # they log a call. build_field_tiles.py switched to it for exactly this
+    # reason: 47,371 advisors carry a different name in the two files.
     map_names = {}
     try:
-        map_names = {k: (v.get("n") or "") for k, v in json.loads(
-            (ROOT / "webapp" / "data" / "contacts.json")
-            .read_text(encoding="utf-8"))["advisors"].items()}
+        map_names = {str(r[0]): (r[1] or "") for r in json.loads(
+            (ROOT / "webapp" / "data" / "advisor_index.json")
+            .read_text(encoding="utf-8"))["advisors"]}
     except FileNotFoundError:
-        print("[!] contacts.json not built — first-name demotion falls back to "
-              "the SEC index alone and will be less complete")
+        print("[!] advisor_index.json not built — first-name demotion falls back "
+              "to the SEC index alone and will be less complete")
 
     def agrees(act_name: str, crd: str) -> bool:
-        """The map's displayed name is AUTHORITATIVE where we have one.
+        """The SEC FILING is the witness, because it is the only independent one.
 
-        This used to be an OR -- agree with the SEC index tokens *or* with the
-        map name -- and an OR on a safety gate is a way of saying "any one
-        witness will do". An index token then rescued 87 pairs the displayed
-        name plainly rejected: John vs Andrew Davis, Mark vs David Evans.
+        Two earlier versions of this gate both let an Act! record vouch for
+        itself, in the same way, one file apart:
 
-        The name on the card is the identity the rep is looking at when they log
-        the call, so it is the one an Act! record has to agree with. Index tokens
-        only decide the advisors the map has no name for.
+          * contacts.json `n` is whichever source won pick_best, and for an
+            Act!-sourced contact that IS the Act! name.
+          * advisor_index.json is reconciled, and reconcile_display_names.py
+            can adopt a CRM name over the filed one -- 341 rows are driven by a
+            CRM-sourced contact, e.g. CRD 2300079 Mohammad -> Masud Akbar.
+
+        Either way the comparison was Act! against Act!, which always agrees,
+        and the gate demoted almost nothing. advisors.parquet is the SEC's own
+        record and is not derived from Act! at all, so it is what a match has to
+        survive.
+
+        Agreement with ANY given-name token counts: "Robert Nelson Murray Jr"
+        carries both `robert` and `nelson`, so an Act! record reading "Nelson
+        Murray" is the same person. The DISPLAYED name is consulted only where
+        the SEC index has no tokens for this advisor -- something rather than
+        nothing, not a second chance to pass.
         """
         crd = str(crd)
+        # THE FILING, INCLUDING THE NAME THE SEC SAYS THEY GO BY.
+        #
+        # Two of these were genuinely Act!-vouching-for-itself and are fixed:
+        # contacts.json `n` is the pick_best winner (identical to the Act! name
+        # on 26,300 of 26,725 high-tier rows), and advisor_index.json is
+        # reconciled and can adopt a CRM name (1,327 rows differ from the pure
+        # SEC display name, 341 of them CRM-driven).
+        #
+        # THE THIRD ONE WAS NOT. I claimed the matching index was contaminated
+        # because CRD 843291 carries both 'wayne' and 'marlyn'. Both come from
+        # advisors.parquet: first_name=WAYNE, used_first_name=MARLYN, and
+        # used_first_name is parsed from the SEC feed's own Form U4 <OthrNms>
+        # by parse_advisors._used_first(). Marlyn IS the SEC's record of the
+        # name Wayne Campbell goes by. Excluding used_first_name did not remove
+        # contamination; it threw away the SEC's own answer and demoted a
+        # correct match.
+        #
+        # So: filed first name, middle name, and used name -- all three from
+        # the SEC. Nothing merges into advisors.parquet (verified: sole writer
+        # is parse_advisors.py, straight off the SEC XML).
+        filed_toks = filed_names.get(crd)
+        if filed_toks:
+            if any(same_person(act_name, t) for t in filed_toks):
+                return True
+            # AN INITIALISM IS THE PERSON, not a stranger. "AJ Gallego" against
+            # a filed ALEXANDER JOSEPH is the same man writing his own initials.
+            # Order matters here, which is why filed_toks is a list.
+            given = _given_of(act_name)
+            if len(given) >= 2 and len(filed_toks) >= 2:
+                if given == "".join(w[0] for w in filed_toks[:len(given)]):
+                    return True
+            # NOTHING TO COMPARE is not a disagreement. "Wiggins II" and
+            # "G. Miller" carry no given name at all; demoting them punishes a
+            # thin Act! record rather than a wrong one.
+            if not given:
+                return True
+            return False
+        toks = sec_tokens.get(crd)
+        if toks:
+            return any(same_person(act_name, t) for t in toks)
         mapped = map_names.get(crd)
         if mapped:
             return any_name_agrees(act_name, mapped)
-        toks = sec_tokens.get(crd)
-        if not toks:
-            return True                  # no evidence either way: do not demote
-        return any(same_person(act_name, t) for t in toks)
+        return True                      # no evidence either way: do not demote
 
     hi = scored["tier"] == "high"
     disagree = hi & ~pd.Series(
@@ -260,6 +379,28 @@ def main() -> None:
 
     keep.to_parquet(OUT, index=False)
     print(f"[*] wrote {len(keep):,} rows to {OUT}")
+
+    # THE PART THAT IS EASY TO SKIP.
+    #
+    # A rule settles most questionable matches; the rest need a person, and a
+    # residue nobody is reminded about is a residue nobody works. So the
+    # crosswalk says out loud what is still undecided every time it runs,
+    # rather than leaving it to be rediscovered.
+    try:
+        import act_review                                   # noqa: PLC0415
+        df = act_review.build()
+        if not df.empty:
+            verdicts = act_review.load_verdicts()
+            todo = [r for r in df.itertuples(index=False)
+                    if r.pile in ("review", "contra")
+                    and not (verdicts.get(r.act_id)
+                             and verdicts[r.act_id]["evidence_hash"] == r.evidence_hash)]
+            if todo:
+                print(f"[!] {len(todo):,} questionable matches still need a decision "
+                      f"-- run: python src/act_review.py --queue")
+    except Exception as err:                                # noqa: BLE001
+        # Never fatal. The crosswalk is the deliverable; this is a reminder.
+        print(f"[!] could not triage questionable matches: {err}")
 
 
 if __name__ == "__main__":

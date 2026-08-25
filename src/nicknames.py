@@ -57,6 +57,20 @@ EXTRA = [
     ("michael", "mike", "mickey", "mick"),
     ("charles", "charlie", "chuck", "chas"),
     ("thomas", "tom", "tommy"),
+    # Measured: its absence accounted for 5 of the 30 false demotions the
+    # recommended gate makes -- see docs/gate_evaluation.md.
+    ("david", "dave", "davey"),
+    # Surfaced by the Act! review queue -- each one was demoting a correct
+    # match. See data/output/act_review_queue.csv and docs/gate_evaluation.md.
+    ("cathleen", "cathy", "cath"),
+    ("kathryn", "katy", "katie", "kat"),
+    ("augustine", "austin", "gus"),
+    ("dustin", "dusty"),
+    ("abraham", "abe", "abram"),
+    ("lucas", "luke"),
+    ("louis", "louie", "lou"),
+    ("fernando", "nando"),
+    ("elizabeth", "libet"),
     ("christopher", "chris", "kit"),
     ("daniel", "dan", "danny"),
     ("matthew", "matt"),
@@ -206,7 +220,13 @@ for _g in GROUPS:
 def normalise(name: str) -> str:
     """The first given name, lower-cased, stripped of honorifics and punctuation."""
     s = str(name or "").strip()
-    s = re.sub(r"^(mr|mrs|ms|dr|miss|rev|sir)\.?\s+", "", s, flags=re.I)
+    # \s* not \s+ : Act! holds "Mr.Terry Morrison" and "Mr.Gary Smith" with no
+    # space after the dot, and requiring one left the honorific attached --
+    # "mrterry" then agreed with nothing and the match was demoted as a
+    # different person. The trailing  stops this eating the start of a real
+    # name (Missy, Drew, Sirena).
+    s = re.sub(r"^(mr|mrs|ms|dr|miss|rev|sir)\.\s*|^(mr|mrs|ms|dr|miss|rev|sir)\s+",
+               "", s, flags=re.I)
     # "SANDRA (SANDY) CERQUEIRA" -- the parenthetical is the preferred name and
     # is handled by same_person, so it is not stripped here.
     s = re.split(r"[\s.,]+", s)[0] if s else ""

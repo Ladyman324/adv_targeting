@@ -98,6 +98,10 @@ PHONE_KINDS = {"direct", "extension", "sole-use", "shared", "switchboard",
 
 @check("phone_kind values are all in the taxonomy")
 def _kinds():
+    # contacts.json, because `wk` -- the phone kind -- lives there and nowhere
+    # else. A previous edit of mine pointed this at advisor_index.json, whose
+    # rows carry only a name: `seen` came back empty and the check passed
+    # unconditionally for every value, which is worse than deleting it.
     adv = read(DATA / "contacts.json")["advisors"]
     seen = {v.get("wk") for v in adv.values() if v.get("wk")}
     unknown = seen - PHONE_KINDS
@@ -1852,6 +1856,63 @@ def _flag_lists_parity():
 
 
 # ---------------------------------------------------------------------------
+# The questionable Act! matches have actually been looked at
+#
+# WHY THIS IS A CHECK AND NOT A NOTE: the identity gate was rewritten five times
+# in one afternoon, each version producing a different demotion count and a
+# confident story, because nothing scored it. docs/gate_evaluation.md fixed the
+# RULE. What no rule can fix is the residue -- the matches where the evidence
+# genuinely does not settle it -- and a residue nobody is reminded about is a
+# residue nobody works.
+#
+# Two piles need a person:
+#   review   demoted, and no mailbox settles whether that was right
+#   contra   KEPT at high tier and syncing to Act! today, but the firm-issued
+#            mailbox on the record matches no name the SEC has on file
+#
+# The second is the dangerous one: those rows are writing call history onto a
+# contact right now, and they do not announce themselves.
+#
+# WARNS rather than fails. An unworked queue is a known debt, not a broken
+# build, and a check that blocks the pipeline on it would simply be disabled.
+# ---------------------------------------------------------------------------
+@check("questionable Act! matches are triaged, and the queue is visible")
+def _act_review_queue():
+    import importlib.util                                   # noqa: PLC0415
+    spec = importlib.util.spec_from_file_location("act_review", SRC / "act_review.py")
+    if spec is None or spec.loader is None:
+        return False, "src/act_review.py is missing -- the residue is not triaged at all"
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    df = module.build()
+    if df.empty:
+        return True, "no questionable matches"
+    verdicts = module.load_verdicts()
+    settled = stale = 0
+    todo = {"review": 0, "contra": 0}
+    for r in df.itertuples(index=False):
+        stored = verdicts.get(r.act_id)
+        if stored and stored["evidence_hash"] == r.evidence_hash:
+            settled += 1
+            continue
+        if stored:
+            stale += 1
+        if r.pile in todo:
+            todo[r.pile] += 1
+
+    outstanding = todo["review"] + todo["contra"]
+    detail = (f"{len(df):,} questionable; {settled:,} adjudicated; "
+              f"outstanding review {todo['review']:,}, contra {todo['contra']:,}")
+    if stale:
+        detail += f"; {stale:,} verdicts reopened by changed evidence"
+    if outstanding:
+        detail += " -- run: python src/act_review.py --queue"
+    # Always true: this reports debt, it does not block on it.
+    return True, detail
+
+
+# ---------------------------------------------------------------------------
 # 30. The territory map is complete, exclusive, and matches its source
 #
 # WHY THIS IS THE MOST DANGEROUS FILE IN THE PROJECT: it is small, hand-
@@ -2163,11 +2224,32 @@ def _first_names():
     rebuilding the lookup is the same bug wearing a different hat.
     """
     import pandas as pd                                   # noqa: PLC0415
-    from nicknames import any_name_agrees                 # noqa: PLC0415
+    from nicknames import same_person                     # noqa: PLC0415
 
     shipped = read(API / "shared" / "act_contacts.json")["contacts"]
     df = pd.read_parquet(ROOT / "data" / "interim" / "act_crosswalk.parquet")
-    adv = read(DATA / "contacts.json")["advisors"]
+    # THE SEC FILING, not contacts.json.
+    #
+    # This read contacts.json `n` and called it "the SEC name". It is the
+    # pick_best winner, and for an Act!-sourced contact it IS the Act! name --
+    # identical on 26,300 of 26,725 high-tier rows. So the check compared Act!
+    # against itself and passed, which is the same defect the gate it guards had
+    # in three separate files.
+    #
+    # advisors.parquet is the SEC's own record: filed first name, middle name,
+    # and used_first_name, the last of these parsed from Form U4 <OthrNms> and
+    # the reason "Marlyn Campbell" is genuinely WAYNE CAMPBELL.
+    filed = pd.read_parquet(ROOT / "data" / "interim" / "advisors.parquet",
+                            columns=["advisor_crd", "first_name", "middle_name",
+                                     "used_first_name"])
+    adv = {}
+    for r in filed.itertuples(index=False):
+        toks = []
+        for t in (r.first_name, r.middle_name, r.used_first_name):
+            if isinstance(t, str):
+                toks.extend(t.split())
+        if toks:
+            adv[str(r.advisor_crd)] = {"n": " ".join(toks)}
 
     # Keyed by ACT_ID, not by CRD. One CRD can appear on several crosswalk rows
     # -- the same person entered twice, or a namesake scored lower -- and taking
@@ -2182,7 +2264,36 @@ def _first_names():
         sec = (adv.get(crd) or {}).get("n")
         if not act_name or not sec:
             continue
-        if not any_name_agrees(act_name, sec):
+        # THE SAME QUESTION THE GATE ASKS, including the initialism.
+        #
+        # Without it this check disagrees with act_crosswalk.py by construction:
+        # the gate accepts "DJ" against a filed DENNY JOHN and "JP" against JEAN
+        # PAUL, and the check then reports those very rows as disagreements. A
+        # guard and its gate that ask different questions will always produce
+        # findings, and every one of them is noise.
+        toks = sec.split()
+        # ABSTAIN ON A BARE INITIAL, exactly as the gate does.
+        #
+        # "J. Cummings", "T.J Weber", "H.S. Hill" carry no comparable given
+        # name. act_crosswalk._given_of() returns "" for these and the gate
+        # treats that as no evidence rather than as disagreement -- demoting
+        # them would punish a thin Act! record rather than a wrong one. A check
+        # without the same abstention reports every one of them, and each is
+        # noise the gate has already reasoned about.
+        import re as _re                                    # noqa: PLC0415
+        _parts = [_re.sub(r"[^a-z]", "", w.lower())
+                  for w in _re.split(r"[\s.,]+", str(act_name))]
+        _parts = [w for w in _parts if w]
+        if len(_parts) < 2 or len(_parts[0]) < 2:
+            continue
+        agrees = any(same_person(act_name, t) for t in toks)
+        if not agrees and len(toks) >= 2:
+            import re as _re                                # noqa: PLC0415
+            first = _re.sub(r"[^a-z]", "",
+                            str(act_name).split()[0].lower()) if act_name.split() else ""
+            if len(first) >= 2:
+                agrees = first == "".join(t[0].lower() for t in toks[:len(first)])
+        if not agrees:
             bad.append(f"{crd} {sec!r} vs Act! {act_name!r}")
 
     return (not bad,
@@ -2954,8 +3065,16 @@ def _bounce_sweep():
 def _queue_state():
     src = text(WEB / "app.js")
     builder = src.split("function recipientFor")[0]
-    fn_start = src.rfind("    crd: String(id),")
-    snippet = src[fn_start:fn_start + 1200] if fn_start > -1 else ""
+    # THE WHOLE FUNCTION, not a fixed byte window.
+    #
+    # This read 1,200 characters from the `crd:` line, which is fine until
+    # somebody adds a comment. Explaining WHY the field must stay _state pushed
+    # the field itself to 1,696 characters and the check reported the very
+    # regression the comment was warning about. A scanner whose reach depends on
+    # how much prose sits above the code is measuring the prose.
+    fn_start = src.find("function dialSnapshot(")
+    fn_end = src.find(chr(10) + "}", fn_start) if fn_start > -1 else -1
+    snippet = src[fn_start:fn_end] if fn_start > -1 and fn_end > -1 else ""
     uses_office = "state: (p && p._state)" in snippet
     no_reg_state = 'state: (p && p.rs' not in src
     # Comments stripped first -- the note explaining this bug quotes the old
