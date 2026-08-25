@@ -35,14 +35,16 @@ function load(options = {}) {
   finally { Module._load = realLoad; delete require.cache[routePath]; }
 }
 
-function context() {
-  return { log: Object.assign(() => {}, { warn: () => {}, error: () => {} }) };
+function context(logs) {
+  return { log: Object.assign((value) => logs.push(String(value)),
+    { warn: (value) => logs.push(String(value)), error: (value) => logs.push(String(value)) }) };
 }
 
-async function request(route, method, { query = {}, body = {} } = {}) {
-  const ctx = context();
-  await route(ctx, { method, query, body });
-  return { status: ctx.res.status, html: ctx.res.body };
+async function request(route, method, { query = {}, body = {}, headers = {} } = {}) {
+  const logs = [];
+  const ctx = context(logs);
+  await route(ctx, { method, query, body, headers });
+  return { status: ctx.res.status, html: ctx.res.body, logs };
 }
 
 test("GET renders an address-confirmation form and never suppresses", async () => {
@@ -106,4 +108,21 @@ test("an invalid signed token discloses nothing and writes nothing", async () =>
   assert.doesNotMatch(response.html, /advisor@example\.com/i);
   assert.equal(calls.suppress.length, 0);
   assert.equal(calls.act.length, 0);
+});
+
+test("request telemetry never logs the bearer token from the referrer", async () => {
+  const { route } = load();
+  const response = await request(route, "POST", {
+    body: { t: "signed-token", email: "" },
+    headers: {
+      "user-agent": "MailScanner/1.0",
+      "x-forwarded-for": "[2001:db8::1234]:443, 10.0.0.1",
+      referer: "https://advisors.example/api/email-preferences?t=sealed-bearer#form",
+    },
+  });
+  const log = response.logs.join("\n");
+  assert.match(log, /MailScanner\/1\.0/);
+  assert.match(log, /2001:db8::1234/);
+  assert.match(log, /https:\/\/advisors\.example\/api\/email-preferences/);
+  assert.doesNotMatch(log, /sealed-bearer|\?t=|#form/);
 });

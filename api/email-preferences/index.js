@@ -139,9 +139,22 @@ function who(req) {
   };
   // x-forwarded-for is a chain; the client is the first entry, the rest are
   // proxies. Front Door and the SWA edge both append to it.
-  const ip = h("x-forwarded-for").split(",")[0].trim().replace(/:\d+$/, "");
+  let ip = h("x-forwarded-for").split(",")[0].trim();
+  const bracketed = ip.match(/^\[([^\]]+)\](?::\d+)?$/);
+  if (bracketed) ip = bracketed[1];
+  else if ((ip.match(/:/g) || []).length === 1) ip = ip.replace(/:\d+$/, "");
+  ip = ip.replace(/[^0-9a-f:.]/gi, "").slice(0, 64);
+  // A form POST normally refers back to /api/email-preferences?t=<token>.
+  // The token is encrypted but still grants the power to unsubscribe one
+  // address, so query strings and fragments must never enter telemetry.
+  const rawRef = h("referer");
+  let ref = rawRef.split(/[?#]/, 1)[0];
+  try {
+    const url = new URL(rawRef);
+    ref = `${url.origin}${url.pathname}`;
+  } catch { /* a relative or malformed referrer is still stripped above */ }
   return `agent=${JSON.stringify(h("user-agent") || "-")} `
-       + `ip=${ip || "-"} ref=${JSON.stringify(h("referer") || "-")}`;
+       + `ip=${JSON.stringify(ip || "-")} ref=${JSON.stringify(ref || "-")}`;
 }
 
 module.exports = async function (context, req) {
