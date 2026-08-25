@@ -39,6 +39,131 @@
     return data;
   }
 
+  /* One-to-one sends are asynchronous now: Graph accepting /send is not proof
+   * that the immutable sent item can already be read. Keep only enough local
+   * metadata to resume confirmation after a reload. Draft text, recipients and
+   * attachment names never enter browser storage. */
+  const DIRECT_OPS_KEY = "advisorMap.directSendOps.v1";
+  const directPollers = new Map();
+
+  function directRows() {
+    try {
+      const rows = JSON.parse(localStorage.getItem(DIRECT_OPS_KEY) || "[]");
+      const cutoff = Date.now() - 90 * 86400000;
+      return Array.isArray(rows) ? rows.filter((row) => row && row.operationId
+        && (!row.createdUtc || Date.parse(row.createdUtc) >= cutoff)) : [];
+    } catch { return []; }
+  }
+
+  function saveDirectRows(rows) {
+    try { localStorage.setItem(DIRECT_OPS_KEY, JSON.stringify(rows.slice(-50))); }
+    catch { /* status recovery is useful, not permission to break sending */ }
+  }
+
+  function rememberDirect(meta) {
+    const safe = { operationId: String(meta.operationId), kind: String(meta.kind || ""),
+      crd: String(meta.crd || ""), sourceId: String(meta.sourceId || ""),
+      createdUtc: String(meta.createdUtc || new Date().toISOString()) };
+    const rows = directRows().filter((row) => row.operationId !== safe.operationId);
+    rows.push(safe); saveDirectRows(rows);
+    return safe;
+  }
+
+  function forgetDirect(operationId) {
+    saveDirectRows(directRows().filter((row) => row.operationId !== operationId));
+  }
+
+  function emitDirect(meta, state) {
+    global.dispatchEvent(new CustomEvent("directsendstatus", { detail: { ...meta, state } }));
+  }
+
+  async function directStatus(operationId) {
+    const response = await fetch(`/api/email?op=direct_send_status&operationId=${encodeURIComponent(operationId)}`,
+      { headers: { Accept: "application/json" } });
+    let data = {};
+    try { data = await response.json(); } catch {}
+    if (!response.ok) {
+      const error = new Error(data.error || `Email service returned ${response.status}.`);
+      error.status = response.status;
+      throw error;
+    }
+    return data;
+  }
+
+  function watchDirect(meta, onUpdate) {
+    const id = String(meta.operationId);
+    let poller = directPollers.get(id);
+    if (poller) { if (onUpdate) poller.listeners.add(onUpdate); return poller.promise; }
+    poller = { listeners: new Set(onUpdate ? [onUpdate] : []) };
+    const notify = (state) => {
+      for (const listener of poller.listeners) {
+        try { listener(state); } catch { /* a closed dialog is not a send failure */ }
+      }
+      emitDirect(meta, state);
+    };
+    poller.promise = (async () => {
+      let wait = 3000;
+      for (let attempt = 0; attempt < 30; attempt++) {
+        if (attempt) await new Promise((resolve) => setTimeout(resolve, wait));
+        try {
+          const state = await directStatus(id);
+          notify(state);
+          if (!state.pending) {
+            // An uncertain operation remains a tombstone on this device too:
+            // reopening the composer must warn rather than offer a fresh send.
+            if (state.status !== "needs_verification") forgetDirect(id);
+            return state;
+          }
+          wait = Math.min(60000, Math.round(wait * 1.6));
+        } catch (error) {
+          if (error && error.status === 404) {
+            // Most often a different signed-in user on a shared browser profile
+            // or a terminal tombstone past retention. It cannot be polled from
+            // this identity and must not block their unrelated composer.
+            forgetDirect(id);
+            return null;
+          }
+          // Keep the durable local pointer. A reload or the next app session
+          // resumes; network failure is never translated into permission to
+          // submit a second message.
+          wait = Math.min(60000, Math.round(wait * 1.8));
+        }
+      }
+      return null;
+    })().finally(() => directPollers.delete(id));
+    directPollers.set(id, poller);
+    return poller.promise;
+  }
+
+  function acceptDirect(state, meta, onUpdate) {
+    if (!state || !/^[0-9a-f-]{36}$/i.test(String(state.operationId || ""))) {
+      // Static/API version skew: the legacy endpoint may already have sent but
+      // cannot provide durable status. Fail closed in the UI; never translate
+      // an untrackable response into a green "Sent" or a retry button.
+      const unknown = { status: "needs_verification", pending: false,
+        message: "The API did not return a durable operation status. Do not resend; verify in Outlook." };
+      if (onUpdate) onUpdate(unknown);
+      return Promise.resolve(unknown);
+    }
+    const saved = rememberDirect({ ...meta, operationId: state.operationId });
+    if (onUpdate) onUpdate(state);
+    emitDirect(saved, state);
+    if (!state.pending) {
+      if (state.status !== "needs_verification") forgetDirect(saved.operationId);
+      return Promise.resolve(state);
+    }
+    return watchDirect(saved, onUpdate);
+  }
+
+  function pendingDirect(kind, crd, sourceId = "") {
+    return directRows().find((row) => row.kind === String(kind)
+      && row.crd === String(crd) && row.sourceId === String(sourceId)) || null;
+  }
+
+  function resumeDirect() {
+    for (const row of directRows()) watchDirect(row);
+  }
+
   function shell() {
     let back = document.getElementById("emailComposerBack");
     if (!back) {
@@ -2131,4 +2256,7 @@ They stay on your call list and keep their history — this only takes them out 
   const documents = () => (catalog && catalog.documents) || [];
   global.EmailComposer = { open, openHistory, openAdmin, isAdmin,
                            internalRecipients, documents };
+  global.DirectSendOps = { accept: acceptDirect, watch: watchDirect,
+                           pending: pendingDirect, resume: resumeDirect };
+  setTimeout(resumeDirect, 0);
 })(window);

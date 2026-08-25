@@ -1,0 +1,11 @@
+{
+  "bindings": [
+    {
+      "name": "timer",
+      "type": "timerTrigger",
+      "direction": "in",
+      "schedule": "0 4,9,14,19,24,29,34,39,44,49,54,59 * * * *",
+      "runOnStartup": false
+    }
+  ]
+}

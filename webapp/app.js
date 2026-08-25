@@ -3049,6 +3049,14 @@ function loadActivity(crd){
     .catch(() => settle(`<p class="profile-empty">Email activity could not be loaded.</p>`));
 }
 
+// A confirmation resumed by email.js after a reload still refreshes the
+// visible relationship card. The event carries identifiers and status only.
+window.addEventListener("directsendstatus", (event) => {
+  const detail = (event && event.detail) || {};
+  if (detail.state && detail.state.status === "sent" && detail.crd)
+    loadActivity(detail.crd);
+});
+
 /* Start a NEW conversation with an advisor who has gone quiet.
  *
  * A blank sheet on purpose. This is the message a rep writes because the queue
@@ -3061,6 +3069,11 @@ function loadActivity(crd){
  * mail an arbitrary address from the rep's mailbox.
  */
 async function openFollowUp(crd, name){
+  const existing = window.DirectSendOps && DirectSendOps.pending("follow_up", crd);
+  if (existing) {
+    alert("A follow-up for this advisor is still being confirmed. Do not resend it; verify in Outlook if confirmation does not finish.");
+    return;
+  }
   const back = document.createElement("div");
   back.className = "ask-back";
   back.innerHTML = `<div class="ask follow-up" role="dialog" aria-modal="true"
@@ -3104,9 +3117,20 @@ async function openFollowUp(crd, name){
                                ...attached }) });
       const j = await r.json();
       if (!r.ok) throw new Error(j.error || `HTTP ${r.status}`);
-      note.textContent = `Sent to ${j.to}.`;
-      setTimeout(close, 900);
-      loadActivity(send.dataset.followSend);
+      const meta = { kind: "follow_up", crd: send.dataset.followSend, sourceId: "" };
+      const update = (state) => {
+        if (!note.isConnected) return;
+        note.textContent = state.message || "Confirming with Outlook…";
+        if (state.status === "sent") {
+          loadActivity(send.dataset.followSend);
+          setTimeout(close, 900);
+        } else if (state.status === "failed") {
+          send.disabled = false;
+          delete send.dataset.op;
+        }
+      };
+      if (window.DirectSendOps) DirectSendOps.accept(j, meta, update);
+      else update(j);
     } catch (err) {
       note.textContent = err.message;
       send.disabled = false;
@@ -3268,6 +3292,13 @@ async function showActivityMessage(crd, id){
     const area = box.querySelector(".reply-text");
     const note = box.querySelector(".reply-note");
     const all = box.querySelector("[data-reply-all]");
+    const existing = window.DirectSendOps
+      && DirectSendOps.pending("reply", send.dataset.replyCrd, send.dataset.replySend);
+    if (existing && !send.dataset.op) {
+      send.disabled = true; area.disabled = true;
+      note.textContent = "A reply to this message is still being confirmed. Do not resend it; verify in Outlook if needed.";
+      return;
+    }
     const text = (area.value || "").trim();
     if (!text){ note.textContent = "Nothing to send."; return; }
     // Disabled for the whole round trip. Without this a second tap while the
@@ -3289,10 +3320,22 @@ async function showActivityMessage(crd, id){
                                ...attached }) });
       const j = await r.json();
       if (!r.ok) throw new Error(j.error || `HTTP ${r.status}`);
-      note.textContent = "Sent.";
-      area.value = "";
-      // The timeline behind the dialog is now out of date by exactly one row.
-      loadActivity(send.dataset.replyCrd);
+      const meta = { kind: "reply", crd: send.dataset.replyCrd,
+        sourceId: send.dataset.replySend };
+      const update = (state) => {
+        if (!note.isConnected) return;
+        note.textContent = state.message || "Confirming with Outlook…";
+        if (state.status === "sent") {
+          area.value = "";
+          // The timeline behind the dialog is now out of date by exactly one row.
+          loadActivity(send.dataset.replyCrd);
+        } else if (state.status === "failed") {
+          send.disabled = false; area.disabled = false;
+          delete send.dataset.op;
+        }
+      };
+      if (window.DirectSendOps) DirectSendOps.accept(j, meta, update);
+      else update(j);
     } catch (err) {
       note.textContent = err.message;
       send.disabled = false; area.disabled = false;

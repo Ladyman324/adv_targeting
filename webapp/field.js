@@ -1379,6 +1379,11 @@ function readMailAttachments(box){
  * to mail an arbitrary address from the rep's mailbox.
  */
 async function showFollowUp(crd, name, onSent){
+  const existing = window.DirectSendOps && DirectSendOps.pending("follow_up", crd);
+  if (existing) {
+    alert("A follow-up for this advisor is still being confirmed. Do not resend it; verify in Outlook if confirmation does not finish.");
+    return;
+  }
   const back = document.createElement("div");
   back.className = "ask-back";
   back.innerHTML = `<div class="ask mail-msg" role="dialog" aria-modal="true"
@@ -1419,15 +1424,33 @@ async function showFollowUp(crd, name, onSent){
                                ...attached }) });
       const j = await r.json();
       if (!r.ok) throw new Error(j.error || `HTTP ${r.status}`);
-      note.textContent = `Sent to ${j.to}.`;
-      if (onSent) Promise.resolve(onSent()).catch(() => {});
-      setTimeout(close, 900);
+      const meta = { kind: "follow_up", crd, sourceId: "" };
+      const update = (state) => {
+        if (!note.isConnected) return;
+        note.textContent = state.message || "Confirming with Outlook…";
+        if (state.status === "sent") {
+          if (onSent) Promise.resolve(onSent()).catch(() => {});
+          setTimeout(close, 900);
+        } else if (state.status === "failed") {
+          btn.disabled = false;
+          delete btn.dataset.op;
+        }
+      };
+      if (window.DirectSendOps) DirectSendOps.accept(j, meta, update);
+      else update(j);
     } catch (err) {
       note.textContent = err.message;
       btn.disabled = false;
     }
   });
 }
+
+// Reload recovery is owned by the shared email bundle. When it confirms a
+// send, refresh the deferred work count even if the original modal is gone.
+window.addEventListener("directsendstatus", (event) => {
+  const detail = (event && event.detail) || {};
+  if (detail.state && detail.state.status === "sent") loadWork().catch(() => {});
+});
 
 /* One message, read on the phone.
  *
@@ -1484,6 +1507,13 @@ async function showMailMessage(crd, id){
     if (!btn) return;
     const area = box.querySelector(".mail-reply");
     const note = box.querySelector(".mail-reply-note");
+    const existing = window.DirectSendOps
+      && DirectSendOps.pending("reply", btn.dataset.crd, btn.dataset.mailReply);
+    if (existing && !btn.dataset.op) {
+      btn.disabled = true; area.disabled = true;
+      note.textContent = "A reply to this message is still being confirmed. Do not resend it; verify in Outlook if needed.";
+      return;
+    }
     const text = (area.value || "").trim();
     if (!text){ note.textContent = "Nothing to send."; return; }
     // Locked for the round trip. A second tap on a slow connection -- which is
@@ -1503,8 +1533,18 @@ async function showMailMessage(crd, id){
                                ...attached }) });
       const j = await r.json();
       if (!r.ok) throw new Error(j.error || `HTTP ${r.status}`);
-      note.textContent = "Sent.";
-      area.value = "";
+      const meta = { kind: "reply", crd: btn.dataset.crd, sourceId: btn.dataset.mailReply };
+      const update = (state) => {
+        if (!note.isConnected) return;
+        note.textContent = state.message || "Confirming with Outlook…";
+        if (state.status === "sent") area.value = "";
+        else if (state.status === "failed") {
+          btn.disabled = false; area.disabled = false;
+          delete btn.dataset.op;
+        }
+      };
+      if (window.DirectSendOps) DirectSendOps.accept(j, meta, update);
+      else update(j);
     } catch (err) {
       note.textContent = err.message;
       btn.disabled = false; area.disabled = false;

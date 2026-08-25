@@ -8,6 +8,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 APP = (ROOT / "webapp" / "app.js").read_text(encoding="utf-8")
 FIELD = (ROOT / "webapp" / "field.js").read_text(encoding="utf-8")
 FIELD_HTML = (ROOT / "webapp" / "field.html").read_text(encoding="utf-8")
+EMAIL = (ROOT / "webapp" / "email.js").read_text(encoding="utf-8")
 
 
 def section(source: str, start: str, end: str) -> str:
@@ -106,6 +107,26 @@ class WorkQueueContractTests(unittest.TestCase):
 
         composer = section(FIELD, "async function showFollowUp", "/* One message, read on the phone.")
         self.assertIn("if (onSent) Promise.resolve(onSent())", composer)
+
+    def test_direct_send_recovery_persists_identifiers_not_message_content(self):
+        remember = section(EMAIL, "function rememberDirect", "function forgetDirect")
+        for field in ("operationId", "kind", "crd", "sourceId", "createdUtc"):
+            self.assertIn(field, remember)
+        for content in ("subject", "text", "body", "recipient", "attachment"):
+            self.assertNotIn(content, remember.lower())
+        self.assertIn("rows.slice(-50)", EMAIL)
+        self.assertIn("90 * 86400000", EMAIL)
+        self.assertIn("op=direct_send_status", EMAIL)
+
+    def test_direct_send_clients_wait_for_durable_confirmation(self):
+        for source in (APP, FIELD):
+            self.assertIn("DirectSendOps.pending", source)
+            self.assertIn("DirectSendOps.accept", source)
+            self.assertIn("Do not resend", source)
+            self.assertIn('state.status === "sent"', source)
+            self.assertIn('state.status === "failed"', source)
+        self.assertIn('status: "needs_verification"', EMAIL)
+        self.assertIn("The API did not return a durable operation status", EMAIL)
 
 
 if __name__ == "__main__":

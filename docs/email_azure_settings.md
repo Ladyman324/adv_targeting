@@ -85,6 +85,11 @@ that size is a marketing campaign and belongs in a platform built for it.
 |---|---|
 | `EMAIL_DIRECT_SEND_ENABLED` | `1` enables direct sending. Anything else = drafts only. |
 | `EMAIL_DIRECT_SEND_KILL_SWITCH` | `1` disables direct sending immediately, overriding the above. |
+| `EMAIL_DIRECT_SEND_OPS_ENABLED` | `1` enables the durable asynchronous path for one-to-one replies and follow-ups. Anything else fails closed; there is no fallback to the former synchronous sender. Leave off until the worker, repair timer, and status endpoint are deployed together. Campaign sending is unaffected. |
+| `EMAIL_DIRECT_SEND_OPS_USER_IDS` | Optional comma/semicolon/space-separated Static Web Apps user IDs allowed to start one-to-one sends. Set one user for the canary before clearing it for general use. |
+| `EMAIL_DIRECT_SEND_HMAC_KEY` | Secret of at least 32 bytes used to bind an operation UUID to its exact message intent without storing the body. Keep it in the Function App/Key Vault, never this repository, and do not rotate it while nonterminal operations exist. |
+| `EMAIL_DIRECT_REPAIR_ENABLED` | `1` permits the identifier-only direct-send outbox dispatcher. It never reads Microsoft Graph. Leave disabled until the new table and queue have been deployed. |
+| `EMAIL_DIRECT_REPAIR_USER_IDS` | Optional comma/semicolon/space-separated user IDs whose durable work markers the dispatcher may enqueue during canary rollout. |
 | `EMAIL_TEST_ADDRESS_ALLOWLIST` | Comma-separated external addresses. When set, a direct send fails if **any external recipient** is not on it; internal compliance BCC does not need duplication here. Leave unset in normal operation. |
 | `EMAIL_INTERNAL_DOMAINS` | Defaults to `eicatlanta.com`. Decides what counts as external for the 24-hour limit. |
 | `EMAIL_REPLY_SWEEP_ENABLED` | `1` permits the reply timer to run. Leave disabled until the advisor-email lookup blob and canary list are ready. |

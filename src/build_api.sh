@@ -13,7 +13,9 @@ STAGE_DIR=""
 # package, so it must not be derived from whatever happens to be on disk.
 #   26: contact-flags.test.js -- flags as a set of reps, not a shared boolean
 #   27: email-follow-up.test.js -- who is left after a campaign, and who is not
-EXPECTED_API_TEST_FILE_COUNT=27
+#   28: email-direct-store.test.js -- atomic operation ownership and outbox
+#   29: email-direct-send.test.js -- no-resubmit reconciliation boundary
+EXPECTED_API_TEST_FILE_COUNT=29
 
 cleanup() {
   test -z "$TEMP_ROOT" && return

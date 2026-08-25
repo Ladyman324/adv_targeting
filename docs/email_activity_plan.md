@@ -932,6 +932,31 @@ This repairs projection failures only after an activity row exists. It does not
 close the post-Graph/pre-activity window in direct send; the operation ledger is
 still required before direct send can be enabled.
 
+## Durable one-to-one send checkpoint
+
+Replies and individual follow-ups now use a separate `EmailDirectSendOps`
+state machine and `email-direct-work` queue. The HTTP request performs only the
+reversible work needed to build a complete Outlook draft, stamps the operation
+identifier last, records the immutable draft ID, and returns `202`. The worker
+rechecks the kill switch, canary, suppression, rolling limit, and mailbox pacing
+immediately before it conditionally enters `submitting` and calls Graph once.
+
+`submitting` is the irreversible boundary. A timeout, network failure, Graph
+5xx, or expired worker lease becomes `ambiguous`; it never becomes `prepared`
+again and is never automatically submitted again. Reconciliation looks for the
+stamped non-draft item. Only Graph's immutable ID and `sentDateTime` create the
+activity row, so the later mailbox sweep converges on the same event. Activity
+or projection failures leave the operation `reconciled` for bookkeeping retry
+without touching `/send`.
+
+The operation and its `q|` outbox marker are created atomically in one user
+partition. Queue messages contain only version, work kind, user ID, and
+operation ID. Tables and browser storage contain identifiers, hashes, states,
+and timestamps—not bodies, recipient lists, attachment bytes, or access tokens.
+Outlook remains the content store. A default-off, user-allowlisted repair timer
+dispatches stranded identifiers and converts expired `submitting` leases to
+`ambiguous` before enqueueing reconciliation.
+
 ## Before this can run
 
 0. `dist/api.tgz` must be rebuilt — `api/shared/act_contacts.json` changed with
@@ -940,9 +965,11 @@ still required before direct send can be enabled.
    `python src/export_advisor_emails.py --upload` — the sweep fails closed
    without the blob, deliberately, so this is a hard prerequisite.
 2. Deploy the API with `EMAIL_REPLY_SWEEP_ENABLED`,
-   `EMAIL_ENGAGEMENT_REPAIR_ENABLED`, and `EMAIL_DIRECT_SEND_ENABLED` still
-   disabled. Verify release provenance and storage health before enabling any
-   workflow.
+   `EMAIL_ENGAGEMENT_REPAIR_ENABLED`, `EMAIL_DIRECT_REPAIR_ENABLED`,
+   `EMAIL_DIRECT_SEND_OPS_ENABLED`, and `EMAIL_DIRECT_SEND_ENABLED` still
+   disabled. Configure a new secret `EMAIL_DIRECT_SEND_HMAC_KEY` (at least 32
+   random bytes) before testing, but do not print it or commit it. Verify release
+   provenance and storage health before enabling any workflow.
 3. Inspect whether production `EmailActivity` already contains pre-marker rows.
    If it does, audit their backfill/decision provenance before migration; do not
    silently reinterpret all old rows as current or historical.
@@ -956,9 +983,18 @@ still required before direct send can be enabled.
    allowlist only after the repair backlog and reconnect metrics stay healthy.
    `ADVISOR_LOOKUP_CONTAINER` / `ADVISOR_LOOKUP_BLOB` default to
    `lookups` / `advisor_emails.json.gz`.
-6. Leave one-to-one direct send disabled until the durable operation ledger is
-   deployed and its lost-response/reconciliation canary has passed.
-7. Watch the first sweep log line: `scanned` should be large, `ours` small. If
+6. For the one-to-one canary, set the same single user in
+   `EMAIL_DIRECT_SEND_OPS_USER_IDS` and `EMAIL_DIRECT_REPAIR_USER_IDS`; enable
+   `EMAIL_DIRECT_REPAIR_ENABLED`, then `EMAIL_DIRECT_SEND_OPS_ENABLED`, and only
+   then `EMAIL_DIRECT_SEND_ENABLED`. Keep `EMAIL_TEST_ADDRESS_ALLOWLIST` on the
+   controlled external address. Exercise a normal reply, Graph timeout/5xx,
+   duplicate queue delivery, and a finalization failure. Confirm that uncertain
+   operations say **Do not resend; verify in Outlook** and produce one Graph
+   `/send` call at most. Disable either send switch immediately if they do not.
+7. Expand the user canary only after `ambiguous`, oldest-marker, retry, and
+   poison-queue observations remain healthy. Do not clear the allowlists merely
+   because a normal send worked.
+8. Watch the first sweep log line: `scanned` should be large, `ours` small. If
    `ours` is near `scanned`, the filter is wrong and should be stopped.
 
 ## Open questions

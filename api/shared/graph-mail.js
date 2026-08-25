@@ -51,6 +51,7 @@ async function request(token, method, path, body, options = {}) {
  * dropped on write, and impossible to notice from either side alone.
  */
 const MESSAGE_FIELDS = "id,internetMessageId,conversationId,isDraft,sentDateTime,parentFolderId,subject";
+const DIRECT_MESSAGE_FIELDS = `${MESSAGE_FIELDS},toRecipients,ccRecipients,bccRecipients`;
 
 function odataString(value) { return String(value).replace(/'/g, "''"); }
 
@@ -58,7 +59,12 @@ async function findByAppId(token, appMessageId) {
   const filter = `singleValueExtendedProperties/Any(ep: ep/id eq '${odataString(APP_PROPERTY_ID)}' and ep/value eq '${odataString(appMessageId)}')`;
   const params = new URLSearchParams({ "$filter": filter, "$select": MESSAGE_FIELDS });
   const result = await request(token, "GET", `/me/messages?${params.toString()}`);
-  return (result.data && result.data.value && result.data.value[0]) || null;
+  const values = (result.data && result.data.value) || [];
+  // A legacy retry can leave both a draft and a sent item carrying the same
+  // application id. Prefer proof of a send; choosing the draft would invite a
+  // caller to submit again after the irreversible operation already happened.
+  return [...values].sort((a, b) => Number(!!a.isDraft) - Number(!!b.isDraft)
+    || String(b.sentDateTime || "").localeCompare(String(a.sentDateTime || "")))[0] || null;
 }
 
 async function createDraft(token, message) {
@@ -86,6 +92,12 @@ async function createDraft(token, message) {
 
 async function getMessage(token, id) {
   const params = new URLSearchParams({ "$select": MESSAGE_FIELDS });
+  const r = await request(token, "GET", `/me/messages/${encodeURIComponent(id)}?${params.toString()}`);
+  return r.data;
+}
+
+async function getDirectMessage(token, id) {
+  const params = new URLSearchParams({ "$select": DIRECT_MESSAGE_FIELDS });
   const r = await request(token, "GET", `/me/messages/${encodeURIComponent(id)}?${params.toString()}`);
   return r.data;
 }
@@ -450,7 +462,7 @@ async function sendDraft(token, messageId) {
 }
 
 module.exports = { GraphError, APP_PROPERTY_ID, NDR_FIELDS, ACTIVITY_FIELDS,
-  findByAppId, createDraft, getMessage, getMessageContent, attachDocuments,
+  findByAppId, createDraft, getMessage, getDirectMessage, getMessageContent, attachDocuments,
   attachInlineImages, attachFiles, createReply, patchDraftRecipients,
   updateDraftBody, sendDraft,
   recentMail, recentInbox, request, attachmentFileName };

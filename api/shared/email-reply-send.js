@@ -650,4 +650,7 @@ async function audienceFor(who, { crd, id }, deps = {}) {
 
 module.exports = { reply, followUp, replyAllAudience, audienceFor, textToHtml,
                    resolveAttachments, guard, stampOperation, alreadySent,
+                   operationId, uniqueAddresses, effectiveReplyRecipients,
+                   complianceAddresses, enforceDirectSendPolicy, waitForMailbox,
+                   refuseInternal, applyCompliance, attachAll, signatureFor,
                    MAX_CHARS, MAX_SUBJECT, MAX_FILES };

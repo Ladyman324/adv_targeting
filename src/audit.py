@@ -977,15 +977,22 @@ def _sweep_schedules():
     bounce = minutes("email-bounce-sweep")
     reply = minutes("email-reply-sweep")
     repair = minutes("email-engagement-repair")
+    direct = minutes("email-direct-repair")
     if bounce is None or reply is None:
         return True, "reply sweep not deployed yet"
     pairs = [("bounce/reply", bounce & reply)]
     if repair is not None:
         pairs.extend([("bounce/repair", bounce & repair), ("reply/repair", reply & repair)])
+    if direct is not None:
+        pairs.extend([("bounce/direct", bounce & direct), ("reply/direct", reply & direct)])
+        if repair is not None:
+            pairs.append(("repair/direct", repair & direct))
     clash = [(name, sorted(values)) for name, values in pairs if values]
     return (not clash,
             f"bounce :{','.join(sorted(bounce))}; reply :{','.join(sorted(reply))}; "
-            + (f"repair :{','.join(sorted(repair))} -- no overlap" if repair is not None else "repair not deployed")
+            + (f"repair :{','.join(sorted(repair))}" if repair is not None else "repair not deployed")
+            + (f"; direct :{','.join(sorted(direct))}" if direct is not None else "; direct not deployed")
+            + " -- no overlap"
             if not clash else
             "TIMER COLLISION: " + "; ".join(f"{name} at {values}" for name, values in clash))
 
@@ -1024,6 +1031,74 @@ def _engagement_repair_safety():
     return (not failed,
             "atomic marker, conditional ack, user canary, literal disabled timer, no mailbox imports"
             if not failed else "ENGAGEMENT REPAIR SAFETY MISSING: " + "; ".join(failed))
+
+
+@check("direct sends are durable, content-minimal, and never auto-resubmit uncertainty")
+def _direct_send_ledger_safety():
+    """Pin the boundary that prevents a lost Graph response becoming two emails."""
+    direct_path = API / "shared" / "email-direct-send.js"
+    store_path = API / "shared" / "email-direct-store.js"
+    queue_path = API / "shared" / "email-direct-queue.js"
+    worker_path = API / "email-direct-worker" / "function.json"
+    repair_path = API / "email-direct-repair" / "index.js"
+    repair_config_path = API / "email-direct-repair" / "function.json"
+    if not all(path.exists() for path in [direct_path, store_path, queue_path,
+                                          worker_path, repair_path, repair_config_path]):
+        return True, "durable direct-send package not deployed yet"
+    direct = text(direct_path)
+    store_src = text(store_path)
+    queue_src = text(queue_path)
+    repair = text(repair_path)
+    route = text(API / "email" / "index.js")
+    client = text(WEB / "email.js")
+    worker_binding = json.loads(text(worker_path))["bindings"][0]
+    repair_binding = json.loads(text(repair_config_path))["bindings"][0]
+    ambiguous = re.search(r"if \(ambiguous\) \{(.*?)\n\s*\} else if", direct, re.S)
+    remembered = re.search(r"function rememberDirect\b(.*?)\n\s*\}", client, re.S)
+    forbidden_store_fields = re.findall(
+        r"\b(?:body|bodyText|bodyHtml|recipientEmail|recipientsJson|attachmentsJson|accessToken)\s*:",
+        re.sub(r"/\*.*?\*/|^\s*//.*$", "", store_src, flags=re.S | re.M))
+    checks = {
+        "separate operation table": 'TABLE_NAME = "EmailDirectSendOps"' in store_src,
+        "operation and marker are transactional":
+            '[["create", operation], ["create", marker]]' in store_src,
+        "store contains no content or token fields": not forbidden_store_fields,
+        "queue is isolated": worker_binding.get("queueName") == "email-direct-work"
+            and 'QUEUE_NAME = "email-direct-work"' in queue_src,
+        "queue payload is identifiers only":
+            'return { v: 1, kind: String(kind), userId: String(userId)' in queue_src
+            and "body" not in re.sub(r"/\*.*?\*/|^\s*//.*$", "", queue_src, flags=re.S | re.M),
+        "HTTP is asynchronous with status": 'directSend.start(who, body, "reply"), 202' in route
+            and 'op === "direct_send_status"' in route,
+        "unsafe synchronous route is gone": "replySend.reply(who, body)" not in route
+            and "replySend.followUp(who, body)" not in route,
+        "intent uses a dedicated HMAC": "EMAIL_DIRECT_SEND_HMAC_KEY" in direct
+            and 'createHmac("sha256"' in direct,
+        "send package and canary are default off": "EMAIL_DIRECT_SEND_OPS_ENABLED" in direct
+            and "EMAIL_DIRECT_SEND_OPS_USER_IDS" in direct and '!== "1"' in direct,
+        "ambiguous work only reconciles": bool(ambiguous)
+            and 'state: "ambiguous"' in ambiguous.group(1)
+            and '"direct_reconcile"' in ambiguous.group(1)
+            and '"direct_send"' not in ambiguous.group(1),
+        "expired submitting becomes ambiguous": 'operation.state === "submitting"' in repair
+            and 'state: "ambiguous"' in repair,
+        "repair is gated, canaried, and mailbox-free": "EMAIL_DIRECT_REPAIR_ENABLED" in repair
+            and "EMAIL_DIRECT_REPAIR_USER_IDS" in repair
+            and "graph-mail" not in repair and "email-auth" not in repair,
+        "repair timer is deliberate": repair_binding.get("runOnStartup") is False
+            and bool(repair_binding.get("schedule")) and "%" not in repair_binding.get("schedule", ""),
+        "activity waits for canonical sent time": "occurredAt: message.sentDateTime" in direct
+            and "actedAt: message.sentDateTime" in direct,
+        "browser persistence is metadata-only": bool(remembered)
+            and all(name in remembered.group(1) for name in
+                    ["operationId", "kind", "crd", "sourceId", "createdUtc"])
+            and all(name not in remembered.group(1) for name in
+                    ["text:", "body:", "recipient", "attachment"]),
+    }
+    failed = [name for name, ok in checks.items() if not ok]
+    return (not failed,
+            "separate ETag ledger/outbox, one-way ambiguity, canonical activity, metadata-only clients"
+            if not failed else "DIRECT SEND SAFETY MISSING: " + "; ".join(failed))
 
 
 @check("the reply sweep stores no message body")

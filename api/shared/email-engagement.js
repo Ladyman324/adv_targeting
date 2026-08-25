@@ -456,7 +456,9 @@ async function completeOutbound(userId, advisorCrd, deps = {}) {
   }
   return st.putEngagement(userId, advisorCrd, {
     replyState: "done",
-    actedAt: new Date().toISOString(),
+    // A durable finalizer may run more than once. Reuse the canonical Graph
+    // sent time so a bookkeeping retry cannot keep moving the business clock.
+    actedAt: deps.actedAt || new Date().toISOString(),
     nextActionAt: "",
     nextActionType: "",
     snoozedUntilUtc: "",

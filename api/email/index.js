@@ -7,6 +7,7 @@ const auth = require("../shared/email-auth");
 const activity = require("../shared/email-activity");
 const engagement = require("../shared/email-engagement");
 const replySend = require("../shared/email-reply-send");
+const directSend = require("../shared/email-direct-send");
 
 function ok(context, body, status = 200) {
   context.res = { status, headers: { "Content-Type": "application/json", "Cache-Control": "no-store" }, body: JSON.stringify(body) };
@@ -183,6 +184,9 @@ module.exports = async function (context, req) {
         return ok(context, await replySend.audienceFor(who,
           { crd: String(req.query.crd || ""), id: String(req.query.id || "") }));
       }
+      if (op === "direct_send_status") {
+        return ok(context, await directSend.status(who, String(req.query.operationId || "")));
+      }
       // Sender health. Admin-only: it names every rep and how their sending is
       // going, which is a management view rather than a rep's own screen.
       if (op === "sender_health") {
@@ -320,7 +324,7 @@ module.exports = async function (context, req) {
      * using.
      */
     if (op === "reply_send") {
-      return ok(context, await replySend.reply(who, body));
+      return ok(context, await directSend.start(who, body, "reply"), 202);
     }
     /* A NEW conversation with an advisor who has gone quiet.
      *
@@ -329,7 +333,7 @@ module.exports = async function (context, req) {
      * rep's mailbox through this endpoint.
      */
     if (op === "follow_up") {
-      return ok(context, await replySend.followUp(who, body));
+      return ok(context, await directSend.start(who, body, "follow_up"), 202);
     }
     if (op === "connect") return ok(context, await auth.begin(who, body.returnTo));
     if (op === "create_batch") return ok(context, await service.createBatch(who, body), 201);
