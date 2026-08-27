@@ -17,7 +17,8 @@ STAGE_DIR=""
 #   29: email-direct-send.test.js -- no-resubmit reconciliation boundary
 #   30: email-preferences.test.js -- scanner-resistant unsubscribe confirmation
 #   33: email-approve-pacing.test.js -- drafts are spaced, not fired at once
-EXPECTED_API_TEST_FILE_COUNT=33
+#   34: template-publish.test.js -- held templates never reach a rep
+EXPECTED_API_TEST_FILE_COUNT=34
 
 cleanup() {
   test -z "$TEMP_ROOT" && return

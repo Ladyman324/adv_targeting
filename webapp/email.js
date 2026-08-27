@@ -827,10 +827,18 @@
         attachments set here are added to every batch automatically.</p>
       ${message ? `<p class="${bad ? "email-error" : "email-ok"}">${esc(message)}</p>` : ""}
       <ul class="email-doclist">${list.length ? list.map((t) => `<li>
-        <span class="email-doc-main"><b>${esc(t.name)}</b>
+        <span class="email-doc-main"><b>${esc(t.name)}</b>${
+          // The state a rep would see, said plainly on the admin's own row.
+          t.published === false ? `<span class="email-held">Held &mdash; not visible to the team</span>` : ""}
           <small>${esc(t.documentNumber || "no document #")}
             ${t.approvalDate ? `&middot; approved ${esc(t.approvalDate)}` : ""}
             &middot; v${t.version}${(t.images || []).length ? ` &middot; ${t.images.length} chart(s)` : ""}</small></span>
+        <label class="email-live" title="${t.published === false
+            ? "Publish this template so the sales team can send it"
+            : "Withdraw it: the team stops seeing it, and it stays here"}">
+          <input type="checkbox" data-email="tpl-publish" data-id="${esc(t.id)}"
+            data-name="${esc(t.name)}"${t.published === false ? "" : " checked"}>
+          <span>Live</span></label>
         <button type="button" class="email-small" data-email="tpl-test" data-id="${esc(t.id)}"
           data-name="${esc(t.name)}">Test to me</button>
         <button type="button" class="email-small" data-email="tpl-edit" data-id="${esc(t.id)}">Edit</button>
@@ -1803,6 +1811,26 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
       return;
     }
     if (action === "tpl-back") { editing = null; return templatesView(); }
+    if (action === "tpl-publish") {
+      // The checkbox has already flipped by the time a click reaches here, so
+      // .checked is the state being asked for, not the one being left.
+      const wanted = button.checked === true;
+      const name = button.dataset.name || button.dataset.id;
+      try {
+        const r = await api("publish_template", { id: button.dataset.id, published: wanted });
+        catalog.templates = r.templates || catalog.templates || [];
+        templatesView(wanted
+          ? `"${name}" is live. The sales team can now choose it.`
+          : `"${name}" is held. It stays in this library and the team cannot see it.`);
+      } catch (e) {
+        // Put the checkbox back: leaving it showing a state the server refused
+        // is how an administrator comes to believe a template is live when it
+        // is not.
+        button.checked = !wanted;
+        templatesView(e.message, true);
+      }
+      return;
+    }
     if (action === "tpl-delete") {
       const name = button.dataset.name || button.dataset.id;
       if (!confirm(`Remove the template "${name}"?\n\nReps will no longer be able to choose it. Batches already created are unaffected.`)) return;

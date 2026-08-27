@@ -342,6 +342,17 @@ async function listTemplates() {
       images: parse(e.imagesJson, []), documentNumber: e.documentNumber || "",
       author: e.author || "", approvalDate: e.approvalDate || "",
       repNotes: e.repNotes || "", status: e.status || "approved",
+      /* THREE STATES, NOT TWO.
+       *
+       * `retired` already existed and hides a template from everyone, admins
+       * included -- a soft delete with no way back. What was missing is a
+       * template that LIVES in the library but is not yet cleared for the sales
+       * team: written, being reviewed, not to be sent.
+       *
+       * Absent means published, so every template that exists today keeps
+       * working. Only templates created after this default to held.
+       */
+      published: e.published !== false,
       version: Number(e.version) || 1 });
   }
   /* The starter templates are seeded ONCE, not whenever the list is empty.
@@ -416,10 +427,36 @@ async function putTemplate(who, input) {
     imagesJson: json(images),
     status: input.status === "retired" ? "retired" : "approved",
     approved: input.status !== "retired",
+    // A NEW template starts held: the whole point is that nobody can send it
+    // until an administrator says so. An EXISTING one keeps whatever it had,
+    // so editing the wording of a live template does not silently withdraw it
+    // from the team mid-campaign.
+    published: existing ? existing.published !== false : false,
     version: (Number(existing && existing.version) || 0) + 1,
     updatedUtc: now(), updatedBy: clean(who && who.name, 256) };
   await (await table("templates")).upsertEntity(entity, "Replace");
   return { id, version: entity.version, warnings: lint.warnings, replaced: !!existing };
+}
+
+/* Clear a template for the sales team, or withdraw it.
+ *
+ * Separate from putTemplate on purpose: publishing is an approval, not an edit.
+ * Bundling the two would mean a rep-visible template could change wording and
+ * approval state in one write, and the audit trail could not tell which of the
+ * two an administrator actually intended.
+ */
+async function setTemplatePublished(who, rawId, published) {
+  const id = safeDocId(rawId);
+  const existing = await getOptional("templates", "approved", id);
+  if (!existing) {
+    const err = new Error("That template no longer exists.");
+    err.statusCode = 404; throw err;
+  }
+  await (await table("templates")).updateEntity({
+    partitionKey: "approved", rowKey: id, published: published === true,
+    updatedUtc: now(), updatedBy: clean(who && who.name, 256),
+  }, "Merge");
+  return { id, name: existing.name || id, published: published === true };
 }
 
 async function deleteTemplate(who, rawId) {
@@ -1262,7 +1299,7 @@ module.exports = {
   passcodeAttempts, recordPasscodeFailure, clearPasscodeFailures,
   id, now, batchPartition, putConnection, getConnection, putAuthState, consumeAuthState,
   createBatch, getBatch, patchBatch, listBatches, createMessage, getMessage, listMessages,
-  patchMessage, deleteMessage, claimMessage, listTemplates, getTemplate, listDocuments, getDocuments,
+  patchMessage, deleteMessage, claimMessage, listTemplates, getTemplate, setTemplatePublished, listDocuments, getDocuments,
   putDocument, deleteDocument, putTemplate, deleteTemplate,
   putTemplateImage, deleteTemplateImage, templateImageBytes,
   getSuppression, suppressEmail, listConnections, sentByInternetId,

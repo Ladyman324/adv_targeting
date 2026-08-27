@@ -72,7 +72,8 @@ module.exports = async function (context, req) {
       // isAdmin travels with the catalog so the composer knows whether to offer
       // document management at all. The server still checks it on every write --
       // this only decides what is drawn.
-      if (op === "catalog") return ok(context, { ...await service.catalog(who), isAdmin: isAdmin(who) });
+      if (op === "catalog") return ok(context,
+        { ...await service.catalog(who, { isAdmin: isAdmin(who) }), isAdmin: isAdmin(who) });
       if (op === "batch") return ok(context, await service.getBatchDetail(who, String(req.query.id || "")));
       /* Who is left to follow up, and who came off the list and why.
        *
@@ -358,12 +359,40 @@ module.exports = async function (context, req) {
     // client-side check is a convenience, never a gate.
     if (op === "lint_template") return ok(context, require("../shared/email-core")
       .lintTemplate({ subject: body.subject, bodyText: body.bodyText }));
-    if (["put_template", "delete_template", "put_template_image", "delete_template_image"].includes(op)) {
+    // Every admin-only template operation must be NAMED here or its handler
+    // below is unreachable -- the block is what enforces the role, so an op
+    // added inside it without being listed simply never runs.
+    if (["put_template", "publish_template", "delete_template",
+         "put_template_image", "delete_template_image"].includes(op)) {
       if (!isAdmin(who)) throw service.httpError(403, "EmailAdministrator role is required.");
       if (op === "put_template") {
         const saved = await store.putTemplate(who, body);
-        await store.audit(who.id, `template:${saved.id}`, "template_published", { id: saved.id, version: saved.version });
+        // "template_saved", not "template_published": publishing is now a
+        // separate act with its own event, and one word cannot mean both
+        // "the wording changed" and "the sales team may send this".
+        await store.audit(who.id, `template:${saved.id}`, "template_saved", { id: saved.id, version: saved.version });
         return ok(context, { ok: true, saved, templates: await store.listTemplates() }, 201);
+      }
+      if (op === "publish_template") {
+        if (!isAdmin(who)) throw service.httpError(403, "EmailAdministrator role is required.");
+        const published = body.published === true;
+        const saved = await store.setTemplatePublished(who, body.id, published);
+        /* Two calls, each naming its event literally.
+         *
+         * A ternary in the event slot reads fine and makes the trail
+         * un-greppable: "which templates were ever published" stops being a
+         * text search and becomes an exercise in reading control flow. The
+         * audit enforces this, and it is right to.
+         */
+        if (published) {
+          await store.audit(who.id, `template:${saved.id}`, "template_published",
+            { id: saved.id, name: saved.name });
+        } else {
+          await store.audit(who.id, `template:${saved.id}`, "template_withdrawn",
+            { id: saved.id, name: saved.name });
+        }
+        return ok(context, { ok: true, saved,
+          templates: await store.listTemplates() });
       }
       if (op === "delete_template") {
         const gone = await store.deleteTemplate(who, body.id);

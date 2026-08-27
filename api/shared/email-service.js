@@ -99,7 +99,19 @@ async function senderHealth(days = 90) {
                      connections: connections.length } };
 }
 
-async function catalog(who) {
+/* Held templates are REMOVED for a rep, not disabled.
+ *
+ * Grey-but-present invites the question "why can't I use that one", and a
+ * half-approved template is not a thing a rep should have to reason about. It
+ * is also why this filter is on the server: hiding a row in the client leaves
+ * the wording sitting in the payload of anyone who opens developer tools, and
+ * the whole point is that unapproved wording does not reach the sales team.
+ */
+function visibleTemplates(templates, admin) {
+  return admin ? templates : templates.filter((t) => t.published !== false);
+}
+
+async function catalog(who, opts) {
   const [connection, templates, documents, policy, rollingUsed] = await Promise.all([
     auth.status(who.id), store.listTemplates(), store.listDocuments(), store.policy(),
     // What this rep has already spent of their 24-hour allowance. Sent to the
@@ -108,7 +120,8 @@ async function catalog(who) {
     store.rollingExternalCount(who.id).catch(() => 0),
   ]);
   const cfg = core.config();
-  return { connection, templates, documents,
+  return { connection,
+    templates: visibleTemplates(templates, !!(opts && opts.isAdmin)), documents,
     // Addresses a rep may copy, straight from the App Setting. Sent with the
     // catalog so the Settings picker cannot offer anything the server would
     // then refuse.
@@ -609,6 +622,12 @@ async function createBatch(who, input) {
   for (const raw of requestedRecipients) recipients.push(await canonicalRecipient(raw, connection));
   const template = await store.getTemplate(String(input.templateId || ""));
   if (!template) throw httpError(400, "Choose an approved email template.");
+  // Hiding it from the picker is presentation; this is the rule. A stale
+  // catalog in an open tab, or a request built by hand, must not be able to
+  // send wording nobody has cleared.
+  if (template.published === false)
+    throw httpError(403, `"${template.name}" is not yet approved for sending. `
+      + "An email administrator has to publish it first.", "template_not_published");
   // Required attachments come from the template and cannot be dropped by the
   // rep. In the Word library this was a line of prose -- "Attachments required:
   // most recent approved Case for Value" -- which is guidance a busy person

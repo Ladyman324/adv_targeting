@@ -577,3 +577,16 @@
 .email-small.grave{color:var(--warn,#d9534f);border-color:var(--warn,#d9534f);
   background:transparent}
 .email-small.grave:hover{background:var(--warn,#d9534f);color:var(--accent-ink,#0b0b0b)}
+
+/* A template that exists but is not cleared for the sales team. Stated on the
+   row rather than implied by a control, because "why can I see this and they
+   cannot" is the question an administrator will otherwise ask. */
+.email-held{display:inline-block;margin-left:8px;padding:1px 7px;border-radius:999px;
+  font-size:10.5px;font-weight:700;letter-spacing:.02em;
+  color:#8a6100;background:#ffe9b8;border:1px solid #f0c775}
+.email-live{display:inline-flex;align-items:center;gap:5px;flex:0 0 auto;
+  font-size:11.5px;font-weight:650;color:var(--muted);cursor:pointer;user-select:none}
+.email-live input{margin:0;cursor:pointer}
+@media (prefers-color-scheme:dark){
+  .email-held{color:#ffd98a;background:#3a2c07;border-color:#6b5210}
+}
