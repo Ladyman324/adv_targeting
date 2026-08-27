@@ -30,19 +30,24 @@ function pending(n) {
   }));
 }
 
-function load(messages) {
+function load(messages, batchOverrides) {
   const sent = [];
   const servicePath = require.resolve("../shared/email-service.js");
   const batch = { id: "b1", userId: "u1", status: "drafting", mode: "drafts",
                   etag: "be", recipientCount: messages.length, attachmentIds: [],
-                  name: "Batch", senderMail: "rep@eicatlanta.com" };
+                  name: "Batch", senderMail: "rep@eicatlanta.com",
+                  ...(batchOverrides || {}) };
   const storeStub = {
     getBatch: async () => batch,
     listMessages: async () => messages,
     patchMessage: async () => {},
+    patchBatch: async () => {},
     getDocuments: async () => [],
     audit: async () => {},
   };
+  // retry refuses to run on a disconnected mailbox, which is correct and is not
+  // what these tests are about.
+  const authStub = { status: async () => ({ connected: true }) };
   class QueueClientStub {
     async createIfNotExists() {}
     async sendMessage(payload, options) {
@@ -55,6 +60,7 @@ function load(messages) {
   Module._load = function (request, parent, isMain) {
     if (parent && parent.filename === servicePath) {
       if (request === "./email-store") return storeStub;
+      if (request === "./email-auth") return authStub;
       if (request === "@azure/storage-queue") return { QueueClient: QueueClientStub };
     }
     return realLoad.call(this, request, parent, isMain);
@@ -91,4 +97,35 @@ test("a single-recipient batch is not delayed at all", async () => {
   await service.approve({ id: "u1", name: "Rep" }, { batchId: "b1", mode: "drafts" });
   assert.deepEqual(sent.map((s) => s.visibilityTimeout), [0],
     "pacing must not make the common one-off send wait for a slot it is first in");
+});
+
+test("retry re-queues genuinely failed messages, paced, but never an unknown send", async () => {
+  /* THE BUG THIS ENCODES. "Retry failed" counted `failed` and re-queued only
+   * `auth_required`, so a batch that lost recipients to a transient Graph
+   * failure offered a button that did nothing. The rep's only recovery was to
+   * rebuild the batch by hand.
+   *
+   * A send whose outcome is UNKNOWN stays terminal: "Graph accepted it but the
+   * Sent Items copy could not be confirmed" means it may already have arrived,
+   * and replaying it would be a second copy to a real advisor.
+   */
+  const messages = [
+    { id: "m0", state: "failed", failureCode: "graph_failure", etag: "e0" },
+    { id: "m1", state: "auth_required", failureCode: "auth_required_draft", etag: "e1" },
+    { id: "m2", state: "failed", failureCode: "sent_item_not_confirmed",
+      graphMessageId: "AAA", etag: "e2" },
+    { id: "m3", state: "failed", failureCode: "graph_failure",
+      graphMessageId: "BBB", etag: "e3" },
+    { id: "m4", state: "sent", etag: "e4" },
+  ];
+  const { service, sent } = load(messages, { status: "paused", mode: "send" });
+  await service.control({ id: "u1", name: "Rep" }, { batchId: "b1", action: "retry" });
+
+  const requeued = sent.map((s) => s.work.messageId);
+  assert.deepEqual(requeued, ["m0", "m1", "m3"],
+    "the ambiguous send is not replayed, and a sent message is left alone");
+  assert.deepEqual(sent.map((s) => s.visibilityTimeout), [0, 10, 20],
+    "a retry is paced too -- replaying failures at once rebuilds the wall");
+  // A message Graph already holds resumes at the send phase, not the draft one.
+  assert.deepEqual(sent.map((s) => s.work.kind), ["draft", "draft", "send"]);
 });

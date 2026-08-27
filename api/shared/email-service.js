@@ -1115,13 +1115,43 @@ async function control(who, input) {
     const messages = await store.listMessages(who.id, batch.id);
     let nextStatus = batch.mode === "send" ? "sending" : "drafting";
     await store.patchBatch(who.id, batch.id, { status: nextStatus }, batch.etag);
-    for (const m of messages.filter((x) => x.state === "auth_required")) {
-      const draftPhase = m.failureCode === "auth_required_draft";
+    /* WHAT "RETRY FAILED" ACTUALLY RETRIES.
+     *
+     * This only ever re-queued `auth_required`, so a batch that lost two
+     * recipients to a transient Graph failure showed a "Retry failed" button
+     * that did nothing at all: the count came from `failed`, the action read
+     * `auth_required`, and the two never met. The rep's only recovery was to
+     * rebuild the batch by hand.
+     *
+     * NOT EVERY FAILURE MAY BE REPLAYED. A send whose outcome is unknown --
+     * Graph accepted it but the Sent Items copy could not be confirmed -- must
+     * never be resent automatically, because the honest answer is "it may
+     * already have arrived". Those codes stay terminal and keep saying so.
+     */
+    // core.config() locally: control() declares no cfg, and reaching for the one
+    // in a neighbouring function is how the last paced enqueue shipped a
+    // ReferenceError that node --check could not see.
+    const paceSeconds = core.config().mailboxIntervalSeconds;
+    const REPLAYABLE = (code) => !["sent_item_not_confirmed", "reconciliation_failed",
+      "recipient_opted_out", "send_blocked_recipient_opted_out"].includes(String(code || ""));
+    const stuck = messages.filter((x) => x.state === "auth_required"
+      || (x.state === "failed" && REPLAYABLE(x.failureCode)));
+    let slot = 0;
+    for (const m of stuck) {
+      // Where to resume, decided by what Graph already holds rather than by the
+      // failure text: a message with a draft id has one, and re-running the
+      // draft phase would reconcile it back to the same draft anyway.
+      const draftPhase = m.failureCode === "auth_required_draft" || !m.graphMessageId;
       await store.patchMessage(who.id, batch.id, m.id, { state: draftPhase ? "draft_pending" : "send_scheduled",
         failureCode: "", failureMessage: "", leaseUntilUtc: "" }, m.etag);
-      await enqueue({ kind: draftPhase ? "draft" : "send", userId: who.id, batchId: batch.id, messageId: m.id });
+      // Paced, like every other enqueue. Replaying a handful of failures all at
+      // once is how the concurrency wall was hit in the first place, and a
+      // retry storm is the worst moment to rebuild it.
+      await enqueue({ kind: draftPhase ? "draft" : "send", userId: who.id, batchId: batch.id, messageId: m.id },
+        slot * paceSeconds);
+      slot += 1;
     }
-    await store.audit(who.id, batch.id, "remaining_retried_after_reconnect", {});
+    await store.audit(who.id, batch.id, "remaining_retried", { requeued: stuck.length });
   } else if (input.action === "resume") {
     if (batch.status !== "paused") throw httpError(409, "This batch is not paused.");
     await store.patchBatch(who.id, batch.id, { status: "sending", pausedUtc: "" }, batch.etag);
