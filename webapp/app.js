@@ -1957,6 +1957,11 @@ function reconcileDesktopDialRoutes(){
   if (!CONTACTS_READY || !Dial.state.ready) return Promise.resolve(false);
   if (!Dial.state.items.some((item) =>
       item.contactRouteVersion !== DATA_VERSION
+      // The rule that decided this proof, not just the data behind it. Without
+      // it, widening who may be emailed reached new lists only: every saved
+      // item still matched the current data build, so nothing looked stale and
+      // a rep's existing lists kept an answer from a rule we no longer apply.
+      || item.emailTierKey !== Dial.emailTierKey()
       || item.emailEligibilityKnown !== true
       || (item.identityApproved !== true && !item.routeIssue)))
     return Promise.resolve(false);

@@ -609,6 +609,20 @@
   const EMAIL_TIERS = new Set(["confirmed", "high"]);
   const tierCanEmail = (tier) => EMAIL_TIERS.has(String(tier || "").trim().toLowerCase());
 
+  /* The RULE's own version, stored on every saved route proof.
+   *
+   * contactRouteVersion versions the DATA a proof was taken from, which is why
+   * widening the tier set reached only new lists: the eligibility rule lives in
+   * code, so changing it moved no data build, no saved item looked stale, and
+   * reconciliation never ran. A rep's existing lists kept a `false` decided by
+   * a rule that no longer exists.
+   *
+   * Derived from the tier set rather than hand-maintained, so it cannot be
+   * forgotten: change EMAIL_TIERS and every stored proof disagrees on the next
+   * load and is re-decided exactly once.
+   */
+  const emailTierKey = () => [...EMAIL_TIERS].sort().join("|");
+
   // Saved rows also need to match the current contact build: an old address is
   // not made safe merely because the person was resolved in a later build.
   function emailRouteStatus(item, address) {
@@ -636,6 +650,7 @@
       after = { ...before, identityApproved: false, emailConfirmed: false,
                 emailEligibilityKnown: true,
                 contactRouteVersion: state.contactRouteVersion,
+                emailTierKey: emailTierKey(),
                 routeIssue: "missing" };
     } else {
       const approved = current.identityApproved === true && !current.unconfirmed;
@@ -654,6 +669,7 @@
         emailConfirmed,
         emailEligibilityKnown: true,
         contactRouteVersion: state.contactRouteVersion,
+        emailTierKey: emailTierKey(),
         routeIssue: approved ? "" : "identity",
       };
     }
@@ -1439,7 +1455,7 @@ A do-not-call is firm-wide and permanent, and cannot be added `
     onChange: (fn) => { listeners.push(fn); return () => {
       const i = listeners.indexOf(fn); if (i !== -1) listeners.splice(i, 1); }; },
     add, addMany, remove, clear, move, inQueue, isDnc, telHref,
-    setContactRouteVersion, routeStatus, emailRouteStatus, tierCanEmail, reconcileRoute, reconcileRoutes,
+    setContactRouteVersion, routeStatus, emailRouteStatus, tierCanEmail, emailTierKey, reconcileRoute, reconcileRoutes,
     start, pause, end, current, remaining, advance, requeue, back, canBack,
     // What was recorded for this person on this pass, if anything. Drives the
     // "you logged X" line, so a correction is made knowingly.

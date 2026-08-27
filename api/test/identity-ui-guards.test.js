@@ -58,6 +58,32 @@ test("saved telephone routes fail closed and reconcile only to current approved 
   assert.equal(Dial.telHref("101", legacy.phone, Dial.state.items[0]), "");
 });
 
+test("a list saved under the old email rule is re-decided, not left stale", () => {
+  // THE BUG THIS ENCODES. Widening who may be emailed worked on new lists and
+  // not on existing ones. A saved high-tier advisor matched the current data
+  // build, had emailEligibilityKnown true, and was identityApproved (high has
+  // always been callable) -- so every staleness test passed and reconciliation
+  // never ran. The stored `emailConfirmed: false`, decided by a rule we no
+  // longer apply, simply survived.
+  //
+  // The proof now carries the RULE's version as well as the data's, derived
+  // from the tier set so it cannot be forgotten when the set changes.
+  const desk = source("app.js");
+  const dial = source("dial.js");
+
+  // Derived, not hand-maintained.
+  assert.match(dial, /const emailTierKey = \(\) => \[\.\.\.EMAIL_TIERS\]\.sort\(\)\.join\("\|"\)/);
+  // Stamped on the proof in BOTH branches of reconcileRoute -- the match and
+  // the "this person is gone" branch.
+  assert.equal((dial.match(/emailTierKey: emailTierKey\(\)/g) || []).length, 2,
+    "every route proof records the rule that decided it");
+  // And the desk view treats a differing rule version as stale.
+  assert.match(desk, /item\.emailTierKey !== Dial\.emailTierKey\(\)/);
+
+  // A pre-rule item has no key at all, so it can never match the current one.
+  assert.notEqual(undefined, "confirmed|high");
+});
+
 test("an item without email proof cannot email, whatever its tier", async () => {
   const Dial = loadDial();
   Dial.setContactRouteVersion("build-new");
