@@ -2288,10 +2288,25 @@ def _approved_recipient_registry():
     problems = []
     if registry.get("contentHash") != content_hash(core):
         problems.append("content hash is invalid")
-    fuzzy = [crd for crd, row in (registry.get("recipients") or {}).items()
-             if row.get("tier") != "confirmed"]
-    if fuzzy:
-        problems.append(f"{len(fuzzy):,} non-confirmed recipients remain")
+    # confirmed AND high are addressable, by decision. `high` is a strong name
+    # match with no CRD asserted anywhere -- about 0.989 precision, so roughly
+    # one in ninety is not the person named. That is a judgement about
+    # acceptable misdirection, taken deliberately; what is NOT a judgement is
+    # `review` or `none`, which mean the match is unresolved and must never
+    # reach an addressable list however the policy is set elsewhere.
+    addressable = {"confirmed", "high"}
+    unresolved = [crd for crd, row in (registry.get("recipients") or {}).items()
+                  if str(row.get("tier") or "").lower() not in addressable]
+    if unresolved:
+        problems.append(f"{len(unresolved):,} recipients carry an unresolved tier")
+    # Internal colleagues may be present, but only flagged: the runtime refuses
+    # them unless the address is on EMAIL_TEST_ADDRESS_ALLOWLIST, and an
+    # unflagged internal record would bypass that gate entirely.
+    leaked = [crd for crd, row in (registry.get("recipients") or {}).items()
+              if str(row.get("email") or "").lower().endswith("@eicatlanta.com")
+              and row.get("internal") is not True]
+    if leaked:
+        problems.append(f"{len(leaked):,} internal addresses are not flagged internal")
     expected = {
         "identityManifestHash": manifest.get("contentHash", ""),
         "identityLinksSha256": ((manifest.get("outputs") or {})

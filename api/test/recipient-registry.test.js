@@ -15,17 +15,71 @@ function record(email, tier = "confirmed", extra = {}) {
 
 test.afterEach(() => registry.reset());
 
-test("only direct-confirmed identities resolve", async () => {
+test("confirmed and high identities resolve; weaker tiers never do", async () => {
+  // `high` was admitted deliberately. It is a strong name match with no CRD
+  // asserted anywhere -- about 0.989 precision -- which is a decision about
+  // acceptable misdirection, not a safety property. `review` means "we are not
+  // sure this is the same person" and is never addressable.
   registry.useIndex({ recipients: {
     "100": record("high@example.com", "high"),
     "101": record("confirmed@example.com", "confirmed"),
     "102": record("review@example.com", "review"),
+    "103": record("none@example.com", "none"),
   } });
   assert.equal((await registry.resolve("101")).email, "confirmed@example.com");
-  await assert.rejects(registry.resolve("100"),
-    (error) => error.code === "recipient_not_approved");
-  await assert.rejects(registry.resolve("102"),
-    (error) => error.code === "recipient_not_approved");
+  assert.equal((await registry.resolve("100")).email, "high@example.com");
+  for (const crd of ["102", "103"])
+    await assert.rejects(registry.resolve(crd),
+      (error) => error.code === "recipient_not_approved");
+});
+
+test("APPROVED_RECIPIENT_TIERS can narrow the policy without a rebuild", async () => {
+  // The point of the setting: tightening used to require rebuilding the API,
+  // re-exporting the blob, and matching the two by content hash.
+  const saved = process.env.APPROVED_RECIPIENT_TIERS;
+  process.env.APPROVED_RECIPIENT_TIERS = "confirmed";
+  const modulePath = require.resolve("../shared/recipient-registry");
+  delete require.cache[modulePath];
+  const narrowed = require(modulePath);
+  try {
+    narrowed.useIndex({ recipients: {
+      "100": record("high@example.com", "high"),
+      "101": record("confirmed@example.com", "confirmed"),
+    } });
+    assert.equal((await narrowed.resolve("101")).email, "confirmed@example.com");
+    await assert.rejects(narrowed.resolve("100"),
+      (error) => error.code === "recipient_not_approved");
+  } finally {
+    narrowed.reset();
+    if (saved === undefined) delete process.env.APPROVED_RECIPIENT_TIERS;
+    else process.env.APPROVED_RECIPIENT_TIERS = saved;
+    delete require.cache[modulePath];
+  }
+});
+
+test("internal colleagues resolve only from the test allowlist", async () => {
+  // Excluding them outright removed the only safe rehearsal path: every test
+  // batch is addressed to this firm, and the exclusion blocked the account
+  // doing the testing. They are exported and gated instead.
+  const saved = process.env.EMAIL_TEST_ADDRESS_ALLOWLIST;
+  try {
+    registry.useIndex({ recipients: {
+      "200": record("colleague@eicatlanta.com", "confirmed", { internal: true }),
+    } });
+    await assert.rejects(registry.resolve("200"),
+      (error) => error.code === "recipient_not_approved",
+      "with no allowlist, internal stays unaddressable");
+
+    process.env.EMAIL_TEST_ADDRESS_ALLOWLIST = "colleague@eicatlanta.com";
+    registry.reset();
+    registry.useIndex({ recipients: {
+      "200": record("colleague@eicatlanta.com", "confirmed", { internal: true }),
+    } });
+    assert.equal((await registry.resolve("200")).email, "colleague@eicatlanta.com");
+  } finally {
+    if (saved === undefined) delete process.env.EMAIL_TEST_ADDRESS_ALLOWLIST;
+    else process.env.EMAIL_TEST_ADDRESS_ALLOWLIST = saved;
+  }
 });
 
 test("one email claimed by two CRDs excludes both", async () => {

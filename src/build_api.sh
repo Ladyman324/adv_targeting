@@ -381,4 +381,18 @@ cp -f "$ARCHIVE" "$DIST/api.tgz"
 printf '%s  api.tgz\n' "$HASH" > "$DIST/api.tgz.sha256"
 verify_archive "$ARCHIVE" "$HASH"
 echo "[*] release $RELEASE_ID  commit $COMMIT  dirty=$DIRTY"
+REGISTRY="$ROOT/data/identity/approved_recipients.json.gz"
+REGISTRY_SHA=$(sha256sum "$REGISTRY" | awk '{print $1}')
 echo "[*] upload $DIST/api.tgz and retain $HASH before publishing"
+echo
+echo "[!] THIS PACKAGE IS HALF A RELEASE. It pins an approved-recipient registry"
+echo "    that is NOT inside the archive, and the emailer refuses to address mail"
+echo "    until the matching blob is in storage:"
+echo
+echo "      file    ${REGISTRY#"$ROOT"/}"
+echo "      sha256  $REGISTRY_SHA"
+echo "      blob    lookups/approved_recipients.json.gz"
+echo
+echo "    az storage blob upload --account-name eicadvisorlog \\"
+echo "      --container-name lookups --name approved_recipients.json.gz \\"
+echo "      --file <path>/approved_recipients.json.gz --overwrite --auth-mode key"

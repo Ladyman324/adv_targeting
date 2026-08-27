@@ -25,6 +25,22 @@ IDENTITY = ROOT / "data" / IDENTITY_DIRNAME
 BLOB_CONTAINER, BLOB_NAME = "lookups", "approved_recipients.json.gz"
 RELEASE_DESCRIPTOR_PATH = (ROOT / "api" / "shared" /
                            "approved-recipient-release.json")
+# WHAT MAY BE EXPORTED, which is not the same as what may be emailed.
+#
+# The registry carries the superset and recipient-registry.js narrows it at run
+# time from APPROVED_RECIPIENT_TIERS. Deciding it only here meant the policy
+# could not be tightened -- or loosened -- without rebuilding the API, uploading
+# a new blob, and matching the two by content hash. Exporting the superset makes
+# that an environment setting; the tier travels on every record so the runtime
+# can still refuse what it does not accept.
+#
+#   confirmed  the firm stated this CRD and the SEC record agrees
+#   high       a strong name match, no CRD asserted anywhere -- measured at
+#              about 0.989 precision, so roughly one in ninety is not this
+#              person. That is a real number of misdirected emails at scale,
+#              and it is why `high` is a decision rather than a default.
+EXPORTED_TIERS = frozenset({"confirmed", "high"})
+
 RELEASE_PROVENANCE_KEYS = (
     "identityManifestHash", "identityLinksSha256", "contactsSha256",
     "actSource", "actSourceSha256",
@@ -112,15 +128,22 @@ def build_registry(links: pd.DataFrame, contacts_payload: dict | None = None,
         email = normalize_email(contact.get("e"))
         tier = clean_text(contact.get("t")).lower()
         source = clean_text(contact.get("src"))
-        if tier != "confirmed":
+        if tier not in EXPORTED_TIERS:
             ineligible[crd] = "contact_identity_not_approved"
             continue
         if not email:
             ineligible[crd] = "missing_or_invalid_email"
             continue
-        if source.upper() == "EIC" or email.endswith("@eicatlanta.com"):
-            ineligible[crd] = "internal_colleague"
-            continue
+        # Internal colleagues are EXPORTED, flagged, and refused at run time
+        # unless the address is on EMAIL_TEST_ADDRESS_ALLOWLIST.
+        #
+        # Excluding them here instead removed the only safe way to test the
+        # emailer -- every rehearsal batch is addressed to this firm -- and it
+        # did so silently, blocking the account that does the testing. Deciding
+        # it at run time keeps them out of advisor campaigns while letting an
+        # administrator name the addresses a rehearsal may use, without a
+        # rebuild and re-upload of the registry.
+        internal = source.upper() == "EIC" or email.endswith("@eicatlanta.com")
         approved = links_by_crd.get(crd)
         if source.upper() == "CRM":
             if not approved:
@@ -147,7 +170,7 @@ def build_registry(links: pd.DataFrame, contacts_payload: dict | None = None,
             "lastName": last_name,
             "firm": clean_text(contact.get("cn") or
                                (exact_act or {}).get("firm")),
-            "tier": tier, "source": source,
+            "tier": tier, "source": source, "internal": internal,
             "actContactId": clean_text(
                 (exact_act or {}).get("source_record_id")),
             "teammates": [],

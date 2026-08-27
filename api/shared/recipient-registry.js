@@ -7,10 +7,24 @@ const RELEASE_DESCRIPTOR = require("./approved-recipient-release.json");
 const CONTAINER = process.env.APPROVED_RECIPIENT_CONTAINER || "lookups";
 const BLOB = process.env.APPROVED_RECIPIENT_BLOB || "approved_recipients.json.gz";
 const TTL_MS = Number(process.env.APPROVED_RECIPIENT_TTL_MS || 60 * 1000);
-// A calibrated fuzzy match is useful research evidence, not authorization to
-// address mail. The exporter applies the same policy; repeating it here means
-// a stale or hand-built blob cannot widen production eligibility.
-const SAFE_TIERS = new Set(["confirmed"]);
+/* WHICH IDENTITY TIERS MAY BE ADDRESSED.
+ *
+ * The registry carries the superset the exporter produced; this is what the
+ * running API will actually accept, and it is deliberately re-checked here so a
+ * stale or hand-built blob cannot widen eligibility on its own.
+ *
+ *   confirmed  the firm stated this CRD and the SEC record agrees
+ *   high       a strong name match with no CRD asserted anywhere, measured at
+ *              about 0.989 precision -- roughly one in ninety is not the person
+ *              named, which at scale is a real count of misdirected mail
+ *
+ * Settable because the previous hardcoded value could only be changed by
+ * rebuilding the API, re-exporting the blob, and matching the two by content
+ * hash -- so the only available response to "this is too tight" was a release.
+ * Narrowing it costs an app setting and a restart.
+ */
+const SAFE_TIERS = new Set(String(process.env.APPROVED_RECIPIENT_TIERS || "confirmed,high")
+  .split(",").map((tier) => tier.trim().toLowerCase()).filter(Boolean));
 let cache = null, loadedAt = 0, sourceEtag = "";
 function norm(value) { return String(value || "").trim().toLowerCase(); }
 function failure(statusCode, code, message, detail = "") {
@@ -101,6 +115,19 @@ function hydratePayload(payload, enforceReleaseBinding) {
   const recipients = new Map(), ineligible = new Map(
     Object.entries(payload.ineligible || {}).map(([k, v]) => [String(k), String(v)]));
   for (const [crd, raw] of Object.entries(payload.recipients)) {
+    /* Internal colleagues are addressable only from the test allowlist.
+     *
+     * They are exported rather than dropped so that rehearsal batches -- which
+     * are always addressed to this firm -- have somewhere to go, while advisor
+     * campaigns still cannot reach staff. An administrator names the addresses
+     * in EMAIL_TEST_ADDRESS_ALLOWLIST; with none set, nothing internal is
+     * addressable, which is the same posture as before minus the dead end.
+     */
+    if (raw && raw.internal === true
+        && !core.config().testAllowlist.has(norm(raw.email))) {
+      ineligible.set(String(crd), "internal_colleague_not_on_test_allowlist");
+      continue;
+    }
     const record = cleanRecord(crd, raw);
     if (record) recipients.set(String(crd), record);
     else ineligible.set(String(crd), "invalid_or_ineligible_registry_record");
