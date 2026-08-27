@@ -39,7 +39,7 @@ const COMPARE = ["#12b39c", "#e0a53a", "#8079e0", "#e8615d", "#4aa3e0", "#9fc93c
 // of every deployed JSON path and byte. It changes for standalone shard
 // rebuilds too, and its leading date keeps the stale-build warning readable.
 // Do not edit it by hand.
-const DATA_VERSION = "20260822T034641Z-b99a17fb2ee4950b";
+const DATA_VERSION = "20260827T164513Z-3c04e4844392be4d";
 const dataUrl = file => `data/${file}?v=${DATA_VERSION}`;
 Dial.setContactRouteVersion(DATA_VERSION);
 // ONE scale for every mark on the map. There used to be two, and they were not
@@ -3911,6 +3911,32 @@ const DRP_LABELS = ["Criminal", "Regulatory action", "Civil judicial", "Customer
 // consumer downstream is untouched. Firm-level fields (firm, motion, score, RAUM,
 // 5.G(7), fit/size) come from the firm dictionary; the IAPD url is rebuilt from
 // the CRD; the disclosure mask unpacks to labels.
+/* What to say about outside managers, given WHICH signal fired.
+ *
+ * "No outside-manager selection reported" was literally true of LPL -- their
+ * Form ADV answers Item 5.G(7) "N" -- and useless: they sponsor a wrap
+ * programme carrying $598.6 billion across five programmes, which is precisely
+ * the business of placing client money with managers who are not them. A rep
+ * repeated that badge to LPL and was corrected by the client.
+ *
+ * So the badge names the evidence rather than reducing two different filings to
+ * one yes-or-no.
+ */
+function outsideManagerLabel(p){
+  // Two producers, two names for the same field: pins carry sgWhy (rehydrate),
+  // firm profiles carry selectsWhy. Reading only one is how this badge kept
+  // saying "Reports selecting outside managers" about a firm whose evidence is
+  // wrap sponsorship -- right answer, wrong reason, and still not what a rep
+  // should repeat to LPL.
+  const why = p.sgWhy || p.selectsWhy || "";
+  const wrap = p.wrapM ? ` · ${fmtMoney(p.wrapM * 1e6)} wrap` : "";
+  if (why === "both") return `Selects outside managers · wrap sponsor${wrap}`;
+  if (why === "wrap") return `Wrap sponsor${wrap}`;
+  if (why === "selects" || p.selects || p.sg === 1)
+    return "Reports selecting outside managers";
+  return "No outside-manager selection reported";
+}
+
 function rehydrate(c, sourceState=""){
   const { iapd, firms, motions, addrs, cities, desig, regs, gp, xb, pins } = c;
   const out = new Array(pins.length);
@@ -3921,6 +3947,9 @@ function rehydrate(c, sourceState=""){
       properties: {
         id: p[6], n: p[7],
         f: fm[0], m: motions[fm[1]], s: fm[2], ra: fm[3], sg: fm[4], sf: fm[5], sz: fm[6],
+        // WHICH signal made sg true, and how big the wrap book is. Appended to
+        // the firm row by export_geojson.py, so older builds simply omit them.
+        sgWhy: fm[8] || "", wrapM: fm[9] == null ? null : fm[9],
         fc: String(fm[7]), _lon: p[0], _lat: p[1], _state: sourceState,
         a: addrs[p[3]], c: cities[p[4]], z: p[5],
         x: p[8], xb: p[9] < 0 ? "" : xb[p[9]],
@@ -4669,7 +4698,7 @@ function renderFirmOverview(crd, p){
       <span class="profile-badge">${esc((p.firm_type || "unclassified").replaceAll("_", " "))}</span>
       ${(p.aka || []).map(n => `<span class="profile-badge">formerly ${esc(n)}</span>`).join("")}
       <span class="profile-badge">${p.platform ? "Home-office / platform access" : "Territory sales access"}</span>
-      <span class="profile-badge">${p.selects ? "Reports selecting outside managers" : "No outside-manager selection reported"}</span>
+      <span class="profile-badge">${outsideManagerLabel(p)}</span>
       ${p.review ? `<span class="profile-badge">review: ${esc(p.review.replaceAll("_", " "))}</span>` : ""}
     </div>
     ${productAngle ? `<div class="profile-recommendation"><h3>Potential product angle</h3><p>${productAngle}</p></div>` : ""}

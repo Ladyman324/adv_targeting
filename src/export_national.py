@@ -6,12 +6,14 @@ assigning the entire office to its dominant firm.
 
 Compact formats:
   firms   [[display_name, crd, opportunity_score, raum_millions,
-            selects_outside_managers, equity_pool_millions,
-            fund_etf_pool_millions, mapped_advisors], ...]
+            hires_outside_managers, equity_pool_millions,
+            fund_etf_pool_millions, mapped_advisors, which_signal], ...]
   offices [[lon, lat, advisor_placements, firm_idx, motion_code,
             firms_at_physical_office, state_idx, physical_office_id], ...]
 """
 from __future__ import annotations
+
+import outside_managers
 
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
@@ -89,8 +91,15 @@ def main() -> None:
     WEB.mkdir(parents=True, exist_ok=True)
     firm_facts = pd.read_parquet(
         ROOT / "data" / "output" / "firms.parquet",
+        # is_wrap_sponsor is READ HERE OR THE FILTER SILENTLY REVERTS. A column
+        # whitelist that omits a new signal does not raise -- the row simply
+        # arrives without it, hires_outside_managers() sees nothing, and the
+        # national view quietly keeps answering the old question while the desk
+        # map answers the new one. That exact shape of bug has now cost this
+        # project a stale team_url, a dropped salutation and a lost CRD tier.
         columns=[
             "crd", "motion", "opportunity_score", "raum_total", "g_select_advisers",
+            "is_wrap_sponsor",
             "raum_equity_exchange_implied", "raum_fund_shares_ric_implied",
         ],
     ).rename(columns={"crd": "firm_crd"})
@@ -214,7 +223,13 @@ def main() -> None:
                         int(round(float(group["raum_total"].dropna().iloc[0]) / 1e6))
                         if len(group["raum_total"].dropna()) else None
                     ),
-                    "selects": int(bool(group["g_select_advisers"].fillna(False).iloc[0])),
+                    # Either 5.G(7) or wrap sponsorship -- see
+                    # src/outside_managers.py. The national heat layer and the
+                    # firm search share the desk map's filter, so they have to
+                    # share its definition too.
+                    "selects": int(bool(
+                        outside_managers.hires_outside_managers(group.iloc[0]))),
+                    "selectsWhy": outside_managers.reason(group.iloc[0]),
                     "equity": (
                         round(float(group["raum_equity_exchange_implied"].dropna().iloc[0]) / 1e6, 1)
                         if len(group["raum_equity_exchange_implied"].dropna()) else None
@@ -257,6 +272,12 @@ def main() -> None:
             firm_list.append([
                 row["f"], row["crd"], row["score"], row["raum"], row["selects"],
                 row["equity"], row["funds"], len(firm_advisors[row["crd"]]),
+                # WHICH signal made `selects` true. Appended last so every
+                # positional reader of this row keeps working; without it the
+                # firm card would tell a wrap sponsor it "reports selecting
+                # outside managers", which is the same wrong answer in the
+                # opposite direction.
+                row["selectsWhy"],
             ])
 
     states = sorted(per_state)

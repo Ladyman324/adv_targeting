@@ -1,6 +1,8 @@
 """Export compact CRD-keyed sales profiles for mapped advisory firms."""
 from __future__ import annotations
 
+import outside_managers
+
 from collections import defaultdict
 import json
 import pathlib
@@ -143,6 +145,24 @@ def load_aliases() -> dict:
     return out
 
 
+def _wrap_millions(row):
+    """Sponsor-only plus sponsor-and-manager wrap assets, in millions, or None.
+
+    Item 5.I(2)(b) -- manager inside somebody else's programme -- is excluded on
+    purpose: that firm is a competitor, not a buyer.
+    """
+    total = 0.0
+    for key in ("wrap_sponsor_amt", "wrap_both_amt"):
+        value = row.get(key)
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            continue
+        if value == value:                      # NaN fails this, and only NaN
+            total += value
+    return int(round(total / 1e6)) if total > 0 else None
+
+
 def main() -> None:
     firms = pd.read_parquet(ROOT / "data" / "output" / "firms.parquet")
     firms["crd"] = firms["crd"].astype(str)
@@ -187,7 +207,16 @@ def main() -> None:
             "fund_score": scalar(row.get("fund_fit_score")),
             "opportunity": scalar(row.get("opportunity_score")),
             "platform": 1 if truth(row.get("platform_access")) else 0,
-            "selects": 1 if truth(row.get("g_select_advisers")) else 0,
+            # THE THIRD COPY OF THIS RULE, and the one the firm card actually
+            # reads -- so it is what told LPL they report no outside-manager
+            # selection. Either signal now, from src/outside_managers.py, with
+            # the reason carried so the badge can name its evidence.
+            "selects": 1 if outside_managers.hires_outside_managers(row) else 0,
+            "selectsWhy": outside_managers.reason(row),
+            # `NaN or 0` does NOT give 0 -- NaN is truthy, so it survives the
+            # or, and int(round(NaN)) raises. An absent amount has to be tested
+            # for, not defaulted around.
+            "wrapM": _wrap_millions(row),
             "firm_type": str(row.get("firm_type", "")),
             "review": "" if pd.isna(row.get("review_reason")) else str(row.get("review_reason")),
             # former/other names from the IAPD firm record -- Bear Stearns for

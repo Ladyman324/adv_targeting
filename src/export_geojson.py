@@ -8,6 +8,8 @@ address, IAPD link, dual BD/RIA, disclosures, office density).
 """
 from __future__ import annotations
 
+import outside_managers
+
 import json
 import pathlib
 import re
@@ -224,11 +226,16 @@ def export(state: str) -> None:
     # fit/size split shown in each firm row. Sourced from firms.parquet (the score
     # source of truth) rather than the branch parquet, so they never drift from it.
     fm = pd.read_parquet(ROOT / "data" / "output" / "firms.parquet")[
-        ["crd", "motion", "raum_total", "g_select_advisers",
+        ["crd", "motion", "raum_total", "g_select_advisers", "is_wrap_sponsor",
+         "wrap_both_amt", "wrap_sponsor_amt", "wrap_n_programs",
          "opportunity_score_fit", "opportunity_score_size"]].rename(columns={"crd": "_fmcrd"})
     fm = fm.rename(columns={"motion": "_current_motion"})
     fm["_fmcrd"] = fm["_fmcrd"].astype(str)
     p = p.merge(fm, left_on="firm_crd", right_on="_fmcrd", how="left")
+    # 5.I(2)(a) sponsor-only + 5.I(2)(c) sponsor-and-manager. Not (2)(b),
+    # which is managing money inside somebody else's programme.
+    p["wrap_amount"] = (p.get("wrap_sponsor_amt").fillna(0)
+                        + p.get("wrap_both_amt").fillna(0))
 
     # Show the name the person actually goes by. Form U4 <OthrNms> says Edison
     # Tate Lambeth goes by Tate and Thomas Tolleson goes by Tom; 22.8% of
@@ -289,7 +296,7 @@ def export(state: str) -> None:
 
     # CRD, not display name, is the identity key. Same-named legal entities can
     # have different scores, motions, and assets.
-    firm_idx, firms = {}, []                  # crd -> idx; [name, mIdx, s, ra, sg, sf, sz, crd]
+    firm_idx, firms = {}, []      # crd -> idx; [name, mIdx, s, ra, sg, sf, sz, crd, why, wrapM]
     def firm_add(r):
         crd = str(r["firm_crd"])
         name = r["firm"]
@@ -300,11 +307,19 @@ def export(state: str) -> None:
                 name, mot_add(r["motion"]),
                 None if pd.isna(r["opportunity_score"]) else round(float(r["opportunity_score"]), 1),
                 None if pd.isna(r.get("raum_total")) else int(round(float(r["raum_total"]) / 1e6)),
-                1 if (r.get("g_select_advisers") is True
-                      or str(r.get("g_select_advisers")).upper() in ("TRUE", "1", "Y")) else 0,
+                # Either signal -- see src/outside_managers.py. 5.G(7) alone hid
+                # LPL and 588 other wrap sponsors behind a filter that is on by
+                # default.
+                1 if outside_managers.hires_outside_managers(r) else 0,
                 None if pd.isna(r.get("opportunity_score_fit")) else round(float(r["opportunity_score_fit"]), 1),
                 None if pd.isna(r.get("opportunity_score_size")) else round(float(r["opportunity_score_size"]), 1),
                 crd,
+                # WHICH signal fired. Appended last so every existing positional
+                # reader of this row is untouched: "No outside-manager selection
+                # reported" was literally true of LPL's 5.G(7) and useless to a
+                # rep looking at a $598.6B wrap sponsor.
+                outside_managers.reason(r),
+                None if pd.isna(r.get("wrap_amount")) else int(round(float(r["wrap_amount"]) / 1e6)),
             ])
         return i
 
