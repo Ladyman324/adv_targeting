@@ -115,17 +115,21 @@ function hydratePayload(payload, enforceReleaseBinding) {
   const recipients = new Map(), ineligible = new Map(
     Object.entries(payload.ineligible || {}).map(([k, v]) => [String(k), String(v)]));
   for (const [crd, raw] of Object.entries(payload.recipients)) {
-    /* Internal colleagues are addressable only from the test allowlist.
+    /* Internal colleagues are addressable only when explicitly admitted.
      *
-     * They are exported rather than dropped so that rehearsal batches -- which
-     * are always addressed to this firm -- have somewhere to go, while advisor
-     * campaigns still cannot reach staff. An administrator names the addresses
-     * in EMAIL_TEST_ADDRESS_ALLOWLIST; with none set, nothing internal is
-     * addressable, which is the same posture as before minus the dead end.
+     * They are exported rather than dropped so rehearsal batches -- always
+     * addressed to this firm -- have somewhere to go. EMAIL_INTERNAL_RECIPIENT_
+     * ALLOWLIST takes addresses or a bare domain, so "eicatlanta.com" admits
+     * the whole staff, including people who join later.
+     *
+     * NOT testAllowlist, which would have been the obvious reuse and is a trap:
+     * that list gates production sending, and any non-empty value requires
+     * every direct-send recipient to appear in it -- admitting five colleagues
+     * would have blocked every advisor campaign.
      */
     if (raw && raw.internal === true
-        && !core.config().testAllowlist.has(norm(raw.email))) {
-      ineligible.set(String(crd), "internal_colleague_not_on_test_allowlist");
+        && !core.internalRecipientAllowed(norm(raw.email))) {
+      ineligible.set(String(crd), "internal_recipient_not_allowlisted");
       continue;
     }
     const record = cleanRecord(crd, raw);

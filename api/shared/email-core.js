@@ -71,6 +71,22 @@ function numberSetting(name, fallback) {
   return Number.isFinite(n) && n > 0 ? n : fallback;
 }
 
+/* May this internal address be emailed?
+ *
+ * Matches a full address or the domain it belongs to, so a firm can admit its
+ * whole staff without listing them -- and so a new colleague does not have to
+ * be added to a setting before a rehearsal batch will reach them.
+ */
+function internalRecipientAllowed(email, cfg) {
+  const address = String(email || "").trim().toLowerCase();
+  if (!address) return false;
+  const list = (cfg || config()).internalRecipientAllowlist;
+  if (!list || !list.size) return false;
+  if (list.has(address)) return true;
+  const domain = address.split("@")[1] || "";
+  return !!domain && list.has(domain);
+}
+
 function config() {
   return {
     directBatchMax: numberSetting("EMAIL_DIRECT_BATCH_MAX", DEFAULTS.directBatchMax),
@@ -117,6 +133,21 @@ function config() {
       .filter((r) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(r.address)),
     testAllowlist: new Set(String(process.env.EMAIL_TEST_ADDRESS_ALLOWLIST || "")
       .split(",").map((x) => x.trim().toLowerCase()).filter(Boolean)),
+    /* Who may be addressed despite being one of our own.
+     *
+     * DELIBERATELY NOT testAllowlist, which looks like the obvious home and is
+     * a trap: that list is a production send gate, and the moment it is
+     * non-empty EVERY direct send must have all its recipients inside it. Using
+     * it to admit five colleagues would have silently blocked every advisor
+     * campaign -- a far larger failure than the one being fixed.
+     *
+     * Entries are addresses or bare domains: "eicatlanta.com" (or
+     * "@eicatlanta.com") admits everyone there, a full address admits one
+     * person. Empty means no internal recipient is addressable.
+     */
+    internalRecipientAllowlist: new Set(
+      String(process.env.EMAIL_INTERNAL_RECIPIENT_ALLOWLIST || "")
+        .split(",").map((x) => x.trim().toLowerCase().replace(/^@/, "")).filter(Boolean)),
     reviewSummaryOver: numberSetting("EMAIL_REVIEW_SUMMARY_OVER", DEFAULTS.reviewSummaryOver),
     reviewLargeOver: numberSetting("EMAIL_REVIEW_LARGE_OVER", DEFAULTS.reviewLargeOver),
     reviewElevatedOver: numberSetting("EMAIL_REVIEW_ELEVATED_OVER", DEFAULTS.reviewElevatedOver),
@@ -687,4 +718,5 @@ module.exports = {
   mergeValues, renderTemplate, plainTextToSafeHtml, sanitizeEmailHtml, extraRecipients,
   corporateSignature, validEmail, isExternal, guardrail, lintTemplate,
   passcodeRequired, passcodeMatches, archiveFooter, complianceBcc, FORESIDE_DEFAULT, interleaveByDomain, campaignHealth, directSendBlockedBy,
+  internalRecipientAllowed
 };

@@ -57,11 +57,11 @@ test("APPROVED_RECIPIENT_TIERS can narrow the policy without a rebuild", async (
   }
 });
 
-test("internal colleagues resolve only from the test allowlist", async () => {
+test("internal colleagues resolve only when their domain or address is allowlisted", async () => {
   // Excluding them outright removed the only safe rehearsal path: every test
   // batch is addressed to this firm, and the exclusion blocked the account
   // doing the testing. They are exported and gated instead.
-  const saved = process.env.EMAIL_TEST_ADDRESS_ALLOWLIST;
+  const saved = process.env.EMAIL_INTERNAL_RECIPIENT_ALLOWLIST;
   try {
     registry.useIndex({ recipients: {
       "200": record("colleague@eicatlanta.com", "confirmed", { internal: true }),
@@ -70,15 +70,17 @@ test("internal colleagues resolve only from the test allowlist", async () => {
       (error) => error.code === "recipient_not_approved",
       "with no allowlist, internal stays unaddressable");
 
-    process.env.EMAIL_TEST_ADDRESS_ALLOWLIST = "colleague@eicatlanta.com";
+    // The DOMAIN form, because that is what a firm sets: one entry that also
+    // covers the colleague who joins next month.
+    process.env.EMAIL_INTERNAL_RECIPIENT_ALLOWLIST = "eicatlanta.com";
     registry.reset();
     registry.useIndex({ recipients: {
       "200": record("colleague@eicatlanta.com", "confirmed", { internal: true }),
     } });
     assert.equal((await registry.resolve("200")).email, "colleague@eicatlanta.com");
   } finally {
-    if (saved === undefined) delete process.env.EMAIL_TEST_ADDRESS_ALLOWLIST;
-    else process.env.EMAIL_TEST_ADDRESS_ALLOWLIST = saved;
+    if (saved === undefined) delete process.env.EMAIL_INTERNAL_RECIPIENT_ALLOWLIST;
+    else process.env.EMAIL_INTERNAL_RECIPIENT_ALLOWLIST = saved;
   }
 });
 
