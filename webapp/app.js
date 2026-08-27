@@ -39,8 +39,9 @@ const COMPARE = ["#12b39c", "#e0a53a", "#8079e0", "#e8615d", "#4aa3e0", "#9fc93c
 // of every deployed JSON path and byte. It changes for standalone shard
 // rebuilds too, and its leading date keeps the stale-build warning readable.
 // Do not edit it by hand.
-const DATA_VERSION = "20260822T034641Z-16d3a70808d79456";
+const DATA_VERSION = "20260822T034641Z-b99a17fb2ee4950b";
 const dataUrl = file => `data/${file}?v=${DATA_VERSION}`;
+Dial.setContactRouteVersion(DATA_VERSION);
 // ONE scale for every mark on the map. There used to be two, and they were not
 // comparable: buildings grew as 20 + 5.2*sqrt(n) and saturated at 56px by just
 // 48 advisors, while clusters used a cubed log that stayed near 20px well into
@@ -337,7 +338,21 @@ function clearMapSelection(){
 function afterNextPaint(fn){
   // One rAF runs before a paint. A second one cannot run until the browser has
   // had an opportunity to paint the work queued by the first frame.
-  requestAnimationFrame(() => requestAnimationFrame(fn));
+  //
+  // BUT rAF DOES NOT FIRE IN A HIDDEN TAB, and this gates the support loads --
+  // geo_index.json among them, which IS city and ZIP search. A page opened in a
+  // background tab, or a phone whose screen locks while it loads, never starts
+  // them, so the box reads "City and ZIP search is still loading" indefinitely
+  // while name, CRD and firm search work fine, because those do not depend on
+  // it. That asymmetry is exactly how the bug presents.
+  //
+  // So a timer races the frames, and whichever arrives first wins, once. The
+  // double rAF exists to yield to a paint, not to be the only route: where
+  // there will never be a paint, waiting for one is waiting forever.
+  let done = false;
+  const once = () => { if (done) return; done = true; fn(); };
+  requestAnimationFrame(() => requestAnimationFrame(once));
+  setTimeout(once, 1200);
 }
 
 function activeTransitionBatch(target, token, transition){
@@ -910,6 +925,7 @@ function loadContacts(signal=null){
       // it in place rather than leaving a card that says a person has no phone
       // when the file listing it has just arrived.
       if (detailsCurrent) renderDetailEntry(detailsCurrent, false);
+      reconcileDesktopDialRoutes().catch(() => {});
     });
   return contactsPromise;
 }
@@ -1052,12 +1068,10 @@ function teamFor(c){
  * activity, applies suppression and carries the approved signature, and none
  * of that happens here. This is the escape hatch, not a replacement.
  *
- * On an UNCONFIRMED match the address was already printed in full and could
- * always be copied, so making it clickable changes convenience rather than
- * risk. It carries the same warning the blocked Email button carries, because
- * the thing worth stopping is sending to a namesake by accident.
+ * Only a confirmed identity becomes a link. High-confidence research matches
+ * remain visible and callable, but are not approved email recipients.
  */
-function mailtoLink(address, unsure, crd){
+function mailtoLink(address, emailConfirmed, crd){
   const a = esc(address);
   /* NOT A LINK for anyone on the do-not-call list.
    *
@@ -1073,10 +1087,11 @@ function mailtoLink(address, unsure, crd){
   if (crd && Dial.isDnc(crd))
     return `<span class="contact-mailto blocked"
       title="${a} — firm-wide do-not-call, so this address is not one-click">${a}</span>`;
-  const tip = unsure
-    ? `${a} — unconfirmed match, so this address may belong to somebody else`
-    : `${a} — opens a blank email outside the app; nothing is logged`;
-  return `<a class="contact-mailto${unsure ? " contact-mailto-unsure" : ""}"
+  if (!emailConfirmed)
+    return `<span class="contact-mailto blocked"
+      title="${a} — address is research-only until this identity is confirmed">${a}</span>`;
+  const tip = `${a} — opens a blank email outside the app; nothing is logged`;
+  return `<a class="contact-mailto"
       href="mailto:${encodeURIComponent(address).replace(/%40/g, "@")}"
       title="${esc(tip)}">${a}</a>`;
 }
@@ -1314,9 +1329,10 @@ function contactBlock(p){
    * permanently, with no undo, because somebody else asked to be left alone.
    */
   const unconfirmed = c.t === "review";
+  const emailConfirmed = c.t === "confirmed";
 
-  if (c.e) rows.push(unconfirmed
-    ? `<span class="contact-btn blocked" title="${esc(c.e)} — unconfirmed match, so this address may belong to somebody else. Copy it deliberately if you are sure.">&#9993; Email unavailable</span>`
+  if (c.e) rows.push(!emailConfirmed
+    ? `<span class="contact-btn blocked" title="${esc(c.e)} — research-only address; confirm the identity before emailing.">&#9993; Email unavailable</span>`
     : `<a class="contact-btn"
       href="#"
       data-contact="email" data-advisor="${esc(p.id)}" title="${esc(c.e)}">&#9993; Email${
@@ -1570,7 +1586,7 @@ function contactBlock(p){
   return `<div class="contact-panel${unsure ? " contact-panel-review" : ""}">
       ${owner}${title}
       <div class="contact-actions">${rows.join("")}</div>
-      <p class="contact-meta">${c.e ? mailtoLink(c.e, unsure, p.id) : ""}${c.wd
+      <p class="contact-meta">${c.e ? mailtoLink(c.e, emailConfirmed, p.id) : ""}${c.wd
           ? ` &middot; ${esc(c.wd)}${c.wx ? esc(" ext. " + c.wx) : ""} <span class="phone-kind">${esc((PHONE_KIND[c.wk] || PHONE_KIND._).tip)}</span>`
           : ""}${c.cd ? ` &middot; ${esc(c.cd)} mobile` : ""}</p>
       ${assets}${stateClash}${mover}
@@ -1926,7 +1942,26 @@ function dialSnapshot(id){
     // Carried on the queue entry so the dialer, which shows only a name and a
     // number, still knows the match was never confirmed.
     unconfirmed: !!(c && c.t === "review"),
+    identityApproved: !!(c && (c.t === "confirmed" || c.t === "high")),
+    emailConfirmed: !!(c && c.t === "confirmed"),
+    emailEligibilityKnown: true,
+    contactRouteVersion: DATA_VERSION,
   };
+}
+
+let desktopRouteReconcile = null;
+function reconcileDesktopDialRoutes(){
+  if (!CONTACTS_READY || !Dial.state.ready) return Promise.resolve(false);
+  if (!Dial.state.items.some((item) =>
+      item.contactRouteVersion !== DATA_VERSION
+      || item.emailEligibilityKnown !== true
+      || (item.identityApproved !== true && !item.routeIssue)))
+    return Promise.resolve(false);
+  if (desktopRouteReconcile) return desktopRouteReconcile;
+  desktopRouteReconcile = Dial.reconcileRoutes((saved) =>
+      contactFor(saved.crd) ? dialSnapshot(saved.crd) : null)
+    .finally(() => { desktopRouteReconcile = null; });
+  return desktopRouteReconcile;
 }
 
 // The email composer receives the same server-synced contact snapshots as the dialer.
@@ -1947,7 +1982,11 @@ function teammatesOf(crd){
   for (const [id] of practice.m) {
     if (String(id) === String(crd)) continue;
     const mate = contactFor(id);
-    if (mate && mate.e) out.push({ name: mate.n || "", email: mate.e });
+    // Review-tier practice members are evidence for a human, not authorized
+    // recipients. The server enforces this too; filtering here prevents the UI
+    // from offering a choice it will correctly refuse.
+    if (mate && mate.e && mate.t === "confirmed")
+      out.push({ crd: String(id), name: mate.n || "", email: mate.e });
   }
   return out;
 }
@@ -1969,9 +2008,13 @@ const greetingFor = (crd) => {
 };
 
 window.AdvisorEmailData = {
-  recipientFor: (id) => ({ ...dialSnapshot(id), firstName: greetingFor(id),
-    teammates: teammateEmails(id), teammatesFull: teammatesOf(id) }),
-  list: () => Dial.state.items.map((it) => ({ ...it, firstName: greetingFor(it.crd),
+  recipientFor: (id) => {
+    const snap = dialSnapshot(id);
+    return !snap.emailConfirmed ? null : { ...snap, firstName: greetingFor(id),
+      teammates: teammateEmails(id), teammatesFull: teammatesOf(id) };
+  },
+  list: () => Dial.state.items.filter((it) => it.emailConfirmed === true)
+    .map((it) => ({ ...it, firstName: greetingFor(it.crd),
     teammates: teammateEmails(it.crd), teammatesFull: teammatesOf(it.crd) })),
 };
 
@@ -2175,15 +2218,18 @@ function renderDialer(){
     <h3 class="dial-name">${esc(cur.name)}${flagGlyphs(cur.crd)}</h3>
     <p class="dial-sub">${esc([cur.firm, [cur.city, cur.state].filter(Boolean).join(", ")]
         .filter(Boolean).join(" · "))}</p>
-    ${cur.email ? `<p class="dial-mail">${mailtoLink(cur.email, false, cur.crd)}</p>` : ""}
+    ${cur.email ? `<p class="dial-mail">${mailtoLink(cur.email,
+      Dial.emailRouteStatus(cur).ok, cur.crd)}</p>` : ""}
     <p class="dial-hist" id="dialHist">${dialHistory.crd === cur.crd ? dialHistory.text : ""}</p>
     <div class="dial-acts">
       ${!cur.phone ? `<span class="dial-nonum">No number on file</span>`
         : Dial.isDnc(cur.crd)
           ? `<span class="dial-nonum">&#9940; Do not call — log Skip to move on</span>`
-          : `<a class="dial-btn primary" href="${esc(Dial.telHref(cur.crd, cur.phone))}"
+          : !Dial.routeStatus(cur).ok
+            ? `<span class="dial-nonum">Current contact details must be verified; log Skip to move on</span>`
+            : `<a class="dial-btn primary" href="${esc(Dial.telHref(cur.crd, cur.phone, cur))}"
           data-dial="dialled" data-crd="${esc(cur.crd)}">&#9742; Call${kind ? " (" + kind + ")" : ""}</a>`}
-      ${cur.email ? `<a class="dial-btn ghost"
+      ${cur.email && Dial.emailRouteStatus(cur).ok ? `<a class="dial-btn ghost"
           href="#"
           data-dial="mailed" data-crd="${esc(cur.crd)}">&#9993; Email${
             dialPurpose ? " (" + esc(Dial.purposeLabel(dialPurpose)) + ")" : ""}</a>` : ""}
@@ -3674,6 +3720,12 @@ document.addEventListener("click", async e => {
   if (act === "toggle-queue") {
     const w = document.getElementById("dialerQueue");
     w.hidden = !w.hidden;
+    // One disclosure at a time. The dock is 340px of a bottom-anchored column,
+    // and stacking the menu on top of the queue is what pushed its own header
+    // off the screen. The height cap in style.css makes that survivable; this
+    // keeps it from happening in the first place, and two panels open at once
+    // in a dock this size was cluttered regardless.
+    if (!w.hidden) dialMenuOpen = false;
     renderDialer();
   } else if (act === "start") { Dial.start(); renderDialer(); }
   else if (act === "pause") { Dial.pause(); renderDialer(); }
@@ -3683,6 +3735,8 @@ document.addEventListener("click", async e => {
     await Dial.startCycle(); Dial.start(); renderDialer();
   } else if (act === "menu") {
     dialMenuOpen = !dialMenuOpen;
+    // The same rule in the other direction.
+    if (dialMenuOpen) document.getElementById("dialerQueue").hidden = true;
     renderDialer();
   } else if (act === "lists") {
     dialMenuOpen = false;
@@ -3907,8 +3961,29 @@ async function fetchScopeJson(st, metricPrefix, missingOk=false, signal=null){
   const downloadedAt = performance.now();
   const parseStart = performance.now();
   let data;
+  /* The parse gets the SAME tolerance the download already has.
+   *
+   * It did not, and the asymmetry was the bug: a state whose file 404s is
+   * reported in `missing` and the other six still draw, but a state whose file
+   * arrives TRUNCATED threw a SyntaxError straight past every per-state guard
+   * and failed the whole territory -- "Could not load Northeast. The current
+   * map was kept.", an empty map, and nothing naming the state or the reason.
+   *
+   * Truncation is the likelier of the two on the connection that matters.
+   * Northeast is roughly 6.5 MB of pins, pins_NY.json alone 3.6 MB, and a rep
+   * loading it on a phone is exactly who gets a body cut short. Losing one
+   * state's pins is a bad afternoon; losing the territory is a broken app.
+   */
   try { data = JSON.parse(text); }
-  finally { PERF.add(`${metricPrefix}:JSON.parse`, performance.now() - parseStart); }
+  catch (err) {
+    PERF.add(`${metricPrefix}:JSON.parse`, performance.now() - parseStart);
+    if (!missingOk) throw new Error(`${st} data is unreadable (${err.message})`);
+    return {
+      data: null, downloadMs: downloadedAt - downloadStart,
+      parseMs: performance.now() - parseStart, downloadedAt,
+    };
+  }
+  PERF.add(`${metricPrefix}:JSON.parse`, performance.now() - parseStart);
   return {
     data,
     downloadMs: downloadedAt - downloadStart,
@@ -4018,9 +4093,14 @@ const PERF = window.PERF = {
   },
 };
 
-Dial.onChange(renderDialer);
+Dial.onChange(() => {
+  renderDialer();
+  // Covers lists opened after boot as well as the initially selected list.
+  reconcileDesktopDialRoutes().catch(() => {});
+});
 const dialReady = PERF.time("dial.init", () => Dial.init()).then(() => {
   renderDialer();
+  reconcileDesktopDialRoutes().catch(() => {});
   PERF.mark("dialer-usable");
 });
 
@@ -4029,6 +4109,10 @@ let backgroundIdleHandle = null;
 let backgroundIdleKind = "";
 let backgroundController = null;
 let backgroundRunning = false;
+// The large advisor index is intentionally NOT background work. Sharded search
+// does not need it, and the few remaining consumers request it when a person
+// opens a card. Treating it as background work made every desktop session pay
+// for 6.9 MB even when the user never needed the filed-name/office expansion.
 const backgroundComplete = () =>
   (NAT_DETAIL_READY || NAT_DETAIL_ERROR) && (CONTACTS_READY || CONTACTS_ERROR);
 
@@ -4264,6 +4348,20 @@ function beginDetails(entry, push=true){
   if (push && detailsCurrent && detailKey(detailsCurrent) !== detailKey(entry))
     detailsHistory.push({ entry:detailsCurrent, map:captureDetailMap() });
   detailsCurrent = entry;
+  /* A new subject starts at the top of the panel.
+   *
+   * The body keeps its scroll position across a re-render, which is right when
+   * the SAME thing is being redrawn and wrong the moment it becomes a
+   * different one: opening a person from a firm's roster meant scrolling down
+   * to find them, then reading their card from whatever offset the roster
+   * happened to be at -- usually past their name, phone and email.
+   *
+   * Here rather than in openAdvisorDetails() because every detail type arrives
+   * through this function, and the next one added would otherwise inherit the
+   * same bug.
+   */
+  const body = document.getElementById("firmOverviewBody");
+  if (body) body.scrollTop = 0;
   syncDetailsHeader();
 }
 
@@ -4731,10 +4829,10 @@ function searchFromHash(){
   try { term = decodeURIComponent(match[1]); } catch { return; }
   if (!term.trim()) return;
   searchBox.value = term;
-  // The advisor index is 19 MB and is normally kicked off by the first focus,
-  // which never happens on this path -- so start it here and search once it is
-  // in. focus() is deliberate: the results popover is anchored to the box.
-  Promise.all([loadAdvisorIndex().catch(() => {}), loadFirmAliases().catch(() => {})])
+  // Nothing focuses the box on this path, so warm the same two small files the
+  // focus handler would have. focus() is deliberate: the results popover is
+  // anchored to the box.
+  Promise.all([loadSearchManifest().catch(() => {}), loadFirmAliases().catch(() => {})])
     .then(() => { searchBox.focus(); runSearch(); });
 }
 
@@ -4801,6 +4899,28 @@ function redraw(fit){
   refreshPanel();
 }
 
+/* Turning a filter ON used to fly the map to the full extent of everything it
+ * matched, across the whole territory. That reads as helpful and is not: a rep
+ * working one suburb ticks "Ranked advisors" and is thrown out to a view of six
+ * states, with no route back to where they were. A filter answers "which of
+ * these people", not "take me somewhere else".
+ *
+ * So the viewport is left exactly as it was. The one case still worth saying
+ * out loud is a filter that empties the CURRENT view while matching elsewhere
+ * -- otherwise the rep faces a blank map with no way to tell a working filter
+ * from a broken one. That is a sentence, not a camera move.
+ */
+function reportFilterReach(emptyMsg, label){
+  const matches = ALL.filter(f => passesFilters(f.properties));
+  if (!matches.length){ showNotice(emptyMsg); return; }
+  const bounds = map.getBounds();
+  const here = matches.some(f =>
+    bounds.contains([f.geometry.coordinates[1], f.geometry.coordinates[0]]));
+  if (!here)
+    showNotice(`No ${label} in this view — ${matches.length.toLocaleString()} `
+      + `elsewhere in ${scopeLabel(scope)}. Zoom out to see them.`);
+}
+
 // moving scope invalidates every selection made under the old one
 function resetForScopeChange(){
   selectedFirms = []; firmColor = {};
@@ -4851,9 +4971,44 @@ function scopeForState(state){
   return st;
 }
 
+/* Put the advisor on screen, not merely in scope.
+ *
+ * "Show on map" used to open the card and stop, leaving the map wherever it
+ * happened to be -- the right territory, but not the right place, so the rep
+ * had a contact card and a view of the whole Southeast. Searching the same
+ * advisor from the box did pan, because openNationalAdvisor() takes these three
+ * steps and openAdvisorAnywhere() took none of them. Same intent, two
+ * behaviours, and the difference was invisible from the code unless you read
+ * both.
+ *
+ * A filter can also be hiding the person we just navigated to, in which case
+ * flying there would land on empty water. relaxFiltersForAdvisor() is what the
+ * search path uses to clear only the filters actually in the way, and it names
+ * them so the rep knows the view changed under them.
+ */
+function revealAdvisor(feature, label){
+  const cleared = relaxFiltersForAdvisor([feature], label || "", false);
+  focusedAdvisorId = String(feature.properties.id);
+  focusedAdvisorLabel = label || "";
+  redraw();
+  flyToAdvisorGroup({ feats: [feature] });
+  openAdvisorDetails(feature, false);
+  return cleared;
+}
+
 async function openAdvisorAnywhere(crd, state){
   const here = ALL.find(x => String(x.properties.id) === String(crd));
-  if (here) { openAdvisorDetails(here); return true; }
+  if (here) {
+    // Already in scope, so no territory change -- but still move to them. A
+    // rep who asked to see someone on the map means on the screen.
+    const cleared = revealAdvisor(here, here.properties.n);
+    // Say so if a filter had to come off. Moving the map is what was asked
+    // for; quietly widening what the map shows is not, and a rep who set a
+    // filter deliberately should not have to notice it went missing.
+    if (cleared.length)
+      showNotice(`To show ${here.properties.n}, cleared ${joinLabels(cleared)}.`);
+    return true;
+  }
 
   const want = scopeForState(state);
   if (!want || want === scope) {
@@ -4866,7 +5021,15 @@ async function openAdvisorAnywhere(crd, state){
   try {
     await switchScope(want, true);
     const found = ALL.find(x => String(x.properties.id) === String(crd));
-    if (found) { openAdvisorDetails(found); return true; }
+    if (found) {
+      const label = found.properties.n;
+      const cleared = revealAdvisor(found, label);
+      const where = want.startsWith("T:") ? `${want.slice(2)} sales territory` : scopeLabel(want);
+      showNotice(cleared.length
+        ? `Switched to ${where} and cleared ${joinLabels(cleared)} to show ${label}.`
+        : `Switched to ${where} to show ${label}.`);
+      return true;
+    }
     // Switched, and they are still not there. Say which of the two it is
     // rather than repeating "not in scope" at somebody who just watched the
     // scope change.
@@ -4877,9 +5040,34 @@ async function openAdvisorAnywhere(crd, state){
   return false;
 }
 
+/* panTo carries two meanings. As a FLAG it says "the caller will position the
+ * map itself, so do not fit bounds"; as a VALUE it is the [lat, lon] to move
+ * to. This is the value half, and it must be an actual finite pair -- handing
+ * the flag `true` to map.setView() asked Leaflet to coerce a boolean into a
+ * LatLng, got null, and threw "Cannot read properties of null (reading 'lat')".
+ */
+function panToPoint(panTo){
+  return (Array.isArray(panTo) && panTo.length === 2
+          && Number.isFinite(+panTo[0]) && Number.isFinite(+panTo[1]))
+    ? [+panTo[0], +panTo[1]] : null;
+}
+
 async function switchScope(next, panTo){
-  if (next === scope && !pendingScope)
+  if (next === scope && !pendingScope){
+    /* ALREADY IN THIS SCOPE -- but still go to the place.
+     *
+     * This returned "applied" without moving the map, and pickLoc() panned
+     * entirely through this function. So searching a city or ZIP INSIDE the
+     * territory already on screen did nothing: the suggestion was right, the
+     * scope was right, and the map sat still. Searching Memphis from the
+     * national view worked (US -> Southeast), then Atlanta did not -- both are
+     * Southeast, so the second search was a no-op. A rep searching within
+     * their own territory, which is most searching, got silence.
+     */
+    const here = panToPoint(panTo);
+    if (here) map.setView(here, 11, { animate:false });
     return { status:"applied", scope:next, request:scopeRequest };
+  }
   const request = ++scopeRequest;
   if (scopeController) scopeController.abort();
   cancelScheduledBackground();
@@ -4932,7 +5120,37 @@ async function switchScope(next, panTo){
     scopeNotice = notes.join(" ");
     applyScopeUI();
     renderAll(!panTo, next === "US" ? null : transition);
-    if (panTo) map.setView(panTo, 11, { animate:false });
+    /* panTo carries TWO meanings, and conflating them broke "Show on map".
+     *
+     * As a flag it says "the caller will position the map itself, so do not
+     * fit bounds" -- that is the `!panTo` above. As a value it is the [lat,
+     * lon] to move to. Location search passes a real pair; openAdvisorAnywhere
+     * passes literal `true`, because all it wants is the flag: it opens the
+     * advisor immediately afterwards, and opening pans.
+     *
+     * map.setView(true, 11) then asked Leaflet to coerce a boolean into a
+     * LatLng, got null, and threw "Cannot read properties of null (reading
+     * 'lat')" -- from inside switchScope, so it surfaced as "Could not load
+     * Southeast" with an empty map and zeros across the header. The territory
+     * had in fact loaded; only the final pan failed, and it took the whole
+     * scope switch down with it.
+     *
+     * So move only for an actual coordinate pair. The flag meaning still works
+     * for both callers.
+     */
+    const target = panToPoint(panTo);
+    if (target) map.setView(target, 11, { animate:false });
+    // A DROPPED STATE MUST BE SAID OUT LOUD, not left in a tooltip.
+    //
+    // Tolerating a corrupt state file (rather than failing the whole territory)
+    // trades a broken map for a quietly incomplete one, and quietly incomplete
+    // is the more dangerous of the two: the rep sees a smaller advisor count,
+    // every filter agrees with it, and nothing suggests Vermont is absent.
+    // scopeNotice alone was not enough -- it surfaces only inside the counter's
+    // info tooltip, which nobody opens.
+    if (result.missing.length)
+      showNotice(`${result.missing.join(", ")} could not be loaded, so those advisors `
+        + `are missing from this view and from its counts. Reload to try again.`);
     if (failures.length)
       showNotice(`Some enrichment is unavailable: ${failures.join(", ")}. Affected filters remain disabled.`);
     if (next === "US") settleNationalAfterPaint();
@@ -4943,7 +5161,13 @@ async function switchScope(next, panTo){
     if (request === scopeRequest){
       scopeSel.value = scope;
       clearScopePending(request);
-      showNotice(`Could not load ${scopeLabel(next)}. The current map was kept.`);
+      // Name the reason. "Could not load Northeast. The current map was kept."
+      // was true and useless: it cost a round trip through a rep, a screenshot
+      // and a guess to learn that one state's file had arrived truncated. The
+      // message a rep can read out loud is the one worth printing.
+      const why = (err && err.message) ? ` (${err.message})` : "";
+      showNotice(`Could not load ${scopeLabel(next)}${why}. The current map was kept. `
+        + `If this repeats, it is usually a dropped download -- try again on a stronger connection.`);
       console.error(err);
     }
     return { status:"failed", scope:next, request, error:err };
@@ -6435,7 +6659,7 @@ const CONTACT_SWITCHES = [];
 
 function syncContactSwitches(){ CONTACT_SWITCHES.forEach(fn => fn()); }
 
-function wireContactSwitch(id, get, set, emptyMsg){
+function wireContactSwitch(id, get, set, emptyMsg, label){
   const box = document.getElementById(id);
   if (!box) return () => {};
   const sync = () => {
@@ -6455,20 +6679,18 @@ function wireContactSwitch(id, get, set, emptyMsg){
     sync();
     redraw();
     if (!get()) return;
-    const pts = ALL.filter(f => passesFilters(f.properties))
-                   .map(f => [f.geometry.coordinates[1], f.geometry.coordinates[0]]);
-    if (!pts.length){ showNotice(emptyMsg); return; }
-    if (pts.length === 1) map.setView(pts[0], 13, { animate:false });
-    else map.fitBounds(pts, { padding:[36,36], maxZoom:12, animate:false });
+    reportFilterReach(emptyMsg, label);
   });
   return sync;
 }
 const syncContactableUI = wireContactSwitch("contactableOnly",
   () => contactableOnly, v => { contactableOnly = v; },
-  "No advisors with contact data match the current filters.");
+  "No advisors with contact data match the current filters.",
+  "advisors with contact data");
 const syncAssetsUI = wireContactSwitch("assetsOnly",
   () => assetsOnly, v => { assetsOnly = v; },
-  "No advisors with an asset figure match the current filters.");
+  "No advisors with an asset figure match the current filters.",
+  "advisors with an asset figure");
 
 const ownerBox = document.getElementById("ownerOnly");
 function syncOwnerUI(){
@@ -6518,11 +6740,7 @@ rankedBox.addEventListener("change", () => {
   syncRankedUI();
   redraw();
   if (!rankedOnly) return;
-  const pts = ALL.filter(f => passesFilters(f.properties))
-                 .map(f => [f.geometry.coordinates[1], f.geometry.coordinates[0]]);
-  if (!pts.length){ showNotice("No ranked advisors match the current filters."); return; }
-  if (pts.length === 1) map.setView(pts[0], 13, { animate:false });
-  else map.fitBounds(pts, { padding:[36,36], maxZoom:12, animate:false });
+  reportFilterReach("No ranked advisors match the current filters.", "ranked advisors");
 });
 
 multiSelect("expToggle", "exp", expSel);
@@ -6985,10 +7203,12 @@ searchBox.addEventListener("input", () => {
   }
   searchTimer = setTimeout(runSearch, 140);
 });
-// The advisor index is 19 MB. Starting it on first focus lets the download and
-// parse overlap typing instead of stalling the keystroke that first needs it.
+// On first focus, warm the two SMALL things a search needs: the 425 KB search
+// manifest and the firm aliases. The 6.9 MB advisor index is no longer on this
+// path at all; an advisor card requests it only when its filed-name and
+// out-of-scope-office enrichment is actually needed.
 searchBox.addEventListener("focus", () => {
-  loadAdvisorIndex().catch(() => {});
+  loadSearchManifest().catch(() => {});
   loadFirmAliases().catch(() => {});
 }, { once: true });
 searchBox.addEventListener("keydown", e => {
@@ -7140,6 +7360,172 @@ function loadAdvisorIndex(){
   return ADV_INDEX_PROMISE;
 }
 
+/* ---- sharded national advisor search -------------------------------------
+ *
+ * advisor_index.json is 6.9 MB gzipped and was fetched on the first focus of
+ * the search box, so the first search of a session waited for all of it. On a
+ * phone that is five to fifteen seconds of a box that looks broken.
+ *
+ * build_advisor_search.py splits the same 412,567 advisors into prefix shards
+ * -- median 2 KB, only 46 of 3,942 above 200 KB -- plus one 425 KB manifest
+ * carrying the firm and city dictionaries the result rows index into. Typing
+ * "tolm" fetches one small file. This is the scheme the field app has run in
+ * production since build_name_index.py, ported rather than invented.
+ *
+ * The full index still loads, in the background, because advisorRow() answers
+ * four other things from it -- card rendering, the list view, owner lookup,
+ * history. It simply no longer blocks a keystroke.
+ */
+let SEARCH_MAN = null, SEARCH_MAN_PROMISE = null, SEARCH_MAN_ERROR = "";
+const SEARCH_SHARDS = new Map();      // prefix -> rows[], once resolved
+const SEARCH_PENDING = new Map();     // prefix -> Promise, while in flight
+
+function loadSearchManifest(){
+  if (SEARCH_MAN) return Promise.resolve(SEARCH_MAN);
+  if (!SEARCH_MAN_PROMISE){
+    SEARCH_MAN_PROMISE = fetch(dataUrl("advisor_search.json"))
+      .then(r => { if (!r.ok) throw new Error("advisor search index unavailable");
+                   return r.json(); })
+      .then(j => { SEARCH_MAN = j; SEARCH_MAN_ERROR = ""; return j; })
+      .catch(err => { SEARCH_MAN_ERROR = err.message || String(err); throw err; });
+  }
+  return SEARCH_MAN_PROMISE;
+}
+
+// The query as name tokens, lowercased -- the normalisation tokens_for()
+// applies at build time. Without it "O'Brien" and "Smith-Jones" address the
+// wrong shard.
+function queryTokens(q){
+  return String(q || "").toLowerCase().split(/[^a-z]+/).filter(Boolean);
+}
+
+/* The token a shard is chosen by: the LONGEST one in the query.
+ *
+ * Not the concatenation, and not the first. Stripping the space out of "bob
+ * smith" produced the key "bobsmith", whose two-letter prefix addresses a
+ * shard no real token starts -- so a search that works today returned nothing.
+ * And taking the first token sends "bob smith" to the heavily split "bob",
+ * where Bob Smith does not live: nickname expansion files him under "bobb"
+ * (from "bobby") and "smit". The longest token is both the most selective and
+ * the most likely to be a real surname.
+ */
+function searchKey(q){
+  const toks = queryTokens(q);
+  if (!toks.length) return "";
+  return toks.reduce((a, b) => (b.length > a.length ? b : a));
+}
+
+/* Which shard answers this query, or "" when it cannot address one.
+ *
+ * Prefixes listed in `split` were too heavy at that length and were rebuilt a
+ * character deeper, so a query stopping exactly there has no shard of its own
+ * -- except the "." sentinel, holding people whose whole token IS the prefix
+ * ("Jon", "Lee", "Ng"). Those are returned, and the caller says that typing
+ * more will find the rest.
+ */
+function shardFor(q){
+  if (!SEARCH_MAN) return { prefix:"", exhausted:false };
+  const key = searchKey(q);
+  if (key.length < SEARCH_MAN.prefix) return { prefix:"", exhausted:false };
+  let take = SEARCH_MAN.prefix;
+  const split = new Set(SEARCH_MAN.split || []);
+  while (split.has(key.slice(0, take)) && take < key.length) take += 1;
+  const prefix = key.slice(0, take);
+  if (split.has(prefix)) return { prefix: prefix + ".", exhausted:true };
+  return { prefix, exhausted:false };
+}
+
+function crdShardFor(q){
+  if (!SEARCH_MAN) return "";
+  const n = SEARCH_MAN.crdPrefix || 3;
+  return q.length >= n ? `crd/${q.slice(0, n)}` : "";
+}
+
+function loadSearchShard(prefix){
+  if (!prefix) return Promise.resolve([]);
+  if (SEARCH_SHARDS.has(prefix)) return Promise.resolve(SEARCH_SHARDS.get(prefix));
+  if (SEARCH_PENDING.has(prefix)) return SEARCH_PENDING.get(prefix);
+  const p = fetch(dataUrl(`search/${prefix}.json`))
+    // A missing shard is not an error: no advisor's name starts that way.
+    .then(r => r.ok ? r.json() : { rows: [] })
+    .then(j => { const rows = j.rows || []; SEARCH_SHARDS.set(prefix, rows); return rows; })
+    .catch(() => { SEARCH_SHARDS.set(prefix, []); return []; })
+    .finally(() => SEARCH_PENDING.delete(prefix));
+  SEARCH_PENDING.set(prefix, p);
+  return p;
+}
+
+/* Rows matching q, from whatever is already in memory.
+ *
+ * Synchronous on purpose: renderNationalSearch() runs on every keystroke and
+ * must paint with what it has. Anything missing comes back as `pending` so the
+ * caller can fetch and re-render -- the same way it already handles national
+ * detail and firm aliases arriving late.
+ */
+function shardSearch(q){
+  const numeric = /^\d+$/.test(q);
+  const target = numeric ? crdShardFor(q) : shardFor(q).prefix;
+  if (!target) return { rows: [], pending: "", exhausted: false };
+  if (!SEARCH_SHARDS.has(target)) return { rows: [], pending: target, exhausted: false };
+  const lower = q.toLowerCase();
+  const want = queryTokens(q);
+  const out = [];
+  for (const row of SEARCH_SHARDS.get(target)){
+    if (numeric){
+      if (String(row[0]).startsWith(q)) out.push(row);
+      continue;
+    }
+    /* EVERY query token must appear somewhere in the row, rather than the whole
+     * query appearing as one substring of the name.
+     *
+     * row[7] carries the tokens NOT derivable from the displayed name -- the
+     * nickname forms -- so this is what lets "bill" find William Kaiser, which
+     * the old whole-file substring scan could never do. Per-token matching
+     * extends that to "bob smith" finding Robert Smith: "bob" matches the alt
+     * column, "smith" the name. A single substring test over the display name
+     * could not, because those two words never appear adjacent anywhere.
+     */
+    const hay = `${row[1]} ${row[6] || ""} ${row[7] || ""}`.toLowerCase();
+    if (want.every(t => hay.includes(t))) out.push(row);
+  }
+  /* RANK, THEN CAP -- in that order, or the cap silently undoes the feature.
+   *
+   * The shard is stored alphabetically, so capping first meant searching
+   * "bill" returned sixty Billeters and Billupses and not one William: the
+   * Williams sort last and never survived the slice. That is the exact
+   * complaint build_name_index.py records about an earlier index, reached by a
+   * different route -- ordering rather than filtering.
+   *
+   * A whole token equal to the query beats a token merely starting with it,
+   * which beats a match buried mid-string. So "bill" leads with the Bills and
+   * the Williams filed as Bill, then the Billupses.
+   */
+  if (!numeric && out.length > 1){
+    const rank = (row) => {
+      const toks = `${row[1]} ${row[6] || ""} ${row[7] || ""}`
+        .toLowerCase().split(/[^a-z]+/).filter(Boolean);
+      if (want.every(t => toks.includes(t))) return 0;
+      if (want.every(t => toks.some(h => h.startsWith(t)))) return 1;
+      return 2;
+    };
+    out.sort((a, b) => rank(a) - rank(b) || a[1].localeCompare(b[1]));
+  }
+  return { rows: out.slice(0, 60), pending: "",
+           exhausted: !numeric && shardFor(q).exhausted };
+}
+
+// firms and cities are indexes into dictionaries. They ride in the search
+// manifest so a result row can name a firm and a city without the full index,
+// and fall back to it for anything rendered before the manifest arrives.
+function searchFirm(i){
+  const d = (SEARCH_MAN && SEARCH_MAN.firms) || (ADV_INDEX && ADV_INDEX.firms) || [];
+  return d[i] || "";
+}
+function searchCity(i){
+  const d = (SEARCH_MAN && SEARCH_MAN.cities) || (ADV_INDEX && ADV_INDEX.cities) || [];
+  return d[i] || "";
+}
+
 function renderNationalSearch(){
   const q = advQuery;
   advOut.hidden = false;
@@ -7154,26 +7540,20 @@ function renderNationalSearch(){
   }
   const rerender = () => { if (advQuery === q) renderNationalSearch(); };
   if (!FIRM_ALIASES) loadFirmAliases().then(rerender);
-  if (!ADV_INDEX && !ADV_INDEX_ERROR)
-    loadAdvisorIndex().then(rerender).catch(rerender);
+  // The manifest, then the one shard this query needs. Neither is the 6.9 MB
+  // file: that loads in the background for advisorRow() and is not waited on.
+  if (!SEARCH_MAN && !SEARCH_MAN_ERROR) loadSearchManifest().then(rerender).catch(rerender);
+  const hits = shardSearch(q);
+  if (hits.pending) loadSearchShard(hits.pending).then(rerender);
 
   const loose = looseName(q);
   const firmRows = NAT_DETAIL_READY ? NAT.firms.filter(f =>
     looseIncludes(f[0], loose) || String(f[1]).includes(q) ||
     !!aliasHit(f[1], loose)).slice(0, 20) : [];
-  const advisorRows = [];
-  const numeric = /^\d+$/.test(q);
-  for (const row of (ADV_INDEX ? ADV_INDEX.advisors : [])){
-    // row[1] is the name the person goes by, row[6] the filed legal name when
-    // it differs. Match both, or searching "Edison Lambeth" would miss the
-    // advisor the map labels "Tate Lambeth", and vice versa.
-    if ((numeric ? String(row[0]).includes(q)
-                 : row[1].toLowerCase().includes(q) ||
-                   (row[6] && row[6].toLowerCase().includes(q)))){
-      advisorRows.push(row);
-      if (advisorRows.length >= 60) break;
-    }
-  }
+  // Matching now happens inside shardSearch(), against one small file rather
+  // than a scan of all 412,567 rows. The shard row is deliberately the same
+  // shape as an advisor_index row, so everything below is unchanged.
+  const advisorRows = hits.rows;
   const firmsHtml = firmRows.length
     ? `<p class="result-label">Firms</p>` + firmRows.map((f, i) =>
       `<button type="button" class="ares" data-national-firm="${i}"><span class="an">${esc(f[0])}</span>` +
@@ -7191,20 +7571,27 @@ function renderNationalSearch(){
   const currentTerritory = scope.startsWith("T:")
     ? scope.slice(2) : (scope === "US" ? "" : STATE_TO_TERRITORY[scope] || "");
   const advisorsHtml = advisorRows.length
-    ? `<p class="result-label">Advisors${advisorRows.length === 60 ? " · first 60" : ""}</p>` + advisorRows.map((row, i) => {
+    ? `<p class="result-label">Advisors${advisorRows.length === 60 ? " · first 60" : ""}${
+      // A split prefix holds only the people whose whole name token IS these
+      // letters -- "Jo" the name, not every John. Saying so matters: silently
+      // omitting the Johns is the one way this is worse than the old
+      // whole-file scan, and a rep would have no reason to suspect it.
+      hits.exhausted ? " · only exact matches for these letters; type one more for the rest" : ""}</p>` + advisorRows.map((row, i) => {
       const territory = STATE_TO_TERRITORY[row[3]] || "Outside assigned territories";
       const outside = currentTerritory && territory !== currentTerritory
         ? " · outside current territory" : "";
       return `<button type="button" class="ares" data-national-advisor="${i}"><span class="an">${esc(row[1])}</span>` +
-        `<span class="af">${esc(ADV_INDEX.firms[row[2]])} · CRD ${esc(row[0])}` +
+        `<span class="af">${esc(searchFirm(row[2]))} · CRD ${esc(row[0])}` +
         `${row[6] ? ` · filed as ${esc(row[6])}` : ""}</span>` +
-        `<span class="ac">${esc(ADV_INDEX.cities[row[4]])}, ${esc(row[3])} · ${esc(territory)}${outside}${row[5].includes("|") ? ` · also ${esc(row[5].split("|").filter(s => s !== row[3]).join(", "))}` : ""}</span></button>`;
+        `<span class="ac">${esc(searchCity(row[4]))}, ${esc(row[3])} · ${esc(territory)}${outside}${row[5].includes("|") ? ` · also ${esc(row[5].split("|").filter(s => s !== row[3]).join(", "))}` : ""}</span></button>`;
     }).join("")
-    : `<p class="result-label">Advisors</p><p class="hint">${ADV_INDEX_ERROR
+    : `<p class="result-label">Advisors</p><p class="hint">${SEARCH_MAN_ERROR
         ? "National advisor search is unavailable."
-        : !ADV_INDEX
+        : (!SEARCH_MAN || hits.pending)
           ? "Loading national advisor search…"
-          : `No advisor match for “${esc(searchBox.value)}”.`}</p>`;
+          : hits.exhausted
+            ? `Too many advisors match “${esc(searchBox.value)}” — type one more letter.`
+            : `No advisor match for “${esc(searchBox.value)}”.`}</p>`;
   advOut.innerHTML = firmsHtml + advisorsHtml;
   advOut.querySelectorAll("[data-national-firm]").forEach(el => el.addEventListener("click", () => {
     const firm = firmRows[+el.dataset.nationalFirm];

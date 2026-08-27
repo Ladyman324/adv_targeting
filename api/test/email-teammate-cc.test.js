@@ -42,7 +42,7 @@ test("the client's recipient whitelist carries the teammate fields", () => {
   const path = require("path");
   const src = fs.readFileSync(
     path.join(__dirname, "..", "..", "webapp", "email.js"), "utf8");
-  const block = /recipients = \(selected \|\| \[\]\)\.map\(\(r\) => \(\{[\s\S]*?\}\)\);/.exec(src);
+  const block = /recipients = [^;]*?\.map\(\(r\) => \(\{[\s\S]*?\}\)\);/.exec(src);
   assert.ok(block, "open()'s recipient mapper not found");
   for (const field of ["teammates", "teammatesFull", "contactId", "email"])
     assert.ok(block[0].includes(`${field}:`),

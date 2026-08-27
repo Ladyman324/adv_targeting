@@ -27,6 +27,7 @@ function fixture(inboxItems) {
         recordDeliveryEvent: async (u, e) => events.push({ userId: u, ...e }),
       },
       act: { markHardBounce: async (...a) => { actCalls.push(a); return { ok: true }; } },
+      recipientRegistry: { verifyActPair: async () => ({ actContactId: "act-1000084" }) },
       core: require("../shared/email-core"),
       refreshBatch: async () => { refreshed.push(1); },
     },
@@ -50,6 +51,7 @@ test("a hard bounce suppresses the address and reaches Act!", async () => {
   assert.equal(f.suppressed[0].kind, "hard_bounce");
   assert.equal(f.actCalls.length, 1);
   assert.equal(f.actCalls[0][0], "1000084", "the CRD travels to Act!");
+  assert.equal(f.actCalls[0][3], "act-1000084", "the independently approved Act GUID travels too");
   assert.ok(f.audits.some((a) => a.includes("hard_bounce_suppressed")));
   assert.equal(f.patched[0].patch.bounceKind, "hard");
 });
@@ -90,6 +92,17 @@ test("an Act! failure does not lose the local suppression", async () => {
   const s = await sweeper.sweepMailbox(f.connection, context, f.deps);
   assert.equal(s.suppressed, 1, "the address is still suppressed here");
   assert.equal(f.seen.at(-1).outcome, "suppressed");
+});
+
+test("an unverified CRD-to-Act pair writes no bounce history", async () => {
+  const f = fixture([hardNdr]);
+  f.deps.recipientRegistry.verifyActPair = async () => {
+    const error = new Error("Act identity changed");
+    error.code = "recipient_identity_changed"; throw error;
+  };
+  const s = await sweeper.sweepMailbox(f.connection, context, f.deps);
+  assert.equal(s.suppressed, 1);
+  assert.equal(f.actCalls.length, 0);
 });
 
 test("a mailbox needing reconnection is skipped, not failed", async () => {

@@ -35,8 +35,12 @@ import json
 import os
 import sys
 import time
+from dataclasses import dataclass
+from pathlib import Path
 
 import requests
+from contact_provenance import (ProvenanceError, atomic_create_json,
+                                utc_pull_id)
 
 BASE = "https://apius.act.com/act.web.api"
 TIMEOUT = 60
@@ -44,6 +48,14 @@ TIMEOUT = 60
 
 class ActError(RuntimeError):
     pass
+
+
+@dataclass(frozen=True)
+class CensusResult:
+    total: int
+    complete: bool
+    stop_reason: str
+    output: str = ""
 
 
 class Act:
@@ -104,6 +116,46 @@ class Act:
             except ValueError:
                 return r.text
         raise ActError(f"GET {url} failed after a re-authorization")
+
+    def post(self, path: str, body=None, allow_error: bool = False, **params):
+        """One POST, with the same re-auth and rate-limit courtesy as get().
+
+        Used only for READ-shaped endpoints -- the dynamic-list previews, which
+        query records by criteria and write nothing. Nothing here should POST to
+        a resource that creates or modifies an Act! record; those go through the
+        narrow, audited path in api/shared/act.js.
+
+        allow_error returns (status, payload) rather than raising. When an
+        endpoint's request shape is undocumented the 400 body IS the
+        documentation -- Act! names the property it could not bind -- and an
+        exception throws that away.
+        """
+        url = f"{self.base}/{path.lstrip('/')}"
+        for attempt in (1, 2):
+            r = requests.post(url, params=params or None, json=body, timeout=TIMEOUT,
+                              headers={"Authorization": f"Bearer {self.token()}",
+                                       "Content-Type": "application/json"})
+            if r.status_code == 401 and attempt == 1:
+                self._token = ""
+                continue
+            if r.status_code == 429:
+                wait = int(r.headers.get("Retry-After", 60))
+                print(f"    [rate limited] sleeping {wait}s", file=sys.stderr)
+                time.sleep(wait)
+                continue
+            self._note_limits(r)
+            payload = None
+            if r.text.strip():
+                try:
+                    payload = r.json()
+                except ValueError:
+                    payload = r.text
+            if allow_error:
+                return r.status_code, payload
+            if not r.ok:
+                raise ActError(f"POST {url} -> {r.status_code} {r.text[:300]}")
+            return payload
+        raise ActError(f"POST {url} failed after a re-authorization")
 
     def _note_limits(self, r):
         rem = r.headers.get("X-RateLimit-Remaining")
@@ -319,7 +371,7 @@ def raw(act: Act, resource: str, top: int) -> None:
 VOCAB_CAP = 200
 
 
-def census(act: Act, resource: str, page: int, cap: int, save_to=None) -> None:
+def census(act: Act, resource: str, page: int, cap: int, save_to=None) -> CensusResult:
     """How often is each field actually populated, and with what values?
 
     INVENTORY BEFORE ASSUMING -- the same rule src/inventory.py applies to the
@@ -344,6 +396,12 @@ def census(act: Act, resource: str, page: int, cap: int, save_to=None) -> None:
     """
     import collections                                  # noqa: PLC0415
 
+    if page <= 0 or cap <= 0:
+        raise ValueError("page and cap must both be positive")
+    if save_to is not None:
+        save_to = Path(save_to)
+        if save_to.exists():
+            raise ProvenanceError(f"immutable artifact already exists: {save_to}")
     filled = collections.Counter()
     values = collections.defaultdict(collections.Counter)
     capped = set()
@@ -351,11 +409,15 @@ def census(act: Act, resource: str, page: int, cap: int, save_to=None) -> None:
     seen_ids = set()
     total = 0
     skip = 0
+    complete = False
+    stop_reason = "cap_reached"
 
     while total < cap:
-        rows = act.get(f"api/{resource}", **{"$top": page, "$skip": skip})
+        requested = min(page, cap - total)
+        rows = act.get(f"api/{resource}", **{"$top": requested, "$skip": skip})
         rows = rows if isinstance(rows, list) else (rows or {}).get("value") or []
         if not rows:
+            complete, stop_reason = True, "empty_page"
             break
         # PAGING IS VERIFIED, NOT ASSUMED. If this instance ignores $skip, every
         # request returns page one -- and the census would report 50,000 records
@@ -363,6 +425,9 @@ def census(act: Act, resource: str, page: int, cap: int, save_to=None) -> None:
         # output would be plausible and wrong. So: if a page contributes no ids
         # we have not already seen, paging is not working and we stop and say so
         # rather than producing a confident answer about nothing.
+        if any(not isinstance(r, dict) or not str(r.get("id") or "").strip()
+               for r in rows):
+            raise ActError(f"api/{resource} returned a row without an Act id")
         fresh = [r for r in rows if r.get("id") not in seen_ids]
         if not fresh:
             print(f"\n[!] PAGING IS NOT WORKING. Page at $skip={skip} returned "
@@ -372,10 +437,13 @@ def census(act: Act, resource: str, page: int, cap: int, save_to=None) -> None:
                   f"    Reporting on those alone -- the percentages below cover "
                   f"{len(seen_ids):,} contacts, NOT the whole database.",
                   file=sys.stderr)
+            stop_reason = "paging_repeated"
             break
         if len(fresh) < len(rows):
             print(f"    [{len(rows) - len(fresh)} repeats at $skip={skip}]",
                   file=sys.stderr)
+            stop_reason = "duplicate_ids"
+            break
         for r in fresh:
             seen_ids.add(r.get("id"))
             total += 1
@@ -423,12 +491,21 @@ def census(act: Act, resource: str, page: int, cap: int, save_to=None) -> None:
                         capped.add(k)
         skip += len(rows)
         print(f"    ...{total:,} records", file=sys.stderr)
-        if len(rows) < page:
+        if len(rows) < requested:
+            complete, stop_reason = True, "short_page"
             break
 
     if not total:
         print("No records read.")
-        return
+        result = CensusResult(total=0, complete=complete,
+                              stop_reason=stop_reason)
+        if save_to is not None:
+            if not complete:
+                raise ActError(f"refusing to save incomplete {resource} census "
+                               f"({stop_reason})")
+            atomic_create_json(save_to, [], pretty=True)
+            return CensusResult(0, True, stop_reason, str(save_to))
+        return result
 
     print(f"\n{total:,} distinct {resource} examined "
           f"({len(seen_ids):,} distinct ids)\n")
@@ -484,13 +561,18 @@ def census(act: Act, resource: str, page: int, cap: int, save_to=None) -> None:
             print(f"  {k}  [{n_distinct} distinct, top 10]\n      {top}")
 
     if save_to is not None:
-        save_to.parent.mkdir(parents=True, exist_ok=True)
-        save_to.write_text(json.dumps(kept, indent=1, default=str), encoding="utf-8")
+        if not complete:
+            raise ActError(f"refusing to save incomplete {resource} census "
+                           f"({stop_reason}); raise --cap and retry")
+        atomic_create_json(save_to, kept, pretty=True)
         print(f"\n[*] wrote {len(kept):,} records to {save_to}")
         print("    This is the CRM export. data/ is gitignored -- it stays local,")
         print("    like the CRM_Contacts_*.xlsx it replaces.")
 
     write_reports(resource, total, filled, values, capped)
+    return CensusResult(total=total, complete=complete,
+                        stop_reason=stop_reason,
+                        output=str(save_to) if save_to is not None else "")
 
 
 def write_reports(resource, total, filled, values, capped) -> None:
@@ -756,8 +838,13 @@ def main() -> None:
         if args.census:
             dest = None
             if args.save:
-                import datetime, pathlib                 # noqa: PLC0415
-                stamp = datetime.date.today().isoformat()
+                if args.census == "contacts":
+                    print("[!] A production contact snapshot requires its exact "
+                          "owner map. Run src/act_pull.py instead; standalone "
+                          "contact publication is disabled.")
+                    return
+                import pathlib                           # noqa: PLC0415
+                stamp = utc_pull_id()
                 dest = (pathlib.Path(__file__).parents[1] / "data" / "raw"
                         / f"act_{args.census}_{stamp}.json")
             census(act, args.census, args.page, args.cap, dest)

@@ -295,10 +295,18 @@ def main() -> None:
     shard: dict = collections.defaultdict(dict)
     for key, rec in practices.items():
         entry = {"n": rec.get("n", ""),
+                 # Member contract: [crd, display name, state, email, tier].
+                 # The field client cannot infer a teammate's identity tier
+                 # from nearby tiles: the teammate may be in another city, or
+                 # the advisor may have been opened from a synced queue with no
+                 # tile loaded at all. Carrying the tier in this small shard
+                 # keeps unconfirmed people out of the picker before the API's
+                 # independent registry check rejects them.
                  "m": [[crd, index_names.get(str(crd)) or advisors.get(crd, {}).get("n", ""), st,
-                        advisors.get(crd, {}).get("e", "")]
+                        advisors.get(crd, {}).get("e", ""),
+                        advisors.get(crd, {}).get("t", "")]
                        for crd, st in rec.get("m", [])]}
-        for _, _, st, _e in entry["m"]:
+        for _, _, st, _e, _tier in entry["m"]:
             if st:
                 shard[st][key] = entry
     if PRACTICES.exists():

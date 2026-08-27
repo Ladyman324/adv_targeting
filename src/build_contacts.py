@@ -71,7 +71,12 @@ import pandas as pd
 
 from nicknames import same_person
 
+from contact_normalization import normalize_act_contact
+from contact_provenance import sha256_file, validate_owner_artifact
 from firm_rosters import FIRMS
+from identity_schema import (IDENTITY_DIRNAME, LINKS_FILENAME,
+                             MANIFEST_FILENAME, content_hash)
+from identity_normalize import is_generic_email
 from web_assets import write_json_gz
 from forbes_match import (ACCEPT, MARGIN, NICKNAMES, W_SUFFIX, build_index,
                           load_reference, name_score, norm, split_name,
@@ -81,7 +86,10 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 RAW = ROOT / "data" / "raw"
 ROSTERS = RAW / "firm_rosters"
 OUT = ROOT / "webapp" / "data"
-CRM_GLOB = str(RAW / "CRM_Contacts_*.xlsx")
+IDENTITY = ROOT / "data" / IDENTITY_DIRNAME
+# The CRM half comes from the Act! API pull, not a hand-made Excel export.
+# CRM_Contacts_*.xlsx published 14 columns and went stale between exports; the
+# pull publishes 226 plus the owner map, and is a command. See load_crm().
 
 # Firm CRD is exact here (from a domain), not a fuzzy name match, so it earns
 # more weight than in forbes_match and city earns less -- a CRM address is the
@@ -401,10 +409,9 @@ def derive_domain_map() -> dict[str, str]:
 # competing with the SEC filing: the filing says who somebody IS, and this says
 # what they are called.
 #
-# The Excel export the rest of this module reads has no Dear column, so it is
-# joined from the JSON API pull on email address. Not through the crosswalk --
-# act_crosswalk.py imports score_contacts() from here, and depending on it back
-# would be circular.
+# Greetings are read directly from the same Act JSON record as the contact.
+# They are never joined through email or through the crosswalk: an address can
+# be shared, and act_crosswalk.py imports score_contacts() from here.
 #
 # WHAT IS REFUSED, and why the list is short: the field is clean. 111 of 47,419
 # values are not a name, and 55 of those are a status somebody typed into the
@@ -432,14 +439,31 @@ def usable_salutation(value: str) -> str:
     return v
 
 
-def salutation_by_email() -> dict:
-    """email -> Dear field, from the newest Act! JSON pull."""
+def newest_act_pull():
+    """The most recent api/contacts download, or None."""
     files = sorted(glob.glob(str(RAW / "act_contacts_*.json")))
-    if not files:
+    return pathlib.Path(files[-1]) if files else None
+
+
+def pull_stamp(path) -> str:
+    """The date a pull carries in its name: act_contacts_2026-08-25.json."""
+    return pathlib.Path(path).stem.replace("act_contacts_", "")
+
+
+def salutation_by_email() -> dict:
+    """email -> Dear field, from the newest Act! JSON pull.
+
+    load_crm() no longer needs this -- it reads the salutation off each record
+    directly, which reaches 47,430 contacts instead of only those whose address
+    matches. Kept because the address-keyed form is still the only way to ask
+    the question about a roster row, which has no Act! contact id.
+    """
+    path = newest_act_pull()
+    if path is None:
         print("[*] no Act! JSON pull; greetings fall back to the first name")
         return {}
     out = {}
-    for row in json.loads(pathlib.Path(files[-1]).read_text(encoding="utf-8")):
+    for row in json.loads(path.read_text(encoding="utf-8")):
         email = clean_email(row.get("emailAddress") or "")
         greeting = usable_salutation(row.get("salutation"))
         if email and greeting:
@@ -447,52 +471,218 @@ def salutation_by_email() -> dict:
     return out
 
 
+def identity_links_for(contacts_path) -> dict:
+    """Act GUID -> source-bound identity decision for these exact Act bytes."""
+    manifest_path = IDENTITY / MANIFEST_FILENAME
+    links_path = IDENTITY / LINKS_FILENAME
+    if not manifest_path.exists() or not links_path.exists():
+        raise RuntimeError(
+            "The identity ledger is missing. Run: "
+            "python src/build_identity_ledger.py")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    core = {k: v for k, v in manifest.items()
+            if k not in {"generatedUtc", "contentHash"}}
+    if manifest.get("contentHash") != content_hash(core):
+        raise RuntimeError("Identity manifest contentHash is invalid.")
+    source = manifest.get("actSource") or {}
+    if (source.get("file") != pathlib.Path(contacts_path).name
+            or source.get("sha256") != sha256_file(contacts_path)):
+        raise RuntimeError(
+            "Identity ledger describes different Act contact bytes. "
+            "Re-run: python src/build_identity_ledger.py")
+    link_meta = (manifest.get("outputs") or {}).get(LINKS_FILENAME) or {}
+    if (link_meta.get("sha256") != sha256_file(links_path)
+            or int(link_meta.get("rows") or -1) != int(source.get("rows") or -2)):
+        raise RuntimeError(
+            "Identity links are stale, incomplete, or modified. "
+            "Re-run: python src/build_identity_ledger.py")
+    frame = pd.read_parquet(links_path).fillna("")
+    if frame["source_record_id"].duplicated().any():
+        raise RuntimeError("Identity ledger contains duplicate Act GUIDs.")
+    return {str(row["source_record_id"]): row
+            for row in frame.to_dict("records")}
+
+
+def contacts_provenance() -> dict:
+    """Immutable identity inputs represented by the generated contact file."""
+    manifest_path = IDENTITY / MANIFEST_FILENAME
+    links_path = IDENTITY / LINKS_FILENAME
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    core = {k: v for k, v in manifest.items()
+            if k not in {"generatedUtc", "contentHash"}}
+    if manifest.get("contentHash") != content_hash(core):
+        raise RuntimeError("Identity manifest contentHash is invalid.")
+    link_meta = (manifest.get("outputs") or {}).get(LINKS_FILENAME) or {}
+    if link_meta.get("sha256") != sha256_file(links_path):
+        raise RuntimeError("Identity links do not match the identity manifest.")
+    act = manifest.get("actSource") or {}
+    return {
+        "identityManifestHash": manifest["contentHash"],
+        "identityLinksSha256": link_meta["sha256"],
+        "actSource": act.get("file", ""),
+        "actSourceSha256": act.get("sha256", ""),
+    }
+
+
+def owner_by_contact_id(contacts_path) -> dict:
+    """Act! contact id -> EIC Contact code (SH, SZ, TL ...).
+
+    This does NOT come from the contact download, and cannot. Act! defines two
+    fields whose names collide -- REFERREDBY, displayed as "EIC Contact", and
+    the custom CUST_ReferredBy_094317334, displayed as "Referred By" -- and
+    api/contacts serialises only the custom one. Every record returns
+    `referredBy: null` for the field we actually want, even under
+    $select=REFERREDBY.
+
+    src/act_eic_contact.py reaches it through Act!'s dynamic-list query instead
+    and writes a dated file beside the contact pull; src/act_pull.py fetches
+    both in one run so their stamps match.
+
+    A MISMATCHED PAIR IS THE DANGER HERE. An owner map from June joined to
+    contacts from August would reassign advisors silently and look entirely
+    normal on screen. Losing the map is unsafe too: existing relationships
+    would appear unowned. Therefore this is a required, exact pair. The owner
+    artifact records the contact filename, byte hash, row count, UTC pull id
+    and completion of every owner-code query; any disagreement stops the build.
+    """
+    stamp = pull_stamp(contacts_path)
+    path = RAW / f"act_eic_contact_{stamp}.json"
+    if not path.exists():
+        raise RuntimeError(
+            f"Missing exact owner artifact {path.name}. Refusing to rebuild "
+            "contacts without relationship ownership. Run: "
+            "python src/act_pull.py --user <you> --db <db>")
+    payload = validate_owner_artifact(contacts_path, path)
+    owners = payload.get("owner_by_contact_id") or {}
+    if payload.get("conflicts"):
+        print(f"[*] {len(payload['conflicts'])} contact(s) carry more than one "
+              f"EIC Contact code and are intentionally unassigned. See {path.name}.")
+    return owners
+
+
 def load_crm(domains: dict[str, str]) -> pd.DataFrame:
-    files = sorted(glob.glob(CRM_GLOB))
-    if not files:
-        print("[*] no CRM export found; rosters only")
+    """The CRM half of the population, from the Act! API pull.
+
+    THIS USED TO READ AN EXCEL EXPORT. The dated Act JSON is now the sole
+    production authority for CRM contact fields. The retired workbook contains
+    phone numbers absent from the API, but they are deliberately not backfilled:
+    a stale number joined by a non-unique email is not a safe contact point.
+
+      * the Dear field on the record itself, not joined by address -- 47,430
+        contacts instead of only those whose email matched, which is what makes
+        Christopher Tolman send as "Chris"
+      * customFields.crd, the firm stating its own advisor's registration
+        number on 8,848 records, which score_contacts() treats as confirmed
+      * mobilePhone, which this function used to hardcode to ""
+
+    It was also six weeks stale by construction: somebody had to remember to
+    export it. The pull is a command.
+    """
+    path = newest_act_pull()
+    if path is None:
+        print("[*] no Act! JSON pull found; rosters only.\n"
+              "    Run: python src/act_pull.py --user <you> --db <db>")
         return pd.DataFrame()
-    path = pathlib.Path(files[-1])
-    frame = pd.read_excel(path).rename(columns=lambda c: str(c).strip())
-    frame["email"] = frame.get("E-mail", "").map(clean_email)
-    greetings = salutation_by_email()
-    frame["salutation"] = frame["email"].map(lambda e: greetings.get(e, "") if e else "")
-    named = int((frame["salutation"] != "").sum())
-    print(f"[*] {named:,} CRM contacts carry a usable Dear field for the greeting")
+    rows = json.loads(path.read_text(encoding="utf-8"))
+    owners = owner_by_contact_id(path)
+    identity_links = identity_links_for(path)
+
+    def cf(row, key):
+        return (row.get("customFields") or {}).get(key)
+
+    def addr(row, key):
+        return (row.get("businessAddress") or {}).get(key)
+
+    def display_name(normalized_row, link):
+        base = strip_designations(normalized_row["name"])
+        if (link.get("identity_status") != "approved"
+                or link.get("preferred_status") not in
+                {"approved_auto", "approved_reviewed"}):
+            return base
+        preferred = usable_salutation(link.get("email_greeting"))
+        parts = base.split()
+        if preferred and parts:
+            parts[0] = preferred
+            return " ".join(parts)
+        return base
+
+    normalized = [(r, normalize_act_contact(r, path.name),
+                   identity_links.get(str(r.get("id") or ""), {}))
+                  for r in rows]
+    frame = pd.DataFrame([{
+        "act_id": str(r.get("id") or ""),
+        "email": n["email"],
+        # Raw salutations remain evidence; only an approved ledger greeting
+        # becomes outbound content.
+        "salutation": (usable_salutation(link.get("email_greeting"))
+                       if link.get("identity_status") == "approved" else ""),
+        # Candidate-safe fullName recovery handles the 133 records whose
+        # structured Act surname contains an honorific instead of a surname.
+        "name": display_name(n, link),
+        "owner": owners.get(str(r.get("id") or ""), ""),
+        "title": n["job_title"],
+        "company": n["company"],
+        "city": n["city"],
+        "state": n["state"],
+        "phone": str(r.get("businessPhone") or "").strip(),
+        "phone_ext": str(r.get("businessExtension") or "").strip(),
+        "mobile": n["mobile"],
+        # Raw Act CRDs never bypass validation. Only the independent ledger can
+        # turn one into a confirmed link.
+        "given_crd": (str(link.get("advisor_crd") or "")
+                      if link.get("identity_status") == "approved" else ""),
+        "identity_crd": str(link.get("advisor_crd") or ""),
+        "identity_status": str(link.get("identity_status") or "unmatched"),
+        "identity_can_call": bool(link.get("can_call")),
+        "identity_can_email": bool(link.get("can_email")),
+        "identity_evidence_hash": str(
+            link.get("resolved_evidence_hash") or ""),
+        # USER10, "Total Assets old" in Act!, is the column the Excel export
+        # published as "Total Assets": it is populated on 97% of the rows that
+        # had a value there, where acv_total_assets reaches only 67% and so
+        # cannot be the source. Deliberately NOT switched to the live
+        # acv/lcv figures -- that would change every displayed book value and
+        # every team key in the same commit as the migration.
+        "assets_raw": cf(r, "user10"),
+    } for r, n, link in normalized])
+
     frame["firm_crd"] = frame["email"].map(
         lambda e: domains.get(e.split("@")[-1], "") if e else "")
+    missing_phone = int((frame["phone"] == "").sum())
+    if missing_phone:
+        print(f"[*] {missing_phone:,} Act contacts have no API business phone; "
+              "left blank rather than backfilled from the retired Excel export")
 
     # A team is (company, city, asset value). Value alone is wrong: 71 shared
     # values span unrelated firms and cities and are coincidences, and $0
     # appears on 82 rows and is not an amount.
-    assets = pd.to_numeric(frame.get("Total Assets"), errors="coerce")
+    assets = pd.to_numeric(frame["assets_raw"], errors="coerce")
     frame["assets"] = assets.where(assets > 0)
+    frame.drop(columns=["assets_raw"], inplace=True)
     frame["team_key"] = [
         f"{norm(str(c))}|{norm(str(t))}|{int(a)}"
         if pd.notna(a) and str(c).strip() and str(t).strip() else ""
-        for c, t, a in zip(frame.get("Company", ""), frame.get("City", ""), frame["assets"])
+        for c, t, a in zip(frame["company"], frame["city"], frame["assets"])
     ]
     frame["source"] = "CRM"
     frame["source_file"] = path.name
-    frame["name"] = ((frame.get("First Name", "").fillna("").astype(str) + " "
-                      + frame.get("Last Name", "").fillna("").astype(str))
-                     .str.strip().map(strip_designations))
-    frame["owner"] = frame.get("EIC Contact", "").fillna("").astype(str).str.strip()
-    frame["title"] = frame.get("Title", "").fillna("").astype(str).str.strip()
-    frame["company"] = frame.get("Company", "").fillna("").astype(str).str.strip()
-    frame["city"] = frame.get("City", "").fillna("").astype(str).str.strip()
-    frame["state"] = frame.get("State", "").fillna("").astype(str).str.strip().str.upper()
-    frame["phone"] = frame.get("Phone", "").fillna("").astype(str)
-    frame["mobile"] = ""
     frame["phone_kind"] = ""        # derived below; the CRM does not say
+    # The Act GUID remains attached through winner selection. It is emitted
+    # only for a confirmed winner and is the sole identifier used for Act writes.
     # Fields only the rosters publish. Declared here so the concat has one
     # schema and a missing column can never become the string "nan".
-    for col in ("team", "profile_url", "linkedin", "phone_ext", "given_crd", "office"):
+    for col in ("team", "profile_url", "linkedin", "office"):
         frame[col] = ""
+
+    named = int((frame["salutation"] != "").sum())
     print(f"[*] CRM {path.name}: {len(frame):,} rows, "
           f"{int((frame['email'] != '').sum()):,} emails, "
           f"{int((frame['firm_crd'] != '').sum()):,} resolved to a firm CRD "
           f"({(frame['firm_crd'] != '').mean():.0%})")
+    print(f"[*] {named:,} carry a usable Dear field for the greeting; "
+          f"{int((frame['owner'] != '').sum()):,} carry an EIC relationship owner; "
+          f"{int((frame['given_crd'] != '').sum()):,} state a CRD; "
+          f"{int((frame['mobile'] != '').sum()):,} have a mobile number")
     return frame
 
 
@@ -1049,19 +1239,52 @@ def score_contacts(people: pd.DataFrame, index) -> pd.DataFrame:
     tiers, crds, scores, namesakes_out, gaps = [], [], [], [], []
     known_crds = {crd for entries in index.values() for crd, _, _ in entries}
     for rec in people.itertuples(index=False):
-        # The roster stated this person's CRD. Nothing a name-similarity score
-        # produces can be better evidence than the firm naming its own
-        # advisor's registration number, so it is taken and not second-guessed
-        # -- but only if the SEC actually carries that CRD, so a typo or a
-        # retired registration falls through to matching instead of pinning a
-        # contact to a CRD that exists nowhere.
+        # The independent evidence ledger is authoritative for Act. The legacy
+        # fuzzy matcher remains useful for scraped rosters, but may not
+        # rehabilitate or redirect a CRM identity the ledger refused.
+        if str(getattr(rec, "source", "")) == "CRM":
+            status = str(getattr(rec, "identity_status", "") or "")
+            resolved = str(getattr(rec, "identity_crd", "") or "")
+            if status == "approved" and resolved in known_crds:
+                tier, crd, score, gap = "confirmed", resolved, 1.0, 1.0
+            elif resolved in known_crds:
+                tier, crd, score, gap = "review", resolved, 0.0, 0.0
+            else:
+                tier, crd, score, gap = "none", "", 0.0, 0.0
+            tiers.append(tier)
+            crds.append(crd)
+            scores.append(score)
+            namesakes_out.append(0)
+            gaps.append(gap)
+            continue
+
+        # A scraped roster may explicitly publish a CRD. An identifier is
+        # strong evidence, but it is not self-authenticating: a shifted CSV
+        # column or stale profile can attach a real CRD to the wrong person.
+        # Require the roster name to agree with that CRD's SEC identity and,
+        # where both sides know the firm, require the firm too. A disagreement
+        # remains visible as review evidence but is never outbound authority.
         stated = str(getattr(rec, "given_crd", "") or "")
         if stated and stated in known_crds:
-            tiers.append("confirmed")
+            given, last = resolve_surname(rec.name, index)
+            stated_rows = [row for row in index.get(last, [])
+                           if str(row[0]) == stated]
+            name_ok = False
+            firm_ok = True
+            if stated_rows:
+                _, forms, entry = stated_rows[0]
+                name_ok = (name_score(given, forms) >= 0.8 and
+                           suffix_agreement(suffix_of(rec.name),
+                                            entry.get("suffix", "")) >= 0)
+                firms = set(entry.get("firms") or [])
+                if rec.firm_crd and firms:
+                    firm_ok = rec.firm_crd in firms
+            tier = "confirmed" if name_ok and firm_ok else "review"
+            tiers.append(tier)
             crds.append(stated)
-            scores.append(1.0)
-            namesakes_out.append(0)
-            gaps.append(1.0)
+            scores.append(1.0 if tier == "confirmed" else 0.0)
+            namesakes_out.append(len(index.get(last, [])))
+            gaps.append(1.0 if tier == "confirmed" else 0.0)
             continue
         given, last = resolve_surname(rec.name, index)
         # A published nickname the filing never records is invisible to
@@ -1290,7 +1513,16 @@ def donate_by_email(people: pd.DataFrame) -> pd.DataFrame:
     """
     email = people["email"].astype(str).str.lower().str.strip()
     local = email.str.split("@").str[0]
-    personal = email.ne("") & people["phone"].ne("") & local.str.contains(r"[._\-]")
+    # A formatting character is not sufficient evidence of a human mailbox:
+    # client.service@ and wealth.management@ are common shared addresses.
+    # Also refuse donation when the same address names more than one person.
+    normalized_names = people["name"].astype(str).map(
+        lambda value: " ".join(re.findall(r"[a-z0-9]+", value.lower())))
+    names_per_email = normalized_names[email.ne("")].groupby(email[email.ne("")]).nunique()
+    unique_person = email.map(names_per_email).fillna(0).eq(1)
+    non_generic = ~email.map(is_generic_email)
+    personal = (email.ne("") & people["phone"].ne("")
+                & local.str.contains(r"[._\-]") & unique_person & non_generic)
     if not personal.any():
         return people
 
@@ -1390,7 +1622,12 @@ def pick_best(group: pd.DataFrame) -> pd.Series:
     score, because a CRM record is worth preferring for its ownership data --
     not for being a CRM record.
     """
-    ranked = group.sort_values("match_score", ascending=False)
+    # Review rows are evidence for a human, not field donors. If this CRD also
+    # has an approved row, an unconfirmed row cannot contribute its email,
+    # phone, owner, salutation or Act GUID.
+    approved = group[group["tier"].isin(["confirmed", "high"])]
+    source_group = approved if len(approved) else group
+    ranked = source_group.sort_values("match_score", ascending=False)
     top = float(ranked["match_score"].iloc[0])
     close = ranked[ranked["match_score"] >= top - MARGIN]
     crm = close[close["source"] == "CRM"]
@@ -1418,8 +1655,9 @@ def pick_best(group: pd.DataFrame) -> pd.Series:
     # across them is not a cross-person merge. Identity fields stay with the
     # winner; only the number is upgraded.
     if str(best.get("phone_kind", "")) not in REACHES_PERSON:
-        reachable = group[group["phone_kind"].isin(REACHES_PERSON)
-                          & (group["match_score"] >= ACCEPT)]
+        reachable = source_group[
+            source_group["phone_kind"].isin(REACHES_PERSON)
+            & (source_group["match_score"] >= ACCEPT)]
         if len(reachable):
             donor = reachable.sort_values("match_score", ascending=False).iloc[0]
             best["phone"] = donor["phone"]
@@ -1442,7 +1680,7 @@ def pick_best(group: pd.DataFrame) -> pd.Series:
     # excluded: those are identity and provenance, and blending them across
     # sources is how a record stops describing one person.
     borrowable = ["email", "title", "team", "profile_url", "linkedin", "mobile"]
-    donors = group[group["match_score"] >= ACCEPT].sort_values(
+    donors = source_group[source_group["match_score"] >= ACCEPT].sort_values(
         "match_score", ascending=False)
     for field in borrowable:
         if field not in group.columns or str(best.get(field, "") or "").strip():
@@ -1480,6 +1718,8 @@ def load_people(limit: int | None = None) -> pd.DataFrame:
             "phone", "phone_ext", "mobile", "city", "state",
             "office", "company", "owner", "assets", "team_key", "firm_crd",
             "given_crd", "phone_kind", "source", "source_file",
+            "act_id", "identity_crd", "identity_status", "identity_can_call",
+            "identity_can_email", "identity_evidence_hash",
             # The CRM's Dear field. Added here the moment it was added to
             # load_crm -- it was not, the first time, and the greeting silently
             # never reached a single record. Exactly the team_url failure this
@@ -1583,8 +1823,6 @@ def write_contact_shards(contacts: dict, payload: dict) -> list:
 
 
 def main() -> None:
-    # Used to corroborate the CRM's Dear field before it becomes a greeting.
-    filed_names = filed_given_names()
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--limit", type=int, help="only the first N contacts, for a trial")
     ap.add_argument("--report", action="store_true", help="print diagnostics and stop")
@@ -1658,6 +1896,9 @@ def main() -> None:
             "t": row["tier"],
             "ms": float(row["match_score"]),
         }
+        if row["tier"] == "confirmed" and str(row.get("act_id", "") or ""):
+            entry["aid"] = str(row["act_id"])
+            entry["ih"] = str(row.get("identity_evidence_hash", "") or "")
         # The state the CONTACT record gives, kept so the panel can compare it
         # with where the SEC says this advisor sits. On an unconfirmed match the
         # two contradict 42% of the time, and that contradiction is the clearest
@@ -1667,7 +1908,7 @@ def main() -> None:
         # THE GREETING, only when the CRM supplied one. Absent on roster-sourced
         # advisors, and the emailer falls back to splitting the display name --
         # which is what it did for everybody before this existed.
-        # CORROBORATED BY THE FILING, OR NOT USED AT ALL.
+        # APPROVED BY THE IDENTITY LEDGER, OR NOT USED AT ALL.
         #
         # The Dear field is usually the greeting a rep chose -- Chris for
         # Christopher Tolman, Scott for HENRY SCOTT KRUSE, who goes by his
@@ -1686,10 +1927,11 @@ def main() -> None:
         # it from Deborah except knowing the person.
         sal = salutation_of(group)
         if sal:
-            filed = filed_names.get(str(crd)) or []
-            first = sal.split()[0]
-            if any(same_person(first, tok) for tok in filed):
-                entry["sal"] = sal
+            # load_crm exposes only the ledger's email_greeting. That value is
+            # either a deterministic SEC/strict-nickname fallback or a
+            # hash-bound reviewed preference such as Bo. Re-running the old
+            # nickname gate here would erase exactly those reviewed exceptions.
+            entry["sal"] = sal
         cs = str(row.get("state", "") or "").strip().upper()[:2]
         if cs:
             entry["cs"] = cs
@@ -1772,6 +2014,7 @@ def main() -> None:
         "advisors": contacts,
         "teams": teams,
         "practices": practices,
+        "provenance": contacts_provenance(),
         "note": (f"{len(contacts):,} advisors with contact detail from the CRM "
                  f"and {len(FIRMS)} scraped rosters. Team assets are stored on "
                  f"the team, never on the person."),

@@ -32,6 +32,7 @@ const graph = require("../shared/graph-mail");
 const bounce = require("../shared/email-bounce");
 const act = require("../shared/act");
 const core = require("../shared/email-core");
+const recipientRegistry = require("../shared/recipient-registry");
 const worker = require("../email-worker/index");
 
 const HOURS = 3600 * 1000;
@@ -132,7 +133,10 @@ async function sweepMailbox(connection, context, deps) {
 
       // Then the CRM, best effort. Mail Code N, never downgrading a U.
       try {
-        const pushed = await deps.act.markHardBounce(verdict.message.contactId, address, verdict.reason);
+        const approved = await deps.recipientRegistry.verifyActPair(
+          verdict.message.contactId, address, { force: true });
+        const pushed = await deps.act.markHardBounce(
+          verdict.message.contactId, address, verdict.reason, approved.actContactId);
         if (!pushed.ok) context.log.warn(`Act! bounce not applied for ${address}: ${pushed.reason || ""}`);
       } catch (err) { context.log.error(`Act! bounce push failed for ${address}: ${err.message}`); }
 
@@ -147,7 +151,7 @@ async function sweepMailbox(connection, context, deps) {
 }
 
 async function sweep(context, overrides = {}) {
-  const deps = { auth, store, graph, bounce, act, core,
+  const deps = { auth, store, graph, bounce, act, core, recipientRegistry,
                  refreshBatch: worker.refreshBatch, ...overrides };
   if (process.env.EMAIL_BOUNCE_SWEEP_ENABLED !== "1") {
     context.log("Bounce sweep is disabled (EMAIL_BOUNCE_SWEEP_ENABLED is not 1).");

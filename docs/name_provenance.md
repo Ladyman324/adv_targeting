@@ -387,3 +387,13 @@ while the project's own truth set labels it SAME.
   is a one-line assertion.
 - **The `given_names_disagree` self-witness fires on 0 rows today.** That is a
   measurement of the current artifacts, not a proof that it cannot fire.
+> **Production authority update (2026-08-26).** References in this document to
+> `CRM_Contacts_*.xlsx` are historical measurements only. That stale manual
+> export is retired/superseded and must not feed identity, contact, registry, or
+> ACT-routing artifacts. Current ACT identity evidence comes from the newest
+> complete, hash-validated `act_pull_manifest_<pull-id>.json` pair. Raw ACT
+> JSON preserves CRM-entered names and preferred greetings as claims; SEC names
+> remain the legal identity authority; independent firm rosters may corroborate
+> but do not overwrite SEC identity. A human-approved preferred name such as Bo
+> remains a hash-bound reviewed decision.
+>

@@ -114,7 +114,21 @@ async function getDirectMessage(token, id) {
 // Sanitised as well: Windows rejects \ / : * ? " < > | in filenames, and an
 // admin display name is free text.
 function attachmentFileName(doc) {
-  const base = String(doc.name || doc.id || "attachment")
+  /* THE UPLOADED FILENAME WINS, WHERE THERE IS ONE.
+   *
+   * An approved document carries two names: the display name an administrator
+   * typed so the picker in the app reads well, and the name the file arrived
+   * under. The advisor should receive the second -- it is what their
+   * compliance archive files and what any later conversation calls it -- while
+   * the first stays a label inside this application.
+   *
+   * doc.fileName is empty on everything published before it was recorded, and
+   * for those the display name is still the only name there is. So this is a
+   * preference, not a requirement, and no existing document loses its
+   * attachment name because of it.
+   */
+  const source = doc.keepName ? doc.name : (doc.fileName || doc.name);
+  const base = String(source || doc.name || doc.id || "attachment")
     .replace(/[\/:*?"<>|]/g, "-").replace(/\s+/g, " ").trim().slice(0, 200);
   /* `.pdf` is appended for APPROVED documents only, because that library is
    * PDF-by-construction and its names are admin display names with no extension

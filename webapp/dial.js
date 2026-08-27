@@ -73,6 +73,12 @@
     // localStorage because a default that differs between the desk and the
     // phone is not a default -- it is two settings sharing a name.
     settings: {},
+    // The immutable static-data build which authorized a saved telephone
+    // route. Each view supplies its generated DATA_VERSION. Queue rows from a
+    // different build (and pre-proof legacy rows) remain useful as lists, but
+    // cannot produce a tel: link until the view reconciles them with current
+    // contact data.
+    contactRouteVersion: "",
   };
 
   const listeners = [];
@@ -277,6 +283,22 @@
   }
 
   async function openList(id) {
+    /* A rep who switches lists while working is still working.
+     *
+     * running was cleared unconditionally here, which ENDED the session: the
+     * call card -- the person, the phone button, the outcome buttons -- folded
+     * away on every list change, and carrying on meant pressing Start again.
+     * Switching lists is choosing different work, not stopping.
+     *
+     * Resumed only when a session was ALREADY running. It never starts one
+     * that was not, so opening a list from the dock, or at boot, still lands
+     * paused; and start() itself returns false when the new list has nobody
+     * left to call, which leaves the dock offering a new cycle as before.
+     *
+     * This cannot dial anyone by surprise: auto-dial is armed only after an
+     * outcome is logged (armAutoDial in each view), never by start().
+     */
+    const wasRunning = state.running;
     const q = await call(`${API.queue}?id=${encodeURIComponent(id)}`);
     state.listId = q.id;
     state.listName = q.name;
@@ -290,6 +312,9 @@
     try { localStorage.setItem(ACTIVE_KEY, state.listId); } catch {}
     await dropSuppressed();
     await refreshProgress();
+    // AFTER dropSuppressed(), so a session never resumes onto somebody who has
+    // just been removed from the new list for being on do-not-call.
+    if (wasRunning) start();
     emit();
     return q;
   }
@@ -540,8 +565,96 @@
   // button, not a call we promised never to place. audit.py enforces that no
   // literal tel: href exists anywhere else.
   function telHref(crd, phone) {
-    if (!phone || isDnc(crd)) return "";
+    const route = arguments.length > 2 ? arguments[2] : null;
+    if (!phone || isDnc(crd) || (route && !routeStatus(route, phone).ok)) return "";
     return "tel:" + String(phone).replace(/[^0-9+,;*#]/g, "");
+  }
+
+  function setContactRouteVersion(version) {
+    state.contactRouteVersion = String(version || "");
+  }
+
+  function routeStatus(item, phone) {
+    if (!item) return { ok: true, reason: "live" };
+    if (item.unconfirmed || item.identityApproved !== true)
+      return { ok: false, reason: "identity" };
+    if (!state.contactRouteVersion || item.contactRouteVersion !== state.contactRouteVersion)
+      return { ok: false, reason: "stale" };
+    if (!String(phone === undefined ? item.phone || "" : phone))
+      return { ok: false, reason: "phone" };
+    if (phone !== undefined && String(phone) !== String(item.phone || ""))
+      return { ok: false, reason: "phone-changed" };
+    return { ok: true, reason: "current" };
+  }
+
+  // Email authority is deliberately narrower than telephone-route authority.
+  // A high-confidence research match may be useful enough to call, but only a
+  // confirmed identity may turn an address into a one-click email action.
+  // Saved rows also need to match the current contact build: an old address is
+  // not made safe merely because the person was confirmed in a later build.
+  function emailRouteStatus(item, address) {
+    if (!item || item.emailEligibilityKnown !== true || item.emailConfirmed !== true)
+      return { ok: false, reason: 'identity' };
+    if (!state.contactRouteVersion || item.contactRouteVersion !== state.contactRouteVersion)
+      return { ok: false, reason: 'stale' };
+    if (!String(address === undefined ? item.email || '' : address))
+      return { ok: false, reason: 'email' };
+    if (address !== undefined && String(address) !== String(item.email || ''))
+      return { ok: false, reason: 'email-changed' };
+    return { ok: true, reason: 'current' };
+  }
+
+  /* Replace a saved route only from a current contact record supplied by the
+   * view. A missing/demoted record is explicitly non-dialable; a changed phone
+   * replaces the old number before proof is renewed. save:false exists for
+   * tests and batching -- reconcileRoutes writes the list once. */
+  async function reconcileRoute(crd, current, opts) {
+    const i = idx(crd);
+    if (i === -1) return { changed: false, status: { ok: false, reason: "missing" } };
+    const before = state.items[i];
+    let after;
+    if (!current || String(current.crd) !== String(before.crd)) {
+      after = { ...before, identityApproved: false, emailConfirmed: false,
+                emailEligibilityKnown: true,
+                contactRouteVersion: state.contactRouteVersion,
+                routeIssue: "missing" };
+    } else {
+      const approved = current.identityApproved === true && !current.unconfirmed;
+      const emailConfirmed = approved && current.emailConfirmed === true;
+      after = {
+        ...before,
+        name: current.name || before.name || "",
+        firm: current.firm || before.firm || "",
+        phone: current.phone || "",
+        phoneKind: current.phoneKind || "",
+        city: current.city || before.city || "",
+        state: current.state || before.state || "",
+        email: current.email || "",
+        unconfirmed: !approved,
+        identityApproved: approved,
+        emailConfirmed,
+        emailEligibilityKnown: true,
+        contactRouteVersion: state.contactRouteVersion,
+        routeIssue: approved ? "" : "identity",
+      };
+    }
+    const changed = JSON.stringify(before) !== JSON.stringify(after);
+    if (changed) state.items[i] = after;
+    if (changed && (!opts || opts.save !== false)) await save();
+    return { changed, item: state.items[i], status: routeStatus(state.items[i]) };
+  }
+
+  async function reconcileRoutes(resolve) {
+    let changed = false;
+    for (const saved of state.items.slice()) {
+      let current;
+      try { current = await resolve(saved); }
+      catch { continue; } // a load failure stays stale and therefore blocked
+      const result = await reconcileRoute(saved.crd, current, { save: false });
+      changed = result.changed || changed;
+    }
+    if (changed) await save();
+    return changed;
   }
 
   // Suppression is enforced HERE, at the point of adding, so a name on the
@@ -564,10 +677,14 @@
 
   async function addMany(items, opts) {
     const fresh = [];
-    let blocked = 0, noPhone = 0, dupe = 0;
+    let blocked = 0, unconfirmed = 0, noPhone = 0, dupe = 0;
     for (const it of items || []) {
       if (!it || !it.crd) continue;
       if (isDnc(it.crd)) { blocked++; continue; }
+      // A review match is allowed on screen as evidence, but it is not an
+      // identity authorization. Keeping it out at this shared insertion point
+      // covers desktop, field, bulk adds, and old UI entry paths alike.
+      if (it.unconfirmed) { unconfirmed++; continue; }
       if (inQueue(it.crd)) { dupe++; continue; }
       if (fresh.some((f) => String(f.crd) === String(it.crd))) { dupe++; continue; }
       // A dial session has no use for someone with no number. Only enforced on
@@ -588,7 +705,7 @@
     } else {
       emit();
     }
-    return { added: taken.length, blocked, noPhone, dupe, overflow,
+    return { added: taken.length, blocked, unconfirmed, noPhone, dupe, overflow,
              max: MAX_QUEUE };
   }
 
@@ -1071,7 +1188,7 @@
   // that view's own tel: anchor -- this module has no DOM of its own.
   function armAuto(item, fire) {
     cancelAuto();
-    if (!state.auto.on || !item || !item.phone) return;
+    if (!state.auto.on || !item || !item.phone || !routeStatus(item).ok) return;
     if (state.auto.announce)
       say(`Next, ${item.name}${item.firm ? `, ${item.firm}` : ""}`);
     state.pending = { crd: item.crd, name: item.name, left: state.auto.delay, timer: null };
@@ -1303,6 +1420,7 @@ A do-not-call is firm-wide and permanent, and cannot be added `
     onChange: (fn) => { listeners.push(fn); return () => {
       const i = listeners.indexOf(fn); if (i !== -1) listeners.splice(i, 1); }; },
     add, addMany, remove, clear, move, inQueue, isDnc, telHref,
+    setContactRouteVersion, routeStatus, emailRouteStatus, reconcileRoute, reconcileRoutes,
     start, pause, end, current, remaining, advance, requeue, back, canBack,
     // What was recorded for this person on this pass, if anything. Drives the
     // "you logged X" line, so a correction is made knowingly.

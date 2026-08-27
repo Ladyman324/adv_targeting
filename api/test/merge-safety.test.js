@@ -3,6 +3,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const core = require("../shared/email-core");
+const { identityPresentationRefresh } = require("../shared/email-service");
 
 // The rule validateMessage applies, lifted out so it can be exercised without
 // storage. Kept in step with the real one by the last test in this file.
@@ -74,4 +75,37 @@ test("the extracted rule matches the one email-service.js actually applies", () 
   assert.match(fn, /knownImageIds && !knownImageIds\.has\(id\)/);
   assert.match(fn, /badImages\.push\(id\)/);
   assert.match(fn, /code: "unknown_image"/);
+});
+
+test("an identity correction rerenders unedited content for fresh review", () => {
+  const refresh = identityPresentationRefresh({
+    recipientName: "Wrong Person", greetingName: "Wrong",
+    recipientLastName: "Person", companyName: "Old Firm",
+    subjectOverridden: false, bodyOverridden: false,
+  }, {
+    name: "Christopher Tolman", greetingName: "Chris",
+    lastName: "Tolman", firm: "UBS",
+  }, {
+    commonSubject: "Hello {{first_name}}",
+    commonBodyText: "Hi {{first_name}},",
+  }, null, []);
+  assert.equal(refresh.changed, true);
+  assert.equal(refresh.blocked, false);
+  assert.equal(refresh.patch.subject, "Hello Chris");
+  assert.equal(refresh.patch.bodyText, "Hi Chris,");
+  assert.doesNotMatch(refresh.patch.bodyHtml, /Wrong/);
+});
+
+test("an identity correction blocks individually edited stale wording", () => {
+  const refresh = identityPresentationRefresh({
+    recipientName: "Wrong Person", greetingName: "Wrong",
+    recipientLastName: "Person", companyName: "Old Firm",
+    subjectOverridden: false, bodyOverridden: true,
+  }, {
+    name: "Christopher Tolman", greetingName: "Chris",
+    lastName: "Tolman", firm: "UBS",
+  }, { commonSubject: "", commonBodyText: "" }, null, []);
+  assert.equal(refresh.changed, true);
+  assert.equal(refresh.blocked, true);
+  assert.deepEqual(refresh.patch, {});
 });

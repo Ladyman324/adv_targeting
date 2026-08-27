@@ -2,16 +2,22 @@
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
 
 process.env.EMAIL_UNSUBSCRIBE_SECRET = "test-secret";
 const suppress = require("../shared/email-suppress");
 const floor = suppress.mailCodeFloor();
 
 test("the Act! Mail Code floor is loaded and populated", () => {
-  // If this is empty the guard is silently absent and 2,383 people who asked not
-  // to be emailed become mailable again. Rebuild with src/build_act_mail_codes.py.
+  // Address coverage stays broad. CRD fallback is intentionally narrower:
+  // only identity-ledger-approved CRD -> Act GUID routes may receive it.
   assert.ok(floor.byAddress.size > 2000, `expected thousands of addresses, got ${floor.byAddress.size}`);
-  assert.ok(floor.byCrd.size > 2000, `expected thousands of CRDs, got ${floor.byCrd.size}`);
+  assert.ok(floor.byCrd.size > 100, `expected hundreds of approved CRDs, got ${floor.byCrd.size}`);
+  const approved = JSON.parse(fs.readFileSync(
+    path.join(__dirname, "..", "shared", "act_contacts.json"), "utf8")).contacts;
+  for (const crd of floor.byCrd.keys())
+    assert.ok(approved[crd], `Mail Code CRD ${crd} is not an approved Act route`);
   assert.match(floor.builtUtc, /^\d{4}-\d{2}-\d{2}/);
 });
 

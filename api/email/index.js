@@ -393,10 +393,13 @@ module.exports = async function (context, req) {
       if (!raw) throw service.httpError(400, "No file content was supplied.");
       const bytes = Buffer.from(raw, "base64");
       if (!bytes.length) throw service.httpError(400, "The uploaded file was empty or not valid base64.");
-      const saved = await store.putDocument(who, { id: body.id, name: body.name, bytes,
-        maxBytes: service.attachmentLimit() });
+      // fileName rides alongside the display name: the advisor should receive
+      // the document called what it was called when it was uploaded, while the
+      // picker in the app keeps the readable label.
+      const saved = await store.putDocument(who, { id: body.id, name: body.name,
+        fileName: body.fileName, bytes, maxBytes: service.attachmentLimit() });
       await store.audit(who.id, `document:${saved.id}`, "document_published", { id: saved.id, name: saved.name,
-        version: saved.version, sha256: saved.sha256, replaced: saved.replaced });
+        fileName: saved.fileName, version: saved.version, sha256: saved.sha256, replaced: saved.replaced });
       return ok(context, { ok: true, saved, documents: await store.listDocuments() }, 201);
     }
     // Name the operation. A bare "Unknown email operation" is indistinguishable

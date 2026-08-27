@@ -653,7 +653,16 @@
       ${message ? `<p class="${bad ? "email-error" : "email-ok"}">${esc(message)}</p>` : ""}
       <ul class="email-doclist">${docs.length ? docs.map((d) => `<li>
         <span class="email-doc-main"><b>${esc(d.name)}</b>
-          <small>${esc(d.id)} &middot; ${bytes(d.size)} &middot; v${d.version}</small></span>
+          <small>${esc(d.id)} &middot; ${bytes(d.size)} &middot; v${d.version}</small>
+          ${/* What the ADVISOR will see. The bold line above is a label for
+                this picker; the attachment now goes out under the name the
+                file was uploaded with, and those differ on purpose -- so the
+                one that leaves the building is stated rather than assumed.
+                Documents published before this was recorded have no uploaded
+                name, and for those the display name is still what is sent. */
+            d.fileName
+              ? `<small class="email-doc-file">Sent as ${esc(d.fileName)}</small>`
+              : `<small class="email-doc-file">Sent as ${esc(d.name)}.pdf &middot; republish to attach it under its own filename</small>`}</span>
         <button type="button" class="email-small" data-email="doc-replace"
           data-id="${esc(d.id)}" data-name="${esc(d.name)}">Replace</button>
         <button type="button" class="grave email-small" data-email="doc-delete"
@@ -1562,10 +1571,18 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
      * list of names, in a language with no compiler to notice the omission.
      * Anything added to AdvisorEmailData has to be added HERE too.
      */
-    recipients = (selected || []).map((r) => ({ contactId: r.contactId || r.crd || "", name: r.name || "",
+    // Existing saved queues can predate the UI-level review guard. Refuse those
+    // snapshots here; the server independently resolves every remaining CRD.
+    const identityBlocked = (selected || []).filter((r) => r && r.unconfirmed).length;
+    recipients = (selected || []).filter((r) => r && !r.unconfirmed).map((r) => ({ contactId: r.contactId || r.crd || "", name: r.name || "",
       email: r.email || "", firm: r.firm || r.companyName || "", firstName: r.firstName || "", lastName: r.lastName || "",
+      unconfirmed: !!r.unconfirmed,
       teammates: Array.isArray(r.teammates) ? r.teammates : [],
       teammatesFull: Array.isArray(r.teammatesFull) ? r.teammatesFull : [] }));
+    if (identityBlocked)
+      global.alert(`${identityBlocked} unconfirmed contact${identityBlocked === 1 ? "" : "s"} `
+        + `cannot be emailed until the CRD link is resolved.`);
+    if (!recipients.length) return;
     detail = null; cursor = 0; forceDetail = false; clearTimeout(pollTimer); clearInterval(tickTimer);
     const back = shell(); back.hidden = false;
     document.getElementById("emailTitle").textContent = "Prepare email";
@@ -1896,7 +1913,10 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
         // name while replacing would otherwise publish a second document and
         // leave the template pointing at the old one.
         const target = replacing ? replacing.id : name;
-        const r = await api("put_document", { id: target, name, dataBase64 });
+        // The name on disk, sent as well as the display name. The advisor gets
+        // the file called what it is actually called; the display name stays a
+        // label for the picker in this app and nothing more.
+        const r = await api("put_document", { id: target, name, fileName: file.name, dataBase64 });
         catalog.documents = r.documents;
         const saved = r.saved;
         const was = replacing;

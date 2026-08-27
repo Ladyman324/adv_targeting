@@ -315,6 +315,17 @@ function snapshot(it) {
     city: clean(it && it.city, 60),
     state: clean(it && it.state, 8),
     email: clean(it && it.email, 160),
+    // Telephone route proof is a cache of the current static contact build,
+    // not permanent authority. The client compares the version again before
+    // rendering tel: and reconciles stale/legacy rows against current data.
+    unconfirmed: !!(it && it.unconfirmed),
+    identityApproved: !!(it && it.identityApproved),
+    // Narrower than call-route approval: high-tier research contacts may be
+    // callable, but only confirmed identities may expose email actions.
+    emailConfirmed: !!(it && it.emailConfirmed),
+    emailEligibilityKnown: !!(it && it.emailEligibilityKnown),
+    contactRouteVersion: clean(it && it.contactRouteVersion, 80),
+    routeIssue: clean(it && it.routeIssue, 24),
   };
 }
 

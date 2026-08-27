@@ -2182,7 +2182,34 @@ def _outcome_act_map():
             + ("; " + "; ".join(problems) if problems else ""))
 
 
-@check("the Act! contact lookup is high-tier only and unambiguous")
+@check("required ACT correction records survive default report generation")
+def _required_act_correction_rows():
+    import pandas as pd                                   # noqa: PLC0415
+    from export_act_crd_corrections import REQUIRED_ACT_IDS  # noqa: PLC0415
+    from identity_schema import (CORRECTIONS_CSV_FILENAME,
+                                 IDENTITY_DIRNAME,
+                                 MANIFEST_FILENAME)        # noqa: PLC0415
+
+    identity = ROOT / "data" / IDENTITY_DIRNAME
+    report = pd.read_csv(identity / CORRECTIONS_CSV_FILENAME,
+                         dtype=str).fillna("")
+    present = set(report.get("act_id", pd.Series(dtype=str)).astype(str))
+    missing = sorted(REQUIRED_ACT_IDS - present)
+    manifest = read(identity / MANIFEST_FILENAME)
+    expected = {
+        "identity_manifest_hash": manifest.get("contentHash", ""),
+        "act_source_file": (manifest.get("actSource") or {}).get("file", ""),
+        "act_source_sha256": (manifest.get("actSource") or {}).get("sha256", ""),
+    }
+    drift = [name for name, value in expected.items()
+             if name not in report or set(report[name].astype(str)) != {value}]
+    return (not missing and not drift,
+            f"{len(REQUIRED_ACT_IDS)} required records present; provenance bound"
+            + (f"; missing {missing}" if missing else "")
+            + (f"; drift {drift}" if drift else ""))
+
+
+@check("the Act! contact lookup is ledger-approved, hash-bound and unambiguous")
 def _act_lookup():
     """This file decides WHICH CONTACT a logged call is written onto.
 
@@ -2191,49 +2218,109 @@ def _act_lookup():
     a stranger's contact record, correctly attributed, with no error raised and
     nothing to distinguish it afterwards from a call that genuinely happened.
 
-    So two invariants. Every id must come from a HIGH-tier crosswalk row -- a
-    review-tier match is a plausible guess, and a plausible guess is exactly the
-    thing that produces an unfindable wrong answer. And no CRD may map to more
-    than one contact, because choosing between them is the same coin flip.
+    Every pair must be a unique approved identity-ledger link. The fuzzy
+    crosswalk is candidate evidence only and is deliberately not consulted.
     """
     import pandas as pd                                   # noqa: PLC0415
+    from collections import Counter                       # noqa: PLC0415
+    from contact_provenance import sha256_file             # noqa: PLC0415
+    from identity_schema import (IDENTITY_DIRNAME, LINKS_FILENAME,
+                                 MANIFEST_FILENAME, content_hash)  # noqa: PLC0415
 
-    shipped = read(API / "shared" / "act_contacts.json")["contacts"]
-    df = pd.read_parquet(ROOT / "data" / "interim" / "act_crosswalk.parquet")
-
-    # SYNCABLE MEANS confirmed OR high, not high alone.
-    #
-    # `confirmed` is the STRONGER of the two: the CRM states the CRD in its own
-    # `crd` custom field -- 8,848 contacts do -- and the SEC index carries that
-    # number. This check knew only about `high`, so when those rows started
-    # being labelled confirmed it reported the best matches in the file as
-    # "review/none-tier CRDs leaked in".
-    SYNCABLE = ["confirmed", "high"]
-    high = df[df.tier.isin(SYNCABLE)]
-    ok_pairs = set(zip(high.advisor_crd.astype(str), high.act_id.astype(str)))
-    lower = {str(c) for c in df[~df.tier.isin(SYNCABLE)].advisor_crd}
-
+    artifact = read(API / "shared" / "act_contacts.json")
+    shipped = artifact["contacts"]
+    identity = ROOT / "data" / IDENTITY_DIRNAME
+    manifest = read(identity / MANIFEST_FILENAME)
+    core = {k: v for k, v in manifest.items()
+            if k not in {"generatedUtc", "contentHash"}}
+    links_path = identity / LINKS_FILENAME
+    links = pd.read_parquet(links_path).fillna("")
     problems = []
-    bad = [c for c, a in shipped.items() if (c, a) not in ok_pairs]
-    if bad:
-        problems.append(f"{len(bad)} CRDs map to an id with no syncable crosswalk "
-                        f"row, e.g. {bad[:3]}")
-    # A CRD that is ONLY review-tier must be absent entirely.
-    leaked = [c for c in shipped if c in lower and c not in
-              {str(x) for x in high.advisor_crd}]
-    if leaked:
-        problems.append(f"{len(leaked)} review/none-tier CRDs leaked in, e.g. {leaked[:3]}")
-
-    dupe_crds = set(high[high.duplicated("advisor_crd", keep=False)].advisor_crd.astype(str))
-    still = sorted(dupe_crds & set(shipped))
-    if still:
-        problems.append(f"{len(still)} ambiguous CRDs were shipped anyway, "
-                        f"e.g. {still[:3]} -- these would be a coin flip between "
-                        f"two contacts")
+    if manifest.get("contentHash") != content_hash(core):
+        problems.append("identity manifest content hash is invalid")
+    link_meta = (manifest.get("outputs") or {}).get(LINKS_FILENAME) or {}
+    if link_meta.get("sha256") != sha256_file(links_path):
+        problems.append("identity links do not match the manifest")
+    approved = links[(links.identity_status == "approved")
+                     & links.can_sync_act.astype(bool)].copy()
+    approved["advisor_crd"] = approved.advisor_crd.astype(str).str.strip()
+    approved["source_record_id"] = approved.source_record_id.astype(str).str.strip()
+    crd_counts = Counter(approved.advisor_crd)
+    guid_counts = Counter(approved.source_record_id)
+    safe = approved[approved.advisor_crd.map(crd_counts).eq(1)
+                    & approved.source_record_id.map(guid_counts).eq(1)]
+    expected = dict(sorted(zip(safe.advisor_crd, safe.source_record_id)))
+    if shipped != expected:
+        wrong = sorted(set(shipped.items()) ^ set(expected.items()))
+        problems.append(f"shipped map differs from approved ledger by "
+                        f"{len(wrong)} pairs, e.g. {wrong[:3]}")
+    if artifact.get("identity_manifest_hash") != manifest.get("contentHash"):
+        problems.append("shipped map names a different identity manifest")
+    if artifact.get("act_source") != (manifest.get("actSource") or {}).get("file"):
+        problems.append("shipped map names a different Act source")
+    if artifact.get("act_source_sha256") != (manifest.get("actSource") or {}).get("sha256"):
+        problems.append("shipped map names different Act source bytes")
 
     return (not problems,
-            f"{len(shipped):,} syncable CRDs of {len(df):,} crosswalk rows; "
-            f"{len(dupe_crds):,} ambiguous excluded"
+            f"{len(shipped):,} approved Act routes of {len(links):,} ledger rows; "
+            f"{len(approved) - len(safe):,} ambiguous approved rows excluded"
+            + ("; " + "; ".join(problems) if problems else ""))
+
+
+@check("the outbound recipient registry is direct-identity only and provenance-bound")
+def _approved_recipient_registry():
+    """A calibrated fuzzy contact is useful on screen, not send authority."""
+    import gzip                                           # noqa: PLC0415
+    from contact_provenance import sha256_file             # noqa: PLC0415
+    from identity_schema import (IDENTITY_DIRNAME, LINKS_FILENAME,
+                                 MANIFEST_FILENAME, content_hash)  # noqa: PLC0415
+
+    identity = ROOT / "data" / IDENTITY_DIRNAME
+    registry_path = identity / "approved_recipients.json.gz"
+    with gzip.open(registry_path, "rt", encoding="utf-8") as handle:
+        registry = json.load(handle)
+    manifest = read(identity / MANIFEST_FILENAME)
+    contacts_path = WEB / "data" / "contacts.json"
+    contacts = read(contacts_path)
+    provenance = registry.get("provenance") or {}
+    core = {k: registry.get(k) for k in
+            ("schemaVersion", "recipients", "ineligible", "provenance")}
+    problems = []
+    if registry.get("contentHash") != content_hash(core):
+        problems.append("content hash is invalid")
+    fuzzy = [crd for crd, row in (registry.get("recipients") or {}).items()
+             if row.get("tier") != "confirmed"]
+    if fuzzy:
+        problems.append(f"{len(fuzzy):,} non-confirmed recipients remain")
+    expected = {
+        "identityManifestHash": manifest.get("contentHash", ""),
+        "identityLinksSha256": ((manifest.get("outputs") or {})
+                                .get(LINKS_FILENAME, {}).get("sha256", "")),
+        "contactsSha256": sha256_file(contacts_path),
+        "actSource": (manifest.get("actSource") or {}).get("file", ""),
+        "actSourceSha256": (manifest.get("actSource") or {}).get("sha256", ""),
+    }
+    if provenance != expected:
+        problems.append("registry provenance differs from current artifacts")
+    contact_provenance = contacts.get("provenance") or {}
+    if contact_provenance != {k: expected[k] for k in (
+            "identityManifestHash", "identityLinksSha256", "actSource",
+            "actSourceSha256")}:
+        problems.append("contacts provenance differs from current identity inputs")
+    count = len(registry.get("recipients") or {})
+    descriptor = read(API / "shared" / "approved-recipient-release.json")
+    descriptor_core = {k: descriptor.get(k) for k in (
+        "schemaVersion", "registrySchemaVersion", "registryContentHash",
+        "recipientCount", "ineligibleCount", "provenance")}
+    if descriptor.get("descriptorHash") != content_hash(descriptor_core):
+        problems.append("packaged registry descriptor hash is invalid")
+    if (descriptor.get("registryContentHash") != registry.get("contentHash") or
+            descriptor.get("provenance") != provenance or
+            descriptor.get("recipientCount") != count or
+            descriptor.get("ineligibleCount") !=
+            len(registry.get("ineligible") or {})):
+        problems.append("packaged API release pins a different registry")
+    return (not problems, f"{count:,} direct-identity email routes"
             + ("; " + "; ".join(problems) if problems else ""))
 
 
@@ -3044,7 +3131,11 @@ def _act_floor():
     path = API / "shared" / "act_mail_codes.json"
     data = json.loads(text(path))
     addresses, crds = data.get("addresses", {}), data.get("crds", {})
-    populated = len(addresses) > 2000 and len(crds) > 2000
+    # Address coverage is independent of identity. CRD fallback is intentionally
+    # limited to ledger-approved Act routes.
+    approved_routes = read(API / "shared" / "act_contacts.json").get("contacts", {})
+    crds_approved = set(crds) <= set(approved_routes)
+    populated = len(addresses) > 2000 and len(crds) > 100
     codes = set(addresses.values()) | set(crds.values())
     expected_codes = codes and codes <= {"U", "N", "NC", "BB"}
 
@@ -3060,9 +3151,10 @@ def _act_floor():
     passes_crd = "contactId: m.contactId" in service
     explained = "blocked.get(r.email)" in service
 
-    ok = all([populated, expected_codes, both_keys, fails_closed,
+    ok = all([populated, crds_approved, expected_codes, both_keys, fails_closed,
               at_create, at_approve, passes_crd, explained])
-    return (ok, f"{len(addresses)} addresses / {len(crds)} CRDs, codes={sorted(codes)}, "
+    return (ok, f"{len(addresses)} addresses / {len(crds)} approved CRDs, "
+                f"CRDs subset of Act routes={crds_approved}, codes={sorted(codes)}, "
                 f"both keys={both_keys}, fails closed={fails_closed}, "
                 f"enforced at create={at_create} and approve={at_approve}, "
                 f"contact id reaches the check={passes_crd}, reason shown={explained}")
@@ -3321,6 +3413,12 @@ def _unconfirmed_actions():
     gated = 'const unconfirmed = c.t === "review"' in app
     # Email, phone and queueing all withheld.
     no_email = "Email unavailable" in app
+    confirmed_email = (
+        'const emailConfirmed = c.t === "confirmed"' in app and
+        "if (!emailConfirmed)" in app and
+        "Dial.emailRouteStatus(cur).ok" in app and
+        'const emailConfirmed = r[COL.tier] === "confirmed"' in field and
+        "|| !emailConfirmed" in field)
     no_phone = 'const href = unconfirmed ? "" : Dial.telHref' in app
     no_queue = "confirm who this is before adding them to a call list" in app.lower()                or "Confirm who this is before adding them to a call list." in app
     # The irreversible one is refused outright, in the shared vocabulary so both
@@ -3332,8 +3430,10 @@ def _unconfirmed_actions():
     # The contradiction that makes the gating comprehensible.
     clash = "contact-clash" in app and "_state" in app
 
-    ok = all([gated, no_email, no_phone, no_queue, dnc_blocked, on_snapshot, clash])
-    return (ok, f"actions gated={gated}, email withheld={no_email}, call withheld={no_phone}, "
+    ok = all([gated, no_email, confirmed_email, no_phone, no_queue,
+              dnc_blocked, on_snapshot, clash])
+    return (ok, f"actions gated={gated}, email withheld={no_email}, "
+                f"confirmed-only email={confirmed_email}, call withheld={no_phone}, "
                 f"queueing withheld={no_queue}, do-not-call refused={dnc_blocked}, "
                 f"flag on the queue entry={on_snapshot}, state clash shown={clash}")
 

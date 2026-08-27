@@ -150,6 +150,7 @@ function batchFromEntity(e) {
     parentBatchId: e.parentBatchId || "",
     followUpSentUtc: e.followUpSentUtc || "",
     copyInternalTo: e.copyInternalTo || "", senderMail: e.senderMail || "",
+    recipientRegistryHash: e.recipientRegistryHash || "",
     approvedUtc: e.approvedUtc || "", sendNotBeforeUtc: e.sendNotBeforeUtc || "",
     pausedUtc: e.pausedUtc || "", canceledUtc: e.canceledUtc || "",
     createdUtc: e.createdUtc, updatedUtc: e.updatedUtc, etag: e.etag };
@@ -179,6 +180,7 @@ async function createBatch(who, batch) {
     ccTeammates: clean(batch.ccTeammates, 2), ccColleague: clean(batch.ccColleague, 254),
     copiedInsteadNote: clean(batch.copiedInsteadNote, 500),
     copyInternalTo: clean(batch.copyInternalTo, 254), senderMail: clean(batch.senderMail, 254),
+    recipientRegistryHash: clean(batch.recipientRegistryHash, 128),
     createdUtc: at, updatedUtc: at };
   await (await table("batches")).createEntity(entity);
   return batchFromEntity(entity);
@@ -189,7 +191,7 @@ async function patchBatch(userId, batchId, patch, etag) {
   const entity = { partitionKey: userId, rowKey: batchId, updatedUtc: now() };
   const strings = ["status", "mode", "name", "commonSubject", "commonBodyText", "warningLevel",
     "warningMessage", "reviewedUtc", "approvedUtc", "sendNotBeforeUtc", "pausedUtc", "canceledUtc",
-    "parentBatchId", "followUpSentUtc"];
+    "parentBatchId", "followUpSentUtc", "recipientRegistryHash"];
   for (const k of strings) if (k in patch) entity[k] = clean(patch[k], k.includes("Body") ? 50000 : 500);
   for (const k of ["commonRevision", "recipientCount", "externalCount", "sentCount",
                    "hardBounceCount", "followUpDays"]) if (k in patch) entity[k] = Number(patch[k]) || 0;
@@ -210,7 +212,10 @@ function messageFromEntity(e) {
   if (!e) return null;
   return { id: e.rowKey, batchId: e.batchId, userId: e.userId, ordinal: Number(e.ordinal) || 0,
     contactId: e.contactId || "", recipientName: e.recipientName || "", recipientEmail: e.recipientEmail || "",
+    greetingName: e.greetingName || "", recipientLastName: e.recipientLastName || "",
+    recipientRegistryHash: e.recipientRegistryHash || "", recipientRoutingHash: e.recipientRoutingHash || "",
     teammateCc: parse(e.teammateCcJson, []),
+    teammateCcCrds: parse(e.teammateCcCrdsJson, []),
     teammatesAvailable: parse(e.teammatesAvailableJson, []),
     companyName: e.companyName || "", subject: e.subject || "", bodyText: e.bodyText || "",
     bodyHtml: e.bodyHtml || "", signatureHtml: e.signatureHtml || "",
@@ -246,7 +251,11 @@ async function createMessage(userId, batchId, message) {
   await (await table("messages")).createEntity({ partitionKey: batchPartition(userId, batchId), rowKey: message.id,
     batchId, userId, ordinal: message.ordinal, contactId: clean(message.contactId, 80),
     recipientName: clean(message.recipientName, 256), recipientEmail: clean(message.recipientEmail, 320).toLowerCase(),
+    greetingName: clean(message.greetingName, 120), recipientLastName: clean(message.recipientLastName, 120),
+    recipientRegistryHash: clean(message.recipientRegistryHash, 128),
+    recipientRoutingHash: clean(message.recipientRoutingHash, 128),
     teammateCcJson: clean(message.teammateCcJson, 2000),
+    teammateCcCrdsJson: clean(message.teammateCcCrdsJson, 2000),
     teammatesAvailableJson: clean(message.teammatesAvailableJson, 8000),
     companyName: clean(message.companyName, 256), subject: clean(message.subject, 500),
     bodyText: clean(message.bodyText, 50000), bodyHtml: clean(message.bodyHtml, 50000),
@@ -289,7 +298,9 @@ async function patchMessage(userId, batchId, messageId, patch, etag) {
      * to disappear quietly -- so it is checked in audit.py now rather than
      * remembered.
      */
-    "teammateCcJson"];
+    "teammateCcJson", "teammateCcCrdsJson", "teammatesAvailableJson",
+    "greetingName", "recipientLastName",
+    "recipientRegistryHash", "recipientRoutingHash"];
   for (const k of strings) if (k in patch) entity[k] = clean(patch[k], ["bodyText", "bodyHtml"].includes(k) ? 50000 : 2000);
   for (const k of ["subjectOverridden", "bodyOverridden", "reviewed"]) if (k in patch) entity[k] = !!patch[k];
   for (const k of ["baseRevision", "attemptCount", "draftAttempts", "sendAttempts",
@@ -499,6 +510,11 @@ async function listDocuments() {
   const out = [];
   for await (const e of (await table("documents")).listEntities({ queryOptions: { filter: odata`PartitionKey eq ${"approved"}` } })) {
     if (e.approved !== false) out.push({ id: e.rowKey, name: e.name, blobName: e.blobName,
+      // The name the file was uploaded under, kept apart from the display name
+      // so an advisor receives the document called what it is actually called.
+      // Empty on anything published before this was recorded, which is why
+      // attachmentFileName() still falls back to the display name.
+      fileName: e.fileName || "",
       contentType: e.contentType || "application/octet-stream", size: Number(e.size) || 0,
       sha256: e.sha256 || "", version: Number(e.version) || 1, approved: true });
   }
@@ -551,7 +567,18 @@ async function container() {
   return c;
 }
 
-async function putDocument(who, { id: rawId, name, bytes, maxBytes }) {
+/* TWO NAMES, ON PURPOSE.
+ *
+ * `name` is the display name -- what an administrator types so the picker in
+ * the app reads well ("Q2 2026 ACV & LCV Client Commentary"). `fileName` is
+ * what the file was called on the way in ("EIC_ACV_LCV_Q2_2026.pdf"), and that
+ * is what the advisor should see land in their inbox: it is the name their
+ * compliance archive, their filing and any later conversation will use.
+ *
+ * Conflating the two meant the attachment arrived under a display name shaped
+ * for a dropdown, which is a fine label and a poor filename.
+ */
+async function putDocument(who, { id: rawId, name, fileName, bytes, maxBytes }) {
   const docId = safeDocId(rawId || name);
   assertPdf(bytes);
   if (maxBytes && bytes.length > maxBytes) {
@@ -572,11 +599,18 @@ async function putDocument(who, { id: rawId, name, bytes, maxBytes }) {
   // and hash a batch was built with against the current row, so replacing a
   // document automatically invalidates batches still carrying the old one --
   // which is the entire point of doing it this way.
+  // "Replace", not "Merge" -- so an upload that supplies no fileName clears a
+  // stale one rather than leaving the previous file's name attached to new
+  // bytes. Falling back to the old value would be worse than falling back to
+  // the display name: it would be confidently wrong.
+  const storedFileName = clean(fileName || "", 256);
   await client.upsertEntity({ partitionKey: "approved", rowKey: docId,
-    name: clean(name || docId, 256), blobName, contentType: "application/pdf",
+    name: clean(name || docId, 256), fileName: storedFileName,
+    blobName, contentType: "application/pdf",
     size: bytes.length, sha256, version: (Number(old && old.version) || 0) + 1,
     approved: true, updatedUtc: now(), updatedBy: clean(who && who.name, 256) }, "Replace");
-  return { id: docId, name: clean(name || docId, 256), size: bytes.length, sha256,
+  return { id: docId, name: clean(name || docId, 256), fileName: storedFileName,
+           size: bytes.length, sha256,
            version: (Number(old && old.version) || 0) + 1, replaced: !!old };
 }
 

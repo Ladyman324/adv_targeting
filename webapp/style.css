@@ -965,14 +965,28 @@ body.scope-pending #map{cursor:progress}
  * Deliberately absent: any call timer or "in progress" indicator. The browser
  * is never told whether a call connected, so such a display would be invented.
  * ======================================================================== */
+/* The dock is anchored to the BOTTOM and grows UPWARD, so anything taller than
+ * the viewport pushes its own header off the top of the screen -- and that
+ * header holds both toggles and the only way to close it. Opening the queue and
+ * the menu together was enough: the controls left the screen and the dock could
+ * not be dismissed at all.
+ *
+ * Capping the height fixes the class of it rather than that one pairing -- a
+ * short window, or a long list, does the same thing. The bar then sticks to the
+ * top of whatever is left, so the button that opened a panel is always the
+ * button you can reach to close it. */
 #dialer{
   position:fixed; left:calc(var(--panel-w) + 14px); bottom:14px; z-index:900;
   width:340px; max-width:calc(100vw - var(--panel-w) - 28px);
+  max-height:calc(100vh - 28px); overflow-y:auto; overscroll-behavior:contain;
   background:var(--panel); border:1px solid var(--hair); border-radius:14px;
-  box-shadow:var(--shadow); overflow:hidden;
+  box-shadow:var(--shadow);
   font-size:13px;
 }
 #dialer[hidden]{display:none}
+/* Sticky, not merely first: the toggles must stay reachable however far the
+ * dock is scrolled, because they are what closes what is below them. */
+#dialerBar{position:sticky; top:0; z-index:2; background:var(--panel)}
 
 #dialerBar{
   /* Wraps rather than overflowing. Giving the list name a width floor, then

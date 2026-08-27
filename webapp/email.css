@@ -98,6 +98,8 @@
   border-bottom:1px solid var(--hair)}
 .email-doc-main{flex:1 1 auto;min-width:0}
 .email-doc-main small{display:block;color:var(--muted);font-size:11.5px}
+/* The name the advisor receives, distinct from the display label above it. */
+.email-doc-main .email-doc-file{color:var(--ink);opacity:.8;overflow-wrap:anywhere}
 .email-doc-none{color:var(--muted);border-bottom:0}
 .email-doc-add{border:1px solid var(--hair);border-radius:10px;padding:12px;margin:0 0 14px}
 .email-doc-add legend{padding:0 6px;font-size:12px;color:var(--muted)}

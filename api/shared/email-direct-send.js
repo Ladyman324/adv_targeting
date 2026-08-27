@@ -21,6 +21,7 @@ const engagement = require("./email-engagement");
 const opsStore = require("./email-direct-store");
 const workQueue = require("./email-direct-queue");
 const replyTools = require("./email-reply-send");
+const recipientRegistry = require("./recipient-registry");
 
 const RETRY_SECONDS = 30;
 const RECONCILE_HORIZON_MS = 6 * 60 * 60 * 1000;
@@ -34,7 +35,7 @@ function httpError(statusCode, message, code) {
 
 function dependencies(overrides = {}) {
   const merged = {
-    graph, auth, core, suppress, advisors, limitGuard, mailboxGate,
+    graph, auth, core, suppress, advisors, recipientRegistry, limitGuard, mailboxGate,
     activityStore, engagement, opsStore, workQueue,
     wait: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
     ...overrides,
@@ -157,6 +158,7 @@ async function preflightReply(who, input, deps) {
   const original = await deps.graph.getMessageContent(token.accessToken, messageId);
   const guarded = await replyTools.guard(
     (((original || {}).from || {}).emailAddress || {}).address, deps, { initiating: false });
+  await deps.recipientRegistry.verify(crd, guarded.address, { force: true });
   const resolved = await replyTools.resolveAttachments(input, deps);
   const compliance = replyTools.complianceAddresses(guarded.address, resolved, deps);
   const recipients = replyTools.uniqueAddresses([
@@ -180,14 +182,8 @@ async function preflightFollowUp(who, input, deps) {
   if (text.length > replyTools.MAX_CHARS) throw httpError(400,
     `A message from here is limited to ${replyTools.MAX_CHARS} characters.`, "too_long");
   await replyTools.refuseInternal(crd, deps);
-  let target = "";
-  try { target = await deps.advisors.emailForCrd(crd); } catch { /* activity fallback below */ }
-  if (!target) {
-    const known = await deps.activityStore.listActivity(crd, 200);
-    const mine = known.filter((row) => String(row.userId) === String(who.id) && row.advisorEmail);
-    target = (mine[0] || known.find((row) => row.advisorEmail) || {}).advisorEmail || "";
-  }
-  if (!target) throw httpError(409, "We hold no email address for this advisor.", "no_known_address");
+  const approved = await deps.recipientRegistry.resolve(crd, { force: true });
+  const target = approved.email;
   const guarded = await replyTools.guard(target, deps, { initiating: true });
   const token = await deps.auth.tokenFor(who.id);
   const resolved = await replyTools.resolveAttachments(input, deps);
@@ -228,6 +224,8 @@ async function start(who, input, kind, overrides = {}) {
   const begun = await deps.opsStore.createOperation(who.id, {
     operationId: prepared.operationId, kind, intentHash: hash, advisorCrd: prepared.crd,
     sourceGraphMessageId: prepared.messageId, replyAll: input.replyAll === true,
+    recipientSetHash: crypto.createHash("sha256")
+      .update(JSON.stringify([...prepared.recipients].sort()), "utf8").digest("hex"),
     attachmentCount: prepared.resolved.documents.length + prepared.resolved.files.length,
   });
   let operation = begun.operation;
@@ -333,6 +331,16 @@ function graphToRecipients(message) {
     .map((entry) => (((entry || {}).emailAddress || {}).address)));
 }
 
+function sameAddresses(actual, expected) {
+  return JSON.stringify((actual || []).slice().sort()) ===
+    JSON.stringify((expected || []).map((value) => String(value).toLowerCase()).sort());
+}
+
+const TERMINAL_IDENTITY_CODES = new Set([
+  "recipient_crd_required", "recipient_not_approved", "recipient_identity_changed",
+  "recipient_routing_changed", "teammate_not_approved",
+]);
+
 function directMessage(gr, token, id) {
   return (gr.getDirectMessage || gr.getMessage)(token, id);
 }
@@ -379,9 +387,40 @@ async function processSend(operation, deps) {
     if (!draft || !draft.isDraft) throw httpError(409,
       "The prepared Outlook draft could not be found.", "prepared_draft_missing");
     const recipients = graphRecipients(draft);
+    const actualRecipientHash = crypto.createHash("sha256")
+      .update(JSON.stringify([...recipients].sort()), "utf8").digest("hex");
+    if (!claimed.recipientSetHash || actualRecipientHash !== claimed.recipientSetHash)
+      throw httpError(409,
+        "The Outlook draft recipients changed after preparation; refusing to send.",
+        "recipient_routing_changed");
+    const currentAdvisor = await deps.recipientRegistry.resolve(
+      claimed.advisorCrd, { force: true });
+    const actualToForAdvisor = graphToRecipients(draft);
+    if (!actualToForAdvisor.includes(currentAdvisor.email))
+      throw httpError(409,
+        "The Outlook draft no longer includes the approved advisor address.",
+        "recipient_routing_changed");
     if (claimed.kind === "follow_up") {
-      for (const recipient of graphToRecipients(draft))
-        await replyTools.guard(recipient, deps, { initiating: true });
+      const approved = currentAdvisor;
+      const actualTo = graphToRecipients(draft);
+      if (actualTo.length !== 1 || actualTo[0] !== approved.email)
+        throw httpError(409,
+          "The Outlook draft recipient no longer matches the approved advisor address.",
+          "recipient_routing_changed");
+      const expectedBcc = typeof deps.core.complianceBcc === "function"
+        ? deps.core.complianceBcc({ recipientEmail: approved.email,
+            attachments: Number(claimed.attachmentCount) > 0 ? [{}] : [] }) : [];
+      const actualCc = (draft.ccRecipients || []).map((entry) =>
+        String((((entry || {}).emailAddress || {}).address) || "").trim().toLowerCase())
+        .filter(Boolean);
+      const actualBcc = (draft.bccRecipients || []).map((entry) =>
+        String((((entry || {}).emailAddress || {}).address) || "").trim().toLowerCase())
+        .filter(Boolean);
+      if (!sameAddresses(actualCc, []) || !sameAddresses(actualBcc, expectedBcc))
+        throw httpError(409,
+          "The Outlook draft copies changed after preparation; refusing to send.",
+          "recipient_routing_changed");
+      await replyTools.guard(approved.email, deps, { initiating: true });
     }
     const cfg = await replyTools.enforceDirectSendPolicy({ id: claimed.userId }, recipients,
       claimed.operationId, deps);
@@ -421,6 +460,11 @@ async function processSend(operation, deps) {
   } catch (err) {
     const latest = await deps.opsStore.getOperation(claimed.userId, claimed.operationId).catch(() => null);
     if (!latest || latest.state !== "prepared") throw err;
+    if (TERMINAL_IDENTITY_CODES.has(err && err.code)) {
+      await deps.opsStore.failOperation(latest.userId, latest.operationId,
+        { lastErrorCode: err.code }, latest.etag);
+      return;
+    }
     const due = new Date(Date.now() + RETRY_SECONDS * 1000).toISOString();
     await deps.opsStore.scheduleOperation(latest.userId, latest.operationId,
       { state: "prepared", lastErrorCode: err.code || "pre_send_deferred" }, due, latest.etag);
@@ -491,9 +535,11 @@ async function processFinalize(operation, deps) {
     const message = await findCanonical(claimed, token, deps);
     if (!message || message.isDraft || !message.sentDateTime) throw httpError(503,
       "The canonical sent item is not available yet.", "sent_item_unavailable");
-    let advisorEmail = "";
-    try { advisorEmail = await deps.advisors.emailForCrd(claimed.advisorCrd); } catch { /* metadata only */ }
-    if (!advisorEmail) advisorEmail = graphRecipients(message)[0] || "";
+    let advisorEmail = graphToRecipients(message)[0] || "";
+    if (!advisorEmail) {
+      try { advisorEmail = (await deps.recipientRegistry.resolve(claimed.advisorCrd)).email; }
+      catch { /* metadata only */ }
+    }
     const recorded = await deps.activityStore.recordActivity({
       userId: claimed.userId, direction: "outbound",
       source: claimed.kind === "reply" ? "app_reply" : "app_followup",

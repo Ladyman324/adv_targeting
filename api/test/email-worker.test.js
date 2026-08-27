@@ -4,14 +4,20 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const worker = require("../email-worker/index");
 
+function routedDraft(id = "draft-1", extra = {}) {
+  return { id, isDraft: true,
+    toRecipients: [{ emailAddress: { address: "safe@example.test" } }],
+    ccRecipients: [], bccRecipients: [], ...extra };
+}
+
 function fixture(mode, state) {
   let version = 1;
   const batch = { id: "batch-1", userId: "user-1", status: mode === "send" ? "sending" : "drafting",
     mode, graphMailboxId: "user-1", sendNotBeforeUtc: new Date(0).toISOString(), etag: `v${version}` };
   const message = { id: "message-1", batchId: batch.id, userId: batch.userId, state,
-    ordinal: 0, recipientEmail: "safe@example.test", recipientName: "Safe User",
+    ordinal: 0, contactId: "123", recipientEmail: "safe@example.test", recipientName: "Safe User",
     subject: "Subject", bodyHtml: "<p>Body</p>", signatureHtml: "<div>Signature</div>",
-    attachments: [], graphMessageId: "", attemptCount: 0,
+    attachments: [], graphMessageId: "", recipientRoutingHash: "route", attemptCount: 0,
     draftAttempts: 0, sendAttempts: 0, reconcileAttempts: 0, etag: `m${version}` };
   const audits = [], enqueued = [];
   const policy = { killed: false, reason: "" };
@@ -37,10 +43,16 @@ function fixture(mode, state) {
   return { batch, message, audits, enqueued, store, policy, suppressed,
     suppress: { blockedAmong: async () => new Map(suppressed) },
     auth: { tokenFor: async () => ({ accessToken: "mock-token", mailboxId: "user-1" }) },
+    recipientRegistry: {
+      verify: async (crd, email) => ({ crd, email, registryHash: "registry",
+        routingHash: "route", teammates: [] }),
+      verifyTeammates: async () => [],
+    },
     enqueue: async (work, delay) => enqueued.push({ work, delay }),
     // campaignHealth is the real one -- stubbing the brake would let these tests
     // pass while it was broken.
     core: { config: () => ({ mailboxIntervalSeconds: 5 }),
+            extraRecipients: () => ({ cc: [], bcc: [] }),
             campaignHealth: require("../shared/email-core").campaignHealth },
     mailboxGate: { acquire: async () => 0 } };
 }
@@ -52,7 +64,7 @@ test("draft retry reconciles the application property before creating anything",
     findByAppId: async () => ({ id: "immutable-1", isDraft: true, internetMessageId: "<one@example>" }),
     createDraft: async () => { creates++; throw new Error("must not create a duplicate"); },
     attachDocuments: async () => { attachments++; },
-    getMessage: async () => null,
+    getMessage: async () => routedDraft("immutable-1"),
   };
   await worker.processWork({ kind: "draft", userId: "user-1", batchId: "batch-1", messageId: "message-1" }, { ...f, graph });
   assert.equal(creates, 0);
@@ -120,7 +132,7 @@ test("a recipient who opts out AFTER approval is not sent to", async () => {
   f.suppressed.set("safe@example.test", "asked to unsubscribe");
   let sends = 0;
   const graph = {
-    getMessage: async () => ({ id: "draft-1", isDraft: true }),
+    getMessage: async () => routedDraft(),
     findByAppId: async () => ({ id: "draft-1", isDraft: true }),
     sendDraft: async () => { sends++; return { requestId: "r1" }; },
   };
@@ -144,7 +156,7 @@ test("the kill switch stops a batch that is already mid-flight", async () => {
   f.policy.reason = "Compliance halted all outbound email.";
   let sends = 0;
   const graph = {
-    getMessage: async () => ({ id: "draft-1", isDraft: true }),
+    getMessage: async () => routedDraft(),
     findByAppId: async () => ({ id: "draft-1", isDraft: true }),
     sendDraft: async () => { sends++; return { requestId: "r1" }; },
   };
@@ -165,7 +177,7 @@ test("a clean recipient still sends once both checks pass", async () => {
   const f = fixture("send", "send_scheduled");
   let sends = 0;
   const graph = {
-    getMessage: async () => ({ id: "draft-1", isDraft: true }),
+    getMessage: async () => routedDraft(),
     findByAppId: async () => ({ id: "draft-1", isDraft: true }),
     sendDraft: async () => { sends++; return { requestId: "r1" }; },
   };
@@ -173,6 +185,80 @@ test("a clean recipient still sends once both checks pass", async () => {
     { ...f, graph });
   assert.equal(sends, 1);
   assert.equal(f.message.state, "submitted");
+});
+
+test("a stale approved email fails before Graph send", async () => {
+  const f = fixture("send", "send_scheduled");
+  f.message.graphMessageId = "draft-1";
+  f.recipientRegistry.verify = async () => {
+    const error = new Error("The approved address changed.");
+    error.statusCode = 409; error.code = "recipient_identity_changed"; throw error;
+  };
+  let sends = 0;
+  const graph = { getMessage: async () => routedDraft(), findByAppId: async () => null,
+    sendDraft: async () => { sends++; } };
+  await worker.processWork({ kind: "send", userId: "user-1", batchId: "batch-1",
+    messageId: "message-1" }, { ...f, graph });
+  assert.equal(sends, 0);
+  assert.equal(f.message.state, "failed");
+  assert.equal(f.message.failureCode, "recipient_identity_changed");
+});
+
+test("a changed Outlook Cc fails before Graph send", async () => {
+  const f = fixture("send", "send_scheduled");
+  f.message.graphMessageId = "draft-1";
+  let sends = 0;
+  const graph = { getMessage: async () => routedDraft("draft-1", {
+      ccRecipients: [{ emailAddress: { address: "added@example.test" } }],
+    }), findByAppId: async () => null, sendDraft: async () => { sends++; } };
+  await worker.processWork({ kind: "send", userId: "user-1", batchId: "batch-1",
+    messageId: "message-1" }, { ...f, graph });
+  assert.equal(sends, 0);
+  assert.equal(f.message.failureCode, "recipient_routing_changed");
+});
+
+test("a missing advisor CRD fails closed", async () => {
+  const f = fixture("send", "send_scheduled");
+  f.message.graphMessageId = "draft-1";
+  f.message.contactId = "";
+  let sends = 0;
+  const graph = { getMessage: async () => routedDraft(), findByAppId: async () => null,
+    sendDraft: async () => { sends++; } };
+  await worker.processWork({ kind: "send", userId: "user-1", batchId: "batch-1",
+    messageId: "message-1" }, { ...f, graph });
+  assert.equal(sends, 0);
+  assert.equal(f.message.failureCode, "recipient_not_approved");
+});
+
+test("a changed teammate routing hash fails before Graph send", async () => {
+  const f = fixture("send", "send_scheduled");
+  f.message.graphMessageId = "draft-1";
+  f.recipientRegistry.verify = async (crd, email) => ({
+    crd, email, routingHash: "new-route", registryHash: "registry",
+  });
+  let sends = 0;
+  const graph = { getMessage: async () => routedDraft(), findByAppId: async () => null,
+    sendDraft: async () => { sends++; } };
+  await worker.processWork({ kind: "send", userId: "user-1", batchId: "batch-1",
+    messageId: "message-1" }, { ...f, graph });
+  assert.equal(sends, 0);
+  assert.equal(f.message.failureCode, "recipient_routing_changed");
+});
+
+test("an unavailable registry retries and never sends open", async () => {
+  const f = fixture("send", "send_scheduled");
+  f.recipientRegistry.verify = async () => {
+    const error = new Error("registry unavailable");
+    error.statusCode = 503; error.code = "recipient_registry_unavailable"; throw error;
+  };
+  let sends = 0;
+  const graph = { getMessage: async () => routedDraft(), findByAppId: async () => null,
+    sendDraft: async () => { sends++; } };
+  await worker.processWork({ kind: "send", userId: "user-1", batchId: "batch-1",
+    messageId: "message-1" }, { ...f, graph });
+  assert.equal(sends, 0);
+  assert.equal(f.message.state, "send_ambiguous");
+  assert.ok(f.enqueued.length);
 });
 
 test("draft retries do not spend the send phase's retry budget", async () => {
@@ -183,7 +269,7 @@ test("draft retries do not spend the send phase's retry budget", async () => {
   f.message.draftAttempts = 5;          // a rough ride getting the draft made
   f.message.attemptCount = 5;
   const graph = {
-    getMessage: async () => ({ id: "draft-1", isDraft: true }),
+    getMessage: async () => routedDraft(),
     findByAppId: async () => ({ id: "draft-1", isDraft: true }),
     sendDraft: async () => { const e = new Error("Graph is busy"); e.statusCode = 503; throw e; },
   };
@@ -199,7 +285,7 @@ test("a phase still fails permanently once its own budget is gone", async () => 
   const f = fixture("send", "send_scheduled");
   f.message.sendAttempts = 6;           // this phase has genuinely run out
   const graph = {
-    getMessage: async () => ({ id: "draft-1", isDraft: true }),
+    getMessage: async () => routedDraft(),
     findByAppId: async () => ({ id: "draft-1", isDraft: true }),
     sendDraft: async () => { const e = new Error("Graph is busy"); e.statusCode = 503; throw e; },
   };
@@ -216,10 +302,10 @@ test("the conversation id is captured when the draft is created", async () => {
   const f = fixture("drafts", "draft_pending");
   const graph = {
     findByAppId: async () => null,
-    createDraft: async () => ({ id: "immutable-1", internetMessageId: "<one@example>",
-                                conversationId: "conv-abc", isDraft: true }),
+    createDraft: async () => routedDraft("immutable-1",
+      { internetMessageId: "<one@example>", conversationId: "conv-abc" }),
     attachDocuments: async () => {},
-    getMessage: async () => null,
+    getMessage: async () => routedDraft("immutable-1"),
   };
   await worker.processWork({ kind: "draft", userId: "user-1", batchId: "batch-1", messageId: "message-1" }, { ...f, graph });
   assert.equal(f.message.graphConversationId, "conv-abc");

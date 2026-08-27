@@ -16,7 +16,8 @@ STAGE_DIR=""
 #   28: email-direct-store.test.js -- atomic operation ownership and outbox
 #   29: email-direct-send.test.js -- no-resubmit reconciliation boundary
 #   30: email-preferences.test.js -- scanner-resistant unsubscribe confirmation
-EXPECTED_API_TEST_FILE_COUNT=30
+#   33: email-approve-pacing.test.js -- drafts are spaced, not fired at once
+EXPECTED_API_TEST_FILE_COUNT=33
 
 cleanup() {
   test -z "$TEMP_ROOT" && return
@@ -27,6 +28,72 @@ cleanup() {
 }
 trap cleanup EXIT
 die() { echo "[!] $*" >&2; exit 1; }
+
+validate_recipient_registry_source() {
+  local registry="$ROOT/data/identity/approved_recipients.json.gz"
+  local descriptor="$API/shared/approved-recipient-release.json"
+  local act_lookup="$API/shared/act_contacts.json"
+  test -s "$registry" || die \
+    "approved recipient registry is missing; run python src/export_approved_recipients.py"
+  test -s "$act_lookup" || die "approved Act lookup is missing"
+  test -s "$descriptor" || die \
+    "approved recipient release descriptor is missing; run python src/export_approved_recipients.py"
+  APPROVED_REGISTRY_PATH="$registry" REGISTRY_DESCRIPTOR_PATH="$descriptor" \
+    ACT_LOOKUP_PATH="$act_lookup" node <<'NODE'
+const fs = require("node:fs");
+const zlib = require("node:zlib");
+const crypto = require("node:crypto");
+const path = process.env.APPROVED_REGISTRY_PATH;
+const canonical = (value) => Array.isArray(value)
+  ? `[${value.map(canonical).join(",")}]`
+  : value && typeof value === "object"
+    ? `{${Object.keys(value).sort().map((key) =>
+      `${JSON.stringify(key)}:${canonical(value[key])}`).join(",")}}`
+    : JSON.stringify(value);
+const payload = JSON.parse(zlib.gunzipSync(fs.readFileSync(path)).toString("utf8"));
+if (Number(payload.schemaVersion) !== 1) throw new Error("unsupported registry schema");
+const core = { schemaVersion: payload.schemaVersion, recipients: payload.recipients,
+  ineligible: payload.ineligible || {}, provenance: payload.provenance || {} };
+const hash = crypto.createHash("sha256").update(canonical(core), "utf8").digest("hex");
+if (hash !== payload.contentHash) throw new Error("registry content hash is invalid");
+const descriptor = JSON.parse(fs.readFileSync(
+  process.env.REGISTRY_DESCRIPTOR_PATH, "utf8"));
+const descriptorCore = { schemaVersion: descriptor.schemaVersion,
+  registrySchemaVersion: descriptor.registrySchemaVersion,
+  registryContentHash: descriptor.registryContentHash,
+  recipientCount: descriptor.recipientCount,
+  ineligibleCount: descriptor.ineligibleCount,
+  provenance: descriptor.provenance || {} };
+const descriptorHash = crypto.createHash("sha256")
+  .update(canonical(descriptorCore), "utf8").digest("hex");
+if (Number(descriptor.schemaVersion) !== 1
+    || Number(descriptor.registrySchemaVersion) !== Number(payload.schemaVersion)
+    || descriptorHash !== descriptor.descriptorHash)
+  throw new Error("registry release descriptor is invalid");
+if (String(descriptor.registryContentHash || "") !== hash)
+  throw new Error("registry release descriptor pins a different content hash");
+if (canonical(descriptor.provenance || {}) !== canonical(payload.provenance || {}))
+  throw new Error("registry release descriptor pins different provenance");
+if (Number(descriptor.recipientCount) !== Object.keys(payload.recipients || {}).length
+    || Number(descriptor.ineligibleCount) !== Object.keys(payload.ineligible || {}).length)
+  throw new Error("registry release descriptor pins different row counts");
+for (const key of ["identityManifestHash", "identityLinksSha256",
+                   "contactsSha256", "actSource", "actSourceSha256"])
+  if (!String((payload.provenance || {})[key] || ""))
+    throw new Error("registry provenance is missing " + key);
+const actLookup = JSON.parse(fs.readFileSync(process.env.ACT_LOOKUP_PATH, "utf8"));
+if (String(actLookup.identity_manifest_hash || "") !==
+    String(payload.provenance.identityManifestHash || ""))
+  throw new Error("registry and approved Act lookup use different identity manifests");
+if (String(actLookup.act_source || "") !== String(payload.provenance.actSource || ""))
+  throw new Error("registry and approved Act lookup use different Act snapshots");
+if (String(actLookup.act_source_sha256 || "") !==
+    String(payload.provenance.actSourceSha256 || ""))
+  throw new Error("registry and approved Act lookup use different Act source bytes");
+if (Object.keys(payload.recipients || {}).length < 1000)
+  throw new Error("registry recipient count is implausibly small");
+NODE
+}
 
 validate_package_files() {
   local tree=$1
@@ -119,7 +186,35 @@ mapping(contacts.contacts, "act_contacts.json contacts", 1000);
 const mail = load("act_mail_codes.json");
 date(mail.built_utc, "act_mail_codes.json");
 mapping(mail.addresses, "act_mail_codes.json addresses", 1000);
-mapping(mail.crds, "act_mail_codes.json crds", 1000);
+mapping(mail.crds, "act_mail_codes.json approved crds", 100);
+for (const crd of Object.keys(mail.crds))
+  if (!contacts.contacts[crd])
+    fail("act_mail_codes.json contains a CRD outside the approved Act lookup: " + crd);
+const descriptor = load("approved-recipient-release.json");
+const descriptorCore = { schemaVersion: descriptor.schemaVersion,
+  registrySchemaVersion: descriptor.registrySchemaVersion,
+  registryContentHash: descriptor.registryContentHash,
+  recipientCount: descriptor.recipientCount,
+  ineligibleCount: descriptor.ineligibleCount,
+  provenance: descriptor.provenance || {} };
+const crypto = require("node:crypto");
+const canonical = (value) => Array.isArray(value)
+  ? `[${value.map(canonical).join(",")}]`
+  : value && typeof value === "object"
+    ? `{${Object.keys(value).sort().map((key) =>
+      `${JSON.stringify(key)}:${canonical(value[key])}`).join(",")}}`
+    : JSON.stringify(value);
+const descriptorHash = crypto.createHash("sha256")
+  .update(canonical(descriptorCore), "utf8").digest("hex");
+if (Number(descriptor.schemaVersion) !== 1
+    || Number(descriptor.registrySchemaVersion) !== 1
+    || !/^[a-f0-9]{64}$/.test(String(descriptor.registryContentHash || ""))
+    || descriptorHash !== descriptor.descriptorHash)
+  fail("approved-recipient-release.json is invalid");
+for (const key of ["identityManifestHash", "identityLinksSha256",
+                   "contactsSha256", "actSource", "actSourceSha256"])
+  if (!String((descriptor.provenance || {})[key] || ""))
+    fail("approved-recipient-release.json provenance is missing " + key);
 const release = JSON.parse(fs.readFileSync(path.join(root, "release.json"), "utf8"));
 if (!/^[A-Za-z0-9._-]{1,128}$/.test(String(release.id || "")))
   fail("release.json has an invalid id");
@@ -157,7 +252,7 @@ run_api_tests() {
     # to a Windows system directory. Invoke Node directly with explicit files.
     cd "$TEMP_BASE"
     unset NODE_TEST_CONTEXT
-    API_PACKAGE_TEST_ROOT="$tree" node --test "${test_files[@]}"
+    API_PACKAGE_TEST_ROOT="$tree" REPOSITORY_TEST_ROOT="$ROOT" node --test "${test_files[@]}"
   )
 }
 
@@ -212,6 +307,8 @@ if test "${1:-}" = "--run-tests"; then
   exit 0
 fi
 test $# -eq 0 || die "usage: $0 [--verify <api.tgz> [expected-sha-or-file] | --check-source <api-directory> | --run-tests <api-directory> <expected-file-count>]"
+
+validate_recipient_registry_source
 
 for command in node git tar sha256sum mktemp find sort diff; do
   command -v "$command" >/dev/null || die "required command is missing: $command"

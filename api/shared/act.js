@@ -637,16 +637,19 @@ async function setMailCode(contactId, target) {
  * does -- not by querying Act! on the address, which is another syntax nobody
  * here has verified.
  */
-async function markDoNotEmail(address, crd) {
+async function markDoNotEmail(address, crd, approvedContactId = "") {
   if (!configured()) return { ok: false, reason: "act_not_configured" };
   const email = String(address || "").trim().toLowerCase();
   if (!email) return { ok: false, reason: "no_address" };
+  if (!approvedContactId) return { ok: false, reason: "approved_contact_required", email };
 
   const contactId = contacts()[String(crd || "")];
   // Reported rather than swallowed. The advisor is already suppressed locally,
   // so they are protected either way -- but somebody should know the CRM did
   // not get the memo.
   if (!contactId) return { ok: false, reason: crd ? "no_contact" : "no_crd", email };
+  if (approvedContactId && String(contactId) !== String(approvedContactId))
+    return { ok: false, reason: "approved_contact_changed", email };
 
   try {
     // Filed under the integration's own Act! user. Attributing an opt-out to a
@@ -700,9 +703,14 @@ async function markDoNotEmail(address, crd) {
  * never-downgrade rule as the opt-out path, so a contact already marked U stays
  * U: someone asking not to be emailed outranks their address being broken.
  */
-async function markHardBounce(contactId, address, detail) {
+async function markHardBounce(crd, address, detail, approvedContactId = "") {
   if (!configured()) return { ok: false, reason: "act_not_configured" };
-  if (!contactId) return { ok: false, reason: "no_crd" };
+  if (!crd) return { ok: false, reason: "no_crd" };
+  if (!approvedContactId) return { ok: false, reason: "approved_contact_required" };
+  const contactId = contacts()[String(crd)];
+  if (!contactId) return { ok: false, reason: "no_contact" };
+  if (approvedContactId && String(contactId) !== String(approvedContactId))
+    return { ok: false, reason: "approved_contact_changed" };
   const mailCode = await setMailCode(contactId, MAIL_CODE_UNREACHABLE);
 
   // History as well, for the same reason opt-outs get one: the code says WHAT,

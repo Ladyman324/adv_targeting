@@ -1,4 +1,4 @@
-"""Contact details -> webapp/data/contacts.json, keyed on advisor CRD.
+"""Retired 16-person trial exporter.
 
 TRIAL SCOPE: EIC's own 16 staff, from data/raw/EIC_Contacts.xlsx. Testing
 click-to-call and click-to-email on people who can tell us it went wrong is a
@@ -68,6 +68,9 @@ def roster(firm_crd: str):
 
 
 def main() -> None:
+    raise SystemExit(
+        "Retired: this trial exporter could overwrite production contacts.json. "
+        "Run python src/build_contacts.py; CRM data comes from Act JSON only.")
     source = ROOT / "data" / "raw" / "EIC_Contacts.xlsx"
     if not source.exists():
         raise SystemExit(f"{source} not found")

@@ -17,6 +17,32 @@ test("attachment filenames always carry a .pdf extension", () => {
   assert.equal(f({}), "attachment.pdf");
 });
 
+test("an approved document is attached under the name it was uploaded with", () => {
+  // The display name is a label for the picker in the app; the advisor should
+  // receive the file called what it is actually called, because that is what
+  // their compliance archive files it under.
+  const f = graph.attachmentFileName;
+  assert.equal(
+    f({ name: "Q2 2026 ACV & LCV Client Commentary",
+        fileName: "EIC_ACV_LCV_Q2_2026.pdf" }),
+    "EIC_ACV_LCV_Q2_2026.pdf");
+  // An uploaded name missing the extension still gets one: Outlook chooses its
+  // handler from the extension and the approved library is PDF by construction.
+  assert.equal(f({ name: "Display", fileName: "commentary_q2" }), "commentary_q2.pdf");
+  // Sanitised on the same terms as a display name -- a filename is user input.
+  assert.equal(f({ name: "Display", fileName: 'a/b:c*d?e"f<g>h|i.pdf' }),
+                  "a-b-c-d-e-f-g-h-i.pdf");
+  // Published BEFORE fileName was recorded: the display name is the only name
+  // there is, and those documents must keep working exactly as before.
+  assert.equal(f({ name: "Fact Sheet", fileName: "" }), "Fact Sheet.pdf");
+  assert.equal(f({ name: "Fact Sheet" }), "Fact Sheet.pdf");
+  // A rep's own attachment keeps its real name and is never given .pdf -- and
+  // fileName must not smuggle its way past that guard.
+  assert.equal(f({ name: "forecast.xlsx", keepName: true }), "forecast.xlsx");
+  assert.equal(f({ name: "forecast.xlsx", fileName: "other.pdf", keepName: true }),
+                  "forecast.xlsx");
+});
+
 test("filenames illegal on Windows are sanitised", () => {
   assert.equal(graph.attachmentFileName({ name: 'a/b:c*d?e"f<g>h|i' }), "a-b-c-d-e-f-g-h-i.pdf");
 });

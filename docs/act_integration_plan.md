@@ -443,3 +443,17 @@ have no CRD, being assistants, branch managers, wholesalers and vendors.
   the firm ever moves to a different email platform, the suppression list has to
   be reconstructed from `email__y_n` codes, because the native fields hold
   nothing.
+> **Superseded production-source note (2026-08-26).** The historical
+> `CRM_Contacts_*.xlsx` observations in this document describe an investigation
+> snapshot, not a supported production input. The production identity path now
+> consumes only the immutable `act_contacts_<pull-id>.json` plus
+> `act_eic_contact_<pull-id>.json` pair committed by the matching
+> `act_pull_manifest_<pull-id>.json`. The ledger verifies the newest
+> manifest's filenames, completeness policy, byte counts, row counts, and
+> SHA-256 hashes, and refuses a newer orphan contacts file. Do not restore the
+> stale CRM Excel export as a fallback.
+>
+> A CRD typed into ACT is an assertion, not proof. Automatic approval requires
+> an independent SEC/roster corroborator; comparable current firm or address
+> contradictions are review cases. Human decisions remain evidence-hash bound.
+>

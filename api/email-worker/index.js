@@ -7,6 +7,7 @@ const service = require("../shared/email-service");
 const core = require("../shared/email-core");
 const mailboxGate = require("../shared/email-mailbox-gate");
 const suppress = require("../shared/email-suppress");
+const recipientRegistry = require("../shared/recipient-registry");
 
 function parseWork(value) {
   if (value && typeof value === "object") return value;
@@ -56,6 +57,53 @@ async function refreshBatch(userId, batchId, deps) {
 
 const RETRY_CEILING = 6;
 
+async function verifyIdentity(message, batch, deps, options = {}) {
+  if (!message.contactId) {
+    if (String(message.recipientEmail).toLowerCase() !== String(batch.graphMailbox).toLowerCase())
+      throw service.httpError(409, "A non-advisor recipient is not the connected mailbox.",
+        "recipient_not_approved");
+    return null;
+  }
+  const approved = await deps.recipientRegistry.verify(
+    message.contactId, message.recipientEmail, options);
+  if (!message.recipientRoutingHash
+      || message.recipientRoutingHash !== approved.routingHash)
+    throw service.httpError(409,
+      "The advisor's approved recipient routing changed after approval.",
+      "recipient_routing_changed");
+  const requestedMates = (message.teammateCc || []).map((email, index) => ({
+    crd: (message.teammateCcCrds || [])[index] || "", email,
+  }));
+  const teammates = await deps.recipientRegistry.verifyTeammates(
+    message.contactId, requestedMates);
+  return { approved, teammates };
+}
+
+function graphAddresses(remote, field) {
+  return (remote[field] || []).map((entry) =>
+    String((((entry || {}).emailAddress || {}).address) || "").trim().toLowerCase()).filter(Boolean).sort();
+}
+
+function sameAddresses(actual, expected) {
+  return JSON.stringify(actual.slice().sort()) ===
+    JSON.stringify((expected || []).map((x) => String(x).toLowerCase()).sort());
+}
+
+function assertRouting(remote, recipientEmail, copies) {
+  if (!sameAddresses(graphAddresses(remote, "toRecipients"), [recipientEmail])
+      || !sameAddresses(graphAddresses(remote, "ccRecipients"), copies.cc)
+      || !sameAddresses(graphAddresses(remote, "bccRecipients"), copies.bcc))
+    throw service.httpError(409,
+      "The Outlook draft recipients do not match the approved routing.",
+      "recipient_routing_changed");
+}
+
+async function routingView(found, token, deps) {
+  if (found && ["toRecipients", "ccRecipients", "bccRecipients"]
+      .some((field) => Array.isArray(found[field]))) return found;
+  return (deps.graph.getDirectMessage || deps.graph.getMessage)(token, found.id);
+}
+
 async function failOrRetry(work, claimed, err, phase, deps) {
   if (["graph_not_connected", "graph_reconnect_required"].includes(err.code)) {
     await deps.store.patchMessage(work.userId, work.batchId, work.messageId, { state: "auth_required",
@@ -79,7 +127,7 @@ async function failOrRetry(work, claimed, err, phase, deps) {
     await deps.enqueue({ ...work, kind: phase === "draft" ? "draft" : "reconcile" }, seconds);
   } else {
     await deps.store.patchMessage(work.userId, work.batchId, work.messageId, { state: "failed",
-      failureCode: err.graphCode || "graph_failure", failureMessage: err.message,
+      failureCode: err.graphCode || err.code || "graph_failure", failureMessage: err.message,
       graphRequestId: err.requestId || "", leaseUntilUtc: "" }, claimed.etag);
   }
   await deps.store.audit(work.userId, work.batchId, `${phase}_failed`, { messageId: work.messageId,
@@ -96,6 +144,7 @@ async function draft(work, deps) {
     const token = await deps.auth.tokenFor(work.userId);
     if (String(token.mailboxId).toLowerCase() !== String(batch.graphMailboxId).toLowerCase())
       throw service.httpError(403, "Mailbox identity changed after batch creation; refusing to create a draft.");
+    await verifyIdentity(claimed, batch, deps, { force: true });
     let found = claimed.graphMessageId ? await deps.graph.getMessage(token.accessToken, claimed.graphMessageId).catch((e) => {
       if (e.statusCode === 404) return null; throw e;
     }) : await deps.graph.findByAppId(token.accessToken, claimed.id);
@@ -142,6 +191,8 @@ async function draft(work, deps) {
     }
     if (!found) found = await deps.graph.createDraft(token.accessToken,
       { ...claimed, ...copies });
+    const routed = await routingView(found, token.accessToken, deps);
+    assertRouting(routed, claimed.recipientEmail, copies);
     await deps.store.patchMessage(work.userId, work.batchId, work.messageId, {
       graphMessageId: found.id, graphInternetMessageId: found.internetMessageId || "",
       // Captured at draft time because it is the only moment we are certain to
@@ -192,10 +243,15 @@ async function send(work, deps) {
     const token = await deps.auth.tokenFor(work.userId);
     if (String(token.mailboxId).toLowerCase() !== String(batch.graphMailboxId).toLowerCase())
       throw service.httpError(403, "Mailbox identity changed after approval; refusing to send.");
-    let remote = claimed.graphMessageId ? await deps.graph.getMessage(token.accessToken, claimed.graphMessageId).catch((e) => {
+    let remote = claimed.graphMessageId ? await (deps.graph.getDirectMessage || deps.graph.getMessage)(
+      token.accessToken, claimed.graphMessageId).catch((e) => {
       if (e.statusCode === 404) return null; throw e;
     }) : null;
-    if (!remote) remote = await deps.graph.findByAppId(token.accessToken, claimed.id);
+    if (!remote) {
+      const found = await deps.graph.findByAppId(token.accessToken, claimed.id);
+      if (found) remote = await (deps.graph.getDirectMessage || deps.graph.getMessage)(
+        token.accessToken, found.id);
+    }
     if (!remote) throw new graph.GraphError("The known Outlook draft could not be reconciled.", { ambiguous: true });
     if (!remote.isDraft) {
       await deps.store.patchMessage(work.userId, work.batchId, work.messageId, { state: "sent",
@@ -225,6 +281,12 @@ async function send(work, deps) {
         await deps.enqueue({ ...work, kind: "send" }, 30);
         return;
       }
+      const identity = await verifyIdentity(claimed, latestBatch, deps, { force: true });
+      const copies = deps.core.extraRecipients(claimed,
+        { copySelf: latestBatch.copySelf, copyInternal: latestBatch.copyInternal,
+          copyInternalTo: latestBatch.copyInternalTo, ccColleague: latestBatch.ccColleague },
+        { mail: latestBatch.senderMail });
+      assertRouting(remote, claimed.recipientEmail, copies);
 
       /* THE LAST MOMENT ANYTHING CAN BE STOPPED.
        *
@@ -242,18 +304,25 @@ async function send(work, deps) {
        * Both checks fail CLOSED: an error here aborts the send rather than
        * proceeding on the assumption that nothing changed.
        */
+      const identityRecipients = [
+        { email: claimed.recipientEmail, contactId: claimed.contactId },
+        ...identity.teammates.map((mate) => ({ email: mate.email, contactId: mate.crd })),
+      ];
       const [policy, blocked] = await Promise.all([
         deps.store.policy(),
-        deps.suppress.blockedAmong([{ email: claimed.recipientEmail, contactId: claimed.contactId }]),
+        deps.suppress.blockedAmong(identityRecipients),
       ]);
 
       if (blocked.size) {
         // Final for this message. The recipient asked not to be emailed; there is
         // no state in which retrying that is correct.
-        const why = blocked.get(String(claimed.recipientEmail || "").toLowerCase()) || "opted out";
+        const blockedAddress = identityRecipients.find((recipient) =>
+          blocked.has(String(recipient.email || "").toLowerCase()));
+        const address = (blockedAddress && blockedAddress.email) || claimed.recipientEmail;
+        const why = blocked.get(String(address || "").toLowerCase()) || "opted out";
         await deps.store.patchMessage(work.userId, work.batchId, work.messageId, { state: "canceled",
           failureCode: "recipient_opted_out", leaseUntilUtc: "",
-          failureMessage: `Not sent: ${claimed.recipientEmail} ${why}. `
+          failureMessage: `Not sent: ${address} ${why}. `
             + `This was recorded after the batch was approved.` }, claimed.etag);
         await deps.store.audit(work.userId, work.batchId, "send_blocked_recipient_opted_out",
           { messageId: work.messageId, reason: why });
@@ -331,7 +400,8 @@ async function reconcile(work, deps) {
 
 async function processWork(raw, overrides = {}) {
   const work = parseWork(raw);
-  const deps = { auth, store, graph, enqueue: service.enqueue, core, mailboxGate, suppress, ...overrides };
+  const deps = { auth, store, graph, enqueue: service.enqueue, core, mailboxGate, suppress,
+    recipientRegistry, ...overrides };
   if (!work.userId || !work.batchId || !work.messageId) throw new Error("Incomplete email queue message.");
   if (work.kind === "draft") return draft(work, deps);
   if (work.kind === "send") return send(work, deps);

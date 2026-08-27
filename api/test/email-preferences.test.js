@@ -22,12 +22,19 @@ function load(options = {}) {
       return options.actResult || { ok: true };
     },
   };
+  const recipientRegistry = {
+    verifyActPair: async () => {
+      if (options.registryError) throw options.registryError;
+      return { actContactId: "act-123" };
+    },
+  };
   delete require.cache[routePath];
   const realLoad = Module._load;
   Module._load = function (request, parent, isMain) {
     if (parent && parent.filename === routePath) {
       if (request === "../shared/email-suppress") return suppress;
       if (request === "../shared/act") return act;
+      if (request === "../shared/recipient-registry") return recipientRegistry;
     }
     return realLoad.call(this, request, parent, isMain);
   };
@@ -83,7 +90,7 @@ test("a normalized match suppresses only the signed token address", async () => 
   assert.match(response.html, /You have been unsubscribed/);
   assert.doesNotMatch(response.html, /Advisor@Example\.com/i);
   assert.deepEqual(calls.suppress, [["Advisor@Example.com", { source: "unsubscribe-form" }]]);
-  assert.deepEqual(calls.act, [["Advisor@Example.com", "123456"]]);
+  assert.deepEqual(calls.act, [["Advisor@Example.com", "123456", "act-123"]]);
   assert.deepEqual(calls.synced, ["Advisor@Example.com"]);
 });
 
@@ -97,6 +104,19 @@ test("an Act failure cannot undo the local suppression", async () => {
   assert.equal(calls.suppress.length, 1);
   assert.equal(calls.act.length, 1);
   assert.equal(calls.synced.length, 0);
+});
+
+test("an unverified CRD-to-Act pair writes no CRM record", async () => {
+  const error = new Error("Act identity changed");
+  error.code = "recipient_identity_changed";
+  const { route, calls } = load({ registryError: error });
+  const response = await request(route, "POST", {
+    body: { t: "signed-token", email: "advisor@example.com" },
+  });
+  assert.equal(response.status, 200);
+  assert.match(response.html, /You have been unsubscribed/);
+  assert.equal(calls.suppress.length, 1, "local suppression is the primary safety action");
+  assert.equal(calls.act.length, 0, "an ambiguous Act contact must receive no history or Mail Code");
 });
 
 test("an invalid signed token discloses nothing and writes nothing", async () => {

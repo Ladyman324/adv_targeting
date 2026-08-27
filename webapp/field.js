@@ -19,11 +19,12 @@ const PAGE = 200;                  // rows added per "Show more"
 // Stamped by src/web_assets.py from metadata time plus every deployed JSON
 // byte. Field data still revalidates, but the shared build ID prevents stale
 // same-day rebuilds and keeps every first-party data request explicit.
-const DATA_VERSION = "20260822T034641Z-16d3a70808d79456";
+const DATA_VERSION = "20260822T034641Z-b99a17fb2ee4950b";
 const dataUrl = file => {
   const path = file.startsWith("data/") ? file : `data/${file}`;
   return `${path}${path.includes("?") ? "&" : "?"}v=${encodeURIComponent(DATA_VERSION)}`;
 };
+Dial.setContactRouteVersion(DATA_VERSION);
 
 
 let INDEX = null;
@@ -378,6 +379,8 @@ function openSheet(r){
   // Firm-wide suppression, surfaced before the buttons rather than after: a
   // rep should see it in the same glance as the phone number.
   const dnc = Dial.state.dnc.get(String(r[COL.crd]));
+  const unconfirmed = r[COL.tier] === "review";
+  const emailConfirmed = r[COL.tier] === "confirmed";
 
   // Suppression used to hide the "+ Call list" button and leave the tel: links
   // working, which is the wrong half: the list is a convenience, the call is
@@ -385,8 +388,8 @@ function openSheet(r){
   // inbound call can be recognised -- but it is not a link.
   const blocked = (label, ghost) =>
     `<span class="${ghost ? "ghost " : ""}blocked">&#9742; ${label}</span>`;
-  const work = Dial.telHref(r[COL.crd], r[COL.phone]);
-  const mob = Dial.telHref(r[COL.crd], r[COL.mobile]);
+  const work = unconfirmed ? "" : Dial.telHref(r[COL.crd], r[COL.phone]);
+  const mob = unconfirmed ? "" : Dial.telHref(r[COL.crd], r[COL.mobile]);
   const tel = !r[COL.phone] ? ""
     : !work ? blocked(isDirect(r) ? "Direct" : "Office")
             : `<a href="${esc(work)}"
@@ -398,12 +401,12 @@ function openSheet(r){
   // Same draft machinery as the session card, driven by the purpose chip in
   // the log block below. Rebuilt whenever the sheet re-renders, which is what
   // the chip handler triggers here.
-  const mail = r[COL.email] ? `<a class="ghost"
+  const mail = r[COL.email] && emailConfirmed ? `<a class="ghost"
       href="#"
       data-mail="${esc(r[COL.crd])}">&#9993; Email${
         adhocPurpose ? " (" + esc(Dial.purposeLabel(adhocPurpose)) + ")" : ""}</a>` : "";
   const queued = Dial.inQueue(r[COL.crd]);
-  const queueBtn = dnc ? "" : `<button class="ghost" data-queue="${esc(r[COL.crd])}">`
+  const queueBtn = dnc || unconfirmed ? "" : `<button class="ghost" data-queue="${esc(r[COL.crd])}">`
       + `${queued ? "&#10003; On call list" : "&#43; Call list"}</button>`;
 
   // The cheapest meetings a rep will ever get: they are already going to the
@@ -434,8 +437,10 @@ function openSheet(r){
     ${row("Phone", r[COL.phone_pretty]
         ? `${r[COL.phone_pretty]} (${isDirect(r) ? "Direct" : "Office"})` : "")}
     ${r[COL.email] ? `<p class="sheet-row"><span class="sheet-lab">Email</span>
-        ${Dial.isDnc(r[COL.crd])
-          ? `<span title="Firm-wide do-not-call, so this address is not one-click"
+        ${Dial.isDnc(r[COL.crd]) || !emailConfirmed
+          ? `<span title="${!emailConfirmed
+               ? "Research-only address; confirm the identity before emailing"
+               : "Firm-wide do-not-call, so this address is not one-click"}"
                >${esc(r[COL.email])}</span>`
           : `<a class="sheet-mailto" href="mailto:${esc(r[COL.email])}"
                title="Opens a blank email outside the app — nothing is logged"
@@ -567,21 +572,21 @@ function snapshotOf(r){
            // a phone working a list in a car has no tile to consult, and this
            // is what stops an unconfirmed match being used to silence somebody
            // firm-wide from a screen that shows only a name and a number.
-           unconfirmed: r[COL.tier] === "review" };
+           unconfirmed: r[COL.tier] === "review",
+           identityApproved: r[COL.tier] === "confirmed" || r[COL.tier] === "high",
+           emailConfirmed: r[COL.tier] === "confirmed",
+           emailEligibilityKnown: true,
+           contactRouteVersion: DATA_VERSION };
+
 }
 
 /* An advisor's teammates, with addresses, for the emailer's per-message picker.
  *
- * The sheet already lists teammates by NAME -- a practice record carries
- * [crd, name, state] and nothing more. The address lives on the teammate's own
- * tile row, which is why the sheet only makes a teammate tappable when their
- * tile happens to be loaded.
- *
- * So this is deliberately PARTIAL, in exactly the way the sheet already is: a
- * teammate whose tile is not loaded has no address here, and offering their
- * name with nothing to send to would be worse than leaving them out. The
- * practice file is fetched if it is not already cached, which covers the common
- * case of working a list inside one area.
+ * The practice shard carries [crd, name, state, email, tier]. The email and
+ * tier must travel together: a teammate may be in another city and therefore
+ * absent from TILE_CACHE, but an unconfirmed identity must still never be
+ * offered as a recipient. The API re-checks the approved-recipient registry;
+ * this client-side filter keeps the UI from offering a choice it will refuse.
  */
 async function teammatesWithEmail(crd, state, teamKey){
   if (!state) return [];
@@ -608,6 +613,7 @@ async function teammatesWithEmail(crd, state, teamKey){
   for (const m of rec.m) {
     const mateCrd = String(m[0]);
     if (mateCrd === String(crd)) continue;
+    if (String(m[4] || "") !== "confirmed") continue;
     /* The address now ships WITH the practice record, as a fourth column.
      *
      * It used to be looked up in TILE_CACHE, which holds only the tiles near
@@ -619,7 +625,7 @@ async function teammatesWithEmail(crd, state, teamKey){
       const row = rowByCrd(mateCrd);
       email = row ? String(row[COL.email] || "") : "";
     }
-    if (email) out.push({ name: m[1] || mateCrd, email });
+    if (email) out.push({ crd: mateCrd, name: m[1] || mateCrd, email });
   }
   return out;
 }
@@ -659,7 +665,7 @@ window.AdvisorEmailData = {
     const greeting = (row && COL.sal != null && row[COL.sal]) || "";
     const base = row ? snapshotOf(row)
       : Dial.state.items.find((it) => String(it.crd) === String(crd));
-    if (!base) return base;
+    if (!base || base.emailConfirmed !== true) return null;
     const mates = await teammatesWithEmail(
       String(crd), row ? row[COL.state] : base.state, row ? row[COL.team_key] : "");
     return { ...base, firstName: greeting,
@@ -668,6 +674,7 @@ window.AdvisorEmailData = {
   list: async () => {
     const out = [];
     for (const it of Dial.state.items) {
+      if (it.emailConfirmed !== true) continue;
       const row = rowByCrd(String(it.crd));
       const mates = await teammatesWithEmail(
         String(it.crd), row ? row[COL.state] : it.state, row ? row[COL.team_key] : "");
@@ -969,6 +976,28 @@ async function locateFlagged(crd, name){
     if (hit) return await hydrate(String(crd), hit[NAMES.C.cell]);
   }
   return null;
+}
+
+// Old saved lists are reconciled only when a rep reaches the row. This keeps
+// field startup fast: one name shard and one tile are fetched for the current
+// stale row, never the national contact file or all 250 saved rows.
+const routeChecks = new Set();
+async function ensureCurrentQueueRoute(item){
+  if (!item || (item.contactRouteVersion === DATA_VERSION
+      && item.emailEligibilityKnown === true
+      && (item.identityApproved === true || item.routeIssue))) return;
+  const key = String(item.crd);
+  if (routeChecks.has(key)) return;
+  routeChecks.add(key);
+  try {
+    const current = rowByCrd(key)
+      || await locateFlagged(key, item.name).catch(() => null);
+    // A failed lookup remains stale and therefore non-dialable. Do not persist
+    // "missing" from a transient mobile-network failure.
+    if (current) await Dial.reconcileRoute(key, snapshotOf(current));
+  } catch {
+    // Fail closed; reloading permits another reconciliation attempt.
+  }
 }
 
 async function dialableFlagged(kind){
@@ -1705,6 +1734,7 @@ function renderDial(){
   const cur = Dial.current();
   sess.hidden = !cur;
   if (!cur) return;
+  ensureCurrentQueueRoute(cur);
 
   const kindLabel = cur.phoneKind === "direct" ? "Direct"
     : cur.phoneKind === "extension" ? "Extension"
@@ -1750,9 +1780,11 @@ function renderDial(){
         .filter(Boolean).join(" &middot; ")).replace(/&amp;middot;/g, "&middot;")}</div>
     <div class="sess-acts">
       ${!cur.phone ? ""
-        : !Dial.telHref(cur.crd, cur.phone)
+        : Dial.isDnc(cur.crd)
           ? `<span class="sess-call blocked">&#9940; Do not call</span>`
-          : `<a class="sess-call" href="${esc(Dial.telHref(cur.crd, cur.phone))}"
+        : !Dial.telHref(cur.crd, cur.phone, cur)
+          ? `<span class="sess-call blocked">&#9940; Contact details need current verification</span>`
+          : `<a class="sess-call" href="${esc(Dial.telHref(cur.crd, cur.phone, cur))}"
           data-sess-call="${esc(cur.crd)}">&#9742; Call${kindLabel ? " (" + kindLabel + ")" : ""}</a>`}
       <!-- The draft is built from the purpose chip below, so choosing
            "Materials" and tapping Email opens a compose window already

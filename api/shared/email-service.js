@@ -7,6 +7,7 @@ const auth = require("./email-auth");
 const limitGuard = require("./email-limit-guard");
 const suppress = require("./email-suppress");
 const health = require("./email-health");
+const recipientRegistry = require("./recipient-registry");
 // The rep's own account settings live in the app store, not the email store --
 // same table the map's default scope and call list come from.
 const appStore = require("./store");
@@ -150,6 +151,29 @@ function recipientSnapshot(raw) {
       .filter((t) => core.validEmail(t.email)).slice(0, 25) };
 }
 
+async function canonicalRecipient(raw, connection) {
+  const crd = String(raw.contactId || raw.crd || "").trim();
+  if (!crd) {
+    const mailbox = String(connection.mailbox || "").trim().toLowerCase();
+    const email = String(raw.email || "").trim().toLowerCase();
+    if (!mailbox || email !== mailbox) throw httpError(400,
+      "Every external recipient needs an approved advisor CRD.", "recipient_crd_required");
+    const profile = connection.profile || {}, split = core.splitName(profile.displayName || "");
+    return { contactId: "", name: profile.displayName || connection.mailbox, email: mailbox,
+      firm: "", firstName: profile.givenName || split.first, lastName: profile.surname || split.last,
+      teammates: [], teammatesFull: [], recipientKind: "self_test",
+      registryHash: "", routingHash: "" };
+  }
+  const approved = await recipientRegistry.resolve(crd);
+  const mates = await recipientRegistry.allowedTeammates(crd);
+  const split = core.splitName(approved.name);
+  return { contactId: crd, name: approved.name, email: approved.email, firm: approved.firm,
+    firstName: approved.greetingName || split.first, lastName: approved.lastName || split.last,
+    teammates: mates.map((m) => m.email),
+    teammatesFull: mates.map((m) => ({ crd: m.crd, name: m.name, email: m.email })),
+    registryHash: approved.registryHash, routingHash: approved.routingHash };
+}
+
 /* Which of an advisor's teammates may actually be copied.
  *
  * A CC is a real email to a real person, so it goes through the same gates the
@@ -207,8 +231,8 @@ function dropCopiedRecipients(recipients, teamCc) {
 }
 
 async function validateMessage(message, duplicateEmails, cfg, currentDocsById, commonRevision = 0,
-                               knownImageIds = null) {
-  const errors = [], warnings = [];
+                               knownImageIds = null, identityErrors = []) {
+  const errors = [...identityErrors], warnings = [];
   if (!core.validEmail(message.recipientEmail)) errors.push({ code: "invalid_recipient", message: "Recipient email is missing or invalid." });
   if (duplicateEmails.has(message.recipientEmail)) errors.push({ code: "duplicate_recipient", message: "This recipient appears more than once in the batch." });
   if (!String(message.subject || "").trim()) errors.push({ code: "missing_subject", message: "Subject is required." });
@@ -271,6 +295,33 @@ async function validateMessage(message, duplicateEmails, cfg, currentDocsById, c
   return { errors, warnings, estimatedBytes: estimated };
 }
 
+function identityPresentationRefresh(message, approved, batch, sender, images) {
+  const split = core.splitName(approved.name);
+  const presentation = {
+    recipientName: approved.name,
+    greetingName: approved.greetingName || split.first,
+    recipientLastName: approved.lastName || split.last,
+    companyName: approved.firm,
+  };
+  const changed = Object.entries(presentation)
+    .some(([key, value]) => String(message[key] || "") !== String(value || ""));
+  if (!changed) return { changed: false, blocked: false, patch: presentation };
+  if (message.subjectOverridden || message.bodyOverridden)
+    return { changed: true, blocked: true, patch: {} };
+  const recipient = {
+    name: presentation.recipientName,
+    firstName: presentation.greetingName,
+    lastName: presentation.recipientLastName,
+    firm: presentation.companyName,
+  };
+  const subject = core.renderTemplate(batch.commonSubject, recipient, sender).rendered;
+  const bodyText = core.renderTemplate(batch.commonBodyText, recipient, sender).rendered;
+  return { changed: true, blocked: false, patch: {
+    ...presentation, subject, bodyText,
+    bodyHtml: core.plainTextToSafeHtml(bodyText, images),
+  } };
+}
+
 async function validateBatch(who, batchId, options = {}) {
   const batch = await store.getBatch(who.id, batchId);
   if (!batch) throw httpError(404, "Email batch not found.");
@@ -279,14 +330,63 @@ async function validateBatch(who, batchId, options = {}) {
   for (const m of messages) counts.set(m.recipientEmail, (counts.get(m.recipientEmail) || 0) + 1);
   const duplicates = new Set([...counts].filter(([, n]) => n > 1).map(([email]) => email));
   const cfg = core.config(), updated = [];
+  await recipientRegistry.load({ force: options.identityForce === true });
   const currentDocsById = new Map((await store.getDocuments(batch.attachmentIds)).map((d) => [d.id, d]));
   const tpl = await store.getTemplate(batch.templateId);
-  const knownImageIds = tpl ? new Set((tpl.images || []).map((i) => String(i.id).toLowerCase())) : null;
+  const images = (tpl && tpl.images) || [];
+  const knownImageIds = tpl ? new Set(images.map((i) => String(i.id).toLowerCase())) : null;
+  const sender = (await auth.status(who.id).catch(() => null) || {}).profile || null;
   for (const message of messages) {
-    const reviewed = options.reviewed === true ? true : message.reviewed;
-    const validation = await validateMessage({ ...message, reviewed }, duplicates, cfg, currentDocsById,
-      Number(batch.commonRevision) || 0, knownImageIds);
-    updated.push(await store.patchMessage(who.id, batchId, message.id, { reviewed, validation,
+    const identityErrors = [];
+    const identityPatch = {};
+    let presentationChanged = false;
+    try {
+      if (message.contactId) {
+        const approved = await recipientRegistry.verify(message.contactId, message.recipientEmail);
+        const requestedMates = (message.teammateCc || []).map((email, index) => ({
+          crd: (message.teammateCcCrds || [])[index] || "", email,
+        }));
+        const approvedMates = await recipientRegistry.verifyTeammates(
+          message.contactId, requestedMates);
+        const blockedMates = approvedMates.length
+          ? await suppress.blockedAmong(approvedMates.map((mate) => ({
+              email: mate.email, contactId: mate.crd,
+            }))) : new Map();
+        if (blockedMates.size) throw httpError(409,
+          "A copied teammate is now suppressed and must be removed before approval.",
+          "teammate_suppressed");
+        const available = await recipientRegistry.allowedTeammates(message.contactId);
+        identityPatch.recipientRegistryHash = approved.registryHash;
+        identityPatch.recipientRoutingHash = approved.routingHash;
+        identityPatch.teammateCcJson = JSON.stringify(approvedMates.map((mate) => mate.email));
+        identityPatch.teammateCcCrdsJson = JSON.stringify(approvedMates.map((mate) => mate.crd));
+        identityPatch.teammatesAvailableJson = JSON.stringify(available.map((mate) => ({
+          crd: mate.crd, name: mate.name, email: mate.email,
+        })));
+        const refresh = identityPresentationRefresh(
+          message, approved, batch, sender, images);
+        presentationChanged = refresh.changed;
+        if (refresh.blocked) {
+          identityErrors.push({
+            code: "recipient_presentation_override_stale",
+            message: "This advisor's approved name or greeting changed. Restore the "
+              + "approved subject/body wording (or recreate the recipient) before approval.",
+          });
+        } else Object.assign(identityPatch, refresh.patch);
+      } else if (String(message.recipientEmail).toLowerCase() !== String(batch.graphMailbox).toLowerCase()) {
+        throw httpError(409, "A non-advisor recipient is not the connected mailbox.",
+          "recipient_not_approved");
+      }
+    } catch (err) {
+      identityErrors.push({ code: err.code || "recipient_identity_unavailable",
+        message: err.message || "Recipient identity could not be verified." });
+    }
+    const reviewed = presentationChanged ? false
+      : (options.reviewed === true ? true : message.reviewed);
+    const candidate = { ...message, ...identityPatch, reviewed };
+    const validation = await validateMessage(candidate, duplicates, cfg, currentDocsById,
+      Number(batch.commonRevision) || 0, knownImageIds, identityErrors);
+    updated.push(await store.patchMessage(who.id, batchId, message.id, { ...identityPatch, reviewed, validation,
       state: validation.errors.length ? "invalid" : (message.state === "invalid" ? "editing" : message.state) }, message.etag));
   }
   const errors = updated.flatMap((m) => m.validation.errors.map((v) => ({ messageId: m.id,
@@ -408,6 +508,8 @@ const FOLLOW_UP_DEFAULT_TEXT = "Just following up on the note below in case it "
 
 async function createFollowUp(who, input, deps = {}) {
   const st = deps.store || store;
+  const registry = deps.recipientRegistry || recipientRegistry;
+  const emailAuth = deps.auth || auth;
   const cfg = core.config();
   const parentId = String(input.batchId || "").trim();
   const parent = await st.getBatch(who.id, parentId);
@@ -417,7 +519,7 @@ async function createFollowUp(who, input, deps = {}) {
   if (parent.followUpSentUtc)
     throw httpError(409, "A follow-up has already been created for this batch.", "follow_up_exists");
 
-  const connection = await auth.status(who.id);
+  const connection = await emailAuth.status(who.id);
   if (!connection.connected || !connection.profile)
     throw httpError(409, "Connect your Microsoft 365 mailbox first.", "graph_not_connected");
   const profile = connection.profile;
@@ -428,6 +530,12 @@ async function createFollowUp(who, input, deps = {}) {
   if (!fresh.remaining.length)
     throw httpError(409, "Everybody has replied, bounced or opted out — there is nobody to follow up.", "nobody_to_follow_up");
 
+  await registry.load({ force: true });
+  const verifiedRemaining = [];
+  for (const row of fresh.remaining) {
+    const approved = await registry.verify(row.crd, row.email);
+    verifiedRemaining.push({ row, approved });
+  }
   const note = String(input.text || FOLLOW_UP_DEFAULT_TEXT).slice(0, cfg.maxBodyChars);
   if (!note.trim()) throw httpError(400, "The follow-up needs something to say.");
   const withAttachments = input.includeAttachments === true;
@@ -441,22 +549,32 @@ async function createFollowUp(who, input, deps = {}) {
     commonSubject: "", commonBodyText: note, commonRevision: 1,
     attachmentIds: documents.map((d) => d.id),
     attachmentSummary: documents.map((d) => ({ id: d.id, name: d.name, bytes: d.bytes })),
-    recipientCount: fresh.remaining.length, externalCount: fresh.remaining.length,
+    recipientCount: verifiedRemaining.length, externalCount: verifiedRemaining.length,
     parentBatchId: parentId,
     graphMailboxId: profile.id, graphMailbox: connection.mailbox,
     ccTeammates: "", ccColleague: "",
     copySelf: String(parent.copySelf || ""), copyInternal: String(parent.copyInternal || ""),
     copyInternalTo: String(parent.copyInternalTo || ""),
-    senderMail: String(profile.mail || profile.userPrincipalName || "") });
+    senderMail: String(profile.mail || profile.userPrincipalName || ""),
+    recipientRegistryHash: (verifiedRemaining[0] && verifiedRemaining[0].approved.registryHash) || "" });
 
-  for (let i = 0; i < fresh.remaining.length; i++) {
-    const r = fresh.remaining[i];
+  for (let i = 0; i < verifiedRemaining.length; i++) {
+    const { row: r, approved } = verifiedRemaining[i];
+    const split = core.splitName(approved.name);
     // "RE:" and the threading both come from Graph's createReply in the worker.
     // The subject here is what the REVIEW SCREEN shows, so it has to read the
     // way the advisor will see it.
     const subject = /^re:/i.test(r.subject) ? r.subject : `RE: ${r.subject}`;
     await st.createMessage(who.id, batchId, { id: st.id(), ordinal: i,
-      contactId: r.crd, recipientName: r.name, recipientEmail: r.email,
+      contactId: r.crd, recipientName: approved.name, recipientEmail: approved.email,
+      companyName: approved.firm,
+      greetingName: approved.greetingName || split.first,
+      recipientLastName: approved.lastName || split.last,
+      recipientRegistryHash: approved.registryHash,
+      recipientRoutingHash: approved.routingHash,
+      teammateCcJson: "[]", teammateCcCrdsJson: "[]",
+      teammatesAvailableJson: JSON.stringify((await registry.allowedTeammates(r.crd))
+        .map((mate) => ({ crd: mate.crd, name: mate.name, email: mate.email }))),
       // The sent message this replies to. The worker needs the Graph id, not
       // the conversation id, because it replies to a MESSAGE.
       followUpOfGraphId: r.graphMessageId,
@@ -481,11 +599,14 @@ async function createFollowUp(who, input, deps = {}) {
 }
 
 async function createBatch(who, input) {
-  const recipients = (Array.isArray(input.recipients) ? input.recipients : []).map(recipientSnapshot);
-  if (!recipients.length) throw httpError(400, "Select at least one recipient.");
-  if (recipients.length >= core.ABSOLUTE_BATCH_STOP) throw httpError(400, "15,000 recipients is a campaign-sized use case and is blocked.");
+  const requestedRecipients = (Array.isArray(input.recipients) ? input.recipients : []).map(recipientSnapshot);
+  if (!requestedRecipients.length) throw httpError(400, "Select at least one recipient.");
+  if (requestedRecipients.length >= core.ABSOLUTE_BATCH_STOP) throw httpError(400, "15,000 recipients is a campaign-sized use case and is blocked.");
   const connection = await auth.status(who.id);
   if (!connection.connected || !connection.profile) throw httpError(409, "Connect your Microsoft 365 mailbox first.", "graph_not_connected");
+  await recipientRegistry.load();
+  const recipients = [];
+  for (const raw of requestedRecipients) recipients.push(await canonicalRecipient(raw, connection));
   const template = await store.getTemplate(String(input.templateId || ""));
   if (!template) throw httpError(400, "Choose an approved email template.");
   // Required attachments come from the template and cannot be dropped by the
@@ -587,12 +708,15 @@ async function createBatch(who, input) {
     copySelf: String(prefs.copySelf || ""),
     copyInternal: String(prefs.copyInternal || ""),
     copyInternalTo: String(prefs.copyInternalTo || ""),
-    senderMail: String(profile.mail || profile.userPrincipalName || "") });
+    senderMail: String(profile.mail || profile.userPrincipalName || ""),
+    recipientRegistryHash: (kept.find((r) => r.registryHash) || {}).registryHash || "" });
   for (let i = 0; i < kept.length; i++) {
     const r = kept[i], subject = core.renderTemplate(template.subject, r, profile),
       body = core.renderTemplate(template.bodyText, r, profile);
     await store.createMessage(who.id, batchId, { id: store.id(), ordinal: i, contactId: r.contactId,
       recipientName: r.name, recipientEmail: r.email, companyName: r.firm,
+      greetingName: r.firstName, recipientLastName: r.lastName,
+      recipientRegistryHash: r.registryHash, recipientRoutingHash: r.routingHash,
       // Stored per message: each advisor has their own practice, so this is the
       // one copy decision that cannot be a batch-level field.
       teammateCcJson: JSON.stringify(teamCc.get(r.contactId || r.email) || []),
@@ -601,6 +725,7 @@ async function createBatch(who, input) {
       // rep three screens into a batch should not need it reloaded to pick a
       // teammate. Suppression is re-checked on every actual copy.
       teammatesAvailableJson: JSON.stringify((r.teammatesFull || []).slice(0, 25)),
+      teammateCcCrdsJson: "[]",
       subject: subject.rendered, bodyText: body.rendered,
       bodyHtml: core.plainTextToSafeHtml(body.rendered, template.images || []),
       inlineImages: template.images || [],
@@ -672,7 +797,8 @@ ${bodyTemplate}`.matchAll(core.IMAGE_TOKEN)) {
   const revision = batch.commonRevision + 1;
   const behind = [];
   for (const m of await store.listMessages(who.id, batch.id)) {
-    const recipient = { name: m.recipientName, firm: m.companyName };
+    const recipient = { name: m.recipientName, firstName: m.greetingName,
+      lastName: m.recipientLastName, firm: m.companyName };
     /* `overwriteAll` replaces individually edited messages too.
      *
      * Normally an override is sacred -- a rep wrote those words on purpose and
@@ -725,8 +851,10 @@ async function updateMessage(who, input) {
   const sender = (await auth.status(who.id).catch(() => null) || {}).profile || null;
   if ("bodyText" in input) { patch.bodyText = String(input.bodyText || "").slice(0, core.config().maxBodyChars);
     patch.bodyHtml = core.plainTextToSafeHtml(patch.bodyText, tplImages); patch.bodyOverridden = true; }
-  if (input.resetSubject) { patch.subject = core.renderTemplate(batch.commonSubject, { name: message.recipientName, firm: message.companyName }, sender).rendered; patch.subjectOverridden = false; }
-  if (input.resetBody) { patch.bodyText = core.renderTemplate(batch.commonBodyText, { name: message.recipientName, firm: message.companyName }, sender).rendered;
+  const mergeRecipient = { name: message.recipientName, firstName: message.greetingName,
+    lastName: message.recipientLastName, firm: message.companyName };
+  if (input.resetSubject) { patch.subject = core.renderTemplate(batch.commonSubject, mergeRecipient, sender).rendered; patch.subjectOverridden = false; }
+  if (input.resetBody) { patch.bodyText = core.renderTemplate(batch.commonBodyText, mergeRecipient, sender).rendered;
     patch.bodyHtml = core.plainTextToSafeHtml(patch.bodyText, tplImages); patch.bodyOverridden = false; }
   await store.patchMessage(who.id, batch.id, message.id, patch, message.etag);
   await store.audit(who.id, batch.id, "individual_message_updated", { messageId: message.id,
@@ -754,18 +882,30 @@ async function updateMessageCc(who, input) {
     throw httpError(409, "This batch can no longer be edited.");
 
   const wanted = (Array.isArray(input.teammates) ? input.teammates : [])
-    .map((a) => String(a || "").trim().toLowerCase())
-    .filter((a) => core.validEmail(a) && a !== message.recipientEmail)
-    .slice(0, MAX_TEAMMATE_CC);
+    .slice(0, MAX_TEAMMATE_CC)
+    .map((item) => typeof item === "object"
+      ? { crd: String(item.crd || "").trim(),
+          email: String(item.email || "").trim().toLowerCase() }
+      : { crd: "", email: String(item || "").trim().toLowerCase() })
+    .filter((item) => (item.crd || core.validEmail(item.email))
+      && item.email !== message.recipientEmail);
   // Suppression applies to a copy exactly as it does to the To line: the
   // unsubscribe footer is signed for the recipient, so somebody copied here
   // could not opt out of a message they never asked for.
-  const blocked = wanted.length
-    ? await suppress.blockedAmong(wanted.map((email) => ({ email }))) : new Map();
-  const cc = wanted.filter((a) => !blocked.has(a));
+  if (!message.contactId && wanted.length) throw httpError(409,
+    "A self-test message cannot copy advisor teammates.", "teammate_not_approved");
+  const approved = message.contactId
+    ? await recipientRegistry.verifyTeammates(message.contactId, wanted, { force: true }) : [];
+  if (wanted.length && approved.length !== wanted.length) throw httpError(409,
+    "A requested teammate is no longer approved for this advisor.", "teammate_not_approved");
+  const blocked = approved.length
+    ? await suppress.blockedAmong(approved.map((mate) => ({ email: mate.email, contactId: mate.crd }))) : new Map();
+  const selected = approved.filter((mate) => !blocked.has(mate.email));
+  const cc = selected.map((mate) => mate.email);
 
   await store.patchMessage(who.id, batch.id, message.id,
-    { teammateCcJson: JSON.stringify(cc) }, message.etag);
+    { teammateCcJson: JSON.stringify(cc),
+      teammateCcCrdsJson: JSON.stringify(selected.map((mate) => mate.crd)) }, message.etag);
 
   // Anyone now copied who was also being written to loses their own message.
   const removed = [];
@@ -782,7 +922,8 @@ async function updateMessageCc(who, input) {
   }
   const detail = await getBatchDetail(who, batch.id);
   return { ...detail, ccApplied: cc, ccRemovedRecipients: removed,
-           ccSuppressed: wanted.filter((a) => blocked.has(a)) };
+           ccSuppressed: approved.filter((mate) => blocked.has(mate.email))
+             .map((mate) => mate.email) };
 }
 
 async function removeRecipient(who, input) {
@@ -814,16 +955,31 @@ async function approve(who, input) {
   if (!["editing", "invalid"].includes(existingBatch.status)) {
     if (existingBatch.mode !== mode) throw httpError(409, "This batch was already approved in a different mode.");
     if (["drafting", "sending", "paused"].includes(existingBatch.status)) {
+      // Re-approving an in-flight batch re-queues whatever has not drafted yet,
+      // and it has to be paced for the same reason the first approval is: this
+      // is the path a rep takes after a throttled batch, so queueing the
+      // survivors all at once would re-create the pile-up that stranded them.
+      // Position within THIS retry, since the remaining messages are a subset.
+      //
+      // core.config() locally: this branch returns before the `const cfg` that
+      // the main approval path declares further down, so reading that binding
+      // here is a temporal dead zone -- a ReferenceError at runtime that
+      // node --check cannot see.
+      const paceSeconds = core.config().mailboxIntervalSeconds;
+      let slot = 0;
       for (const message of await store.listMessages(who.id, existingBatch.id)) {
         if (!["editing", "draft_pending", "draft_ambiguous", "draft_creating"].includes(message.state)) continue;
         if (message.state === "editing") await store.patchMessage(who.id, existingBatch.id, message.id,
           { state: "draft_pending", queuedUtc: message.queuedUtc || new Date().toISOString() }, message.etag);
-        await enqueue({ kind: "draft", userId: who.id, batchId: existingBatch.id, messageId: message.id });
+        await enqueue({ kind: "draft", userId: who.id, batchId: existingBatch.id, messageId: message.id },
+          slot * paceSeconds);
+        slot += 1;
       }
     }
     return getBatchDetail(who, existingBatch.id);
   }
-  const validation = await validateBatch(who, input.batchId, { reviewed: input.reviewed === true });
+  const validation = await validateBatch(who, input.batchId,
+    { reviewed: input.reviewed === true, identityForce: true });
   const batch = validation.batch;
   if (!input.confirmation || Number(input.confirmation.recipientCount) !== batch.recipientCount)
     throw httpError(400, "Confirm the exact recipient count before approval.");
@@ -889,9 +1045,27 @@ async function approve(who, input) {
   // reshuffle the queue underneath a send already scheduled.
   const order = new Map(core.interleaveByDomain(validation.messages).map((m, i) => [m.id, i]));
   for (const m of validation.messages) {
+    const slot = order.get(m.id);
     await store.patchMessage(who.id, batch.id, m.id, { state: "draft_pending", queuedUtc: approvedUtc,
-      sendPosition: order.get(m.id), leaseUntilUtc: "" }, m.etag);
-    await enqueue({ kind: "draft", userId: who.id, batchId: batch.id, messageId: m.id });
+      sendPosition: slot, leaseUntilUtc: "" }, m.etag);
+    /* PACED, on the same clock as the send that follows it.
+     *
+     * Every draft used to be enqueued with no delay, so a batch fanned out to
+     * as many simultaneous Graph calls as the platform had instances -- and the
+     * DRAFT phase is where the attachment is uploaded. Graph allows roughly four
+     * concurrent operations per mailbox: an eleven-recipient batch carrying a
+     * PDF sent four and failed seven, some refused outright as
+     * ApplicationThrottled / MailboxConcurrency and the rest timing out behind
+     * the same wall.
+     *
+     * mailboxIntervalSeconds already spaced the SENDS; it simply never reached
+     * the step doing the expensive work. Reusing the same slot puts both phases
+     * on one timeline, which also removes a second pile-up: the send schedule is
+     * absolute (sendNotBeforeUtc + slot * interval), so a batch whose drafting
+     * ran long had every send slot fall due at once.
+     */
+    await enqueue({ kind: "draft", userId: who.id, batchId: batch.id, messageId: m.id },
+      slot * cfg.mailboxIntervalSeconds);
   }
   await store.audit(who.id, batch.id, mode === "send" ? "direct_send_approved" : "draft_creation_approved",
     { recipientCount: batch.recipientCount, attachmentIds: batch.attachmentIds, sendNotBeforeUtc });
@@ -969,4 +1143,4 @@ module.exports = {
   senderHealth, catalog, createBatch, updateCommon, updateMessage, updateMessageCc,
   validateBatch, removeRecipient,
   approve, getBatchDetail, control, enqueue, httpError, attachmentLimit,
-  followUpCandidates, createFollowUp };
+  followUpCandidates, createFollowUp, identityPresentationRefresh };

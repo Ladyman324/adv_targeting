@@ -36,6 +36,7 @@
 "use strict";
 
 const suppress = require("../shared/email-suppress");
+const recipientRegistry = require("../shared/recipient-registry");
 const act = require("../shared/act");
 
 function page(context, title, message, {
@@ -205,7 +206,8 @@ module.exports = async function (context, req) {
       const result = await suppress.suppress(email, { source: "unsubscribe-form" });
       context.log(`email preference opt-out: ${email} (new=${result.added}) ${who(req)}`);
       try {
-        const pushed = await act.markDoNotEmail(email, crd);
+        const approved = await recipientRegistry.verifyActPair(crd, email, { force: true });
+        const pushed = await act.markDoNotEmail(email, crd, approved.actContactId);
         if (pushed.ok) await suppress.markActSynced(email);
         else context.log.warn(`Act! do-not-email not applied for ${email}: ${pushed.reason || "unknown"}`);
       } catch (err) {

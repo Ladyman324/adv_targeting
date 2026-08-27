@@ -1,0 +1,326 @@
+"""Export the server-authoritative approved-recipient registry from identity links."""
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import gzip
+import hashlib
+import json
+import os
+import pathlib
+import sys
+from collections import Counter
+
+import pandas as pd
+
+ROOT = pathlib.Path(__file__).parents[1]
+sys.path.insert(0, str(ROOT / "src"))
+from identity_normalize import clean_text, normalize_crd, normalize_email
+from identity_schema import (
+    APPROVED_REGISTRY_FILENAME, APPROVED_REGISTRY_GZIP_FILENAME,
+    IDENTITY_DIRNAME, LINKS_FILENAME, MANIFEST_FILENAME, content_hash,
+)
+
+IDENTITY = ROOT / "data" / IDENTITY_DIRNAME
+BLOB_CONTAINER, BLOB_NAME = "lookups", "approved_recipients.json.gz"
+RELEASE_DESCRIPTOR_PATH = (ROOT / "api" / "shared" /
+                           "approved-recipient-release.json")
+RELEASE_PROVENANCE_KEYS = (
+    "identityManifestHash", "identityLinksSha256", "contactsSha256",
+    "actSource", "actSourceSha256",
+)
+
+
+def load_contacts() -> dict:
+    path = ROOT / "webapp" / "data" / "contacts.json"
+    if not path.exists():
+        raise SystemExit(f"Missing {path}; run the contact build first.")
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def team_hints(payload: dict) -> tuple[dict, dict]:
+    """Return CRD -> group key and both kinds of contact-group membership.
+
+    Team/practice membership is only a relationship hint. Identity, email and
+    eligibility always come from the registry recipient assembled below.
+    """
+    advisors = payload.get("advisors", {})
+    groups = {**(payload.get("teams", {}) or {}),
+              **(payload.get("practices", {}) or {})}
+    membership = {}
+    for crd, row in advisors.items():
+        if not isinstance(row, dict):
+            continue
+        key = clean_text(row.get("pk") or row.get("tm"))
+        if key:
+            membership[normalize_crd(crd)] = key
+    return membership, groups
+
+
+def _contacts_from_links(links: pd.DataFrame) -> dict:
+    """Small fixture/default for callers that test the pure registry builder."""
+    advisors = {}
+    for row in links.fillna("").to_dict("records"):
+        crd = normalize_crd(row.get("advisor_crd"))
+        if not crd:
+            continue
+        advisors[crd] = {
+            "e": normalize_email(row.get("email")),
+            "n": clean_text(row.get("display_name") or row.get("legal_name")),
+            "sal": clean_text(row.get("email_greeting")),
+            "cn": clean_text(row.get("firm")),
+            "src": "CRM", "t": "confirmed",
+        }
+    return {"advisors": advisors, "teams": {}, "practices": {}}
+
+
+def build_registry(links: pd.DataFrame, contacts_payload: dict | None = None,
+                   provenance: dict | None = None) -> dict:
+    """Build every safe outbound route; the ledger gates Act-derived routes.
+
+    Only identities carrying a direct, independently validated CRD are usable.
+    Calibrated ``high`` roster matches remain valuable research evidence, but
+    they are probabilistic name/firm/location matches and are not permission to
+    address outbound mail. A CRM row is included only when the Act GUID, CRD
+    and email agree with one unique, approved identity-ledger row.
+    """
+    rows = links.fillna("").to_dict("records")
+    approved_links = [r for r in rows if r["identity_status"] == "approved" and
+                      bool(r["can_email"]) and normalize_crd(r["advisor_crd"]) and
+                      normalize_email(r["email"])]
+    links_by_crd, unsafe_link_crds = {}, {}
+    link_crd_count = Counter(normalize_crd(r["advisor_crd"])
+                             for r in approved_links)
+    link_email_count = Counter(normalize_email(r["email"])
+                               for r in approved_links)
+    for row in approved_links:
+        crd, email = normalize_crd(row["advisor_crd"]), normalize_email(row["email"])
+        if link_crd_count[crd] != 1:
+            unsafe_link_crds[crd] = "approved_crd_not_unique"
+        elif link_email_count[email] != 1:
+            unsafe_link_crds[crd] = "approved_email_not_unique"
+        else:
+            links_by_crd[crd] = row
+
+    contacts_payload = contacts_payload or _contacts_from_links(links)
+    contacts = contacts_payload.get("advisors", {}) or {}
+    recipients, ineligible = {}, {}
+    for raw_crd, contact in contacts.items():
+        crd = normalize_crd(raw_crd)
+        if not crd or not isinstance(contact, dict):
+            continue
+        email = normalize_email(contact.get("e"))
+        tier = clean_text(contact.get("t")).lower()
+        source = clean_text(contact.get("src"))
+        if tier != "confirmed":
+            ineligible[crd] = "contact_identity_not_approved"
+            continue
+        if not email:
+            ineligible[crd] = "missing_or_invalid_email"
+            continue
+        if source.upper() == "EIC" or email.endswith("@eicatlanta.com"):
+            ineligible[crd] = "internal_colleague"
+            continue
+        approved = links_by_crd.get(crd)
+        if source.upper() == "CRM":
+            if not approved:
+                ineligible[crd] = unsafe_link_crds.get(
+                    crd, "act_identity_not_approved")
+                continue
+            if normalize_email(approved.get("email")) != email:
+                ineligible[crd] = "act_email_does_not_match_approved_identity"
+                continue
+        # A roster winner may also have an exact approved Act row. Attach its
+        # GUID only when its email agrees, so later CRM writes remain exact.
+        exact_act = approved if approved and normalize_email(
+            approved.get("email")) == email else None
+        name = clean_text(contact.get("n") or
+                          (exact_act or {}).get("display_name"))
+        greeting = clean_text(contact.get("sal") or
+                              (exact_act or {}).get("email_greeting"))
+        last_name = clean_text((exact_act or {}).get("act_last_name"))
+        if not last_name and name:
+            last_name = name.split()[-1]
+        recipients[crd] = {
+            "eligible": True, "email": email,
+            "name": name, "greetingName": greeting,
+            "lastName": last_name,
+            "firm": clean_text(contact.get("cn") or
+                               (exact_act or {}).get("firm")),
+            "tier": tier, "source": source,
+            "actContactId": clean_text(
+                (exact_act or {}).get("source_record_id")),
+            "teammates": [],
+        }
+
+    # Enforce one CRD and one address globally after Act and roster routes merge.
+    email_count = Counter(row["email"] for row in recipients.values())
+    for crd in list(recipients):
+        if email_count[recipients[crd]["email"]] > 1:
+            recipients.pop(crd)
+            ineligible[crd] = "approved_email_not_unique"
+
+    advisor_team, groups = team_hints(contacts_payload)
+    for crd, recipient in recipients.items():
+        key = advisor_team.get(crd, "")
+        members = (groups.get(key, {}) or {}).get("m", []) if key else []
+        pairs = sorted({(normalize_crd(item[0]), recipients[normalize_crd(item[0])]["email"])
+                        for item in members if isinstance(item, list) and item and
+                        normalize_crd(item[0]) in recipients and
+                        normalize_crd(item[0]) != crd})
+        recipient["teammates"] = [
+            {"crd": mate_crd, "email": email,
+             "name": recipients[mate_crd]["name"]}
+            for mate_crd, email in pairs]
+    for crd, recipient in recipients.items():
+        route = {
+            "crd": crd, "email": recipient["email"],
+            "actContactId": recipient["actContactId"],
+            "teammates": sorted([[m["crd"], m["email"]]
+                                 for m in recipient["teammates"]]),
+        }
+        recipient["routingHash"] = content_hash(route)
+        ineligible.pop(crd, None)
+    core = {"schemaVersion": 1, "recipients": dict(sorted(recipients.items())),
+            "ineligible": dict(sorted(ineligible.items())),
+            "provenance": dict(sorted((provenance or {}).items()))}
+    return {**core, "contentHash": content_hash(core),
+            "generated": dt.datetime.now(dt.timezone.utc).isoformat()}
+
+
+def write_registry(payload: dict) -> tuple[pathlib.Path, pathlib.Path]:
+    json_path = IDENTITY / APPROVED_REGISTRY_FILENAME
+    gzip_path = IDENTITY / APPROVED_REGISTRY_GZIP_FILENAME
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True,
+                     separators=(",", ":")).encode("utf-8")
+    tmp = json_path.with_suffix(".json.tmp")
+    tmp.write_bytes(raw)
+    tmp.replace(json_path)
+    with gzip.GzipFile(filename="", mode="wb", fileobj=gzip_path.open("wb"),
+                       mtime=0) as handle:
+        handle.write(raw)
+    return json_path, gzip_path
+
+
+def build_release_descriptor(payload: dict) -> dict:
+    """Pin this registry build into the API without copying recipient PII."""
+    provenance = payload.get("provenance") or {}
+    unexpected = sorted(set(provenance) - set(RELEASE_PROVENANCE_KEYS))
+    if unexpected:
+        raise ValueError("Registry provenance contains unapproved fields: " +
+                         ", ".join(unexpected))
+    missing = [key for key in RELEASE_PROVENANCE_KEYS
+               if not clean_text(provenance.get(key))]
+    if missing:
+        raise ValueError("Registry provenance is missing: " + ", ".join(missing))
+    registry_hash = clean_text(payload.get("contentHash")).lower()
+    if len(registry_hash) != 64 or any(c not in "0123456789abcdef"
+                                       for c in registry_hash):
+        raise ValueError("Registry contentHash is invalid")
+    core = {
+        "schemaVersion": 1,
+        "registrySchemaVersion": int(payload.get("schemaVersion") or 0),
+        "registryContentHash": registry_hash,
+        "recipientCount": len(payload.get("recipients") or {}),
+        "ineligibleCount": len(payload.get("ineligible") or {}),
+        "provenance": {key: provenance[key]
+                       for key in sorted(RELEASE_PROVENANCE_KEYS)},
+    }
+    return {**core, "descriptorHash": content_hash(core)}
+
+
+def write_release_descriptor(payload: dict) -> pathlib.Path:
+    descriptor = build_release_descriptor(payload)
+    raw = (json.dumps(descriptor, ensure_ascii=False, sort_keys=True, indent=2) +
+           "\n").encode("utf-8")
+    tmp = RELEASE_DESCRIPTOR_PATH.with_suffix(".json.tmp")
+    tmp.write_bytes(raw)
+    tmp.replace(RELEASE_DESCRIPTOR_PATH)
+    return RELEASE_DESCRIPTOR_PATH
+
+
+def upload(path: pathlib.Path) -> int:
+    """Explicit only; local generation never needs the Azure SDK or credential."""
+    try:
+        from azure.storage.blob import BlobServiceClient, ContentSettings
+    except ImportError:
+        print("azure-storage-blob is not installed: pip install azure-storage-blob")
+        return 1
+    connection = os.environ.get("AZURE_STORAGE_CONNECTION_STRING", "")
+    if not connection:
+        print("AZURE_STORAGE_CONNECTION_STRING is not set.")
+        return 1
+    container = BlobServiceClient.from_connection_string(
+        connection).get_container_client(BLOB_CONTAINER)
+    try:
+        container.create_container()
+    except Exception:
+        pass
+    with path.open("rb") as handle:
+        container.get_blob_client(BLOB_NAME).upload_blob(
+            handle, overwrite=True, content_settings=ContentSettings(
+                content_type="application/json", content_encoding="gzip"))
+    print(f"[+] uploaded {BLOB_CONTAINER}/{BLOB_NAME}")
+    return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--upload", action="store_true",
+                        help="upload after generation (requires fresh authorization)")
+    args = parser.parse_args()
+    links_path = IDENTITY / LINKS_FILENAME
+    manifest_path = IDENTITY / MANIFEST_FILENAME
+    contacts_path = ROOT / "webapp" / "data" / "contacts.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest_core = {k: v for k, v in manifest.items()
+                     if k not in {"generatedUtc", "contentHash"}}
+    if manifest.get("contentHash") != content_hash(manifest_core):
+        raise SystemExit("Identity manifest contentHash is invalid")
+
+    def file_hash(path):
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    expected_links = ((manifest.get("outputs") or {})
+                      .get(LINKS_FILENAME, {}).get("sha256"))
+    actual_links = file_hash(links_path)
+    if not expected_links or expected_links != actual_links:
+        raise SystemExit("Identity links do not match the identity manifest")
+    links = pd.read_parquet(links_path)
+    contacts_payload = load_contacts()
+    contacts_provenance = contacts_payload.get("provenance") or {}
+    expected_contact_provenance = {
+        "identityManifestHash": manifest["contentHash"],
+        "identityLinksSha256": actual_links,
+        "actSource": (manifest.get("actSource") or {}).get("file", ""),
+        "actSourceSha256": (manifest.get("actSource") or {}).get("sha256", ""),
+    }
+    if contacts_provenance != expected_contact_provenance:
+        raise SystemExit(
+            "contacts.json was not built from this exact identity ledger and "
+            "Act snapshot; run python src/build_contacts.py")
+    payload = build_registry(links, contacts_payload, {
+        "identityManifestHash": manifest["contentHash"],
+        "identityLinksSha256": actual_links,
+        "contactsSha256": file_hash(contacts_path),
+        "actSource": (manifest.get("actSource") or {}).get("file", ""),
+        "actSourceSha256": (manifest.get("actSource") or {}).get("sha256", ""),
+    })
+    json_path, gzip_path = write_registry(payload)
+    descriptor_path = write_release_descriptor(payload)
+    print(f"[+] {json_path}: {len(payload['recipients']):,} approved; "
+          f"{len(payload['ineligible']):,} ineligible")
+    print(f"[+] {gzip_path} ({gzip_path.stat().st_size / 1024:.1f} KiB)")
+    print(f"[+] {descriptor_path}: release-bound to {payload['contentHash']}")
+    if args.upload:
+        return upload(gzip_path)
+    print("[*] local only; --upload was not requested")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

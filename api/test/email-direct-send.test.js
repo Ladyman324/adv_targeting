@@ -2,14 +2,18 @@
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const crypto = require("node:crypto");
 const direct = require("../shared/email-direct-send");
 const repair = require("../email-direct-repair/index");
 
 const OP = "11111111-1111-4111-8111-111111111111";
+const recipientSetHash = (addresses) => crypto.createHash("sha256")
+  .update(JSON.stringify([...addresses].sort()), "utf8").digest("hex");
 
 function harness(initial, graphOverrides = {}) {
   let operation = { userId: "u1", operationId: OP, kind: "follow_up", advisorCrd: "123",
     state: "prepared", graphDraftId: "draft-1", graphMessageId: "draft-1",
+    recipientSetHash: recipientSetHash(["advisor@example.com"]),
     createdUtc: "2026-08-25T12:00:00Z", etag: "e1", ...initial };
   let version = 1;
   const calls = { send: 0, scheduled: [], activity: [], completed: 0, queue: [] };
@@ -57,6 +61,12 @@ function harness(initial, graphOverrides = {}) {
     activityStore: { policy: async () => ({ killed: false }),
       recordActivity: async (entry) => { calls.activity.push(entry); return entry; } },
     suppress: { blockedAmong: async () => new Map() },
+    recipientRegistry: {
+      resolve: async () => ({ crd: "123", email: "advisor@example.com",
+        routingHash: "route", teammates: [] }),
+      verify: async () => ({ crd: "123", email: "advisor@example.com",
+        routingHash: "route", teammates: [] }),
+    },
     limitGuard: { reserve: async () => ({ alreadyReserved: false }) },
     mailboxGate: { acquire: async () => 0 }, wait: async () => {},
     advisors: { emailForCrd: async () => "advisor@example.com" },
@@ -115,16 +125,49 @@ test("turning off the canary after preparation defers without Graph or poison fa
 
 test("follow-up suppression is rechecked for To but not an internal compliance Bcc", () => enabled(async () => {
   const checked = [];
-  const h = harness({}, { getMessage: async () => ({ id: "draft-1", isDraft: true,
+  const h = harness({ recipientSetHash: recipientSetHash(
+    ["advisor@example.com", "compliance@eicatlanta.com"]) }, {
+    getMessage: async () => ({ id: "draft-1", isDraft: true,
     toRecipients: [{ emailAddress: { address: "advisor@example.com" } }],
     bccRecipients: [{ emailAddress: { address: "compliance@eicatlanta.com" } }] }) });
   h.deps.suppress.blockedAmong = async (addresses) => {
     checked.push(...addresses);
     return new Map([["compliance@eicatlanta.com", true]]);
   };
+  h.deps.core.complianceBcc = () => ["compliance@eicatlanta.com"];
   await direct.processWork({ v: 1, kind: "direct_send", userId: "u1", operationId: OP }, h.deps);
   assert.deepEqual(checked, ["advisor@example.com"]);
   assert.equal(h.calls.send, 1);
+}));
+
+test("a changed direct-send recipient set fails before Graph send", () => enabled(async () => {
+  const h = harness({}, { getMessage: async () => ({ id: "draft-1", isDraft: true,
+    toRecipients: [{ emailAddress: { address: "wrong@example.com" } }] }) });
+  await direct.processWork(
+    { v: 1, kind: "direct_send", userId: "u1", operationId: OP }, h.deps);
+  assert.equal(h.calls.send, 0);
+  assert.equal(h.current().state, "failed");
+  assert.equal(h.current().lastErrorCode, "recipient_routing_changed");
+}));
+
+test("a reply sender must match the current approved CRD identity", () => enabled(async () => {
+  const err = new Error("changed"); err.code = "recipient_identity_changed";
+  let operationWrites = 0;
+  await assert.rejects(() => direct.start({ id: "u1" }, {
+    operationId: OP, crd: "123", id: "inbound-1", text: "Thank you.",
+  }, "reply", {
+    advisors: { isInternalCrd: async () => false },
+    activityStore: { activityOwner: async () => "u1" },
+    auth: { tokenFor: async () => ({ accessToken: "token" }) },
+    graph: { getMessageContent: async () => ({ subject: "Re",
+      from: { emailAddress: { address: "wrong@example.com" } } }) },
+    suppress: { blockedAmong: async () => new Map() },
+    core: { config: () => ({ internalDomains: new Set(["eicatlanta.com"]) }),
+      isExternal: () => true },
+    recipientRegistry: { verify: async () => { throw err; } },
+    opsStore: { createOperation: async () => { operationWrites++; } },
+  }), (error) => error.code === "recipient_identity_changed");
+  assert.equal(operationWrites, 0);
 }));
 
 test("canonical Graph metadata drives activity and a retry-stable actedAt", async () => {
@@ -212,6 +255,12 @@ test("HTTP orchestration prepares a stamped Outlook draft, queues identifiers, a
     auth: { tokenFor: async () => ({ accessToken: "token", profile: {} }) },
     advisors: { isInternalCrd: async () => false, emailForCrd: async () => "advisor@example.com" },
     suppress: { blockedAmong: async () => new Map() },
+    recipientRegistry: {
+      resolve: async () => ({ crd: "123", email: "advisor@example.com",
+        routingHash: "route", teammates: [] }),
+      verify: async () => ({ crd: "123", email: "advisor@example.com",
+        routingHash: "route", teammates: [] }),
+    },
     core: { config: () => ({ maxAttachmentBytes: 1000000, directSendEnvironmentEnabled: true,
       testAllowlist: new Set(), internalDomains: new Set(["eicatlanta.com"]),
       rollingExternalLimit: 5000 }), isExternal: () => true,
