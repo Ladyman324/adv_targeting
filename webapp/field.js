@@ -380,7 +380,7 @@ function openSheet(r){
   // rep should see it in the same glance as the phone number.
   const dnc = Dial.state.dnc.get(String(r[COL.crd]));
   const unconfirmed = r[COL.tier] === "review";
-  const emailConfirmed = r[COL.tier] === "confirmed";
+  const emailConfirmed = Dial.tierCanEmail(r[COL.tier]);
 
   // Suppression used to hide the "+ Call list" button and leave the tel: links
   // working, which is the wrong half: the list is a convenience, the call is
@@ -574,7 +574,7 @@ function snapshotOf(r){
            // firm-wide from a screen that shows only a name and a number.
            unconfirmed: r[COL.tier] === "review",
            identityApproved: r[COL.tier] === "confirmed" || r[COL.tier] === "high",
-           emailConfirmed: r[COL.tier] === "confirmed",
+           emailConfirmed: Dial.tierCanEmail(r[COL.tier]),
            emailEligibilityKnown: true,
            contactRouteVersion: DATA_VERSION };
 
@@ -613,7 +613,7 @@ async function teammatesWithEmail(crd, state, teamKey){
   for (const m of rec.m) {
     const mateCrd = String(m[0]);
     if (mateCrd === String(crd)) continue;
-    if (String(m[4] || "") !== "confirmed") continue;
+    if (!Dial.tierCanEmail(m[4])) continue;
     /* The address now ships WITH the practice record, as a fourth column.
      *
      * It used to be looked up in TILE_CACHE, which holds only the tiles near

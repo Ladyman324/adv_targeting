@@ -58,7 +58,7 @@ test("saved telephone routes fail closed and reconcile only to current approved 
   assert.equal(Dial.telHref("101", legacy.phone, Dial.state.items[0]), "");
 });
 
-test("email route proof is confirmed-only while high-tier telephone routes remain callable", async () => {
+test("an item without email proof cannot email, whatever its tier", async () => {
   const Dial = loadDial();
   Dial.setContactRouteVersion("build-new");
 
@@ -91,14 +91,16 @@ test("email route proof is confirmed-only while high-tier telephone routes remai
   assert.equal(Dial.state.items[0].emailEligibilityKnown, true);
 });
 
-test("direct-profile and saved-queue mailto paths require confirmed email proof", () => {
+test("direct-profile and saved-queue mailto paths require email proof", () => {
   const desk = source("app.js");
   const field = source("field.js");
   assert.match(desk,
     /mailtoLink\(cur\.email,\s*Dial\.emailRouteStatus\(cur\)\.ok,\s*cur\.crd\)/);
   assert.match(desk, /mailtoLink\(c\.e,\s*emailConfirmed,\s*p\.id\)/);
   assert.match(field, /Dial\.isDnc\(r\[COL\.crd\]\) \|\| !emailConfirmed/);
-  assert.match(field, /emailConfirmed:\s*r\[COL\.tier\] === "confirmed"/);
+  // The shared predicate, not a local copy. Both views re-deciding this
+  // independently is why widening the server registry reached neither.
+  assert.match(field, /emailConfirmed:\s*Dial\.tierCanEmail\(r\[COL\.tier\]\)/);
   assert.match(field, /emailEligibilityKnown:\s*true/);
 });
 
@@ -131,7 +133,7 @@ test("teammate hints carry CRDs for server-side authorization", () => {
   assert.match(desk, /out\.push\(\{ crd: String\(id\), name:/);
   assert.match(field, /out\.push\(\{ crd: mateCrd, name:/);
   assert.match(fieldTiles, /advisors\.get\(crd, \{\}\)\.get\("t", ""\)/);
-  assert.match(field, /String\(m\[4\] \|\| ""\) !== "confirmed"/);
+  assert.match(field, /if \(!Dial\.tierCanEmail\(m\[4\]\)\) continue;/);
 });
 
 test("saved queues preserve the bounded current-route proof fields", () => {

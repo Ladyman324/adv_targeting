@@ -1329,7 +1329,10 @@ function contactBlock(p){
    * permanently, with no undo, because somebody else asked to be left alone.
    */
   const unconfirmed = c.t === "review";
-  const emailConfirmed = c.t === "confirmed";
+  // Dial.tierCanEmail, not a local rule: this decided the same question as
+  // field.js and the server registry, in three places, and widening the
+  // server alone left both views still refusing.
+  const emailConfirmed = Dial.tierCanEmail(c.t);
 
   if (c.e) rows.push(!emailConfirmed
     ? `<span class="contact-btn blocked" title="${esc(c.e)} — research-only address; confirm the identity before emailing.">&#9993; Email unavailable</span>`
@@ -1943,7 +1946,7 @@ function dialSnapshot(id){
     // number, still knows the match was never confirmed.
     unconfirmed: !!(c && c.t === "review"),
     identityApproved: !!(c && (c.t === "confirmed" || c.t === "high")),
-    emailConfirmed: !!(c && c.t === "confirmed"),
+    emailConfirmed: !!(c && Dial.tierCanEmail(c.t)),
     emailEligibilityKnown: true,
     contactRouteVersion: DATA_VERSION,
   };
@@ -1985,7 +1988,7 @@ function teammatesOf(crd){
     // Review-tier practice members are evidence for a human, not authorized
     // recipients. The server enforces this too; filtering here prevents the UI
     // from offering a choice it will correctly refuse.
-    if (mate && mate.e && mate.t === "confirmed")
+    if (mate && mate.e && Dial.tierCanEmail(mate.t))
       out.push({ crd: String(id), name: mate.n || "", email: mate.e });
   }
   return out;

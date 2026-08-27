@@ -3428,12 +3428,20 @@ def _unconfirmed_actions():
     gated = 'const unconfirmed = c.t === "review"' in app
     # Email, phone and queueing all withheld.
     no_email = "Email unavailable" in app
+    # Both views must ask the SHARED predicate rather than re-deciding locally.
+    # They each carried their own `=== "confirmed"` test, which is why widening
+    # the server's registry to admit `high` changed nothing a rep could see:
+    # three copies of one rule, and only one of them moved. The tiers live in
+    # dial.js now; what this check enforces is that nobody re-implements it.
     confirmed_email = (
-        'const emailConfirmed = c.t === "confirmed"' in app and
+        "const emailConfirmed = Dial.tierCanEmail(c.t)" in app and
         "if (!emailConfirmed)" in app and
         "Dial.emailRouteStatus(cur).ok" in app and
-        'const emailConfirmed = r[COL.tier] === "confirmed"' in field and
-        "|| !emailConfirmed" in field)
+        "const emailConfirmed = Dial.tierCanEmail(r[COL.tier])" in field and
+        "|| !emailConfirmed" in field and
+        'const EMAIL_TIERS = new Set(["confirmed", "high"])' in dial and
+        # review and none are never emailable, whatever the tier set says.
+        '"review"' not in dial.split("const EMAIL_TIERS")[1].split(")")[0])
     no_phone = 'const href = unconfirmed ? "" : Dial.telHref' in app
     no_queue = "confirm who this is before adding them to a call list" in app.lower()                or "Confirm who this is before adding them to a call list." in app
     # The irreversible one is refused outright, in the shared vocabulary so both

@@ -587,11 +587,30 @@
     return { ok: true, reason: "current" };
   }
 
-  // Email authority is deliberately narrower than telephone-route authority.
-  // A high-confidence research match may be useful enough to call, but only a
-  // confirmed identity may turn an address into a one-click email action.
+  /* WHICH IDENTITY TIERS MAY BE EMAILED, defined once for both views.
+   *
+   * app.js and field.js each decided this for themselves -- `c.t ===
+   * "confirmed"` in one, `r[COL.tier] === "confirmed"` in the other -- so the
+   * rule lived in two places and the server's registry made it three. Widening
+   * the server alone therefore changed nothing a rep could see: the desk view
+   * still printed "Email unavailable" and the emailer list still excluded them,
+   * because the client never asked.
+   *
+   * Mirrors APPROVED_RECIPIENT_TIERS on the server (default confirmed,high).
+   * `review` and `none` mean the identity is unresolved and are never emailable
+   * at either end.
+   *
+   * This is a judgement about acceptable misdirection, not a safety property.
+   * `high` is a strong name match with no CRD asserted anywhere -- around 0.989
+   * precision, so roughly one in ninety is not the person named. A misdialled
+   * call is recovered in seconds; a misdirected email is written, forwardable,
+   * and archived under the sender's name.
+   */
+  const EMAIL_TIERS = new Set(["confirmed", "high"]);
+  const tierCanEmail = (tier) => EMAIL_TIERS.has(String(tier || "").trim().toLowerCase());
+
   // Saved rows also need to match the current contact build: an old address is
-  // not made safe merely because the person was confirmed in a later build.
+  // not made safe merely because the person was resolved in a later build.
   function emailRouteStatus(item, address) {
     if (!item || item.emailEligibilityKnown !== true || item.emailConfirmed !== true)
       return { ok: false, reason: 'identity' };
@@ -1420,7 +1439,7 @@ A do-not-call is firm-wide and permanent, and cannot be added `
     onChange: (fn) => { listeners.push(fn); return () => {
       const i = listeners.indexOf(fn); if (i !== -1) listeners.splice(i, 1); }; },
     add, addMany, remove, clear, move, inQueue, isDnc, telHref,
-    setContactRouteVersion, routeStatus, emailRouteStatus, reconcileRoute, reconcileRoutes,
+    setContactRouteVersion, routeStatus, emailRouteStatus, tierCanEmail, reconcileRoute, reconcileRoutes,
     start, pause, end, current, remaining, advance, requeue, back, canBack,
     // What was recorded for this person on this pass, if anything. Drives the
     // "you logged X" line, so a correction is made knowingly.
