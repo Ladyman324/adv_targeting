@@ -230,6 +230,26 @@ test("a missing advisor CRD fails closed", async () => {
   assert.equal(f.message.failureCode, "recipient_not_approved");
 });
 
+test("connected-mailbox self-test sends without an advisor teammate record", async () => {
+  const f = fixture("send", "send_scheduled");
+  f.batch.graphMailbox = "self@example.test";
+  f.message.contactId = "";
+  f.message.recipientEmail = "self@example.test";
+  f.message.graphMessageId = "draft-self";
+  let sends = 0;
+  const graph = {
+    getMessage: async () => routedDraft("draft-self", {
+      toRecipients: [{ emailAddress: { address: "self@example.test" } }],
+    }),
+    findByAppId: async () => null,
+    sendDraft: async () => { sends++; return { requestId: "self-request" }; },
+  };
+  await worker.processWork({ kind: "send", userId: "user-1", batchId: "batch-1",
+    messageId: "message-1" }, { ...f, graph });
+  assert.equal(sends, 1);
+  assert.equal(f.message.state, "submitted");
+});
+
 test("a changed teammate routing hash fails before Graph send", async () => {
   const f = fixture("send", "send_scheduled");
   f.message.graphMessageId = "draft-1";

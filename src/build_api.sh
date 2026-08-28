@@ -18,7 +18,8 @@ STAGE_DIR=""
 #   30: email-preferences.test.js -- scanner-resistant unsubscribe confirmation
 #   33: email-approve-pacing.test.js -- drafts are spaced, not fired at once
 #   34: template-publish.test.js -- held templates never reach a rep
-EXPECTED_API_TEST_FILE_COUNT=34
+#   35: email-campaign-repair.test.js -- approved work survives lost queue hints
+EXPECTED_API_TEST_FILE_COUNT=35
 
 cleanup() {
   test -z "$TEMP_ROOT" && return

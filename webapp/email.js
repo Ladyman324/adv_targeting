@@ -21,6 +21,14 @@
   // automatic -- on blur, and before any navigation that would discard it.
   let dirty = false;
   let saving = false;
+  // Approval is the only browser-bound portion of a send. Once its 202 response
+  // arrives, Azure owns the work and this window may close.
+  let approvalPending = false;
+  global.addEventListener("beforeunload", (event) => {
+    if (!approvalPending) return;
+    event.preventDefault();
+    event.returnValue = "";
+  });
 
   const esc = (v) => String(v == null ? "" : v).replace(/[&<>"']/g, (c) => ({
     "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
@@ -1487,7 +1495,15 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
       </main></div>
       <footer class="email-footer"><p id="emailNotice" class="email-notice${
         sendBlocked ? " bad" : ""}">${esc(
-        (!locked && sendBlocked) ? sendBlocked : (b.warningMessage || ""))}</p><div>
+        (!locked && sendBlocked) ? sendBlocked : (b.warningMessage || (locked
+          ? (b.status === "paused"
+            ? "This batch is paused. It will not continue until you resume it."
+            : (["drafting", "sending"].includes(b.status)
+              ? (b.mode === "send"
+                ? "Queued on the server - safe to close this window; sending continues in Microsoft 365."
+                : "Draft creation is queued on the server - safe to close this window.")
+              : ""))
+          : "")))}</p><div>
         ${b.status === "completed" && b.mode === "send" && !b.parentBatchId && !b.followUpSentUtc
           ? `<button type="button" class="ask-btn" data-email="follow-up-open" data-id="${esc(b.id)}">Follow up on no reply</button>` : ""}
         ${b.status === "action_required" ? `<button type="button" class="ask-btn" data-email="connect">Reconnect Microsoft 365</button><button type="button" class="ask-btn" data-email="retry">Retry remaining</button>` : ""}
@@ -1576,7 +1592,8 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
       }
       host.innerHTML = `<span class="email-countdown"><b>${left}s</b> to cancel before
         ${detail.batch.recipientCount} email${detail.batch.recipientCount === 1 ? "" : "s"} send.
-        Use <b>Cancel remaining</b> below to stop.</span>`;
+        Use <b>Cancel remaining</b> below to stop. The batch is stored on the server;
+        you may close this window and sending will continue.</span>`;
     };
     paint();
     tickTimer = setInterval(paint, 1000);
@@ -2227,9 +2244,12 @@ They stay on your call list and keep their history — this only takes them out 
         if (!passcode) return notice("Approval cancelled — no passcode entered.", true);
       }
       button.disabled = true;
+      approvalPending = true;
       try { detail = await api("approve", { batchId: b.id, mode, reviewed: true, passcode,
         confirmation: { recipientCount: b.recipientCount, attachmentIds: b.attachmentIds } }); composerView(); }
-      catch (e) { button.disabled = false; notice(e.message, true); } return;
+      catch (e) { button.disabled = false; notice(e.message, true); }
+      finally { approvalPending = false; }
+      return;
     }
     if (["pause", "cancel", "retry"].includes(action)) {
       const actual = action === "pause" && detail.batch.status === "paused" ? "resume" : action;

@@ -1118,6 +1118,37 @@ def _direct_send_ledger_safety():
             if not failed else "DIRECT SEND SAFETY MISSING: " + "; ".join(failed))
 
 
+@check("campaign repair is gated, paced, mailbox-free, and recovers approval gaps")
+def _campaign_repair_safety():
+    repair_path = API / "email-campaign-repair" / "index.js"
+    config_path = API / "email-campaign-repair" / "function.json"
+    if not repair_path.exists() or not config_path.exists():
+        return False, "campaign repair function is missing"
+    repair = text(repair_path)
+    config = json.loads(text(config_path))
+    binding = config.get("bindings", [{}])[0]
+    checks = {
+        "timer is explicitly gated": "EMAIL_CAMPAIGN_REPAIR_ENABLED" in repair
+            and '!== "1"' in repair,
+        "timer has a user canary": "EMAIL_CAMPAIGN_REPAIR_USER_IDS" in repair,
+        "timer never imports Graph/auth": "graph-mail" not in repair and "email-auth" not in repair,
+        "schedule is literal": bool(binding.get("schedule"))
+            and "%" not in binding.get("schedule", ""),
+        "runOnStartup is false": binding.get("runOnStartup") is False,
+        "approval gap promotes editing conditionally": 'message.state === "editing"' in repair
+            and "patchMessage(userId, batch.id, message.id" in repair
+            and "message.etag" in repair,
+        "recovered work stays paced": "recoverySlot * interval" in repair,
+        "one mailbox cannot consume the run": "MAX_ENQUEUED_PER_USER" in repair,
+        "uncertain sends reconcile": '["submitted", "send_ambiguous"]' in repair
+            and 'return "reconcile"' in repair,
+    }
+    failed = [name for name, ok in checks.items() if not ok]
+    return (not failed,
+            "conditional approval-gap recovery, paced fair dispatch, literal gated timer, no mailbox imports"
+            if not failed else "CAMPAIGN REPAIR SAFETY MISSING: " + "; ".join(failed))
+
+
 @check("the reply sweep stores no message body")
 def _reply_sweep_stores_no_body():
     """THE RULE THIS ENFORCES: Exchange stays the system of record.

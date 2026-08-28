@@ -69,7 +69,9 @@ async function verifyIdentity(message, batch, deps, options = {}) {
     if (String(message.recipientEmail).toLowerCase() !== String(batch.graphMailbox).toLowerCase())
       throw service.httpError(409, "A non-advisor recipient is not the connected mailbox.",
         "recipient_not_approved");
-    return null;
+    // A connected-mailbox self-test has no advisor registry row and therefore
+    // no teammates. Keep the return shape identical to the advisor path.
+    return { approved: null, teammates: [] };
   }
   const approved = await deps.recipientRegistry.verify(
     message.contactId, message.recipientEmail, options);
