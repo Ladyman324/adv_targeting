@@ -796,6 +796,27 @@
     return q;
   }
 
+  /* Replace a derived role list in one shared path for desk and phone.
+   * The list name is presentation; id is the persisted backing row. Refreshing
+   * summaries before returning is what keeps every picker on the list actually
+   * open instead of displaying whichever ordinary option happens to come first. */
+  async function replaceList(id, name, items, opts) {
+    await openList(id);
+    state.listName = name;
+    state.items = [];
+    state.cursor = 0;
+    state.running = false;
+    state.trail = [];
+    const result = await addMany(items, opts);
+    if (!result.added && opts && opts.deleteIfEmpty) {
+      await deleteList(state.listId);
+      return { ...result, deleted: true };
+    }
+    if (!result.added) await save();
+    await loadLists();
+    return result;
+  }
+
   async function addToList(listId, item) {
     if (!item || !item.crd) return { added: false };
     return mutateListMember(listId, "add", item);
@@ -1527,7 +1548,7 @@ A do-not-call is firm-wide and permanent, and cannot be added `
     isKeyContact, isDueDiligence, isScheduler, flagsOf, setFlag, fetchFlags,
     flagMembersOf, flaggedByMe, flaggedByOthers,
     loadSettings, saveSettings, setting,
-    loadLists, openList, createList, renameList, deleteList, startCycle,
+    loadLists, openList, createList, replaceList, renameList, deleteList, startCycle,
     refreshProgress, preferredListId,
     // How far through this pass the rep is. Derived, never stored.
     progress: () => ({ done: state.done.size, total: state.items.length,

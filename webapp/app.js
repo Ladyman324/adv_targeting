@@ -1195,8 +1195,9 @@ function renderContactCount(){
  */
 const STAR_PATH = "M12 2.6l2.9 6 6.6.9-4.8 4.6 1.2 6.5L12 17.6 6.1 20.6l1.2-6.5"
                 + "L2.5 9.5l6.6-.9z";
-const DOC_PATH = "M6 2.8h8l4 4v13.4H6z M14 2.8v4h4";
-const SEARCH_PATH = "M13.7 13.7l4.1 4.1 M10.8 15.1a4.3 4.3 0 1 1 0-8.6 4.3 4.3 0 0 1 0 8.6z";
+const SHIELD_PATH = "M12 2.5l7.5 3v5.2c0 4.7-3.2 8.6-7.5 9.8-4.3-1.2-7.5-5.1"
+                  + "-7.5-9.8V5.5z";
+const CHECK_PATH = "M8.4 12.2l2.4 2.4 4.6-4.9";
 const CALENDAR_PATH = "M5 5.5h14v14H5z M5 9h14 M8 3v5 M16 3v5";
 const CLOCK_PATH = "M16.5 13.2a4.2 4.2 0 1 1 0 8.4 4.2 4.2 0 0 1 0-8.4z M16.5 15.2v2.4l1.7 1";
 
@@ -1232,9 +1233,9 @@ function flagMarks(crd){
                    scheduler: Dial.flaggedByOthers(crd, "scheduler") };
   return `<span class="contact-flags">`
     + flagMark(crd, "key", mine.key, "Key person", STAR_PATH, "", others.key)
-    + flagMark(crd, "dd", mine.dd, "Analyst", DOC_PATH,
-        `<path d="${SEARCH_PATH}" fill="var(--panel, #fff)" stroke="currentColor"
-          stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>`, others.dd)
+    + flagMark(crd, "dd", mine.dd, "Analyst", SHIELD_PATH,
+        `<path d="${CHECK_PATH}" fill="none" stroke="${mine.dd ? "var(--panel, #fff)" : "currentColor"}"
+          stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>`, others.dd)
     + flagMark(crd, "scheduler", mine.scheduler, "Scheduler", CALENDAR_PATH,
         `<path d="${CLOCK_PATH}" fill="var(--panel, #fff)" stroke="currentColor"
           stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>`, others.scheduler)
@@ -1252,9 +1253,9 @@ function flagGlyphs(crd){
       <path d="${path}" fill="currentColor"/>${extra || ""}</svg>`;
   return `<span class="flag-glyphs">`
     + (key ? one("Key person", STAR_PATH, "", "key") : "")
-    + (dd ? one("Analyst", DOC_PATH,
-        `<path d="${SEARCH_PATH}" fill="var(--panel, #fff)" stroke="currentColor"
-          stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>`, "dd") : "")
+    + (dd ? one("Analyst", SHIELD_PATH,
+        `<path d="${CHECK_PATH}" fill="none" stroke="var(--panel, #fff)"
+          stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>`, "dd") : "")
     + (scheduler ? one("Scheduler", CALENDAR_PATH,
         `<path d="${CLOCK_PATH}" fill="var(--panel, #fff)" stroke="currentColor"
           stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>`, "scheduler") : "")
@@ -2166,13 +2167,19 @@ function dialKindLabel(kind){
 
 let dialError = "";
 let dialHistory = { crd: "", text: "" };
+let standingCleanup = null;
 
 // Which standing flag a REAL list corresponds to, by name, or "" for an
 // ordinary list the rep made themselves.
 const ROLE_META = {
   key: { label: "Key people", singular: "Key person", symbol: "&#9733;" },
-  dd: { label: "Analysts", singular: "Analyst", symbol: "&#128269;" },
+  dd: { label: "Analysts", singular: "Analyst", symbol: "&#128737;" },
   scheduler: { label: "Schedulers", singular: "Scheduler", symbol: "&#128197;" },
+};
+const ROLE_LIST_IDS = { key: "role-key", dd: "role-analyst", scheduler: "role-scheduler" };
+const LEGACY_ROLE_IDS = {
+  keypeople: "key", keycontacts: "key", analyst: "dd", analysts: "dd",
+  duediligence: "dd", scheduler: "scheduler", schedulers: "scheduler",
 };
 const STANDING_NAMES = {
   "key contacts": "key", "key people": "key",
@@ -2180,9 +2187,13 @@ const STANDING_NAMES = {
   "scheduler": "scheduler", "schedulers": "scheduler",
 };
 function standingKindOf(listId){
-  const l = (Dial.state.lists || []).find(x => x.id === listId);
-  if (!l) return "";
-  return STANDING_NAMES[String(l.name || "").trim().toLowerCase()] || "";
+  const id = String(listId || "").toLowerCase();
+  const canonical = Object.entries(ROLE_LIST_IDS).find(([, roleId]) => roleId === id);
+  if (canonical) return canonical[0];
+  const legacy = LEGACY_ROLE_IDS[id];
+  if (!legacy) return "";
+  const l = (Dial.state.lists || []).find((x) => String(x.id).toLowerCase() === id);
+  return l && STANDING_NAMES[String(l.name || "").trim().toLowerCase()] === legacy ? legacy : "";
 }
 
 /* Unmarking must also take them OFF the standing list.
@@ -2201,18 +2212,21 @@ function standingKindOf(listId){
 async function dropFromStandingList(crd, kind, stillMine){
   if (stillMine) return false;
   if (standingKindOf(Dial.state.listId) !== kind) return false;
+  if (!flaggedAdvisors(kind).length) {
+    await Dial.deleteList(Dial.state.listId);
+    return true;
+  }
   if (!Dial.inQueue(crd)) return false;
   await Dial.remove(String(crd));
   return true;
 }
 
-function standingOption(kind, icon, label, lists){
-  const n = flaggedAdvisors(kind).length;
-  if (!n) return "";
-  const exists = (lists || []).some(l =>
-    String(l.name || "").trim().toLowerCase() === label.toLowerCase());
-  if (exists) return "";            // the real list is already in the picker
-  return `<option value="__${kind}">${icon} ${label} (${n})</option>`;
+function standingOption(kind, icon, label){
+  const active = standingKindOf(Dial.state.listId) === kind;
+  const n = active ? Dial.state.items.length : flaggedAdvisors(kind).length;
+  if (!n && !active) return "";
+  const selected = active ? " selected" : "";
+  return `<option value="__${kind}"${selected}>${icon} ${label}${n ? ` (${n})` : ""}</option>`;
 }
 
 function renderDialer(){
@@ -2220,6 +2234,13 @@ function renderDialer(){
   const dock = document.getElementById("dialer");
   if (!dock) return;
   const n = S.items.length;
+  const ordinaryLists = S.lists.filter((l) => !standingKindOf(l.id));
+  const activeStanding = standingKindOf(S.listId);
+  if (activeStanding && !flaggedAdvisors(activeStanding).length && !standingCleanup) {
+    standingCleanup = Dial.deleteList(S.listId)
+      .catch((err) => { dialError = err.message || "The empty role list could not be retired."; })
+      .finally(() => { standingCleanup = null; renderDialer(); });
+  }
   // The dock survives an EMPTY list as long as another list exists. It used to
   // hide whenever the open list had nobody in it, which meant creating a new
   // list made the whole dock vanish -- taking the list picker with it, so there
@@ -2251,7 +2272,7 @@ function renderDialer(){
       + `<button type="button" class="dial-collapse" data-dial="toggle-queue"
            aria-label="Show or hide the call list">&#9776;</button>`
       + `<select class="dial-list" data-dial="pick" aria-label="Call list">`
-        + S.lists.map(l => `<option value="${esc(l.id)}"${l.id === S.listId ? " selected" : ""}>`
+        + ordinaryLists.map(l => `<option value="${esc(l.id)}"${l.id === S.listId ? " selected" : ""}>`
             + `${esc(l.name)} (${l.count})</option>`).join("")
         /* The standing entries BUILD the list; they are not a second copy of it.
          *
@@ -2265,7 +2286,7 @@ function renderDialer(){
          * then on there is exactly one row for it, and the list manager's ★ row
          * is what rebuilds it from the flags. */
         + Object.entries(ROLE_META).map(([kind, meta]) =>
-            standingOption(kind, meta.symbol, meta.label, S.lists)).join("")
+            standingOption(kind, meta.symbol, meta.label)).join("")
         + `<option value="__new">+ New list…</option></select>`
       + `<span class="dial-count">${p.done} of ${n}</span>`
       + `<button type="button" class="dial-btn ghost" data-dial="menu"
@@ -2293,11 +2314,13 @@ function renderDialer(){
       `<div class="dial-menu-head">${esc(S.listName)} &middot; ${n} ${n === 1 ? "person" : "people"}`
       + `${S.cycle > 1 ? ` &middot; pass ${S.cycle}` : ""}</div>`
       + `<button type="button" data-dial="lists">Manage all lists&hellip;</button>`
-      + `<button type="button" data-dial="edit"${n ? "" : " disabled"}>Edit who&rsquo;s on it</button>`
-      + `<button type="button" data-dial="rename">Rename this list</button>`
-      + `<button type="button" data-dial="empty"${n ? "" : " disabled"}>Remove everyone from it</button>`
-      + `<button type="button" class="grave" data-dial="drop">Delete this list</button>`
-      + `<p class="dial-menu-note">Your call history is kept either way.</p>`;
+      + (activeStanding
+        ? `<p class="dial-menu-note">Membership is controlled by the ${esc(ROLE_META[activeStanding].singular)} label.</p>`
+        : `<button type="button" data-dial="edit"${n ? "" : " disabled"}>Edit who&rsquo;s on it</button>`
+          + `<button type="button" data-dial="rename">Rename this list</button>`
+          + `<button type="button" data-dial="empty"${n ? "" : " disabled"}>Remove everyone from it</button>`
+          + `<button type="button" class="grave" data-dial="drop">Delete this list</button>`
+          + `<p class="dial-menu-note">Your call history is kept either way.</p>`);
   }
 
   // The list, for reordering and removing. Collapsed by default -- the point of
@@ -2649,14 +2672,17 @@ async function openFlagList(kind, { start = false } = {}){
   const label = (ROLE_META[kind] || ROLE_META.key).label;
   const people = flaggedAdvisors(kind).filter(p => p.callable);
   if (!people.length) { showNotice(`Nobody on ${label} has a number on file.`); return false; }
-  await Dial.openList(label);
-  // Emptied first: this is a SNAPSHOT of the flags as they stand now, and
-  // reopening it after unstarring somebody must not leave them behind.
-  await Dial.clear();
+  const existing = (Dial.state.lists || []).find((list) => standingKindOf(list.id) === kind);
   // dialSnapshot builds the same item shape every other queue add uses --
   // name, firm, phone, city, state, email -- so a flag list behaves like any
   // other list once it is open.
-  await Dial.addMany(people.map(p => dialSnapshot(p.crd)), { phoneOnly: true });
+  const result = await Dial.replaceList(existing ? existing.id : ROLE_LIST_IDS[kind], label,
+    people.map(p => dialSnapshot(p.crd)), { phoneOnly: true, deleteIfEmpty: true });
+  if (!result.added) {
+    showNotice(`Nobody on ${label} is currently eligible for the calling queue.`);
+    renderDialer();
+    return false;
+  }
   if (start) Dial.start();
   renderDialer();
   return true;
@@ -2685,7 +2711,7 @@ function flagListRows(){
 function paintListManager(){
   if (!listsBack) return;
   if (listsEditMode) return paintListEdit();
-  const ls = Dial.state.lists || [];
+  const ls = (Dial.state.lists || []).filter((list) => !standingKindOf(list.id));
   listsBack.innerHTML =
     `<div class="ask lists" role="dialog" aria-modal="true" aria-label="Call lists">`
     + `<h3>Call lists</h3>`
@@ -4263,6 +4289,14 @@ const dialReady = PERF.time("dial.init", () => Dial.init()).then(() => {
   renderDialer();
   reconcileDesktopDialRoutes().catch(() => {});
   PERF.mark("dialer-usable");
+});
+
+// A role may be changed on the phone while the desktop tab sleeps. Refresh the
+// small flag set on return so an active derived list can retire itself when its
+// final label was removed elsewhere.
+document.addEventListener("visibilitychange", async () => {
+  if (document.visibilityState !== "visible" || !Dial.state.ready) return;
+  try { await Dial.fetchFlags(); renderDialer(); } catch { /* stale labels remain visible */ }
 });
 
 let supportTimer = null;

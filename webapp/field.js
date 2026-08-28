@@ -713,6 +713,7 @@ async function snapshotForQueue(r){
 
 /* ---------- the dialer ---------------------------------------------------- */
 let dialErr = "";                  // last save failure, shown until it clears
+let standingCleanup = null;
 
 // The same net as the desktop view. Swipe-to-queue, the sheet buttons and the
 // outcome grid all run inside async handlers, and a rejection in one of those
@@ -827,7 +828,7 @@ function renderLists(){
   if (!listsOpen) return;
   if (listsMode === "edit") return renderListEdit();
   const S = Dial.state;
-  const ls = S.lists || [];
+  const ls = (S.lists || []).filter((list) => !standingKindOf(list.id));
   $("listsInner").innerHTML = `
     <button id="listsClose" aria-label="Close">&times;</button>
     <h2>Call lists</h2>
@@ -888,8 +889,9 @@ function renderLists(){
  */
 const STAR_PATH = "M12 2.6l2.9 6 6.6.9-4.8 4.6 1.2 6.5L12 17.6 6.1 20.6l1.2-6.5"
                 + "L2.5 9.5l6.6-.9z";
-const DOC_PATH = "M6 2.8h8l4 4v13.4H6z M14 2.8v4h4";
-const SEARCH_PATH = "M13.7 13.7l4.1 4.1 M10.8 15.1a4.3 4.3 0 1 1 0-8.6 4.3 4.3 0 0 1 0 8.6z";
+const SHIELD_PATH = "M12 2.5l7.5 3v5.2c0 4.7-3.2 8.6-7.5 9.8-4.3-1.2-7.5-5.1"
+                  + "-7.5-9.8V5.5z";
+const CHECK_PATH = "M8.4 12.2l2.4 2.4 4.6-4.9";
 const CALENDAR_PATH = "M5 5.5h14v14H5z M5 9h14 M8 3v5 M16 3v5";
 const CLOCK_PATH = "M16.5 13.2a4.2 4.2 0 1 1 0 8.4 4.2 4.2 0 0 1 0-8.4z M16.5 15.2v2.4l1.7 1";
 
@@ -915,9 +917,9 @@ function flagMarksField(crd){
                    scheduler: Dial.flaggedByOthers(crd, "scheduler") };
   return `<span class="contact-flags">`
     + flagMarkField(crd, "key", mine.key, "Key person", STAR_PATH, "", others.key)
-    + flagMarkField(crd, "dd", mine.dd, "Analyst", DOC_PATH,
-        `<path d="${SEARCH_PATH}" fill="var(--panel, #fff)" stroke="currentColor"
-          stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>`, others.dd)
+    + flagMarkField(crd, "dd", mine.dd, "Analyst", SHIELD_PATH,
+        `<path d="${CHECK_PATH}" fill="none" stroke="${mine.dd ? "var(--panel, #fff)" : "currentColor"}"
+          stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>`, others.dd)
     + flagMarkField(crd, "scheduler", mine.scheduler, "Scheduler", CALENDAR_PATH,
         `<path d="${CLOCK_PATH}" fill="var(--panel, #fff)" stroke="currentColor"
           stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>`, others.scheduler)
@@ -1029,8 +1031,13 @@ document.addEventListener("click", async (event) => {
 // the two must agree or the same list means different things per device.
 const FIELD_ROLE_META = {
   key: { label: "Key people", symbol: "&#9733;" },
-  dd: { label: "Analysts", symbol: "&#128269;" },
+  dd: { label: "Analysts", symbol: "&#128737;" },
   scheduler: { label: "Schedulers", symbol: "&#128197;" },
+};
+const ROLE_LIST_IDS = { key: "role-key", dd: "role-analyst", scheduler: "role-scheduler" };
+const LEGACY_ROLE_IDS = {
+  keypeople: "key", keycontacts: "key", analyst: "dd", analysts: "dd",
+  duediligence: "dd", scheduler: "scheduler", schedulers: "scheduler",
 };
 const STANDING_NAMES = {
   "key contacts": "key", "key people": "key",
@@ -1038,9 +1045,13 @@ const STANDING_NAMES = {
   "scheduler": "scheduler", "schedulers": "scheduler",
 };
 function standingKindOf(listId){
-  const l = (Dial.state.lists || []).find((x) => x.id === listId);
-  if (!l) return "";
-  return STANDING_NAMES[String(l.name || "").trim().toLowerCase()] || "";
+  const id = String(listId || "").toLowerCase();
+  const canonical = Object.entries(ROLE_LIST_IDS).find(([, roleId]) => roleId === id);
+  if (canonical) return canonical[0];
+  const legacy = LEGACY_ROLE_IDS[id];
+  if (!legacy) return "";
+  const l = (Dial.state.lists || []).find((x) => String(x.id).toLowerCase() === id);
+  return l && STANDING_NAMES[String(l.name || "").trim().toLowerCase()] === legacy ? legacy : "";
 }
 
 /* Unmarking must also take them OFF the standing list.
@@ -1055,6 +1066,10 @@ function standingKindOf(listId){
 async function dropFromStandingList(crd, kind, stillMine){
   if (stillMine) return false;
   if (standingKindOf(Dial.state.listId) !== kind) return false;
+  if (!flaggedField(kind).length) {
+    await Dial.deleteList(Dial.state.listId);
+    return true;
+  }
   if (!Dial.inQueue(crd)) return false;
   await Dial.remove(String(crd));
   return true;
@@ -1135,6 +1150,18 @@ async function dialableFlagged(kind){
     if (full && full[COL.phone]) out.push(snapshotOf(full));
   }
   return out;
+}
+
+async function openFlagListField(kind, { start = false } = {}){
+  const label = (FIELD_ROLE_META[kind] || FIELD_ROLE_META.key).label;
+  const people = await dialableFlagged(kind);
+  if (!people.length) throw new Error(`Nobody on ${label} has a number on file.`);
+  const existing = (Dial.state.lists || []).find((list) => standingKindOf(list.id) === kind);
+  const result = await Dial.replaceList(existing ? existing.id : ROLE_LIST_IDS[kind], label,
+    people, { phoneOnly: true, deleteIfEmpty: true });
+  if (!result.added) throw new Error(`Nobody on ${label} is currently eligible for the calling queue.`);
+  if (start) Dial.start();
+  return true;
 }
 
 const FLAG_SETS = Object.entries(FIELD_ROLE_META)
@@ -1815,6 +1842,13 @@ function renderDial(){
   // queued, and the one button that starts working through them.
   const bar = $("queueBar");
   const n = S.items.length;
+  const ordinaryLists = S.lists.filter((list) => !standingKindOf(list.id));
+  const activeStanding = standingKindOf(S.listId);
+  if (activeStanding && !flaggedField(activeStanding).length && !standingCleanup) {
+    standingCleanup = Dial.deleteList(S.listId)
+      .catch((err) => { dialErr = err.message || "The empty role list could not be retired."; })
+      .finally(() => { standingCleanup = null; renderDial(); });
+  }
   const p = Dial.progress();
   const finished = n > 0 && p.left === 0;
   bar.hidden = (!n && S.lists.length < 2) || S.running;
@@ -1825,19 +1859,29 @@ function renderDial(){
       `<div class="lm-head">${esc(S.listName)} &middot; ${n} ${n === 1 ? "person" : "people"}`
       + `${S.cycle > 1 ? ` &middot; pass ${S.cycle}` : ""}</div>`
       + `<button id="lmAll">Manage all lists&hellip;</button>`
-      + `<button id="lmEdit"${n ? "" : " disabled"}>Edit who&rsquo;s on it</button>`
-      + `<button id="lmRename">Rename this list</button>`
-      + `<button id="lmEmpty"${n ? "" : " disabled"}>Remove everyone from it</button>`
-      + `<button id="lmDrop" class="grave">Delete this list</button>`
-      + `<p class="lm-note">Your call history is kept either way.</p>`;
+      + (activeStanding
+        ? `<p class="lm-note">Membership is controlled by the ${esc(FIELD_ROLE_META[activeStanding].label)} label.</p>`
+        : `<button id="lmEdit"${n ? "" : " disabled"}>Edit who&rsquo;s on it</button>`
+          + `<button id="lmRename">Rename this list</button>`
+          + `<button id="lmEmpty"${n ? "" : " disabled"}>Remove everyone from it</button>`
+          + `<button id="lmDrop" class="grave">Delete this list</button>`
+          + `<p class="lm-note">Your call history is kept either way.</p>`);
   }
   if (!bar.hidden) {
     // The list is named and switchable, because a rep working "Georgia ranked"
     // monthly and "New prospects" weekly has two different jobs, not one queue.
-    const picker = S.lists.length > 1 || n
+    const standingOptions = Object.entries(FIELD_ROLE_META).map(([kind, meta]) => {
+      const active = standingKindOf(S.listId) === kind;
+      const count = active ? S.items.length : flaggedField(kind).length;
+      if (!count && !active) return "";
+      const selected = active ? " selected" : "";
+      return `<option value="__${kind}"${selected}>${meta.symbol} ${meta.label}${count ? ` (${count})` : ""}</option>`;
+    }).join("");
+    const picker = ordinaryLists.length > 1 || n || standingOptions
       ? `<select id="qList" aria-label="Call list">`
-        + S.lists.map((l) => `<option value="${esc(l.id)}"${l.id === S.listId ? " selected" : ""}>`
+        + ordinaryLists.map((l) => `<option value="${esc(l.id)}"${l.id === S.listId ? " selected" : ""}>`
             + `${esc(l.name)} (${l.count})</option>`).join("")
+        + standingOptions
         + `<option value="__new">+ New list…</option></select>`
       : "";
     // Two deliberate rows. Top: which list, and the menu that acts on it.
@@ -2781,17 +2825,8 @@ document.addEventListener("click", (e) => {
       }
       lb.disabled = true;
       lb.textContent = "Finding…";
-      dialableFlagged(kind).then(async (people) => {
-        if (!people.length) {
-          // Distinguishes "nobody is flagged" from "nobody flagged has a
-          // number we can reach", which are different problems for the rep.
-          dialErr = `Nobody on ${label} has a number on file.`;
-          renderLists(); renderDial(); return;
-        }
+      openFlagListField(kind, { start: true }).then(() => {
         listsOpen = false;
-        await Dial.openList(label);
-        await Dial.addMany(people, { phoneOnly: true });
-        Dial.start();
         renderLists(); renderDial();
       }).catch((err) => { renderLists(); fail(err); });
       return;
@@ -3118,6 +3153,9 @@ document.addEventListener("change", (e) => {
       // sit on "+ New list…" after a cancel.
       if (!name) { renderDial(); return; }
       Dial.createList(name.trim()).then(renderDial);
+    } else if (["__key", "__dd", "__scheduler"].includes(v)) {
+      openFlagListField(v.slice(2)).then(renderDial)
+        .catch((err) => { dialErr = err.message || "That list could not be built."; renderDial(); });
     } else {
       Dial.openList(v).then(renderDial);
     }
@@ -3178,6 +3216,7 @@ document.addEventListener("visibilitychange", async () => {
     const type = r.headers.get("Content-Type") || "";
     if (!r.ok || !type.includes("json")) { showSessionLapsed(); return; }
     // Alive: pick up anything that changed on another device while away.
+    await Dial.fetchFlags();
     await Dial.refreshQueue();
     await Dial.refreshDnc();
     // The queue moves while the app is in the background -- a sweep runs

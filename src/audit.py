@@ -1963,7 +1963,7 @@ def _flag_lists_parity():
     # views share only dial.js, which has no DOM -- and duplicated geometry is
     # exactly what drifts silently. A star that is a slightly different star on
     # the phone is the kind of thing nobody reports and everybody notices.
-    for const in ("STAR_PATH", "DOC_PATH", "SEARCH_PATH", "CALENDAR_PATH", "CLOCK_PATH"):
+    for const in ("STAR_PATH", "SHIELD_PATH", "CHECK_PATH", "CALENDAR_PATH", "CLOCK_PATH"):
         got = []
         for src in (desk, field):
             found = re.search(const + r'\s*=\s*(".*?");', src, re.S)

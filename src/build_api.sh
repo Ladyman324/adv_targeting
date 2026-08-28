@@ -20,7 +20,8 @@ STAGE_DIR=""
 #   34: template-publish.test.js -- held templates never reach a rep
 #   35: email-campaign-repair.test.js -- approved work survives lost queue hints
 #   36: queue-member.test.js -- arbitrary-list membership is atomic and session-safe
-EXPECTED_API_TEST_FILE_COUNT=36
+#   37: role-list-contract.test.js -- derived role lists stay distinct and disposable
+EXPECTED_API_TEST_FILE_COUNT=37
 
 cleanup() {
   test -z "$TEMP_ROOT" && return
