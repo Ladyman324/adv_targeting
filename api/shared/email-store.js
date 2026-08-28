@@ -214,6 +214,11 @@ function messageFromEntity(e) {
     contactId: e.contactId || "", recipientName: e.recipientName || "", recipientEmail: e.recipientEmail || "",
     greetingName: e.greetingName || "", recipientLastName: e.recipientLastName || "",
     recipientRegistryHash: e.recipientRegistryHash || "", recipientRoutingHash: e.recipientRoutingHash || "",
+    recipientTier: e.recipientTier || "",
+    recipientSource: e.recipientSource || "",
+    recipientMatchScore: Number(e.recipientMatchScore) >= 0 ? Number(e.recipientMatchScore) : null,
+    recipientMatchGap: Number(e.recipientMatchGap) >= 0 ? Number(e.recipientMatchGap) : null,
+    recipientPolicyVersion: e.recipientPolicyVersion || "",
     teammateCc: parse(e.teammateCcJson, []),
     teammateCcCrds: parse(e.teammateCcCrdsJson, []),
     teammatesAvailable: parse(e.teammatesAvailableJson, []),
@@ -254,6 +259,15 @@ async function createMessage(userId, batchId, message) {
     greetingName: clean(message.greetingName, 120), recipientLastName: clean(message.recipientLastName, 120),
     recipientRegistryHash: clean(message.recipientRegistryHash, 128),
     recipientRoutingHash: clean(message.recipientRoutingHash, 128),
+    recipientTier: clean(message.recipientTier, 40),
+    recipientSource: clean(message.recipientSource, 120),
+    recipientMatchScore: message.recipientMatchScore === null
+      || message.recipientMatchScore === undefined || message.recipientMatchScore === ""
+      ? -1 : (Number.isFinite(Number(message.recipientMatchScore)) ? Number(message.recipientMatchScore) : -1),
+    recipientMatchGap: message.recipientMatchGap === null
+      || message.recipientMatchGap === undefined || message.recipientMatchGap === ""
+      ? -1 : (Number.isFinite(Number(message.recipientMatchGap)) ? Number(message.recipientMatchGap) : -1),
+    recipientPolicyVersion: clean(message.recipientPolicyVersion, 80),
     teammateCcJson: clean(message.teammateCcJson, 2000),
     teammateCcCrdsJson: clean(message.teammateCcCrdsJson, 2000),
     teammatesAvailableJson: clean(message.teammatesAvailableJson, 8000),
@@ -300,12 +314,19 @@ async function patchMessage(userId, batchId, messageId, patch, etag) {
      */
     "teammateCcJson", "teammateCcCrdsJson", "teammatesAvailableJson",
     "greetingName", "recipientLastName",
-    "recipientRegistryHash", "recipientRoutingHash"];
+    "recipientRegistryHash", "recipientRoutingHash",
+    "recipientTier", "recipientSource", "recipientPolicyVersion"];
   for (const k of strings) if (k in patch) entity[k] = clean(patch[k], ["bodyText", "bodyHtml"].includes(k) ? 50000 : 2000);
   for (const k of ["subjectOverridden", "bodyOverridden", "reviewed"]) if (k in patch) entity[k] = !!patch[k];
   for (const k of ["baseRevision", "attemptCount", "draftAttempts", "sendAttempts",
                    "reconcileAttempts", "sendPosition", "hardBounceCount"])
     if (k in patch) entity[k] = Number(patch[k]) || 0;
+  for (const k of ["recipientMatchScore", "recipientMatchGap"]) {
+    if (!(k in patch)) continue;
+    const value = patch[k];
+    entity[k] = value === null || value === undefined || value === ""
+      ? -1 : (Number.isFinite(Number(value)) ? Number(value) : -1);
+  }
   if ("validation" in patch) entity.validationJson = json(patch.validation);
   if ("attachments" in patch) entity.attachmentsJson = json(patch.attachments);
   await (await table("messages")).updateEntity(entity, "Merge", etag ? { etag } : undefined);

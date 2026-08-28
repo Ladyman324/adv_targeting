@@ -85,6 +85,25 @@ def content_hash(value: Any) -> str:
     return hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()
 
 
+def runtime_content_hash(value: Any) -> str:
+    """Hash JSON as the JavaScript verifier sees parsed numeric values.
+
+    JSON.parse cannot retain the lexical distinction between 1 and 1.0.
+    Normalize integral floats before hashing so Python and JavaScript agree.
+    Registry scores are bounded decimal values, so no other number-format
+    differences are possible in this payload.
+    """
+    def normalize(item):
+        if isinstance(item, float) and item.is_integer():
+            return int(item)
+        if isinstance(item, dict):
+            return {key: normalize(val) for key, val in item.items()}
+        if isinstance(item, list):
+            return [normalize(val) for val in item]
+        return item
+    return content_hash(normalize(value))
+
+
 def evidence_hash(payload: Mapping[str, Any]) -> str:
     """Hash evidence facts, never build time or output row order."""
     return content_hash({"rulesetVersion": RULESET_VERSION, "evidence": dict(payload)})

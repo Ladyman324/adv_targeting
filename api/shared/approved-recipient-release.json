@@ -1,5 +1,5 @@
 {
-  "descriptorHash": "1972635e6ea3cfaa9d9217ad6b4691c270862f3ff390e96414de20267788a9c2",
+  "descriptorHash": "4a3ee153643e223acbb0280e8682ba9c0612155250180f86fb0e4f26fc720027",
   "ineligibleCount": 23375,
   "provenance": {
     "actSource": "act_contacts_2026-08-26T185802Z.json",
@@ -9,7 +9,7 @@
     "identityManifestHash": "d42ccebdfc219470ac989196ae4f399c5701f492614c3412a2913ed1e3238287"
   },
   "recipientCount": 104400,
-  "registryContentHash": "3b1b381cfc28cc5bd0af2e08e8b749cab6de204b2f8ba6a506659fb287539d99",
+  "registryContentHash": "6e0ffb43620720ca7777a93317370b9c5250d18185c6b995a05d59dadf8f2eec",
   "registrySchemaVersion": 1,
   "schemaVersion": 1
 }

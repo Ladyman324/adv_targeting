@@ -9,6 +9,7 @@
 
 const fs = require("node:fs");
 const path = require("node:path");
+const recipientRegistry = require("../shared/recipient-registry");
 const store = require("../shared/store");
 const actSync = require("../shared/act");
 
@@ -75,6 +76,7 @@ async function health(context, req) {
       release,
       // Diagnostic only, and deliberately says nothing the caller could not
       // already infer. "Why did my call not appear in Act!" has several
+      recipientEligibility: recipientRegistry.policy(),
       // answers that all look identical from the outside -- not deployed, not
       // switched on, no Act! account for this person, no contact match for that
       // advisor -- and guessing between them costs an afternoon each time.

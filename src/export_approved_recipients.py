@@ -6,6 +6,7 @@ import datetime as dt
 import gzip
 import hashlib
 import json
+import math
 import os
 import pathlib
 import sys
@@ -18,14 +19,14 @@ sys.path.insert(0, str(ROOT / "src"))
 from identity_normalize import clean_text, normalize_crd, normalize_email
 from identity_schema import (
     APPROVED_REGISTRY_FILENAME, APPROVED_REGISTRY_GZIP_FILENAME,
-    IDENTITY_DIRNAME, LINKS_FILENAME, MANIFEST_FILENAME, content_hash,
+    IDENTITY_DIRNAME, LINKS_FILENAME, MANIFEST_FILENAME, content_hash, runtime_content_hash,
 )
 
 IDENTITY = ROOT / "data" / IDENTITY_DIRNAME
 BLOB_CONTAINER, BLOB_NAME = "lookups", "approved_recipients.json.gz"
 RELEASE_DESCRIPTOR_PATH = (ROOT / "api" / "shared" /
                            "approved-recipient-release.json")
-# WHAT MAY BE EXPORTED, which is not the same as what may be emailed.
+# WHAT MAY BE EXPORTED AND PRESENTED TO THE CONTROLLED COMPOSER.
 #
 # The registry carries the superset and recipient-registry.js narrows it at run
 # time from APPROVED_RECIPIENT_TIERS. Deciding it only here meant the policy
@@ -35,11 +36,20 @@ RELEASE_DESCRIPTOR_PATH = (ROOT / "api" / "shared" /
 # can still refuse what it does not accept.
 #
 #   confirmed  the firm stated this CRD and the SEC record agrees
-#   high       a strong name match, no CRD asserted anywhere -- measured at
-#              about 0.989 precision, so roughly one in ninety is not this
-#              person. That is a real number of misdirected emails at scale,
-#              and it is why `high` is a decision rather than a default.
+#   high       a probabilistic roster-to-SEC match, email-authorized by an
+#              explicit business decision rather than by proof of identity
+#
+# The relevant contact calibration currently has 633 labelled rows (0.32% of
+# 200,949 contact rows). All 467 labels accepted by the shipping high-tier gate
+# were correct. That is encouraging, but the labeller reaches unusually clean
+# rows and its own documentation calls the result an optimistic bound. The
+# unrelated 0.989 Act first-name-gate statistic is not evidence for this tier.
+# `review` remains outside this registry and outside the controlled composer.
 EXPORTED_TIERS = frozenset({"confirmed", "high"})
+# The weighted matcher sums to 1.0 and can add W_SUFFIX=0.18. Preserve the
+# producer's evidence only inside that real model range. This is a score, not a
+# probability; clamping an impossible value would turn bad evidence into a lie.
+MATCH_SCORE_MAX = 1.18
 
 RELEASE_PROVENANCE_KEYS = (
     "identityManifestHash", "identityLinksSha256", "contactsSha256",
@@ -52,6 +62,53 @@ def load_contacts() -> dict:
     if not path.exists():
         raise SystemExit(f"Missing {path}; run the contact build first.")
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def bounded_match_score(value) -> float | None:
+    """Return a finite matcher score in the producer's real range."""
+    try:
+        score = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(score) or not 0 <= score <= MATCH_SCORE_MAX:
+        return None
+    return round(score, 3)
+
+
+def registry_quality_summary(payload: dict) -> dict:
+    """PII-free release aggregates; counts are coverage, never accuracy.
+
+    Source-level precision needs labelled source-level truth. These aggregates
+    expose the size and score-evidence coverage of every population so release
+    review can see where that truth is missing without pretending the aggregate
+    calibration transfers equally to every roster.
+    """
+    recipients = payload.get("recipients") or {}
+    ineligible = payload.get("ineligible") or {}
+    tiers = Counter()
+    sources = Counter()
+    tier_sources = Counter()
+    score_coverage = Counter()
+    for row in recipients.values():
+        tier = clean_text(row.get("tier")).lower() or "unknown"
+        source = clean_text(row.get("source")) or "unknown"
+        tiers[tier] += 1
+        sources[source] += 1
+        tier_sources[(tier, source)] += 1
+        if bounded_match_score(row.get("matchScore")) is not None:
+            score_coverage[(tier, source)] += 1
+    return {
+        "recipientCount": len(recipients),
+        "ineligibleCount": len(ineligible),
+        "tiers": dict(sorted(tiers.items())),
+        "sources": dict(sorted(sources.items())),
+        "tierSources": [
+            {"tier": tier, "source": source, "recipients": count,
+             "withMatchScore": score_coverage[(tier, source)]}
+            for (tier, source), count in sorted(tier_sources.items())
+        ],
+        "ineligibleReasons": dict(sorted(Counter(ineligible.values()).items())),
+    }
 
 
 def team_hints(payload: dict) -> tuple[dict, dict]:
@@ -85,20 +142,20 @@ def _contacts_from_links(links: pd.DataFrame) -> dict:
             "n": clean_text(row.get("display_name") or row.get("legal_name")),
             "sal": clean_text(row.get("email_greeting")),
             "cn": clean_text(row.get("firm")),
-            "src": "CRM", "t": "confirmed",
+            "src": "CRM", "t": "confirmed", "ms": 1.0,
         }
     return {"advisors": advisors, "teams": {}, "practices": {}}
 
 
 def build_registry(links: pd.DataFrame, contacts_payload: dict | None = None,
                    provenance: dict | None = None) -> dict:
-    """Build every safe outbound route; the ledger gates Act-derived routes.
+    """Build every business-authorized route; the ledger gates Act routes.
 
-    Only identities carrying a direct, independently validated CRD are usable.
-    Calibrated ``high`` roster matches remain valuable research evidence, but
-    they are probabilistic name/firm/location matches and are not permission to
-    address outbound mail. A CRM row is included only when the Act GUID, CRD
-    and email agree with one unique, approved identity-ledger row.
+    ``confirmed`` and ``high`` are authorized for the controlled composer by
+    business decision. They do not carry the same evidence: high remains a
+    probabilistic name/firm/location match. ``review`` is unresolved and never
+    enters this registry. A CRM row is included only when the Act GUID, CRD and
+    email agree with one unique, approved identity-ledger row.
     """
     rows = links.fillna("").to_dict("records")
     approved_links = [r for r in rows if r["identity_status"] == "approved" and
@@ -134,8 +191,12 @@ def build_registry(links: pd.DataFrame, contacts_payload: dict | None = None,
         if not email:
             ineligible[crd] = "missing_or_invalid_email"
             continue
+        match_score = bounded_match_score(contact.get("ms"))
+        if tier == "high" and (not source or match_score is None):
+            ineligible[crd] = "high_match_evidence_missing"
+            continue
         # Internal colleagues are EXPORTED, flagged, and refused at run time
-        # unless the address is on EMAIL_TEST_ADDRESS_ALLOWLIST.
+        # unless the address or domain is on EMAIL_INTERNAL_RECIPIENT_ALLOWLIST.
         #
         # Excluding them here instead removed the only safe way to test the
         # emailer -- every rehearsal batch is addressed to this firm -- and it
@@ -164,7 +225,7 @@ def build_registry(links: pd.DataFrame, contacts_payload: dict | None = None,
         last_name = clean_text((exact_act or {}).get("act_last_name"))
         if not last_name and name:
             last_name = name.split()[-1]
-        recipients[crd] = {
+        recipient = {
             "eligible": True, "email": email,
             "name": name, "greetingName": greeting,
             "lastName": last_name,
@@ -175,6 +236,9 @@ def build_registry(links: pd.DataFrame, contacts_payload: dict | None = None,
                 (exact_act or {}).get("source_record_id")),
             "teammates": [],
         }
+        if match_score is not None:
+            recipient["matchScore"] = match_score
+        recipients[crd] = recipient
 
     # Enforce one CRD and one address globally after Act and roster routes merge.
     email_count = Counter(row["email"] for row in recipients.values())
@@ -207,7 +271,7 @@ def build_registry(links: pd.DataFrame, contacts_payload: dict | None = None,
     core = {"schemaVersion": 1, "recipients": dict(sorted(recipients.items())),
             "ineligible": dict(sorted(ineligible.items())),
             "provenance": dict(sorted((provenance or {}).items()))}
-    return {**core, "contentHash": content_hash(core),
+    return {**core, "contentHash": runtime_content_hash(core),
             "generated": dt.datetime.now(dt.timezone.utc).isoformat()}
 
 
@@ -339,6 +403,19 @@ def main() -> int:
           f"{len(payload['ineligible']):,} ineligible")
     print(f"[+] {gzip_path} ({gzip_path.stat().st_size / 1024:.1f} KiB)")
     print(f"[+] {descriptor_path}: release-bound to {payload['contentHash']}")
+    summary = registry_quality_summary(payload)
+    print("[*] authorized tiers: " + ", ".join(
+        f"{tier} {count:,}" for tier, count in summary["tiers"].items()))
+    print("[*] authorized routes by tier and source "
+          "(matchScore coverage is evidence coverage, not precision):")
+    for row in summary["tierSources"]:
+        print(f"    {row['tier']:<10} {row['source']:<36} "
+              f"{row['recipients']:>7,} routes  "
+              f"score {row['withMatchScore']:>7,}")
+    if summary["ineligibleReasons"]:
+        print("[*] ineligible reasons: " + ", ".join(
+            f"{reason} {count:,}" for reason, count in
+            summary["ineligibleReasons"].items()))
     if args.upload:
         return upload(gzip_path)
     print("[*] local only; --upload was not requested")

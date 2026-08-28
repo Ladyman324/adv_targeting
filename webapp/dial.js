@@ -213,6 +213,7 @@
 
     try {
       const h = await healthP;
+      setEmailPolicy(h.recipientEligibility);
       state.user = h.user || null;
       state.problem = (h.configured && h.storageOk)
         ? "" : (h.detail || "Call logging is unavailable.");
@@ -606,8 +607,31 @@
    * call is recovered in seconds; a misdirected email is written, forwardable,
    * and archived under the sender's name.
    */
-  const EMAIL_TIERS = new Set(["confirmed", "high"]);
-  const tierCanEmail = (tier) => EMAIL_TIERS.has(String(tier || "").trim().toLowerCase());
+  let EMAIL_TIERS = new Set(["confirmed", "high"]);
+  let EMAIL_BLOCKED_HIGH_SOURCES = new Set();
+  let EMAIL_POLICY_VERSION = "";
+  const normPolicyValue = (value) => String(value || "").trim().toLowerCase();
+  function setEmailPolicy(policy) {
+    if (!policy || typeof policy !== "object") return;
+    const tiers = Array.isArray(policy.tiers) ? policy.tiers.map(normPolicyValue).filter(Boolean) : [];
+    const blocked = Array.isArray(policy.blockedHighSources)
+      ? policy.blockedHighSources.map(normPolicyValue).filter(Boolean) : [];
+    if (tiers.length) EMAIL_TIERS = new Set(tiers);
+    EMAIL_BLOCKED_HIGH_SOURCES = new Set(blocked);
+    EMAIL_POLICY_VERSION = String(policy.version || "");
+  }
+  const tierCanEmail = (tier, source) => {
+    const t = normPolicyValue(tier);
+    return EMAIL_TIERS.has(t)
+      && !(t === "high" && EMAIL_BLOCKED_HIGH_SOURCES.has(normPolicyValue(source)));
+  };
+  const identityTierLabel = (tier, source) => {
+    const t = normPolicyValue(tier), s = normPolicyValue(source);
+    if (t === "confirmed") return s === "crm" || s === "act" ? "ACT-confirmed CRD" : "Firm-stated CRD";
+    if (t === "high") return "High-confidence roster match";
+    if (t === "review") return "Unconfirmed research match";
+    return "Identity evidence unavailable";
+  };
 
   /* The RULE's own version, stored on every saved route proof.
    *
@@ -621,7 +645,10 @@
    * forgotten: change EMAIL_TIERS and every stored proof disagrees on the next
    * load and is re-decided exactly once.
    */
-  const emailTierKey = () => [...EMAIL_TIERS].sort().join("|");
+  const emailTierKey = () => EMAIL_POLICY_VERSION || [
+    [...EMAIL_TIERS].sort().join("|"),
+    [...EMAIL_BLOCKED_HIGH_SOURCES].sort().join("|")
+  ].join(";");
 
   // Saved rows also need to match the current contact build: an old address is
   // not made safe merely because the person was resolved in a later build.
@@ -1455,7 +1482,8 @@ A do-not-call is firm-wide and permanent, and cannot be added `
     onChange: (fn) => { listeners.push(fn); return () => {
       const i = listeners.indexOf(fn); if (i !== -1) listeners.splice(i, 1); }; },
     add, addMany, remove, clear, move, inQueue, isDnc, telHref,
-    setContactRouteVersion, routeStatus, emailRouteStatus, tierCanEmail, emailTierKey, reconcileRoute, reconcileRoutes,
+    setContactRouteVersion, routeStatus, emailRouteStatus, setEmailPolicy,
+    tierCanEmail, emailTierKey, identityTierLabel, reconcileRoute, reconcileRoutes,
     start, pause, end, current, remaining, advance, requeue, back, canBack,
     // What was recorded for this person on this pass, if anything. Drives the
     // "you logged X" line, so a correction is made knowingly.

@@ -39,7 +39,7 @@ const COMPARE = ["#12b39c", "#e0a53a", "#8079e0", "#e8615d", "#4aa3e0", "#9fc93c
 // of every deployed JSON path and byte. It changes for standalone shard
 // rebuilds too, and its leading date keeps the stale-build warning readable.
 // Do not edit it by hand.
-const DATA_VERSION = "20260827T164513Z-3c04e4844392be4d";
+const DATA_VERSION = "20260827T164513Z-0c9910167da52858";
 const dataUrl = file => `data/${file}?v=${DATA_VERSION}`;
 Dial.setContactRouteVersion(DATA_VERSION);
 // ONE scale for every mark on the map. There used to be two, and they were not
@@ -1063,34 +1063,18 @@ const PHONE_KIND = {
 function teamFor(c){
   return (c && c.tm && CONTACTS && CONTACTS.teams && CONTACTS.teams[c.tm]) || null;
 }
-/* The address as a mailto:, for the one-off note that does not belong in a
- * campaign. The in-app Email button stays exactly as it was -- it logs the
- * activity, applies suppression and carries the approved signature, and none
- * of that happens here. This is the escape hatch, not a replacement.
- *
- * Only a confirmed identity becomes a link. High-confidence research matches
- * remain visible and callable, but are not approved email recipients.
+/* Raw mailto is separate from the controlled composer. By explicit business
+ * decision every displayed address stays clickable, including review-tier and
+ * do-not-call records. Outlook receives none of the app's suppression,
+ * identity, rate-limit, or activity-log controls, so the tooltip keeps that
+ * discretion visible at the point of use.
  */
 function mailtoLink(address, emailConfirmed, crd){
-  const a = esc(address);
-  /* NOT A LINK for anyone on the do-not-call list.
-   *
-   * A mailto: leaves the application entirely -- no batch, no suppression
-   * check, no send limit, no logging. That is the point of it, and it is fine
-   * for an ordinary one-off. It is not fine for somebody who has asked us to
-   * stop: the guard the in-app path applies would simply not run, and the rep
-   * would have no way of knowing it had been skipped.
-   *
-   * The address still SHOWS, because a rep who can read it decides better than
-   * one shown nothing. What is withheld is the one click.
-   */
-  if (crd && Dial.isDnc(crd))
-    return `<span class="contact-mailto blocked"
-      title="${a} — firm-wide do-not-call, so this address is not one-click">${a}</span>`;
-  if (!emailConfirmed)
-    return `<span class="contact-mailto blocked"
-      title="${a} — address is research-only until this identity is confirmed">${a}</span>`;
-  const tip = `${a} — opens a blank email outside the app; nothing is logged`;
+  const a = esc(address), cautions = [];
+  if (!emailConfirmed) cautions.push("identity is not approved for the controlled composer");
+  if (crd && Dial.isDnc(crd)) cautions.push("a do-not-call record is present");
+  const tip = `${a} - opens a blank email outside the app; nothing is logged and app suppression controls do not apply`
+    + (cautions.length ? `; caution: ${cautions.join("; ")}` : "");
   return `<a class="contact-mailto"
       href="mailto:${encodeURIComponent(address).replace(/%40/g, "@")}"
       title="${esc(tip)}">${a}</a>`;
@@ -1332,7 +1316,7 @@ function contactBlock(p){
   // Dial.tierCanEmail, not a local rule: this decided the same question as
   // field.js and the server registry, in three places, and widening the
   // server alone left both views still refusing.
-  const emailConfirmed = Dial.tierCanEmail(c.t);
+  const emailConfirmed = Dial.tierCanEmail(c.t, c.src);
 
   if (c.e) rows.push(!emailConfirmed
     ? `<span class="contact-btn blocked" title="${esc(c.e)} — research-only address; confirm the identity before emailing.">&#9993; Email unavailable</span>`
@@ -1946,8 +1930,11 @@ function dialSnapshot(id){
     // number, still knows the match was never confirmed.
     unconfirmed: !!(c && c.t === "review"),
     identityApproved: !!(c && (c.t === "confirmed" || c.t === "high")),
-    emailConfirmed: !!(c && Dial.tierCanEmail(c.t)),
+    contactTier: (c && c.t) || "",
+    contactSource: (c && c.src) || "",
+    emailConfirmed: !!(c && Dial.tierCanEmail(c.t, c.src)),
     emailEligibilityKnown: true,
+    emailTierKey: Dial.emailTierKey(),
     contactRouteVersion: DATA_VERSION,
   };
 }
@@ -1993,7 +1980,7 @@ function teammatesOf(crd){
     // Review-tier practice members are evidence for a human, not authorized
     // recipients. The server enforces this too; filtering here prevents the UI
     // from offering a choice it will correctly refuse.
-    if (mate && mate.e && Dial.tierCanEmail(mate.t))
+    if (mate && mate.e && Dial.tierCanEmail(mate.t, mate.src))
       out.push({ crd: String(id), name: mate.n || "", email: mate.e });
   }
   return out;
@@ -2021,9 +2008,15 @@ window.AdvisorEmailData = {
     return !snap.emailConfirmed ? null : { ...snap, firstName: greetingFor(id),
       teammates: teammateEmails(id), teammatesFull: teammatesOf(id) };
   },
-  list: () => Dial.state.items.filter((it) => it.emailConfirmed === true)
-    .map((it) => ({ ...it, firstName: greetingFor(it.crd),
-    teammates: teammateEmails(it.crd), teammatesFull: teammatesOf(it.crd) })),
+  list: () => {
+    const out = Dial.state.items.filter((it) => Dial.emailRouteStatus(it).ok)
+      .map((it) => ({ ...it, firstName: greetingFor(it.crd),
+        identityLabel: Dial.identityTierLabel(it.contactTier, it.contactSource),
+        teammates: teammateEmails(it.crd), teammatesFull: teammatesOf(it.crd) }));
+    out.eligibilitySummary = { selected: Dial.state.items.length, included: out.length,
+      excluded: Dial.state.items.length - out.length };
+    return out;
+  },
 };
 
 

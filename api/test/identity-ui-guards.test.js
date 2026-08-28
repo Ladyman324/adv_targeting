@@ -58,30 +58,14 @@ test("saved telephone routes fail closed and reconcile only to current approved 
   assert.equal(Dial.telHref("101", legacy.phone, Dial.state.items[0]), "");
 });
 
-test("a list saved under the old email rule is re-decided, not left stale", () => {
-  // THE BUG THIS ENCODES. Widening who may be emailed worked on new lists and
-  // not on existing ones. A saved high-tier advisor matched the current data
-  // build, had emailEligibilityKnown true, and was identityApproved (high has
-  // always been callable) -- so every staleness test passed and reconciliation
-  // never ran. The stored `emailConfirmed: false`, decided by a rule we no
-  // longer apply, simply survived.
-  //
-  // The proof now carries the RULE's version as well as the data's, derived
-  // from the tier set so it cannot be forgotten when the set changes.
+test("a saved list is re-decided when server email policy changes", () => {
   const desk = source("app.js");
   const dial = source("dial.js");
-
-  // Derived, not hand-maintained.
-  assert.match(dial, /const emailTierKey = \(\) => \[\.\.\.EMAIL_TIERS\]\.sort\(\)\.join\("\|"\)/);
-  // Stamped on the proof in BOTH branches of reconcileRoute -- the match and
-  // the "this person is gone" branch.
-  assert.equal((dial.match(/emailTierKey: emailTierKey\(\)/g) || []).length, 2,
-    "every route proof records the rule that decided it");
-  // And the desk view treats a differing rule version as stale.
+  assert.match(dial, /EMAIL_POLICY_VERSION/);
+  assert.match(dial, /blockedHighSources/);
+  assert.match(dial, /const emailTierKey = \(\) => EMAIL_POLICY_VERSION/);
+  assert.equal((dial.match(/emailTierKey: emailTierKey\(\)/g) || []).length, 2);
   assert.match(desk, /item\.emailTierKey !== Dial\.emailTierKey\(\)/);
-
-  // A pre-rule item has no key at all, so it can never match the current one.
-  assert.notEqual(undefined, "confirmed|high");
 });
 
 test("an item without email proof cannot email, whatever its tier", async () => {
@@ -117,27 +101,24 @@ test("an item without email proof cannot email, whatever its tier", async () => 
   assert.equal(Dial.state.items[0].emailEligibilityKnown, true);
 });
 
-test("direct-profile and saved-queue mailto paths require email proof", () => {
+test("raw mailto remains clickable while controlled actions use policy proof", () => {
   const desk = source("app.js");
   const field = source("field.js");
-  assert.match(desk,
-    /mailtoLink\(cur\.email,\s*Dial\.emailRouteStatus\(cur\)\.ok,\s*cur\.crd\)/);
-  assert.match(desk, /mailtoLink\(c\.e,\s*emailConfirmed,\s*p\.id\)/);
-  assert.match(field, /Dial\.isDnc\(r\[COL\.crd\]\) \|\| !emailConfirmed/);
-  // The shared predicate, not a local copy. Both views re-deciding this
-  // independently is why widening the server registry reached neither.
-  assert.match(field, /emailConfirmed:\s*Dial\.tierCanEmail\(r\[COL\.tier\]\)/);
+  assert.match(desk, /function mailtoLink[\s\S]{0,900}href="mailto:/);
+  assert.doesNotMatch(desk, /function mailtoLink[\s\S]{0,900}contact-mailto blocked/);
+  assert.match(desk, /app suppression controls do not apply/);
+  assert.match(field, /class="sheet-mailto" href="mailto:/);
+  assert.match(field, /app suppression controls do not apply/);
+  assert.match(field, /emailConfirmed:\s*Dial\.tierCanEmail\(r\[COL\.tier\],[\s\S]{0,80}COL\.source/);
   assert.match(field, /emailEligibilityKnown:\s*true/);
 });
 
-test("review-tier contacts have no reflex action in either application", () => {
+test("review tier is blocked from controlled actions but not raw mailto", () => {
   const desk = source("app.js");
   const field = source("field.js");
   const dial = source("dial.js");
-
-  assert.match(desk, /if \(!emailConfirmed\)[\s\S]{0,140}contact-mailto blocked/);
   assert.match(desk, /return !snap\.emailConfirmed \? null/);
-  assert.match(desk, /state\.items\.filter\(\(it\) => it\.emailConfirmed === true\)/);
+  assert.match(desk, /filter\(\(it\) => Dial\.emailRouteStatus\(it\)\.ok\)/);
   assert.match(field, /const unconfirmed = r\[COL\.tier\] === "review"/);
   assert.match(field, /const mail = r\[COL\.email\] && emailConfirmed/);
   assert.match(field, /const queueBtn = dnc \|\| unconfirmed/);
@@ -148,18 +129,32 @@ test("review-tier contacts have no reflex action in either application", () => {
 test("the email whitelist cannot erase and then use an unconfirmed identity", () => {
   const email = source("email.js");
   assert.match(email, /filter\(\(r\) => r && !r\.unconfirmed\)/);
-  assert.match(email, /cannot be emailed until the CRD link is resolved/);
+  assert.match(email, /cannot use the controlled composer until the CRD link is resolved/);
   assert.match(email, /if \(!recipients\.length\) return/);
 });
 
-test("teammate hints carry CRDs for server-side authorization", () => {
+test("teammate hints carry CRDs, tier, and source for server authorization", () => {
   const desk = source("app.js");
   const field = source("field.js");
   const fieldTiles = fs.readFileSync(path.join(ROOT, "src", "build_field_tiles.py"), "utf8");
   assert.match(desk, /out\.push\(\{ crd: String\(id\), name:/);
   assert.match(field, /out\.push\(\{ crd: mateCrd, name:/);
-  assert.match(fieldTiles, /advisors\.get\(crd, \{\}\)\.get\("t", ""\)/);
-  assert.match(field, /if \(!Dial\.tierCanEmail\(m\[4\]\)\) continue;/);
+  assert.match(fieldTiles, /get\("t", ""\)/);
+  assert.match(fieldTiles, /get\("src", ""\)/);
+  assert.match(field, /Dial\.tierCanEmail\(m\[4\], m\[5\] \|\| ""\)/);
+});
+
+test("controlled actions log only eligible routes and disclose identity evidence", () => {
+  const field = source("field.js");
+  const email = source("email.js");
+  assert.match(field, /const controlledEmail = r\[COL\.email\][\s\S]{0,120}Dial\.tierCanEmail/);
+  assert.match(field, /controlledEmail[\s\S]{0,350}data-mail=[\s\S]{0,350}href="mailto:/);
+  assert.match(field, /app suppression controls do not apply/);
+  assert.match(email, /function identityLabel\(message\)/);
+  assert.match(email, /ACT-confirmed CRD/);
+  assert.match(email, /High-confidence roster match/);
+  assert.match(email, /identitySummary\(detail\.messages\)/);
+  assert.match(email, /identityLabel\(m\)/);
 });
 
 test("saved queues preserve the bounded current-route proof fields", () => {

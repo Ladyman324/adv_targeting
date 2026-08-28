@@ -110,13 +110,15 @@ test("retry re-queues genuinely failed messages, paced, but never an unknown sen
    * and replaying it would be a second copy to a real advisor.
    */
   const messages = [
-    { id: "m0", state: "failed", failureCode: "graph_failure", etag: "e0" },
+    { id: "m0", state: "failed", failureCode: "draft_retryable_exhausted", etag: "e0" },
     { id: "m1", state: "auth_required", failureCode: "auth_required_draft", etag: "e1" },
     { id: "m2", state: "failed", failureCode: "sent_item_not_confirmed",
       graphMessageId: "AAA", etag: "e2" },
-    { id: "m3", state: "failed", failureCode: "graph_failure",
+    { id: "m3", state: "failed", failureCode: "send_retryable_exhausted",
       graphMessageId: "BBB", etag: "e3" },
     { id: "m4", state: "sent", etag: "e4" },
+    { id: "m5", state: "failed", failureCode: "send_outcome_unknown",
+      graphMessageId: "CCC", etag: "e5" },
   ];
   const { service, sent } = load(messages, { status: "paused", mode: "send" });
   await service.control({ id: "u1", name: "Rep" }, { batchId: "b1", action: "retry" });

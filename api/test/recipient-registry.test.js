@@ -57,6 +57,36 @@ test("APPROVED_RECIPIENT_TIERS can narrow the policy without a rebuild", async (
   }
 });
 
+test("a blocked source excludes high routes but never confirmed routes", async () => {
+  const savedTiers = process.env.APPROVED_RECIPIENT_TIERS;
+  const savedSources = process.env.APPROVED_RECIPIENT_BLOCKED_SOURCES;
+  const modulePath = require.resolve("../shared/recipient-registry");
+  process.env.APPROVED_RECIPIENT_TIERS = "confirmed,high";
+  process.env.APPROVED_RECIPIENT_BLOCKED_SOURCES = " uBs , EDWARD JONES ";
+  delete require.cache[modulePath];
+  const blocked = require(modulePath);
+  try {
+    blocked.useIndex({ recipients: {
+      "110": record("high@example.com", "high", { source: "UBS" }),
+      "111": record("confirmed@example.com", "confirmed", { source: "UBS" }),
+    } });
+    await assert.rejects(blocked.resolve("110"),
+      (error) => error.code === "recipient_not_approved"
+        && error.detail === "high_tier_source_blocked");
+    assert.equal((await blocked.resolve("111")).email, "confirmed@example.com");
+    assert.deepEqual(blocked.policy().tiers, ["confirmed", "high"]);
+    assert.deepEqual(blocked.policy().blockedHighSources, ["edward jones", "ubs"]);
+    assert.notEqual(blocked.policy().version, registry.policy().version);
+  } finally {
+    blocked.reset();
+    if (savedTiers === undefined) delete process.env.APPROVED_RECIPIENT_TIERS;
+    else process.env.APPROVED_RECIPIENT_TIERS = savedTiers;
+    if (savedSources === undefined) delete process.env.APPROVED_RECIPIENT_BLOCKED_SOURCES;
+    else process.env.APPROVED_RECIPIENT_BLOCKED_SOURCES = savedSources;
+    delete require.cache[modulePath];
+  }
+});
+
 test("internal colleagues resolve only when their domain or address is allowlisted", async () => {
   // Excluding them outright removed the only safe rehearsal path: every test
   // batch is addressed to this firm, and the exclusion blocked the account

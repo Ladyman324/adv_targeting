@@ -14,11 +14,12 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from export_approved_recipients import (
-    RELEASE_PROVENANCE_KEYS, build_registry, build_release_descriptor,
+    RELEASE_PROVENANCE_KEYS, bounded_match_score, build_registry,
+    build_release_descriptor, registry_quality_summary,
 )
 from export_act_crd_corrections import REQUIRED_ACT_IDS
 import build_act_lookup
-from identity_schema import LINKS_FILENAME, MANIFEST_FILENAME, content_hash
+from identity_schema import LINKS_FILENAME, MANIFEST_FILENAME, content_hash, runtime_content_hash
 from import_act_identity_decisions import normalize_decision, validate
 
 
@@ -89,7 +90,7 @@ class RegistryTests(unittest.TestCase):
             link("1", "one@example.com", "act-1")]))
         core = {k: payload[k] for k in
                 ("schemaVersion", "recipients", "ineligible", "provenance")}
-        self.assertEqual(content_hash(core), payload["contentHash"])
+        self.assertEqual(runtime_content_hash(core), payload["contentHash"])
         recipient = payload["recipients"]["1"]
         route = {"crd": "1", "email": "one@example.com",
                  "actContactId": "act-1", "teammates": []}
@@ -103,17 +104,52 @@ class RegistryTests(unittest.TestCase):
         self.assertEqual("approved_email_not_unique",
                          payload["ineligible"]["1"])
 
-    def test_scraped_high_contact_is_research_only_not_email_approved(self):
-        contacts = {"advisors": {"900": {
-            "e": "roster@example.com", "n": "Roster Person",
-            "cn": "Roster Firm", "src": "UBS", "t": "high",
-        }}, "teams": {}, "practices": {}}
+    def test_confirmed_and_high_are_authorized_but_review_is_blocked(self):
+        contacts = {"advisors": {
+            "900": {"e": "roster@example.com", "n": "Roster Person",
+                    "cn": "Roster Firm", "src": "UBS", "t": "high",
+                    "ms": 0.82},
+            "901": {"e": "direct@example.com", "n": "Direct Person",
+                    "cn": "Roster Firm", "src": "Cetera",
+                    "t": "confirmed", "ms": 1.0},
+            "902": {"e": "review@example.com", "n": "Review Person",
+                    "cn": "Roster Firm", "src": "UBS", "t": "review",
+                    "ms": 0.90},
+            "903": {"e": "unscored@example.com", "n": "Unscored Person",
+                    "cn": "Roster Firm", "src": "UBS", "t": "high"},
+        }, "teams": {}, "practices": {}}
         payload = build_registry(pd.DataFrame(columns=[
             "advisor_crd", "identity_status", "can_email", "email"]),
             contacts)
-        self.assertNotIn("900", payload["recipients"])
+        self.assertEqual({"900", "901"}, set(payload["recipients"]))
+        self.assertEqual("high", payload["recipients"]["900"]["tier"])
+        self.assertEqual(0.82, payload["recipients"]["900"]["matchScore"])
+        self.assertEqual("confirmed", payload["recipients"]["901"]["tier"])
+        self.assertNotIn("902", payload["recipients"])
         self.assertEqual("contact_identity_not_approved",
-                         payload["ineligible"]["900"])
+                         payload["ineligible"]["902"])
+        self.assertEqual("high_match_evidence_missing",
+                         payload["ineligible"]["903"])
+
+    def test_match_score_is_bounded_model_evidence_not_probability(self):
+        self.assertEqual(0.72, bounded_match_score("0.72"))
+        self.assertEqual(1.18, bounded_match_score(1.18))
+        for value in (-0.01, 1.181, float("inf"), "not-a-score", None):
+            self.assertIsNone(bounded_match_score(value))
+
+    def test_registry_quality_summary_counts_tiers_sources_and_score_coverage(self):
+        payload = {"recipients": {
+            "1": {"tier": "confirmed", "source": "CRM", "matchScore": 1},
+            "2": {"tier": "high", "source": "UBS", "matchScore": 0.9},
+            "3": {"tier": "high", "source": "UBS"},
+        }, "ineligible": {"4": "contact_identity_not_approved"}}
+        summary = registry_quality_summary(payload)
+        self.assertEqual({"confirmed": 1, "high": 2}, summary["tiers"])
+        self.assertEqual({"CRM": 1, "UBS": 2}, summary["sources"])
+        self.assertIn({"tier": "high", "source": "UBS", "recipients": 2,
+                       "withMatchScore": 1}, summary["tierSources"])
+        self.assertEqual({"contact_identity_not_approved": 1},
+                         summary["ineligibleReasons"])
 
     def test_direct_crd_roster_contact_remains_eligible(self):
         contacts = {"advisors": {"901": {

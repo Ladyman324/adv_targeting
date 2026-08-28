@@ -25,6 +25,14 @@ const TTL_MS = Number(process.env.APPROVED_RECIPIENT_TTL_MS || 60 * 1000);
  */
 const SAFE_TIERS = new Set(String(process.env.APPROVED_RECIPIENT_TIERS || "confirmed,high")
   .split(",").map((tier) => tier.trim().toLowerCase()).filter(Boolean));
+const BLOCKED_HIGH_SOURCES = new Set(
+  String(process.env.APPROVED_RECIPIENT_BLOCKED_SOURCES || "")
+    .split(",").map((source) => source.trim().toLowerCase()).filter(Boolean));
+const POLICY_TIERS = [...SAFE_TIERS].sort();
+const POLICY_BLOCKED_SOURCES = [...BLOCKED_HIGH_SOURCES].sort();
+const POLICY_VERSION = crypto.createHash("sha256")
+  .update(JSON.stringify({ schemaVersion: 1, tiers: POLICY_TIERS,
+    blockedHighSources: POLICY_BLOCKED_SOURCES }), "utf8").digest("hex").slice(0, 16);
 let cache = null, loadedAt = 0, sourceEtag = "";
 function norm(value) { return String(value || "").trim().toLowerCase(); }
 function failure(statusCode, code, message, detail = "") {
@@ -81,6 +89,10 @@ function cleanRecord(crd, raw) {
       || !SAFE_TIERS.has(tier)) return null;
   const id = String(crd || "").trim();
   if (!/^\d{3,12}$/.test(id)) return null;
+  const metric = (longName, shortName) => {
+    const value = Number(raw && (raw[longName] ?? raw[shortName]));
+    return Number.isFinite(value) ? value : null;
+  };
   const record = { crd: id, email,
     name: String((raw && raw.name) || "").slice(0, 256),
     greetingName: String((raw && (raw.greetingName || raw.firstName)) || "").slice(0, 120),
@@ -88,6 +100,8 @@ function cleanRecord(crd, raw) {
     firm: String((raw && raw.firm) || "").slice(0, 256), tier,
     source: String((raw && raw.source) || "").slice(0, 120),
     actContactId: String((raw && raw.actContactId) || "").slice(0, 120),
+    matchScore: metric("matchScore", "ms"),
+    matchGap: metric("matchGap", "mg"),
     routingHash: String((raw && raw.routingHash) || "").slice(0, 128),
     teammates: (Array.isArray(raw && raw.teammates) ? raw.teammates : []).map((mate) => ({
       crd: String((mate && mate.crd) || "").trim(), email: norm(mate && mate.email),
@@ -100,6 +114,10 @@ function cleanRecord(crd, raw) {
   if (record.routingHash && record.routingHash !== calculatedRoutingHash) return null;
   record.routingHash = calculatedRoutingHash;
   return record;
+}
+function policy() {
+  return { schemaVersion: 1, version: POLICY_VERSION, tiers: POLICY_TIERS.slice(),
+    blockedHighSources: POLICY_BLOCKED_SOURCES.slice() };
 }
 function hydratePayload(payload, enforceReleaseBinding) {
   if (!payload || Number(payload.schemaVersion) !== 1 || !payload.recipients
@@ -131,6 +149,11 @@ function hydratePayload(payload, enforceReleaseBinding) {
         && !core.internalRecipientAllowed(norm(raw.email))) {
       ineligible.set(String(crd), "internal_recipient_not_allowlisted");
       continue;
+    }
+    const rawTier = String((raw && raw.tier) || "").trim().toLowerCase();
+    const rawSource = String((raw && raw.source) || "").trim().toLowerCase();
+    if (rawTier === "high" && BLOCKED_HIGH_SOURCES.has(rawSource)) {
+      ineligible.set(String(crd), "high_tier_source_blocked"); continue;
     }
     const record = cleanRecord(crd, raw);
     if (record) recipients.set(String(crd), record);
@@ -245,4 +268,4 @@ function useIndex(payload) {
 function reset() { cache = null; loadedAt = 0; sourceEtag = ""; }
 module.exports = { load, resolve, verify, allowedTeammates, verifyTeammates,
   verifyActPair, useIndex, reset, norm, failure, canonicalJson, expectedContentHash,
-  hydrate };
+  hydrate, policy };

@@ -19,7 +19,7 @@ const PAGE = 200;                  // rows added per "Show more"
 // Stamped by src/web_assets.py from metadata time plus every deployed JSON
 // byte. Field data still revalidates, but the shared build ID prevents stale
 // same-day rebuilds and keeps every first-party data request explicit.
-const DATA_VERSION = "20260827T164513Z-3c04e4844392be4d";
+const DATA_VERSION = "20260827T164513Z-0c9910167da52858";
 const dataUrl = file => {
   const path = file.startsWith("data/") ? file : `data/${file}`;
   return `${path}${path.includes("?") ? "&" : "?"}v=${encodeURIComponent(DATA_VERSION)}`;
@@ -237,9 +237,14 @@ function render(rows, note){
         ? `<span class="blocked" title="Do not call" aria-label="${esc(r[COL.name])} — do not call">&#9940;</span>`
         : `<a class="${isDirect(r) ? "" : "office"}" href="${esc(telUrl)}"
            data-call="${esc(r[COL.crd])}" aria-label="Call ${esc(r[COL.name])}">&#9742;</a>`;
-    const mail = r[COL.email]
-      ? `<a class="mail" href="#"
-           data-mail="${esc(r[COL.crd])}" aria-label="Email ${esc(r[COL.name])}">&#9993;</a>` : "";
+    const controlledEmail = r[COL.email]
+      && Dial.tierCanEmail(r[COL.tier], r[COL.source] || "");
+    const mail = !r[COL.email] ? "" : controlledEmail
+      ? `<a class="mail" href="#" data-mail="${esc(r[COL.crd])}"
+           aria-label="Email ${esc(r[COL.name])}">&#9993;</a>`
+      : `<a class="mail" href="mailto:${esc(r[COL.email])}"
+           title="Opens outside the app; nothing is logged and app suppression controls do not apply"
+           aria-label="Open a raw email to ${esc(r[COL.name])}">&#9993;</a>`;
     return `<li>
       <div class="who" data-open="${i}">
         <div class="nm-line"><span class="nm">${esc(r[COL.name])}</span>${badges}</div>
@@ -380,7 +385,8 @@ function openSheet(r){
   // rep should see it in the same glance as the phone number.
   const dnc = Dial.state.dnc.get(String(r[COL.crd]));
   const unconfirmed = r[COL.tier] === "review";
-  const emailConfirmed = Dial.tierCanEmail(r[COL.tier]);
+  const contactSource = COL.source == null ? "" : r[COL.source];
+  const emailConfirmed = Dial.tierCanEmail(r[COL.tier], contactSource);
 
   // Suppression used to hide the "+ Call list" button and leave the tel: links
   // working, which is the wrong half: the list is a convenience, the call is
@@ -437,14 +443,9 @@ function openSheet(r){
     ${row("Phone", r[COL.phone_pretty]
         ? `${r[COL.phone_pretty]} (${isDirect(r) ? "Direct" : "Office"})` : "")}
     ${r[COL.email] ? `<p class="sheet-row"><span class="sheet-lab">Email</span>
-        ${Dial.isDnc(r[COL.crd]) || !emailConfirmed
-          ? `<span title="${!emailConfirmed
-               ? "Research-only address; confirm the identity before emailing"
-               : "Firm-wide do-not-call, so this address is not one-click"}"
-               >${esc(r[COL.email])}</span>`
-          : `<a class="sheet-mailto" href="mailto:${esc(r[COL.email])}"
-               title="Opens a blank email outside the app — nothing is logged"
-               >${esc(r[COL.email])}</a>`}</p>` : ""}
+        <a class="sheet-mailto" href="mailto:${esc(r[COL.email])}"
+          title="Opens outside the app; nothing is logged and app suppression controls do not apply"
+          >${esc(r[COL.email])}</a></p>` : ""}
     ${withEic(r)}
     ${territoryRow(r)}
     ${isRanked(r) ? `<p class="sheet-row"><span class="sheet-lab">Ranked</span>
@@ -574,8 +575,12 @@ function snapshotOf(r){
            // firm-wide from a screen that shows only a name and a number.
            unconfirmed: r[COL.tier] === "review",
            identityApproved: r[COL.tier] === "confirmed" || r[COL.tier] === "high",
-           emailConfirmed: Dial.tierCanEmail(r[COL.tier]),
+           contactTier: r[COL.tier] || "",
+           contactSource: COL.source == null ? "" : (r[COL.source] || ""),
+           emailConfirmed: Dial.tierCanEmail(r[COL.tier],
+             COL.source == null ? "" : r[COL.source]),
            emailEligibilityKnown: true,
+           emailTierKey: Dial.emailTierKey(),
            contactRouteVersion: DATA_VERSION };
 
 }
@@ -613,7 +618,7 @@ async function teammatesWithEmail(crd, state, teamKey){
   for (const m of rec.m) {
     const mateCrd = String(m[0]);
     if (mateCrd === String(crd)) continue;
-    if (!Dial.tierCanEmail(m[4])) continue;
+    if (!Dial.tierCanEmail(m[4], m[5] || "")) continue;
     /* The address now ships WITH the practice record, as a fourth column.
      *
      * It used to be looked up in TILE_CACHE, which holds only the tiles near
@@ -681,6 +686,8 @@ window.AdvisorEmailData = {
       out.push({ ...it, firstName: (row && COL.sal != null && row[COL.sal]) || "",
                  teammates: mates.map((m) => m.email), teammatesFull: mates });
     }
+    out.eligibilitySummary = { selected: Dial.state.items.length, included: out.length,
+      excluded: Dial.state.items.length - out.length };
     return out;
   },
 };
@@ -984,6 +991,7 @@ async function locateFlagged(crd, name){
 const routeChecks = new Set();
 async function ensureCurrentQueueRoute(item){
   if (!item || (item.contactRouteVersion === DATA_VERSION
+      && item.emailTierKey === Dial.emailTierKey()
       && item.emailEligibilityKnown === true
       && (item.identityApproved === true || item.routeIssue))) return;
   const key = String(item.crd);

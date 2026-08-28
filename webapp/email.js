@@ -185,7 +185,12 @@
     if (el) { el.textContent = message || ""; el.classList.toggle("bad", bad); }
   }
 
-  async function loadCatalog() { catalog = await api("catalog", null, "GET"); return catalog; }
+  async function loadCatalog() {
+    catalog = await api("catalog", null, "GET");
+    if (global.Dial && catalog && catalog.recipientEligibility)
+      global.Dial.setEmailPolicy(catalog.recipientEligibility);
+    return catalog;
+  }
 
   function connectView(error = "") {
     document.getElementById("emailBody").innerHTML = `<div class="email-connect">
@@ -1030,10 +1035,34 @@ ${t.bodyText}`);
              unopened: all.length - blocked - reviewed };
   }
 
+  function identityLabel(message) {
+    const tier = String((message && (message.recipientTier || message.contactTier)) || "").toLowerCase();
+    const source = String((message && (message.recipientSource || message.contactSource)) || "");
+    if (tier === "confirmed") return "ACT-confirmed CRD";
+    if (tier === "high") return `High-confidence roster match${source ? " · " + source : ""}`;
+    if (tier === "self_test") return "Connected mailbox test";
+    return "Identity evidence unavailable";
+  }
+
+  function identitySummary(messages) {
+    const counts = { confirmed: 0, high: 0, other: 0 };
+    for (const message of messages || []) {
+      const tier = String(message.recipientTier || message.contactTier || "").toLowerCase();
+      if (tier === "confirmed") counts.confirmed += 1;
+      else if (tier === "high") counts.high += 1;
+      else counts.other += 1;
+    }
+    return [counts.confirmed ? `${counts.confirmed} ACT-confirmed` : "",
+      counts.high ? `${counts.high} high-confidence` : "",
+      counts.other ? `${counts.other} other/test` : ""]
+      .filter(Boolean).join(" · ");
+  }
+
   function tallyRow() {
     const c = tally();
     return `<div class="email-tally-row">
       <span class="count">${c.total} recipient${c.total === 1 ? "" : "s"}</span>
+      <span class="identity">${esc(identitySummary(detail.messages))}</span>
       ${c.blocked ? `<button type="button" class="bad" data-email="next-problem">${c.blocked} blocked</button>` : ""}
       ${c.reviewed ? `<span class="good">${c.reviewed} reviewed by you</span>` : ""}
       ${c.unopened ? `<span class="warnish">${c.unopened} not yet opened</span>` : ""}
@@ -1050,6 +1079,7 @@ ${t.bodyText}`);
     return `<div class="email-pager">
       <button type="button" data-email="step" data-by="-1" ${cursor ? "" : "disabled"} aria-label="Previous recipient">&#9664;</button>
       <span class="email-pager-who"><b>${esc(m.recipientName || m.recipientEmail)}</b>
+        <small>${esc(identityLabel(m))}</small>
         <small class="${flag}">${cursor + 1} of ${n} &middot; ${esc(stateLabel(m.state))}</small></span>
       <button type="button" data-email="step" data-by="1" ${cursor < n - 1 ? "" : "disabled"} aria-label="Next recipient">&#9654;</button>
       ${["editing", "invalid"].includes(detail.batch.status) && n > 1
@@ -1389,7 +1419,7 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
           return `<li class="${i === cursor ? "on" : ""}">
           <button type="button" data-email="pick" data-index="${i}">
             <span>${esc(x.recipientName || x.recipientEmail)}</span>
-            <small>${esc(x.recipientEmail)}</small>
+            <small>${esc(x.recipientEmail)} &middot; ${esc(identityLabel(x))}</small>
             <em class="state-${esc(x.state)}">${esc(stateLabel(x.state))}${
               over ? ` &middot; own wording` : ""}</em></button>
           ${!locked && detail.messages.length > 1
@@ -1421,7 +1451,8 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
         <section class="email-individual${m.subjectOverridden || m.bodyOverridden ? " overridden" : ""}">
           <div class="email-section-head">
             <div><p class="eyebrow">Step 2 &middot; edit one &middot; ${cursor + 1} of ${detail.messages.length}</p>
-            <h3>${esc(m.recipientName || m.recipientEmail)}</h3></div>
+            <h3>${esc(m.recipientName || m.recipientEmail)}</h3>
+            <p class="email-fine">${esc(identityLabel(m))}</p></div>
             ${locked ? "" : `<span id="emailSaveState" class="email-savestate good">Saved</span>`}</div>
           ${m.subjectOverridden || m.bodyOverridden ? `<p class="email-override">
             <b>This email keeps its own wording.</b> Edits to the common template above are
@@ -1581,15 +1612,23 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
      */
     // Existing saved queues can predate the UI-level review guard. Refuse those
     // snapshots here; the server independently resolves every remaining CRD.
+    const selectionSummary = selected && selected.eligibilitySummary;
     const identityBlocked = (selected || []).filter((r) => r && r.unconfirmed).length;
     recipients = (selected || []).filter((r) => r && !r.unconfirmed).map((r) => ({ contactId: r.contactId || r.crd || "", name: r.name || "",
       email: r.email || "", firm: r.firm || r.companyName || "", firstName: r.firstName || "", lastName: r.lastName || "",
       unconfirmed: !!r.unconfirmed,
+      contactTier: r.contactTier || "",
+      contactSource: r.contactSource || "",
+      identityLabel: r.identityLabel || (global.Dial
+        ? global.Dial.identityTierLabel(r.contactTier, r.contactSource) : ""),
       teammates: Array.isArray(r.teammates) ? r.teammates : [],
       teammatesFull: Array.isArray(r.teammatesFull) ? r.teammatesFull : [] }));
-    if (identityBlocked)
+    if (selectionSummary && selectionSummary.excluded)
+      global.alert(`${selectionSummary.included} of ${selectionSummary.selected} saved contacts can use the controlled composer. `
+        + `${selectionSummary.excluded} were excluded by identity, source, or stale-data checks.`);
+    else if (identityBlocked)
       global.alert(`${identityBlocked} unconfirmed contact${identityBlocked === 1 ? "" : "s"} `
-        + `cannot be emailed until the CRD link is resolved.`);
+        + `cannot use the controlled composer until the CRD link is resolved.`);
     if (!recipients.length) return;
     detail = null; cursor = 0; forceDetail = false; clearTimeout(pollTimer); clearInterval(tickTimer);
     const back = shell(); back.hidden = false;

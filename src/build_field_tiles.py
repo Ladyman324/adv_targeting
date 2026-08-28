@@ -72,7 +72,7 @@ CELL = 0.25
 # the client -- never hardcoded there.
 COLUMNS = ["crd", "name", "title", "firm", "city", "state", "lat", "lon",
            "email", "phone", "phone_pretty", "phone_kind", "mobile",
-           "team", "team_size", "team_key", "owner", "tier",
+           "team", "team_size", "team_key", "owner", "tier", "source",
            # Added for the field view's chips and badges. A rep with ninety
            # minutes needs a reason to pick, and distance alone is not one --
            # the nearest advisor is often nobody in particular.
@@ -226,6 +226,7 @@ def main() -> None:
             c.get("pk", "") if c.get("pk") in practices else "",
             c.get("o", ""),
             c.get("t", ""),
+            c.get("src", ""),
             1 if crd in ranked else 0,
             round(money),
             str(office or ""),
@@ -295,7 +296,7 @@ def main() -> None:
     shard: dict = collections.defaultdict(dict)
     for key, rec in practices.items():
         entry = {"n": rec.get("n", ""),
-                 # Member contract: [crd, display name, state, email, tier].
+                 # Member contract: [crd, display name, state, email, tier, source].
                  # The field client cannot infer a teammate's identity tier
                  # from nearby tiles: the teammate may be in another city, or
                  # the advisor may have been opened from a synced queue with no
@@ -304,9 +305,10 @@ def main() -> None:
                  # independent registry check rejects them.
                  "m": [[crd, index_names.get(str(crd)) or advisors.get(crd, {}).get("n", ""), st,
                         advisors.get(crd, {}).get("e", ""),
-                        advisors.get(crd, {}).get("t", "")]
+                        advisors.get(crd, {}).get("t", ""),
+                        advisors.get(crd, {}).get("src", "")]
                        for crd, st in rec.get("m", [])]}
-        for _, _, st, _e, _tier in entry["m"]:
+        for _, _, st, _e, _tier, _source in entry["m"]:
             if st:
                 shard[st][key] = entry
     if PRACTICES.exists():

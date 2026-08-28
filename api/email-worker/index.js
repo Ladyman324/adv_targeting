@@ -56,6 +56,13 @@ async function refreshBatch(userId, batchId, deps) {
 }
 
 const RETRY_CEILING = 6;
+function terminalFailureCode(err, phase, retryable) {
+  if (phase === "send" && err.ambiguous && err.safeToRetry !== true)
+    return "send_outcome_unknown";
+  if (retryable) return `${phase}_retryable_exhausted`;
+  return err.graphCode || err.code || `${phase}_permanent_failure`;
+}
+
 
 async function verifyIdentity(message, batch, deps, options = {}) {
   if (!message.contactId) {
@@ -111,7 +118,8 @@ async function failOrRetry(work, claimed, err, phase, deps) {
     await deps.store.audit(work.userId, work.batchId, "microsoft_reconnect_required", { messageId: work.messageId, phase });
     return;
   }
-  const retryable = err.statusCode === 429 || err.ambiguous || (err.statusCode >= 500);
+  const retryable = err.safeToRetry === true || err.statusCode === 429
+    || err.ambiguous || (err.statusCode >= 500);
   // This phase's own budget. Sharing one counter meant several draft retries
   // could leave the first send attempt with no allowance at all -- the message
   // failed permanently on a transient error it had never actually hit while
@@ -126,12 +134,15 @@ async function failOrRetry(work, claimed, err, phase, deps) {
     }, claimed.etag);
     await deps.enqueue({ ...work, kind: phase === "draft" ? "draft" : "reconcile" }, seconds);
   } else {
+    const terminalCode = terminalFailureCode(err, phase, retryable);
     await deps.store.patchMessage(work.userId, work.batchId, work.messageId, { state: "failed",
-      failureCode: err.graphCode || err.code || "graph_failure", failureMessage: err.message,
+      failureCode: terminalCode, failureMessage: err.message,
       graphRequestId: err.requestId || "", leaseUntilUtc: "" }, claimed.etag);
   }
   await deps.store.audit(work.userId, work.batchId, `${phase}_failed`, { messageId: work.messageId,
-    retryable, code: err.graphCode || "", requestId: err.requestId || "" });
+    retryable, safeToRetry: retryable
+      && terminalFailureCode(err, phase, retryable) !== "send_outcome_unknown",
+    code: err.graphCode || "", requestId: err.requestId || "" });
 }
 
 async function draft(work, deps) {
@@ -252,7 +263,8 @@ async function send(work, deps) {
       if (found) remote = await (deps.graph.getDirectMessage || deps.graph.getMessage)(
         token.accessToken, found.id);
     }
-    if (!remote) throw new graph.GraphError("The known Outlook draft could not be reconciled.", { ambiguous: true });
+    if (!remote) throw new graph.GraphError("The known Outlook draft could not be reconciled.",
+      { ambiguous: true, safeToRetry: true });
     if (!remote.isDraft) {
       await deps.store.patchMessage(work.userId, work.batchId, work.messageId, { state: "sent",
         submittedUtc: claimed.submittedUtc || remote.sentDateTime || new Date().toISOString(), leaseUntilUtc: "",
@@ -377,15 +389,18 @@ async function reconcile(work, deps) {
         leaseUntilUtc: "", failureCode: "", failureMessage: "" }, message.etag);
       await deps.store.audit(work.userId, work.batchId, "send_reconciled", { messageId: message.id,
         status: "no_known_failure" });
-    } else if (message.state === "send_ambiguous") {
-      await deps.store.patchMessage(work.userId, work.batchId, work.messageId, { state: "send_scheduled",
-        leaseUntilUtc: "" }, message.etag);
-      await deps.enqueue({ ...work, kind: "send" }, 5);
     } else if (message.reconcileAttempts < RETRY_CEILING) {
       await deps.store.patchMessage(work.userId, work.batchId, work.messageId, { leaseUntilUtc: "" }, message.etag);
       await deps.enqueue(work, 60);
-    } else await deps.store.patchMessage(work.userId, work.batchId, work.messageId, { state: "failed",
-      leaseUntilUtc: "", failureCode: "sent_item_not_confirmed", failureMessage: "Graph accepted the send, but the Sent Items copy could not be confirmed. Do not retry automatically." }, message.etag);
+    } else {
+      const unknown = message.state === "send_ambiguous";
+      await deps.store.patchMessage(work.userId, work.batchId, work.messageId, { state: "failed",
+        leaseUntilUtc: "", failureCode: unknown ? "send_outcome_unknown" : "sent_item_not_confirmed",
+        failureMessage: unknown
+          ? "Microsoft Graph did not provide a definitive send outcome. The message was not submitted again."
+          : "Graph accepted the send, but the Sent Items copy could not be confirmed. Do not retry automatically." },
+        message.etag);
+    }
   } catch (err) {
     if (message.reconcileAttempts < RETRY_CEILING) {
       const latest = await deps.store.getMessage(work.userId, work.batchId, work.messageId);

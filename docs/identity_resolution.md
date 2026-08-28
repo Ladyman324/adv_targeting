@@ -100,12 +100,11 @@ evidence hash. Inactive records cannot be manually promoted.
 
    The contact build validates and publishes the exact ledger/ACT provenance.
    The ACT lookup is ledger-approved only. The email registry is bound to the
-   identity manifest, links, ACT source bytes, and contacts hash. Only
-   `confirmed` direct-CRD identities enter outbound email; calibrated `high`
-   roster matches remain research/calling evidence and are not email authority,
-   including external Outlook mailto links. Saved call lists keep separate
-   current-build proofs for calling and emailing so high-tier research contacts
-   remain callable without becoming email-authorized.
+   identity manifest, links, ACT source bytes, and contacts hash. `confirmed`
+   and `high` identities enter the outbound registry by an explicit business
+   authorization decision. `review` remains unresolved and is excluded from
+   the controlled composer. Saved lists keep current-build proofs so a stale
+   address or an old tier rule is re-evaluated before controlled sending.
 
 8. Test, review, then deploy in the safe order:
 
@@ -120,6 +119,63 @@ evidence hash. Inactive records cannot be manually promoted.
    descriptor exactly pins the local registry and ACT lookup. Runtime rejects a
    validly self-hashed blob from any other release; all registry failures fail
    closed.
+
+## Email authorization and evidence
+
+The tiers answer different questions and must not be described as equivalent
+proof:
+
+- `confirmed` means a source asserted the CRD and the source identity agrees
+  with the SEC record. ACT-derived routes additionally require one unique,
+  approved ledger GUID/CRD/email tuple.
+- `high` means the roster-to-SEC scorer found a sufficiently strong,
+  sufficiently unambiguous name/firm/location match. There is no asserted CRD.
+  The business has deliberately authorized these routes for email despite that
+  probabilistic evidence.
+- `review` means the identity remains unresolved. It is visible as research
+  evidence but is excluded from the registry and from the controlled composer.
+
+The relevant contact calibration currently labels 633 of 200,949 contact rows
+(0.32%). At the shipping thresholds it accepts 467 labelled rows, and all
+467 match the independently published Barron's CRD. This is encouraging, but
+it is not a 100% population guarantee: the labelling bridge preferentially
+reaches cleaner records, Barron's skews toward large firms, and
+`src/contact_calibrate.py` explicitly calls the precision an optimistic bound.
+The 98.9% figure in `docs/gate_evaluation.md` measures a different question -
+the precision of an ACT first-name rule when deciding which rows to demote -
+and must not be used as the accuracy of scraped high-tier matches.
+
+Every exported route carries its tier and, when the contact artifact supplies
+one, `matchScore`. The score is bounded to the matcher's actual 0-1.18 range;
+the suffix bonus can take it above 1.0, so it is evidence from the model rather
+than a probability.
+
+The raw Outlook `mailto:` action is intentionally discretionary and clickable.
+It hands the displayed address to Outlook and does not claim the registry,
+suppression, pacing, review, logging, or send guarantees of the controlled
+composer. Identity warnings and the do-not-call state remain visible so the
+rep makes that one-off decision knowingly. This escape hatch must not be
+described as controlled email authorization.
+
+### Source-level quality reporting
+
+Aggregate calibration must not be silently inherited by every roster source.
+The exporter now prints PII-free counts by tier and source, match-score coverage,
+and ineligibility reason so each release exposes its population mix. A genuine
+source-quality report should add, for every source, labelled count, correct
+count, population and labelled coverage, a confidence interval, evaluation
+date, and the hashes of the roster/contact/scoring artifacts. Sources with no
+independent labels should say `unmeasured`, not borrow the aggregate precision.
+Until that truth set exists, source counts are blast-radius reporting, not a
+source accuracy score.
+
+The API also supports the comma-separated
+`APPROVED_RECIPIENT_BLOCKED_SOURCES` per-source emergency block setting.
+Entries are normalized source names and block only `high` routes from that
+source; a `confirmed` CRD from the same source remains eligible. Blocking a
+source is an operational stop, not a deletion or a claim that the remaining
+sources are accurate. The next source-quality report should record which
+setting was active for the release.
 
 ## Preferred names
 

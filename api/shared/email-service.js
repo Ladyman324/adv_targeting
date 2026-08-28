@@ -111,6 +111,33 @@ function visibleTemplates(templates, admin) {
   return admin ? templates : templates.filter((t) => t.published !== false);
 }
 
+function recipientEvidence(record) {
+  const metric = (value) => value === null || value === undefined || value === ""
+    ? null : (Number.isFinite(Number(value)) ? Number(value) : null);
+  return {
+    recipientTier: String((record && record.tier) || ""),
+    recipientSource: String((record && record.source) || ""),
+    recipientMatchScore: metric(record && record.matchScore),
+    recipientMatchGap: metric(record && record.matchGap),
+    recipientPolicyVersion: recipientRegistry.policy().version,
+  };
+}
+
+function recipientEvidenceSummary(records) {
+  const tiers = {}, sources = {};
+  for (const record of records || []) {
+    const tier = String(record.recipientTier || record.tier || "unknown");
+    const source = String(record.recipientSource || record.source || "unknown");
+    tiers[tier] = (tiers[tier] || 0) + 1;
+    sources[source] = (sources[source] || 0) + 1;
+  }
+  return {
+    policyVersion: recipientRegistry.policy().version,
+    tiers,
+    sources,
+  };
+}
+
 async function catalog(who, opts) {
   const [connection, templates, documents, policy, rollingUsed] = await Promise.all([
     auth.status(who.id), store.listTemplates(), store.listDocuments(), store.policy(),
@@ -126,6 +153,7 @@ async function catalog(who, opts) {
     // catalog so the Settings picker cannot offer anything the server would
     // then refuse.
     internalRecipients: cfg.internalRecipients,
+    recipientEligibility: recipientRegistry.policy(),
     signatureHtml: connection.profile ? core.corporateSignature(connection.profile) : "",
     policy: { directSendAvailable: cfg.directSendEnvironmentEnabled && !policy.killed,
       killed: policy.killed, reason: policy.reason,
@@ -175,7 +203,12 @@ async function canonicalRecipient(raw, connection) {
     return { contactId: "", name: profile.displayName || connection.mailbox, email: mailbox,
       firm: "", firstName: profile.givenName || split.first, lastName: profile.surname || split.last,
       teammates: [], teammatesFull: [], recipientKind: "self_test",
-      registryHash: "", routingHash: "" };
+      registryHash: "", routingHash: "",
+      recipientTier: "self_test",
+      recipientSource: "connected_mailbox",
+      recipientMatchScore: null,
+      recipientMatchGap: null,
+      recipientPolicyVersion: recipientRegistry.policy().version };
   }
   const approved = await recipientRegistry.resolve(crd);
   const mates = await recipientRegistry.allowedTeammates(crd);
@@ -184,7 +217,8 @@ async function canonicalRecipient(raw, connection) {
     firstName: approved.greetingName || split.first, lastName: approved.lastName || split.last,
     teammates: mates.map((m) => m.email),
     teammatesFull: mates.map((m) => ({ crd: m.crd, name: m.name, email: m.email })),
-    registryHash: approved.registryHash, routingHash: approved.routingHash };
+    registryHash: approved.registryHash, routingHash: approved.routingHash,
+    ...recipientEvidence(approved) };
 }
 
 /* Which of an advisor's teammates may actually be copied.
@@ -371,6 +405,7 @@ async function validateBatch(who, batchId, options = {}) {
         const available = await recipientRegistry.allowedTeammates(message.contactId);
         identityPatch.recipientRegistryHash = approved.registryHash;
         identityPatch.recipientRoutingHash = approved.routingHash;
+        Object.assign(identityPatch, recipientEvidence(approved));
         identityPatch.teammateCcJson = JSON.stringify(approvedMates.map((mate) => mate.email));
         identityPatch.teammateCcCrdsJson = JSON.stringify(approvedMates.map((mate) => mate.crd));
         identityPatch.teammatesAvailableJson = JSON.stringify(available.map((mate) => ({
@@ -586,6 +621,11 @@ async function createFollowUp(who, input, deps = {}) {
       recipientRegistryHash: approved.registryHash,
       recipientRoutingHash: approved.routingHash,
       teammateCcJson: "[]", teammateCcCrdsJson: "[]",
+      recipientTier: approved.tier,
+      recipientSource: approved.source,
+      recipientMatchScore: approved.matchScore,
+      recipientMatchGap: approved.matchGap,
+      recipientPolicyVersion: recipientRegistry.policy().version,
       teammatesAvailableJson: JSON.stringify((await registry.allowedTeammates(r.crd))
         .map((mate) => ({ crd: mate.crd, name: mate.name, email: mate.email }))),
       // The sent message this replies to. The worker needs the Graph id, not
@@ -607,7 +647,8 @@ async function createFollowUp(who, input, deps = {}) {
   await st.audit(who.id, batchId, "follow_up_created",
     { parentBatchId: parentId, recipients: fresh.remaining.length,
       replied: fresh.counts.replied, bounced: fresh.counts.bounced,
-      suppressed: fresh.counts.suppressed, attachments: documents.length });
+      suppressed: fresh.counts.suppressed, attachments: documents.length,
+      recipientIdentity: recipientEvidenceSummary(verifiedRemaining.map(({ approved }) => approved)) });
   return getBatchDetail(who, batchId);
 }
 
@@ -738,6 +779,11 @@ async function createBatch(who, input) {
       recipientRegistryHash: r.registryHash, recipientRoutingHash: r.routingHash,
       // Stored per message: each advisor has their own practice, so this is the
       // one copy decision that cannot be a batch-level field.
+      recipientTier: r.recipientTier,
+      recipientSource: r.recipientSource,
+      recipientMatchScore: r.recipientMatchScore,
+      recipientMatchGap: r.recipientMatchGap,
+      recipientPolicyVersion: r.recipientPolicyVersion,
       teammateCcJson: JSON.stringify(teamCc.get(r.contactId || r.email) || []),
       // The whole practice, so the review screen can offer them one at a time.
       // Stored rather than recomputed: contacts.json is a client asset, and a
@@ -758,7 +804,8 @@ async function createBatch(who, input) {
   }
   await store.audit(who.id, batchId, "batch_created", { recipientCount: kept.length,
     suppressedCount: dropped.length,
-    templateId: template.id, attachmentIds: requested });
+    templateId: template.id, attachmentIds: requested,
+    recipientIdentity: recipientEvidenceSummary(kept) });
   return validateBatch(who, batchId);
 }
 
@@ -1132,45 +1179,45 @@ async function control(who, input) {
     const connection = await auth.status(who.id);
     if (!connection.connected) throw httpError(409, "Reconnect Microsoft 365 before retrying remaining work.");
     const messages = await store.listMessages(who.id, batch.id);
-    let nextStatus = batch.mode === "send" ? "sending" : "drafting";
+    const SAFE_FAILED_RETRIES = new Map([
+      ["draft_retryable_exhausted", "draft"],
+      ["send_retryable_exhausted", "send"],
+    ]);
+    const retryPhase = (message) => {
+      if (message.state === "auth_required") {
+        if (message.failureCode === "auth_required_draft") return "draft";
+        if (message.failureCode === "auth_required_send") return "send";
+        return "";
+      }
+      if (message.state === "failed")
+        return SAFE_FAILED_RETRIES.get(String(message.failureCode || "")) || "";
+      return "";
+    };
+    const candidates = messages.map((message) => ({ message, phase: retryPhase(message) }))
+      .filter(({ phase }) => phase);
+    if (!candidates.length) throw httpError(409,
+      "None of the remaining failures has a send outcome that is safe to retry.",
+      "no_safe_retry");
+    const nextStatus = batch.mode === "send" ? "sending" : "drafting";
     await store.patchBatch(who.id, batch.id, { status: nextStatus }, batch.etag);
-    /* WHAT "RETRY FAILED" ACTUALLY RETRIES.
-     *
-     * This only ever re-queued `auth_required`, so a batch that lost two
-     * recipients to a transient Graph failure showed a "Retry failed" button
-     * that did nothing at all: the count came from `failed`, the action read
-     * `auth_required`, and the two never met. The rep's only recovery was to
-     * rebuild the batch by hand.
-     *
-     * NOT EVERY FAILURE MAY BE REPLAYED. A send whose outcome is unknown --
-     * Graph accepted it but the Sent Items copy could not be confirmed -- must
-     * never be resent automatically, because the honest answer is "it may
-     * already have arrived". Those codes stay terminal and keep saying so.
-     */
-    // core.config() locally: control() declares no cfg, and reaching for the one
-    // in a neighbouring function is how the last paced enqueue shipped a
-    // ReferenceError that node --check could not see.
     const paceSeconds = core.config().mailboxIntervalSeconds;
-    const REPLAYABLE = (code) => !["sent_item_not_confirmed", "reconciliation_failed",
-      "recipient_opted_out", "send_blocked_recipient_opted_out"].includes(String(code || ""));
-    const stuck = messages.filter((x) => x.state === "auth_required"
-      || (x.state === "failed" && REPLAYABLE(x.failureCode)));
     let slot = 0;
-    for (const m of stuck) {
-      // Where to resume, decided by what Graph already holds rather than by the
-      // failure text: a message with a draft id has one, and re-running the
-      // draft phase would reconcile it back to the same draft anyway.
-      const draftPhase = m.failureCode === "auth_required_draft" || !m.graphMessageId;
-      await store.patchMessage(who.id, batch.id, m.id, { state: draftPhase ? "draft_pending" : "send_scheduled",
-        failureCode: "", failureMessage: "", leaseUntilUtc: "" }, m.etag);
-      // Paced, like every other enqueue. Replaying a handful of failures all at
-      // once is how the concurrency wall was hit in the first place, and a
-      // retry storm is the worst moment to rebuild it.
-      await enqueue({ kind: draftPhase ? "draft" : "send", userId: who.id, batchId: batch.id, messageId: m.id },
-        slot * paceSeconds);
+    for (const { message: m, phase } of candidates) {
+      const draftPhase = phase === "draft";
+      await store.patchMessage(who.id, batch.id, m.id, {
+        state: draftPhase ? "draft_pending" : "send_scheduled",
+        failureCode: "", failureMessage: "", retryAfterUtc: "", leaseUntilUtc: "",
+        ...(draftPhase ? { draftAttempts: 0 } : { sendAttempts: 0 }),
+      }, m.etag);
+      await enqueue({ kind: phase, userId: who.id, batchId: batch.id,
+        messageId: m.id }, slot * paceSeconds);
       slot += 1;
     }
-    await store.audit(who.id, batch.id, "remaining_retried", { requeued: stuck.length });
+    await store.audit(who.id, batch.id, "remaining_retried", {
+      requeued: candidates.length,
+      draft: candidates.filter((x) => x.phase === "draft").length,
+      send: candidates.filter((x) => x.phase === "send").length,
+    });
   } else if (input.action === "resume") {
     if (batch.status !== "paused") throw httpError(409, "This batch is not paused.");
     await store.patchBatch(who.id, batch.id, { status: "sending", pausedUtc: "" }, batch.etag);

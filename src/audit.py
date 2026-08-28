@@ -394,11 +394,28 @@ def _hydratable():
 # ---------------------------------------------------------------------------
 @check("tiles carry every column a queue snapshot needs")
 def _snapshot_columns():
-    cols = set(read(DATA / "tile_index.json")["columns"])
-    need = {"crd", "name", "firm", "phone", "phone_kind", "city", "state", "email"}
+    index = read(DATA / "tile_index.json")
+    columns = index["columns"]
+    cols = set(columns)
+    need = {"crd", "name", "firm", "phone", "phone_kind", "city", "state",
+            "email", "tier", "source", "ranked", "assets", "office", "sal"}
     missing = need - cols
-    return (not missing, f"{len(need)} needed"
-            + (f"; MISSING from tiles: {sorted(missing)}" if missing else ""))
+    shape_problem = ""
+    if not missing and index.get("cells"):
+        sample = read(DATA / "tiles" / f"{index['cells'][0]}.json").get("rows", [])
+        if sample:
+            row = sample[0]
+            values = dict(zip(columns, row))
+            if (not isinstance(values["source"], str)
+                    or values["ranked"] not in (0, 1)
+                    or not isinstance(values["assets"], (int, float))
+                    or not isinstance(values["office"], str)
+                    or not isinstance(values["sal"], str)):
+
+                shape_problem = "column values do not match the declared schema"
+    return (not missing and not shape_problem, f"{len(need)} needed"
+            + (f"; MISSING from tiles: {sorted(missing)}" if missing else "")
+            + (f"; {shape_problem}" if shape_problem else ""))
 
 
 # ---------------------------------------------------------------------------
@@ -2267,13 +2284,15 @@ def _act_lookup():
             + ("; " + "; ".join(problems) if problems else ""))
 
 
-@check("the outbound recipient registry is direct-identity only and provenance-bound")
+@check("the outbound registry contains only business-authorized tiers and is provenance-bound")
 def _approved_recipient_registry():
-    """A calibrated fuzzy contact is useful on screen, not send authority."""
+    """Confirmed and high are authorized by decision; review remains blocked."""
     import gzip                                           # noqa: PLC0415
+    from collections import Counter                        # noqa: PLC0415
+    import math                                           # noqa: PLC0415
     from contact_provenance import sha256_file             # noqa: PLC0415
     from identity_schema import (IDENTITY_DIRNAME, LINKS_FILENAME,
-                                 MANIFEST_FILENAME, content_hash)  # noqa: PLC0415
+                                 MANIFEST_FILENAME, content_hash, runtime_content_hash)  # noqa: PLC0415
 
     identity = ROOT / "data" / IDENTITY_DIRNAME
     registry_path = identity / "approved_recipients.json.gz"
@@ -2286,22 +2305,47 @@ def _approved_recipient_registry():
     core = {k: registry.get(k) for k in
             ("schemaVersion", "recipients", "ineligible", "provenance")}
     problems = []
-    if registry.get("contentHash") != content_hash(core):
+    if registry.get("contentHash") != runtime_content_hash(core):
         problems.append("content hash is invalid")
-    # confirmed AND high are addressable, by decision. `high` is a strong name
-    # match with no CRD asserted anywhere -- about 0.989 precision, so roughly
-    # one in ninety is not the person named. That is a judgement about
-    # acceptable misdirection, taken deliberately; what is NOT a judgement is
-    # `review` or `none`, which mean the match is unresolved and must never
-    # reach an addressable list however the policy is set elsewhere.
+    # Confirmed AND high are email-authorized by business decision. They are not
+    # equivalent proof. The contact calibration accepted 467/467 current labels,
+    # but labelled only 633 rows (0.32% of contact rows) and explicitly calls
+    # that result an optimistic bound. The unrelated 0.989 Act demotion-rule
+    # statistic must never be presented as high-tier contact precision.
     addressable = {"confirmed", "high"}
-    unresolved = [crd for crd, row in (registry.get("recipients") or {}).items()
+    recipients = registry.get("recipients") or {}
+    unresolved = [crd for crd, row in recipients.items()
                   if str(row.get("tier") or "").lower() not in addressable]
     if unresolved:
         problems.append(f"{len(unresolved):,} recipients carry an unresolved tier")
+    # A high route must retain the source and exact bounded score that justified
+    # the contact build. The score is model evidence in [0, 1.18], not a
+    # probability; a missing value cannot silently inherit aggregate accuracy.
+    high_without_evidence = []
+    contact_rows = contacts.get("advisors") or {}
+    for crd, row in recipients.items():
+        if str(row.get("tier") or "").lower() != "high":
+            continue
+        score = row.get("matchScore")
+        source = str(row.get("source") or "").strip()
+        expected_score = (contact_rows.get(str(crd)) or {}).get("ms")
+        numeric = (isinstance(score, (int, float)) and not isinstance(score, bool)
+                   and math.isfinite(float(score)) and 0 <= float(score) <= 1.18)
+        expected_numeric = (
+            isinstance(expected_score, (int, float))
+            and not isinstance(expected_score, bool)
+            and math.isfinite(float(expected_score))
+            and 0 <= float(expected_score) <= 1.18)
+        if (not source or not numeric or not expected_numeric or
+                round(float(score), 3) != round(float(expected_score), 3)):
+            high_without_evidence.append(crd)
+    if high_without_evidence:
+        problems.append(
+            f"{len(high_without_evidence):,} high routes lack source/matchScore evidence")
     # Internal colleagues may be present, but only flagged: the runtime refuses
-    # them unless the address is on EMAIL_TEST_ADDRESS_ALLOWLIST, and an
-    # unflagged internal record would bypass that gate entirely.
+    # them unless the address or domain is on
+    # EMAIL_INTERNAL_RECIPIENT_ALLOWLIST; an unflagged internal record would
+    # bypass that gate entirely.
     leaked = [crd for crd, row in (registry.get("recipients") or {}).items()
               if str(row.get("email") or "").lower().endswith("@eicatlanta.com")
               and row.get("internal") is not True]
@@ -2322,7 +2366,15 @@ def _approved_recipient_registry():
             "identityManifestHash", "identityLinksSha256", "actSource",
             "actSourceSha256")}:
         problems.append("contacts provenance differs from current identity inputs")
-    count = len(registry.get("recipients") or {})
+    count = len(recipients)
+    tier_counts = Counter(str(row.get("tier") or "unknown").lower()
+                          for row in recipients.values())
+    source_count = len({str(row.get("source") or "").strip()
+                        for row in recipients.values()
+                        if str(row.get("source") or "").strip()})
+    registry_runtime = text(API / "shared" / "recipient-registry.js")
+    if "APPROVED_RECIPIENT_BLOCKED_SOURCES" not in registry_runtime:
+        problems.append("runtime lacks the per-source emergency block setting")
     descriptor = read(API / "shared" / "approved-recipient-release.json")
     descriptor_core = {k: descriptor.get(k) for k in (
         "schemaVersion", "registrySchemaVersion", "registryContentHash",
@@ -2335,7 +2387,11 @@ def _approved_recipient_registry():
             descriptor.get("ineligibleCount") !=
             len(registry.get("ineligible") or {})):
         problems.append("packaged API release pins a different registry")
-    return (not problems, f"{count:,} direct-identity email routes"
+    tiers = ", ".join(f"{tier} {amount:,}"
+                      for tier, amount in sorted(tier_counts.items()))
+    return (not problems,
+            f"{count:,} business-authorized email routes "
+            f"({tiers}) across {source_count:,} sources"
             + ("; " + "; ".join(problems) if problems else ""))
 
 
@@ -3413,52 +3469,74 @@ def _sender_health():
 # contradicts where the SEC says the advisor sits.
 #
 # Showing the details is right -- a rep who can read them decides better than
-# one shown nothing. Offering one-click ACTIONS on them is not, because every
-# consequence lands on the wrong person: an outcome logged against her CRD, a
-# history saying she was called, and -- the one that cannot be undone -- a
-# firm-wide do-not-call that silences her because somebody else asked to be left
-# alone.
+# one shown nothing. Controlled or irreversible actions are different: the
+# composer, calling, queueing and do-not-call all attribute the action to this
+# CRD and therefore stay unavailable on review-tier evidence. A raw Outlook
+# mailto is an explicitly accepted discretionary escape hatch, not a controlled
+# send and not proof that the CRD link is approved.
 # ---------------------------------------------------------------------------
-@check("unconfirmed contact matches offer no one-click email, call or queueing")
+@check("review contacts stay out of the controlled composer and reflex actions")
 def _unconfirmed_actions():
     app = text(WEB / "app.js")
     dial = text(WEB / "dial.js")
     field = text(WEB / "field.js")
+    email = text(WEB / "email.js")
+    field_tiles = text(SRC / "build_field_tiles.py")
 
     gated = 'const unconfirmed = c.t === "review"' in app
-    # Email, phone and queueing all withheld.
-    no_email = "Email unavailable" in app
-    # Both views must ask the SHARED predicate rather than re-deciding locally.
-    # They each carried their own `=== "confirmed"` test, which is why widening
-    # the server's registry to admit `high` changed nothing a rep could see:
-    # three copies of one rule, and only one of them moved. The tiers live in
-    # dial.js now; what this check enforces is that nobody re-implements it.
-    confirmed_email = (
-        "const emailConfirmed = Dial.tierCanEmail(c.t)" in app and
-        "if (!emailConfirmed)" in app and
+    # Both views consume the server-shaped policy through one public Dial API.
+    # Source is part of the decision so an emergency high-tier source block is
+    # visible immediately instead of failing only when the API receives a send.
+    controlled_email = (
+        "recipientEligibility" in text(API / "health" / "index.js") and
+        "setEmailPolicy(h.recipientEligibility)" in dial and
+        "Dial.tierCanEmail(c.t, c.src)" in app and
         "Dial.emailRouteStatus(cur).ok" in app and
-        "const emailConfirmed = Dial.tierCanEmail(r[COL.tier])" in field and
-        "|| !emailConfirmed" in field and
-        'const EMAIL_TIERS = new Set(["confirmed", "high"])' in dial and
-        # review and none are never emailable, whatever the tier set says.
-        '"review"' not in dial.split("const EMAIL_TIERS")[1].split(")")[0])
+        "Dial.tierCanEmail(r[COL.tier], contactSource)" in field and
+        "const mail = r[COL.email] && emailConfirmed" in field and
+        "function setEmailPolicy(policy)" in dial and
+        "const tierCanEmail = (tier, source)" in dial and
+        'let EMAIL_TIERS = new Set(["confirmed", "high"])' in dial and
+        '"review"' not in dial.split("let EMAIL_TIERS")[1].split(")")[0])
+    # A source-aware predicate with no source data is a silent allow. Require
+    # the field tile schema and practice-member contract to carry source too.
+    columns = (field_tiles.split("COLUMNS =", 1)[1].split("]", 1)[0]
+               if "COLUMNS =" in field_tiles else "")
+    field_source_evidence = (
+        '"source"' in columns and
+        'c.get("src"' in field_tiles and
+        "Member contract:" in field_tiles and
+        "source" in field_tiles.split("Member contract:", 1)[1].split("\n", 1)[0])
+    # A saved list cannot launder review-tier evidence into the controlled
+    # composer. Raw mailto is governed separately as an intentional escape hatch.
+    composer_blocks_review = (
+        "filter((r) => r && !r.unconfirmed)" in email and
+        "cannot use the controlled composer until the CRD link is resolved" in email)
+    raw_mailto_exists = "mailto:" in app and "mailto:" in field
     no_phone = 'const href = unconfirmed ? "" : Dial.telHref' in app
-    no_queue = "confirm who this is before adding them to a call list" in app.lower()                or "Confirm who this is before adding them to a call list." in app
+    no_queue = ("confirm who this is before adding them to a call list"
+                in app.lower())
     # The irreversible one is refused outright, in the shared vocabulary so both
     # shells inherit it.
     dnc_blocked = "item.unconfirmed" in dial and "cannot be added" in dial
     # And the flag rides on the queue entry, because the dialer shows only a
     # name and a number.
-    on_snapshot = "unconfirmed: !!(c && c.t" in app and 'unconfirmed: r[COL.tier] === "review"' in field
+    on_snapshot = ("unconfirmed: !!(c && c.t" in app and
+                   'unconfirmed: r[COL.tier] === "review"' in field)
     # The contradiction that makes the gating comprehensible.
     clash = "contact-clash" in app and "_state" in app
 
-    ok = all([gated, no_email, confirmed_email, no_phone, no_queue,
+    ok = all([gated, controlled_email, field_source_evidence,
+              composer_blocks_review, raw_mailto_exists, no_phone, no_queue,
               dnc_blocked, on_snapshot, clash])
-    return (ok, f"actions gated={gated}, email withheld={no_email}, "
-                f"confirmed-only email={confirmed_email}, call withheld={no_phone}, "
-                f"queueing withheld={no_queue}, do-not-call refused={dnc_blocked}, "
-                f"flag on the queue entry={on_snapshot}, state clash shown={clash}")
+    return (ok, f"review tier marked={gated}, "
+                f"source-aware controlled email={controlled_email}, "
+                f"field carries source evidence={field_source_evidence}, "
+                f"composer blocks review={composer_blocks_review}, "
+                f"raw mailto present={raw_mailto_exists}, "
+                f"call withheld={no_phone}, queueing withheld={no_queue}, "
+                f"do-not-call refused={dnc_blocked}, "
+                f"flag on queue entry={on_snapshot}, state clash shown={clash}")
 
 
 # ---------------------------------------------------------------------------

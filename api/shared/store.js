@@ -320,10 +320,15 @@ function snapshot(it) {
     // rendering tel: and reconciles stale/legacy rows against current data.
     unconfirmed: !!(it && it.unconfirmed),
     identityApproved: !!(it && it.identityApproved),
-    // Narrower than call-route approval: high-tier research contacts may be
-    // callable, but only confirmed identities may expose email actions.
+    // Email eligibility is a bounded proof from the current contact build and
+    // the active server policy. `confirmed` and `high` are both actionable;
+    // the tier/source remain visible so the UI never presents them as the same
+    // kind of identity evidence.
     emailConfirmed: !!(it && it.emailConfirmed),
     emailEligibilityKnown: !!(it && it.emailEligibilityKnown),
+    emailTierKey: clean(it && it.emailTierKey, 80),
+    contactTier: clean(it && it.contactTier, 16),
+    contactSource: clean(it && it.contactSource, 120),
     contactRouteVersion: clean(it && it.contactRouteVersion, 80),
     routeIssue: clean(it && it.routeIssue, 24),
   };
