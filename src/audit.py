@@ -1869,7 +1869,7 @@ def _practice_emails():
 
 
 # ---------------------------------------------------------------------------
-# Both views offer the two standing flag lists, under the same names
+# Both views offer the three standing sales-role lists, under the same names
 #
 # The star and the shield are firm-wide sales knowledge, saved once and read by
 # whoever opens the advisor next. The DESK grew lists off them; the field view
@@ -1882,15 +1882,16 @@ def _practice_emails():
 # a field view calling its list "Key contact" would silently create a SECOND
 # list beside the desk's "Key contacts" -- two lists, same star, diverging.
 # ---------------------------------------------------------------------------
-@check("the star and shield lists exist on both the desk and the phone")
+@check("the sales-role lists exist on both the desk and the phone")
 def _flag_lists_parity():
     desk, field = text(WEB / "app.js"), text(WEB / "field.js")
     problems = []
 
-    # The labels each view will pass to openList(), taken from the source.
+    # The labels each view will pass to openList(), taken from the shared-shape
+    # metadata object. Legacy Due diligence aliases remain outside this set.
     def labels(src):
-        found = re.search(r'kind === "key" \? "([^"]+)" : "([^"]+)"', src)
-        return set(found.groups()) if found else set()
+        block = re.search(r'(?:ROLE_META|FIELD_ROLE_META)\s*=\s*\{(.*?)\n\};', src, re.S)
+        return set(re.findall(r'label:\s*"([^"]+)"', block.group(1))) if block else set()
 
     desk_labels, field_labels = labels(desk), labels(field)
     if not desk_labels:
@@ -1928,7 +1929,7 @@ def _flag_lists_parity():
         # another's, with no way to join a flag already set.
         marks = re.search(r"function flagMarks(?:Field)?\(crd\)\{.*?" + chr(10) + r"\}", src, re.S)
         if not marks:
-            problems.append(f"{name} has no flag pair renderer")
+            problems.append(f"{name} has no flag renderer")
         elif "isKeyContact" in marks.group(0) or "isDueDiligence" in marks.group(0):
             problems.append(f"{name}'s flag control is pressed by ANY rep's mark, so one rep "
                             f"can clear another's and nobody can join one already set")
@@ -1958,11 +1959,11 @@ def _flag_lists_parity():
         if 'aria-pressed' not in src:
             problems.append(f"{name}'s flag control does not report its state")
 
-    # THE TWO DRAWINGS MUST MATCH. The paths are duplicated on purpose -- the
+    # THE DRAWINGS MUST MATCH. The paths are duplicated on purpose -- the
     # views share only dial.js, which has no DOM -- and duplicated geometry is
     # exactly what drifts silently. A star that is a slightly different star on
     # the phone is the kind of thing nobody reports and everybody notices.
-    for const in ("STAR_PATH", "SHIELD_PATH", "CHECK_PATH"):
+    for const in ("STAR_PATH", "DOC_PATH", "SEARCH_PATH", "CALENDAR_PATH", "CLOCK_PATH"):
         got = []
         for src in (desk, field):
             found = re.search(const + r'\s*=\s*(".*?");', src, re.S)

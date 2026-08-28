@@ -20,6 +20,7 @@ const Module = require("module");
 // A minimal Table Storage double: one partition, upsert/get/delete by rowKey.
 function fakeTable() {
   const rows = new Map();
+  let version = 0;
   return {
     rows,
     async getEntity(pk, rk) {
@@ -27,8 +28,27 @@ function fakeTable() {
       if (!hit) { const e = new Error("not found"); e.statusCode = 404; throw e; }
       return { ...hit };
     },
-    async upsertEntity(entity) { rows.set(entity.rowKey, { ...entity }); },
-    async deleteEntity(pk, rk) { rows.delete(rk); },
+    async createEntity(entity) {
+      if (rows.has(entity.rowKey)) { const e = new Error("exists"); e.statusCode = 409; throw e; }
+      rows.set(entity.rowKey, { ...entity, etag: `e${++version}` });
+    },
+    async updateEntity(entity, mode, opts) {
+      const current = rows.get(entity.rowKey);
+      if (!current) { const e = new Error("not found"); e.statusCode = 404; throw e; }
+      if (opts && opts.etag && opts.etag !== current.etag) {
+        const e = new Error("stale"); e.statusCode = 412; throw e;
+      }
+      rows.set(entity.rowKey, { ...entity, etag: `e${++version}` });
+    },
+    async upsertEntity(entity) { rows.set(entity.rowKey, { ...entity, etag: `e${++version}` }); },
+    async deleteEntity(pk, rk, opts) {
+      const current = rows.get(rk);
+      if (!current) { const e = new Error("not found"); e.statusCode = 404; throw e; }
+      if (opts && opts.etag && opts.etag !== current.etag) {
+        const e = new Error("stale"); e.statusCode = 412; throw e;
+      }
+      rows.delete(rk);
+    },
     async *listEntities() { for (const r of rows.values()) yield { ...r }; },
     async createTable() { /* the real client creates on first use */ },
   };
@@ -119,4 +139,29 @@ test("the same rep marking twice is not two members", async () => {
   const after = await store.setFlag({ id: "u-a", name: REP_A.name.toUpperCase() },
                                     "444", "key", true, "Dup", "");
   assert.equal(after.keyBy.length, 1, "a UPN is not case-sensitive; one rep is one member");
+});
+
+test("scheduler is independent and legacy analyst storage remains dd", async () => {
+  const env = await ready(); if (!env) return;
+  const { store } = env;
+  await store.setFlag(REP_A, "555", "dd", true, "Analyst Person", "10");
+  const after = await store.setFlag(REP_B, "555", "scheduler", true, "Analyst Person", "10");
+  assert.equal(after.dd, true);
+  assert.equal(after.scheduler, true);
+  assert.deepEqual(after.ddBy, [REP_A.name]);
+  assert.deepEqual(after.schedulerBy, [REP_B.name]);
+  const [listed] = await store.listFlags();
+  assert.equal(listed.dd, true, "Analyst continues to use the legacy dd storage field");
+  assert.equal(listed.scheduler, true);
+});
+
+test("a row survives until key, analyst, and scheduler are all empty", async () => {
+  const env = await ready(); if (!env) return;
+  const { store, t } = env;
+  await store.setFlag(REP_A, "666", "scheduler", true, "Calendar", "");
+  await store.setFlag(REP_A, "666", "key", true, "Calendar", "");
+  await store.setFlag(REP_A, "666", "key", false, "Calendar", "");
+  assert.equal(t.rows.size, 1);
+  await store.setFlag(REP_A, "666", "scheduler", false, "Calendar", "");
+  assert.equal(t.rows.size, 0);
 });

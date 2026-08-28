@@ -1,4 +1,4 @@
-/* GET /api/flags     — every key contact and due-diligence contact
+/* GET /api/flags     — every key-person, analyst, and scheduler contact
  * PUT /api/flags     — set or clear one flag on one advisor
  *
  * FIRM-WIDE, like /api/dnc and unlike /api/queue. Which person at a firm runs
@@ -7,7 +7,7 @@
  * row records who set it and when, so the knowledge has a source.
  *
  * Unlike a do-not-call entry these can be cleared: a key contact who moves firm
- * is stale sales knowledge, not a compliance suppression. Clearing BOTH flags
+ * is stale sales knowledge, not a compliance suppression. Clearing every flag
  * deletes the row rather than leaving one that says "this person is nothing".
  *
  * The whole set ships to the client on load. It is a few hundred rows at most,

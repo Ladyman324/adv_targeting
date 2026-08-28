@@ -53,7 +53,7 @@
     cursor: 0,              // how far through the queue we are
     running: false,         // a session is under way (not "a call is happening")
     dnc: new Map(),         // crd -> {by, at, reason}
-    flags: new Map(),       // crd -> {key, dd, name, firmCrd, by, at}
+    flags: new Map(),       // crd -> {key, dd, scheduler, name, firmCrd, by, at}
     saving: false,
     auto: { on: false, delay: 4, announce: true },
     pending: null,          // an auto-dial counting down: {crd, name, left}
@@ -489,7 +489,7 @@
   const flagMembersOf = (crd, kind) => {
     const f = flagsOf(crd);
     if (!f) return [];
-    const raw = kind === "key" ? f.keyBy : f.ddBy;
+    const raw = kind === "key" ? f.keyBy : kind === "dd" ? f.ddBy : f.schedulerBy;
     if (Array.isArray(raw)) return raw;
     // A server that predates the set sends one name, or nothing but `by`.
     const one = String(raw || f.by || "").trim();
@@ -508,6 +508,7 @@
   // Anyone at all -- what the map pin and the read-only glyphs care about.
   const isKeyContact = (crd) => !!(flagsOf(crd) && flagsOf(crd).key);
   const isDueDiligence = (crd) => !!(flagsOf(crd) && flagsOf(crd).dd);
+  const isScheduler = (crd) => !!(flagsOf(crd) && flagsOf(crd).scheduler);
 
   async function fetchFlags() {
     const d = await call(API.flags);
@@ -526,27 +527,29 @@
     // Optimism now has to model a SET: adding me must not drop a colleague,
     // and removing me must not drop the flag while they still hold it.
     const memberList = (k) => {
-      const raw = before ? (k === "key" ? before.keyBy : before.ddBy) : null;
+      const raw = before ? (k === "key" ? before.keyBy : k === "dd" ? before.ddBy : before.schedulerBy) : null;
       if (Array.isArray(raw)) return raw.slice();
       const one = String(raw || (before && before.by) || "").trim();
-      return before && (k === "key" ? before.key : before.dd) && one ? [one] : [];
+      const enabled = before && (k === "key" ? before.key : k === "dd" ? before.dd : before.scheduler);
+      return enabled && one ? [one] : [];
     };
     const me = String((state.user && state.user.name) || "").trim();
-    const next = { key: memberList("key"), dd: memberList("dd") };
-    const target = kind === "key" ? "key" : "dd";
+    const next = { key: memberList("key"), dd: memberList("dd"), scheduler: memberList("scheduler") };
+    const target = String(kind);
     next[target] = next[target].filter((n) => n.toLowerCase() !== me.toLowerCase());
     if (on && me) next[target].push(me);
     const optimistic = { crd: id, key: next.key.length > 0, dd: next.dd.length > 0,
-                         keyBy: next.key, ddBy: next.dd,
+                         scheduler: next.scheduler.length > 0,
+                         keyBy: next.key, ddBy: next.dd, schedulerBy: next.scheduler,
                          name: name || (before && before.name) || "" };
-    if (optimistic.key || optimistic.dd) state.flags.set(id, optimistic);
+    if (optimistic.key || optimistic.dd || optimistic.scheduler) state.flags.set(id, optimistic);
     else state.flags.delete(id);
     emit();
     try {
       const d = await call(API.flags, { method: "PUT",
         body: JSON.stringify({ crd: id, kind, on: !!on, name, firmCrd }) });
       const saved = d.saved || {};
-      if (saved.key || saved.dd) state.flags.set(id, saved); else state.flags.delete(id);
+      if (saved.key || saved.dd || saved.scheduler) state.flags.set(id, saved); else state.flags.delete(id);
     } catch (e) {
       if (before) state.flags.set(id, before); else state.flags.delete(id);
       emit();
@@ -771,6 +774,37 @@
              max: MAX_QUEUE };
   }
 
+  async function mutateListMember(listId, operation, value) {
+    const id = String(listId || "");
+    if (!id) throw new Error("Choose a call list first.");
+    const body = operation === "add"
+      ? { id, operation, item: value }
+      : { id, operation, crd: String(value || "") };
+    const q = await call(API.queue, { method: "PATCH", body: JSON.stringify(body) });
+    const summary = state.lists.find((l) => l.id === q.id);
+    if (summary) {
+      summary.count = Number(q.count) || 0;
+      summary.updatedUtc = q.updatedUtc || summary.updatedUtc;
+      summary.etag = q.etag || summary.etag;
+    }
+    if (q.id === state.listId) {
+      state.items = Array.isArray(q.items) ? q.items : state.items;
+      state.cursor = Math.max(0, Math.min(Number(q.cursor) || 0, state.items.length));
+      state.etag = q.etag || state.etag;
+    }
+    emit();
+    return q;
+  }
+
+  async function addToList(listId, item) {
+    if (!item || !item.crd) return { added: false };
+    return mutateListMember(listId, "add", item);
+  }
+
+  async function removeFromList(listId, crd) {
+    if (!crd) return { removed: false };
+    return mutateListMember(listId, "remove", crd);
+  }
   async function remove(crd) {
     const i = idx(crd);
     if (i === -1) return;
@@ -1481,7 +1515,7 @@ A do-not-call is firm-wide and permanent, and cannot be added `
     init, state, OUTCOMES, outcomeLabel, actNotice, PURPOSES, purposeLabel,
     onChange: (fn) => { listeners.push(fn); return () => {
       const i = listeners.indexOf(fn); if (i !== -1) listeners.splice(i, 1); }; },
-    add, addMany, remove, clear, move, inQueue, isDnc, telHref,
+    add, addMany, addToList, removeFromList, remove, clear, move, inQueue, isDnc, telHref,
     setContactRouteVersion, routeStatus, emailRouteStatus, setEmailPolicy,
     tierCanEmail, emailTierKey, identityTierLabel, reconcileRoute, reconcileRoutes,
     start, pause, end, current, remaining, advance, requeue, back, canBack,
@@ -1490,7 +1524,7 @@ A do-not-call is firm-wide and permanent, and cannot be added `
     lastOutcome: (crd) => state.done.get(String(crd)) || null,
     log, history, fullHistory, describeHistory,
     refreshQueue, refreshDnc, dropSuppressed,
-    isKeyContact, isDueDiligence, flagsOf, setFlag, fetchFlags,
+    isKeyContact, isDueDiligence, isScheduler, flagsOf, setFlag, fetchFlags,
     flagMembersOf, flaggedByMe, flaggedByOthers,
     loadSettings, saveSettings, setting,
     loadLists, openList, createList, renameList, deleteList, startCycle,

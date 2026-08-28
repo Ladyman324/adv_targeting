@@ -1100,14 +1100,14 @@ function teammateList(rec, selfId){
     const name = (t && t.n) || ("CRD " + id);
     // Kept OUT of `name`: it is markup, and name goes through esc() below and
     // into a title attribute where a tag would be nonsense.
-    const marks = flagGlyphs(id);
     const role = t && t.ti ? ` <span class="teammate-title">${esc(t.ti)}</span>` : "";
     const reach = t && REACHES_PERSON_KINDS.has(t.wk) ? ' <span class="teammate-dot" title="direct line on file">&#9679;</span>' : "";
     // Same jump the "elsewhere" control uses, so a teammate behaves like any
     // other advisor on the map rather than being a dead end.
     return `<li><button type="button" class="teammate" data-teammate="${esc(id)}"
         data-teammate-state="${esc(st || "")}"
-        title="Show ${esc(name)} on the map">${esc(name)}${marks}</button>${role}${reach}</li>`;
+        title="Show ${esc(name)} on the map">${esc(name)}</button>
+        ${personActionButton(id, name)}${role}${reach}</li>`;
   });
   // The team's stated size and the number we can NAME often differ, because a
   // teammate whose contact row matched no advisor is not in this file. Saying
@@ -1195,9 +1195,10 @@ function renderContactCount(){
  */
 const STAR_PATH = "M12 2.6l2.9 6 6.6.9-4.8 4.6 1.2 6.5L12 17.6 6.1 20.6l1.2-6.5"
                 + "L2.5 9.5l6.6-.9z";
-const SHIELD_PATH = "M12 2.5l7.5 3v5.2c0 4.7-3.2 8.6-7.5 9.8-4.3-1.2-7.5-5.1"
-                  + "-7.5-9.8V5.5z";
-const CHECK_PATH = "M8.4 12.2l2.4 2.4 4.6-4.9";
+const DOC_PATH = "M6 2.8h8l4 4v13.4H6z M14 2.8v4h4";
+const SEARCH_PATH = "M13.7 13.7l4.1 4.1 M10.8 15.1a4.3 4.3 0 1 1 0-8.6 4.3 4.3 0 0 1 0 8.6z";
+const CALENDAR_PATH = "M5 5.5h14v14H5z M5 9h14 M8 3v5 M16 3v5";
+const CLOCK_PATH = "M16.5 13.2a4.2 4.2 0 1 1 0 8.4 4.2 4.2 0 0 1 0-8.4z M16.5 15.2v2.4l1.7 1";
 
 /* PRESSED MEANS MINE.
  *
@@ -1225,13 +1226,18 @@ function flagMark(crd, kind, on, label, path, extra, others = []){
 }
 
 function flagMarks(crd){
-  const mine = { key: Dial.flaggedByMe(crd, "key"), dd: Dial.flaggedByMe(crd, "dd") };
-  const others = { key: Dial.flaggedByOthers(crd, "key"), dd: Dial.flaggedByOthers(crd, "dd") };
+  const mine = { key: Dial.flaggedByMe(crd, "key"), dd: Dial.flaggedByMe(crd, "dd"),
+                 scheduler: Dial.flaggedByMe(crd, "scheduler") };
+  const others = { key: Dial.flaggedByOthers(crd, "key"), dd: Dial.flaggedByOthers(crd, "dd"),
+                   scheduler: Dial.flaggedByOthers(crd, "scheduler") };
   return `<span class="contact-flags">`
-    + flagMark(crd, "key", mine.key, "Key contact", STAR_PATH, "", others.key)
-    + flagMark(crd, "dd", mine.dd, "Due diligence", SHIELD_PATH,
-        `<path d="${CHECK_PATH}" fill="none" stroke="${mine.dd ? "var(--panel, #fff)" : "currentColor"}"
-          stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>`, others.dd)
+    + flagMark(crd, "key", mine.key, "Key person", STAR_PATH, "", others.key)
+    + flagMark(crd, "dd", mine.dd, "Analyst", DOC_PATH,
+        `<path d="${SEARCH_PATH}" fill="var(--panel, #fff)" stroke="currentColor"
+          stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>`, others.dd)
+    + flagMark(crd, "scheduler", mine.scheduler, "Scheduler", CALENDAR_PATH,
+        `<path d="${CLOCK_PATH}" fill="var(--panel, #fff)" stroke="currentColor"
+          stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>`, others.scheduler)
     + `</span>`;
 }
 
@@ -1239,18 +1245,127 @@ function flagMarks(crd){
  * control -- team rosters, the call queue, search results. Same shapes, no
  * button, nothing to click by accident while working a list. */
 function flagGlyphs(crd){
-  const key = Dial.isKeyContact(crd), dd = Dial.isDueDiligence(crd);
-  if (!key && !dd) return "";
-  const one = (label, path, extra) => `<svg class="flag-glyph" viewBox="0 0 24 24"
+  const key = Dial.isKeyContact(crd), dd = Dial.isDueDiligence(crd), scheduler = Dial.isScheduler(crd);
+  if (!key && !dd && !scheduler) return "";
+  const one = (label, path, extra, kind) => `<svg class="flag-glyph flag-glyph-${kind}" viewBox="0 0 24 24"
       role="img" aria-label="${esc(label)}"><title>${esc(label)}</title>
       <path d="${path}" fill="currentColor"/>${extra || ""}</svg>`;
   return `<span class="flag-glyphs">`
-    + (key ? one("Key contact", STAR_PATH) : "")
-    + (dd ? one("Due diligence", SHIELD_PATH,
-        `<path d="${CHECK_PATH}" fill="none" stroke="var(--panel, #fff)"
-          stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>`) : "")
+    + (key ? one("Key person", STAR_PATH, "", "key") : "")
+    + (dd ? one("Analyst", DOC_PATH,
+        `<path d="${SEARCH_PATH}" fill="var(--panel, #fff)" stroke="currentColor"
+          stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>`, "dd") : "")
+    + (scheduler ? one("Scheduler", CALENDAR_PATH,
+        `<path d="${CLOCK_PATH}" fill="var(--panel, #fff)" stroke="currentColor"
+          stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>`, "scheduler") : "")
     + `</span>`;
 }
+
+/* Dense rows get one sibling action button rather than three nested buttons.
+ * The active roles remain visible at a glance; the button opens the same direct
+ * toggles used on a full contact card plus an explicit destination-list picker. */
+function personActionButton(crd, name){
+  return `<span class="person-quick">${flagGlyphs(crd)}
+    <button type="button" class="person-action-trigger" data-person-actions="${esc(crd)}"
+      data-person-name="${esc(name || "")}" aria-haspopup="dialog" aria-expanded="false"
+      title="Label or add ${esc(name || "this person")} to a list"
+      aria-label="Actions for ${esc(name || "this person")}">&hellip;</button></span>`;
+}
+
+let personActionBack = null;
+function closePersonActions(){
+  if (!personActionBack) return;
+  const trigger = personActionBack._trigger;
+  personActionBack.remove();
+  personActionBack = null;
+  if (trigger && trigger.isConnected) {
+    trigger.setAttribute("aria-expanded", "false");
+    trigger.focus();
+  }
+}
+
+function openPersonActions(trigger){
+  closePersonActions();
+  const crd = String(trigger.dataset.personActions || "");
+  const c = contactFor(crd) || {};
+  const name = trigger.dataset.personName || c.n || `CRD ${crd}`;
+  // Standing role lists are projections of the toggles above, not ordinary
+  // destinations. Manually adding here would be silently undone on rebuild.
+  const lists = (Dial.state.lists || []).filter((list) => !standingKindOf(list.id));
+  const back = document.createElement("div");
+  back.className = "ask-back person-action-back";
+  back._trigger = trigger;
+  back.innerHTML = `<div class="ask person-action-dialog" role="dialog" aria-modal="true"
+      aria-labelledby="personActionTitle">
+    <h3 id="personActionTitle">${esc(name)}</h3>
+    <p class="person-action-label">Sales roles</p>
+    <div class="person-action-roles">${flagMarks(crd)}</div>
+    <p class="person-action-label">Add to a call list</p>
+    <div class="person-action-lists">${lists.length ? lists.map((list) =>
+      `<button type="button" class="ask-btn" data-person-list="${esc(list.id)}"
+        data-person-crd="${esc(crd)}">${esc(list.name)} <small>${Number(list.count) || 0}</small></button>`).join("")
+      : `<p class="hint">Create a call list first.</p>`}</div>
+    <p class="person-action-status" role="status" aria-live="polite"></p>
+    <button type="button" class="ask-btn ghost" data-person-close>Close</button></div>`;
+  personActionBack = back;
+  trigger.setAttribute("aria-expanded", "true");
+  document.body.appendChild(back);
+  back.querySelector(".flag-mark, [data-person-list], [data-person-close]")?.focus();
+}
+
+document.addEventListener("keydown", (event) => {
+  if (!personActionBack) return;
+  if (event.key === "Escape") return closePersonActions();
+  if (event.key !== "Tab") return;
+  const focusable = [...personActionBack.querySelectorAll(
+    'button:not([disabled]),[href],input:not([disabled]),select:not([disabled]),textarea:not([disabled])')];
+  if (!focusable.length) return;
+  const first = focusable[0], last = focusable[focusable.length - 1];
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault(); last.focus();
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault(); first.focus();
+  }
+});
+document.addEventListener("click", async (event) => {
+  const trigger = event.target.closest("[data-person-actions]");
+  if (trigger) {
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    openPersonActions(trigger);
+    return;
+  }
+  if (!personActionBack) return;
+  if (event.target === personActionBack || event.target.closest("[data-person-close]")) {
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    closePersonActions();
+    return;
+  }
+  const listButton = event.target.closest("[data-person-list]");
+  if (!listButton) return;
+  event.preventDefault();
+  event.stopImmediatePropagation();
+  const status = personActionBack.querySelector(".person-action-status");
+  listButton.disabled = true;
+  if (status) status.textContent = "Adding...";
+  try {
+    await loadContacts();
+    const snapshot = dialSnapshot(listButton.dataset.personCrd);
+    if (!snapshot.identityApproved)
+      throw new Error("Confirmed contact details are not available for this person yet.");
+    const result = await Dial.addToList(listButton.dataset.personList, snapshot);
+    if (status) status.textContent = result && result.added === false
+      ? "Already on that list." : "Added.";
+    await Dial.loadLists();
+    const current = (Dial.state.lists || []).find((list) => list.id === listButton.dataset.personList);
+    const count = listButton.querySelector("small");
+    if (count && current) count.textContent = Number(current.count) || 0;
+    renderDialer();
+  } catch (err) {
+    if (status) status.textContent = err.message || "That could not be saved.";
+  } finally { listButton.disabled = false; }
+}, true);
 
 function contactBlock(p){
   const c = contactFor(p.id);
@@ -1569,6 +1684,9 @@ function contactBlock(p){
       title="${on ? "Remove from the call list" : "Add to the call list"}"
       >${on ? "&#10003; On call list" : "&#43; Call list"}</button>`);
   }
+  rows.push(`<button type="button" class="contact-btn" data-person-actions="${esc(p.id)}"
+    data-person-name="${esc(p.n || "")}" aria-haspopup="dialog" aria-expanded="false"
+    aria-label="Choose a list for ${esc(p.n || "this person")}">&#43; Choose list&hellip;</button>`);
 
   return `<div class="contact-panel${unsure ? " contact-panel-review" : ""}">
       ${owner}${title}
@@ -2051,7 +2169,16 @@ let dialHistory = { crd: "", text: "" };
 
 // Which standing flag a REAL list corresponds to, by name, or "" for an
 // ordinary list the rep made themselves.
-const STANDING_NAMES = { "key contacts": "key", "due diligence": "dd" };
+const ROLE_META = {
+  key: { label: "Key people", singular: "Key person", symbol: "&#9733;" },
+  dd: { label: "Analysts", singular: "Analyst", symbol: "&#128269;" },
+  scheduler: { label: "Schedulers", singular: "Scheduler", symbol: "&#128197;" },
+};
+const STANDING_NAMES = {
+  "key contacts": "key", "key people": "key",
+  "due diligence": "dd", "analyst": "dd", "analysts": "dd",
+  "scheduler": "scheduler", "schedulers": "scheduler",
+};
 function standingKindOf(listId){
   const l = (Dial.state.lists || []).find(x => x.id === listId);
   if (!l) return "";
@@ -2105,7 +2232,7 @@ function renderDialer(){
    * not mid-session had no way to reach their own Key contacts at all: the
    * list existed, was correct, and was unreachable. That is how this feature
    * came to look like it had never been built. */
-  const standing = flaggedAdvisors("key").length + flaggedAdvisors("dd").length;
+  const standing = Object.keys(ROLE_META).reduce((n, kind) => n + flaggedAdvisors(kind).length, 0);
   dock.hidden = !n && S.lists.length < 2 && !S.problem && !standing;
   if (dock.hidden) { dialMenuOpen = false; return; }
 
@@ -2137,8 +2264,8 @@ function renderDialer(){
          * So the synthetic entry appears only until the real list exists. From
          * then on there is exactly one row for it, and the list manager's ★ row
          * is what rebuilds it from the flags. */
-        + standingOption("key", "&#9733;", "Key contacts", S.lists)
-        + standingOption("dd", "&#128737;", "Due diligence", S.lists)
+        + Object.entries(ROLE_META).map(([kind, meta]) =>
+            standingOption(kind, meta.symbol, meta.label, S.lists)).join("")
         + `<option value="__new">+ New list…</option></select>`
       + `<span class="dial-count">${p.done} of ${n}</span>`
       + `<button type="button" class="dial-btn ghost" data-dial="menu"
@@ -2182,6 +2309,7 @@ function renderDialer(){
         <span class="dial-li-main"><b>${esc(it.name)}${flagGlyphs(it.crd)}</b>
           <small>${esc([it.firm, [it.city, liveState(it)].filter(Boolean).join(", ")]
             .filter(Boolean).join(" · "))}</small></span>
+        ${personActionButton(it.crd, it.name)}
         <span class="dial-li-acts">
           <button type="button" data-dial="up" data-crd="${esc(it.crd)}" title="Move up"${i ? "" : " disabled"}>&#9650;</button>
           <button type="button" data-dial="down" data-crd="${esc(it.crd)}" title="Move down"${i === n - 1 ? " disabled" : ""}>&#9660;</button>
@@ -2216,7 +2344,7 @@ function renderDialer(){
     ${priorOutcome ? `<p class="dial-prior">You logged
       <b>${esc(Dial.outcomeLabel(priorOutcome.disposition))}</b> here.
       Logging another records a correction.</p>` : ""}
-    <h3 class="dial-name">${esc(cur.name)}${flagGlyphs(cur.crd)}</h3>
+    <h3 class="dial-name">${esc(cur.name)}${personActionButton(cur.crd, cur.name)}</h3>
     <p class="dial-sub">${esc([cur.firm, [cur.city, cur.state].filter(Boolean).join(", ")]
         .filter(Boolean).join(" · "))}</p>
     ${cur.email ? `<p class="dial-mail">${mailtoLink(cur.email,
@@ -2498,7 +2626,7 @@ function paintListEdit(){
 function flaggedAdvisors(kind){
   const out = [];
   for (const [crd, f] of Dial.state.flags) {
-    if (kind === "key" ? !f.key : !f.dd) continue;
+    if (!f[kind]) continue;
     // Mine only. dial.js owns the membership test, so the two views and
     // the card control cannot disagree about whose flag this is.
     if (!Dial.flaggedByMe(crd, kind)) continue;
@@ -2518,7 +2646,7 @@ function flaggedAdvisors(kind){
  * a list, it does not begin dialling.
  */
 async function openFlagList(kind, { start = false } = {}){
-  const label = kind === "key" ? "Key contacts" : "Due diligence";
+  const label = (ROLE_META[kind] || ROLE_META.key).label;
   const people = flaggedAdvisors(kind).filter(p => p.callable);
   if (!people.length) { showNotice(`Nobody on ${label} has a number on file.`); return false; }
   await Dial.openList(label);
@@ -2535,7 +2663,7 @@ async function openFlagList(kind, { start = false } = {}){
 }
 
 function flagListRows(){
-  const sets = [["key", "&#9733;", "Key contacts"], ["dd", "&#128737;&#65039;", "Due diligence"]];
+  const sets = Object.entries(ROLE_META).map(([kind, meta]) => [kind, meta.symbol, meta.label]);
   return `<ul class="lists-ul">` + sets.map(([kind, icon, label]) => {
     const people = flaggedAdvisors(kind);
     const callable = people.filter(p => p.callable).length;
@@ -2640,7 +2768,7 @@ document.addEventListener("click", async e => {
      */
     if (act === "flag-call" || act === "flag-show"){
       const kind = b.dataset.kind;
-      const label = kind === "key" ? "Key contacts" : "Due diligence";
+      const label = (ROLE_META[kind] || ROLE_META.key).label;
       const everyone = flaggedAdvisors(kind);
       /* SHOW does not need a phone number.
        *
@@ -2800,6 +2928,7 @@ function queueRowHtml(entry){
   return `<li class="wq-row" data-wq-crd="${esc(entry.advisorCrd)}">
       <button type="button" class="wq-name" data-wq-action="open"
         data-wq-crd="${esc(entry.advisorCrd)}" aria-label="Open ${esc(label)}">${esc(label)}</button>
+      ${personActionButton(entry.advisorCrd, label)}
       <span class="wq-why wq-${esc(entry.reason)}">${esc(entry.reasonLabel)}</span>
       <span class="wq-when">${esc(when ? fmtDate(when) : "")}</span>
       <span class="wq-acts">${queueActions(entry)
@@ -3578,7 +3707,9 @@ document.addEventListener("click", async e => {
       const dropped = await dropFromStandingList(id, kind, Dial.flaggedByMe(id, kind));
       // Redraw the card in place so both marks reflect the new state, and the
       // map so a star appears on the pin without a reload.
-      if (detailsCurrent) renderDetailEntry(detailsCurrent, false);
+      const modalMarks = flag.closest(".person-action-roles .contact-flags");
+      if (modalMarks) modalMarks.outerHTML = flagMarks(id);
+      else if (detailsCurrent) renderDetailEntry(detailsCurrent, false);
       redraw();
       if (dropped) renderDialer();
     } catch (err) {
@@ -3807,9 +3938,9 @@ document.addEventListener("change", e => {
       // Re-render on cancel, or the <select> is left showing "+ New list…".
       if (!name) { renderDialer(); return; }
       Dial.createList(name.trim()).then(renderDialer);
-    } else if (el.value === "__key" || el.value === "__dd") {
+    } else if (["__key", "__dd", "__scheduler"].includes(el.value)) {
       // Switches to the list without dialling, exactly like picking any other.
-      openFlagList(el.value === "__key" ? "key" : "dd")
+      openFlagList(el.value.slice(2))
         .catch(err => { showNotice(err.message || "That list could not be built."); renderDialer(); });
     } else if (standingKindOf(el.value)) {
       /* The REAL "Key contacts" list, picked after it has been built once.
@@ -4772,7 +4903,7 @@ function renderFirmAdvisorList(){
       `${q.unc ? `<span class="runc">ADDRESS UNCERTAIN</span>`
                 : (q.lt === 1 ? `<span class="rcity">CITY LEVEL</span>` : "")}</b>` +
       `<small>${esc(bits)}</small></span><span class="detail-chevron">›</span></button>` +
-      rowQueueButton(q.id) + `</div>`;
+      personActionButton(q.id, q.n) + rowQueueButton(q.id) + `</div>`;
   }).join("");
   const remaining = total - shown;
   // Counts the whole filtered set, not the 40 on screen -- "add these" should
@@ -7610,10 +7741,11 @@ function renderNationalSearch(){
       const territory = STATE_TO_TERRITORY[row[3]] || "Outside assigned territories";
       const outside = currentTerritory && territory !== currentTerritory
         ? " · outside current territory" : "";
-      return `<button type="button" class="ares" data-national-advisor="${i}"><span class="an">${esc(row[1])}</span>` +
+      return `<div class="ares-person"><button type="button" class="ares" data-national-advisor="${i}"><span class="an">${esc(row[1])}</span>` +
         `<span class="af">${esc(searchFirm(row[2]))} · CRD ${esc(row[0])}` +
         `${row[6] ? ` · filed as ${esc(row[6])}` : ""}</span>` +
-        `<span class="ac">${esc(searchCity(row[4]))}, ${esc(row[3])} · ${esc(territory)}${outside}${row[5].includes("|") ? ` · also ${esc(row[5].split("|").filter(s => s !== row[3]).join(", "))}` : ""}</span></button>`;
+        `<span class="ac">${esc(searchCity(row[4]))}, ${esc(row[3])} · ${esc(territory)}${outside}${row[5].includes("|") ? ` · also ${esc(row[5].split("|").filter(s => s !== row[3]).join(", "))}` : ""}</span></button>`
+        + personActionButton(row[0], row[1]) + `</div>`;
     }).join("")
     : `<p class="result-label">Advisors</p><p class="hint">${SEARCH_MAN_ERROR
         ? "National advisor search is unavailable."
@@ -7808,7 +7940,7 @@ function openRoster(a, detailPush=true, onlyFirm=null){
           : "";
         return `<div class="rrow${dim}" data-ri="${rosterRows.push(f) - 1}" role="button" tabindex="0">
           <span class="rrl"><span class="rn">${esc(p.n)}${flag}${contactDots(p.id)}${barTag}${forTag}${ownTag}${uncTag}</span>
-          <span class="rm">${bits}</span>${line}</span>${link}</div>`;
+          <span class="rm">${bits}</span>${line}</span>${personActionButton(p.id, p.n)}${link}</div>`;
       }).join("");
     return `<div class="rgrp">
       <div class="rfirm"><span class="swatch" style="background:${col}"></span>

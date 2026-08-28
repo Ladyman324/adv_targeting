@@ -546,6 +546,7 @@ body{
 .flag-mark.on{opacity:1}
 .flag-mark[data-flag="key"].on{color:#d9a017}
 .flag-mark[data-flag="dd"].on{color:#2f8f6b}
+.flag-mark[data-flag="scheduler"].on{color:#6b57a5}
 .flag-mark:disabled{opacity:.35}
 /* A COLLEAGUE HOLDS THIS TOO.
    Deliberately NOT the same as `.on`: the button's fill says whether the flag
@@ -558,7 +559,29 @@ body{
 .flag-mark.shared{opacity:.8}
 .flag-mark.shared[data-flag="key"]{color:#d9a017}
 .flag-mark.shared[data-flag="dd"]{color:#2f8f6b}
+.flag-mark.shared[data-flag="scheduler"]{color:#6b57a5}
 .flag-mark.shared.on{opacity:1}
+.flag-mark:focus-visible,.person-action-trigger:focus-visible{
+  outline:2px solid var(--accent);outline-offset:2px;border-radius:6px}
+.person-action-trigger{min-width:var(--tap);min-height:var(--tap);border:0;border-radius:8px;
+  background:transparent;color:var(--muted);font-size:18px;padding:8px;
+  -webkit-tap-highlight-color:transparent}
+.person-action-back{position:fixed;inset:0;z-index:1200;background:rgba(0,0,0,.38);
+  display:flex;align-items:flex-end;justify-content:center;padding:12px}
+.person-action-dialog{width:min(520px,100%);max-height:82vh;overflow:auto;background:var(--panel);
+  color:var(--ink);border-radius:14px 14px 8px 8px;padding:18px;box-sizing:border-box;
+  box-shadow:0 -6px 30px rgba(0,0,0,.22)}
+.person-action-dialog h3{margin:0 0 12px;font-size:19px}
+.person-action-label{margin:13px 0 6px;color:var(--muted);font-size:11px;
+  font-weight:750;text-transform:uppercase;letter-spacing:.04em}
+.person-action-roles .contact-flags{margin:0;gap:8px}
+.person-action-lists{display:grid;gap:7px}
+.person-action-lists button{display:flex;justify-content:space-between;align-items:center;
+  width:100%;min-height:var(--tap);padding:10px 12px;text-align:left}
+.person-action-lists small{color:var(--muted)}
+.person-action-status{min-height:18px;margin:8px 0;color:var(--accent);font-size:12px}
+.mates li{display:flex;align-items:center}
+.mates .mate{flex:1;min-width:0;text-align:left}
 
 .lists-row.flag-list{background:var(--panel-2); border-radius:8px; margin-bottom:4px}
 .lists-row.flag-list:last-child{margin-bottom:12px;

@@ -251,7 +251,7 @@ function render(rows, note){
         <div class="sub">${sub}</div>
       </div>
       <div class="dist">${dist}</div>
-      <div class="acts">${tel}${mail}</div>
+      <div class="acts">${tel}${mail}${fieldPersonActionButton(r[COL.crd], r[COL.name])}</div>
     </li>`;
   }).join("");
   $("list")._shown = shown;
@@ -423,6 +423,7 @@ function openSheet(r){
     <details class="mates"><summary>${mates.length} other${mates.length === 1 ? "" : "s"} in this building</summary>
       <ul>${mates.slice(0, 25).map((o) => `<li>
         <button type="button" class="mate" data-mate="${esc(o[COL.crd])}">${esc(o[COL.name])}</button>
+        ${fieldPersonActionButton(o[COL.crd], o[COL.name])}
         <span class="mate-sub">${esc(o[COL.title] || o[COL.firm] || "")}</span>
         ${o[COL.owner] ? `<span class="badge owned">${esc(o[COL.owner])}</span>` : ""}
       </li>`).join("")}</ul>
@@ -455,7 +456,8 @@ function openSheet(r){
     ${dnc ? `<p class="warn-box">&#9940; <b>Do not call.</b> Added by
         ${esc(dnc.by || "a colleague")}${dnc.at ? " on " + esc(String(dnc.at).slice(0, 10)) : ""}.
         ${dnc.reason ? esc(dnc.reason) : ""}</p>` : ""}
-    <div class="sheet-acts">${tel}${cell}${mail}${queueBtn}</div>
+    <div class="sheet-acts">${tel}${cell}${mail}${queueBtn}
+      ${fieldPersonActionButton(r[COL.crd], r[COL.name], "Choose list...")}</div>
     ${building}
     <!-- ALWAYS PRESENT, not gated on having tapped Call. A rep who takes an
          inbound call, or dials from a desk handset, still has to be able to
@@ -809,6 +811,7 @@ function renderListEdit(){
       <li class="lists-row">
         <span class="lists-main"><b>${esc(it.name || "Unnamed")}</b>
           <small>${esc(it.firm || it.companyName || "")}</small></span>
+        ${fieldPersonActionButton(it.crd, it.name || "Unnamed")}
         <span class="lists-acts">
           <button class="grave" data-ledit="drop" data-crd="${esc(it.crd)}">Remove</button>
         </span>
@@ -885,9 +888,10 @@ function renderLists(){
  */
 const STAR_PATH = "M12 2.6l2.9 6 6.6.9-4.8 4.6 1.2 6.5L12 17.6 6.1 20.6l1.2-6.5"
                 + "L2.5 9.5l6.6-.9z";
-const SHIELD_PATH = "M12 2.5l7.5 3v5.2c0 4.7-3.2 8.6-7.5 9.8-4.3-1.2-7.5-5.1"
-                  + "-7.5-9.8V5.5z";
-const CHECK_PATH = "M8.4 12.2l2.4 2.4 4.6-4.9";
+const DOC_PATH = "M6 2.8h8l4 4v13.4H6z M14 2.8v4h4";
+const SEARCH_PATH = "M13.7 13.7l4.1 4.1 M10.8 15.1a4.3 4.3 0 1 1 0-8.6 4.3 4.3 0 0 1 0 8.6z";
+const CALENDAR_PATH = "M5 5.5h14v14H5z M5 9h14 M8 3v5 M16 3v5";
+const CLOCK_PATH = "M16.5 13.2a4.2 4.2 0 1 1 0 8.4 4.2 4.2 0 0 1 0-8.4z M16.5 15.2v2.4l1.7 1";
 
 function flagMarkField(crd, kind, on, label, path, extra, others = []){
   // PRESSED MEANS MINE -- see the desk's flagMark() for why a shared boolean
@@ -905,19 +909,134 @@ function flagMarkField(crd, kind, on, label, path, extra, others = []){
 }
 
 function flagMarksField(crd){
-  const mine = { key: Dial.flaggedByMe(crd, "key"), dd: Dial.flaggedByMe(crd, "dd") };
-  const others = { key: Dial.flaggedByOthers(crd, "key"), dd: Dial.flaggedByOthers(crd, "dd") };
+  const mine = { key: Dial.flaggedByMe(crd, "key"), dd: Dial.flaggedByMe(crd, "dd"),
+                 scheduler: Dial.flaggedByMe(crd, "scheduler") };
+  const others = { key: Dial.flaggedByOthers(crd, "key"), dd: Dial.flaggedByOthers(crd, "dd"),
+                   scheduler: Dial.flaggedByOthers(crd, "scheduler") };
   return `<span class="contact-flags">`
-    + flagMarkField(crd, "key", mine.key, "Key contact", STAR_PATH, "", others.key)
-    + flagMarkField(crd, "dd", mine.dd, "Due diligence", SHIELD_PATH,
-        `<path d="${CHECK_PATH}" fill="none" stroke="${mine.dd ? "var(--panel, #fff)" : "currentColor"}"
-          stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>`, others.dd)
+    + flagMarkField(crd, "key", mine.key, "Key person", STAR_PATH, "", others.key)
+    + flagMarkField(crd, "dd", mine.dd, "Analyst", DOC_PATH,
+        `<path d="${SEARCH_PATH}" fill="var(--panel, #fff)" stroke="currentColor"
+          stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>`, others.dd)
+    + flagMarkField(crd, "scheduler", mine.scheduler, "Scheduler", CALENDAR_PATH,
+        `<path d="${CLOCK_PATH}" fill="var(--panel, #fff)" stroke="currentColor"
+          stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>`, others.scheduler)
     + `</span>`;
 }
 
+function fieldPersonActionButton(crd, name, text = "&hellip;"){
+  return `<button type="button" class="person-action-trigger" data-person-actions="${esc(crd)}"
+    data-person-name="${esc(name || "")}" aria-haspopup="dialog" aria-expanded="false"
+    aria-label="Label or add ${esc(name || "this person")} to a list">${text}</button>`;
+}
+
+let personActionBack = null;
+function closePersonActionsField(){
+  if (!personActionBack) return;
+  const trigger = personActionBack._trigger;
+  personActionBack.remove();
+  personActionBack = null;
+  if (trigger && trigger.isConnected) {
+    trigger.setAttribute("aria-expanded", "false");
+    trigger.focus();
+  }
+}
+
+function openPersonActionsField(trigger){
+  closePersonActionsField();
+  const crd = String(trigger.dataset.personActions || "");
+  const row = rowByCrd(crd);
+  const name = trigger.dataset.personName || (row && row[COL.name]) || `CRD ${crd}`;
+  // Standing role lists are projections of the toggles above, not ordinary
+  // destinations. Manually adding here would be silently undone on rebuild.
+  const lists = (Dial.state.lists || []).filter((list) => !standingKindOf(list.id));
+  const back = document.createElement("div");
+  back.className = "person-action-back";
+  back._trigger = trigger;
+  back.innerHTML = `<div class="person-action-dialog" role="dialog" aria-modal="true"
+      aria-labelledby="personActionTitle">
+    <h3 id="personActionTitle">${esc(name)}</h3>
+    <p class="person-action-label">Sales roles</p>
+    <div class="person-action-roles">${flagMarksField(crd)}</div>
+    <p class="person-action-label">Add to a call list</p>
+    <div class="person-action-lists">${lists.length ? lists.map((list) =>
+      `<button type="button" data-person-list="${esc(list.id)}"
+        data-person-crd="${esc(crd)}">${esc(list.name)} <small>${Number(list.count) || 0}</small></button>`).join("")
+      : `<p class="lists-none">Create a call list first.</p>`}</div>
+    <p class="person-action-status" role="status" aria-live="polite"></p>
+    <button type="button" class="ghost" data-person-close>Close</button></div>`;
+  personActionBack = back;
+  trigger.setAttribute("aria-expanded", "true");
+  document.body.appendChild(back);
+  back.querySelector(".flag-mark, [data-person-list], [data-person-close]")?.focus();
+}
+
+document.addEventListener("keydown", (event) => {
+  if (!personActionBack) return;
+  if (event.key === "Escape") return closePersonActionsField();
+  if (event.key !== "Tab") return;
+  const focusable = [...personActionBack.querySelectorAll(
+    'button:not([disabled]),[href],input:not([disabled]),select:not([disabled]),textarea:not([disabled])')];
+  if (!focusable.length) return;
+  const first = focusable[0], last = focusable[focusable.length - 1];
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault(); last.focus();
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault(); first.focus();
+  }
+});
+document.addEventListener("click", async (event) => {
+  const trigger = event.target.closest("[data-person-actions]");
+  if (trigger) {
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    openPersonActionsField(trigger);
+    return;
+  }
+  if (!personActionBack) return;
+  if (event.target === personActionBack || event.target.closest("[data-person-close]")) {
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    closePersonActionsField();
+    return;
+  }
+  const listButton = event.target.closest("[data-person-list]");
+  if (!listButton) return;
+  event.preventDefault();
+  event.stopImmediatePropagation();
+  const status = personActionBack.querySelector(".person-action-status");
+  listButton.disabled = true;
+  if (status) status.textContent = "Adding...";
+  try {
+    const crd = listButton.dataset.personCrd;
+    const row = rowByCrd(crd) || await locateFlagged(crd,
+      personActionBack.querySelector("h3")?.textContent || "").catch(() => null);
+    if (!row) throw new Error("Load this person's details before adding them to a list.");
+    const result = await Dial.addToList(listButton.dataset.personList, snapshotOf(row));
+    if (status) status.textContent = result && result.added === false
+      ? "Already on that list." : "Added.";
+    await Dial.loadLists();
+    const current = (Dial.state.lists || []).find((list) => list.id === listButton.dataset.personList);
+    const count = listButton.querySelector("small");
+    if (count && current) count.textContent = Number(current.count) || 0;
+    renderDial();
+  } catch (err) {
+    if (status) status.textContent = err.message || "That could not be saved.";
+  } finally { listButton.disabled = false; }
+}, true);
+
 // Which standing flag a REAL list corresponds to, by name. Mirrors the desk;
 // the two must agree or the same list means different things per device.
-const STANDING_NAMES = { "key contacts": "key", "due diligence": "dd" };
+const FIELD_ROLE_META = {
+  key: { label: "Key people", symbol: "&#9733;" },
+  dd: { label: "Analysts", symbol: "&#128269;" },
+  scheduler: { label: "Schedulers", symbol: "&#128197;" },
+};
+const STANDING_NAMES = {
+  "key contacts": "key", "key people": "key",
+  "due diligence": "dd", "analyst": "dd", "analysts": "dd",
+  "scheduler": "scheduler", "schedulers": "scheduler",
+};
 function standingKindOf(listId){
   const l = (Dial.state.lists || []).find((x) => x.id === listId);
   if (!l) return "";
@@ -944,7 +1063,7 @@ async function dropFromStandingList(crd, kind, stillMine){
 function flaggedField(kind){
   const out = [];
   for (const [crd, f] of (Dial.state.flags || new Map())) {
-    if (kind === "key" ? !f.key : !f.dd) continue;
+    if (!f[kind]) continue;
     // Mine only. dial.js owns the membership test, so the two views and
     // the card control cannot disagree about whose flag this is.
     if (!Dial.flaggedByMe(crd, kind)) continue;
@@ -1018,8 +1137,8 @@ async function dialableFlagged(kind){
   return out;
 }
 
-const FLAG_SETS = [["key", "&#9733;", "Key contacts"],
-                   ["dd", "&#128737;&#65039;", "Due diligence"]];
+const FLAG_SETS = Object.entries(FIELD_ROLE_META)
+  .map(([kind, meta]) => [kind, meta.symbol, meta.label]);
 
 function flagListRowsField(){
   return FLAG_SETS.map(([kind, icon, label]) => {
@@ -1160,6 +1279,7 @@ function workRowHtml(entry){
         <small class="work-why work-${esc(entry.reason)}">${esc(entry.reasonLabel)}${
           when ? ` &middot; ${esc(mailWhen(when))}` : ""}</small>
       </button>
+      ${fieldPersonActionButton(entry.advisorCrd, label)}
       <span class="work-acts">${workActions(entry)
         .map(action => workActionHtml(action, entry, label)).join("")}</span></li>`;
 }
@@ -2652,7 +2772,7 @@ document.addEventListener("click", (e) => {
      */
     if (act === "flag-call" || act === "flag-show") {
       const kind = lb.dataset.kind;
-      const label = kind === "key" ? "Key contacts" : "Due diligence";
+      const label = (FIELD_ROLE_META[kind] || FIELD_ROLE_META.key).label;
       if (act === "flag-show") {
         const names = flaggedField(kind).map((x) => x.name);
         dialErr = `${label}: ${names.join(", ")}`;

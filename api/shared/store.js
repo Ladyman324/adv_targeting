@@ -342,7 +342,7 @@ async function putQueue(who, opts) {
   // Shed from the tail until it fits, rather than failing the whole write and
   // losing a queue someone spent ten minutes assembling.
   let payload = JSON.stringify(trimmed);
-  while (payload.length > MAX_QUEUE_BYTES && trimmed.length) {
+  while (Buffer.byteLength(payload, "utf8") > MAX_QUEUE_BYTES && trimmed.length) {
     trimmed = trimmed.slice(0, -1);
     payload = JSON.stringify(trimmed);
   }
@@ -388,6 +388,83 @@ async function putQueue(who, opts) {
            dropped: Math.max(0, (items || []).length - trimmed.length) };
 }
 
+/* Add or remove one advisor from ANY saved list without making that list the
+ * active list in the browser. The read/conditional-write retry is important:
+ * desk and phone can update the same list at once, and whole-row storage must
+ * merge those intentions rather than silently choose a winner. */
+async function mutateQueueMember(who, id, operation, itemOrCrd) {
+  const op = String(operation || "").toLowerCase();
+  if (op !== "add" && op !== "remove") {
+    const err = new Error("operation must be add or remove."); err.statusCode = 400; throw err;
+  }
+  const key = listId(id);
+  const rawItem = op === "add" ? itemOrCrd : null;
+  const crd = clean(op === "add" && rawItem ? rawItem.crd : itemOrCrd, 32);
+  if (!crd) { const err = new Error("An advisor CRD is required."); err.statusCode = 400; throw err; }
+  if (op === "add" && (rawItem.unconfirmed || rawItem.identityApproved !== true)) {
+    const err = new Error("Only confirmed contact matches can be added to a call list.");
+    err.statusCode = 409; throw err;
+  }
+  if (op === "add") {
+    const dnc = await table("dnc");
+    try {
+      await dnc.getEntity("dnc", crd);
+      const err = new Error("This advisor is on the firm do-not-call list.");
+      err.statusCode = 409; throw err;
+    } catch (e) { if (e.statusCode !== 404) throw e; }
+  }
+
+  const client = await table("queue");
+  for (let attempt = 0; attempt < 5; attempt++) {
+    let existing;
+    try { existing = await client.getEntity(who.id, key); }
+    catch (e) {
+      if (e.statusCode !== 404) throw e;
+      const err = new Error("That call list no longer exists."); err.statusCode = 404; throw err;
+    }
+    let items;
+    try { items = JSON.parse(existing.items || "[]"); }
+    catch { items = []; }
+    const index = items.findIndex((it) => String(it && it.crd) === crd);
+    if ((op === "add" && index !== -1) || (op === "remove" && index === -1)) {
+      return { ...summarise(existing), items, added: false, removed: false };
+    }
+
+    const anchor = items[Number(existing.cursor) || 0];
+    if (op === "add") items.push(snapshot(rawItem));
+    else items.splice(index, 1);
+    if (items.length > MAX_QUEUE) {
+      const err = new Error(`A call list can hold at most ${MAX_QUEUE} people.`);
+      err.statusCode = 409; throw err;
+    }
+    const payload = JSON.stringify(items);
+    if (Buffer.byteLength(payload, "utf8") > MAX_QUEUE_BYTES) {
+      const err = new Error("That person would make the call list too large to save.");
+      err.statusCode = 409; throw err;
+    }
+    let cursor = Math.max(0, Math.min(Number(existing.cursor) || 0, items.length));
+    if (op === "remove" && anchor) {
+      const anchored = items.findIndex((it) => String(it && it.crd) === String(anchor.crd));
+      if (anchored !== -1) cursor = anchored;
+    }
+    const entity = {
+      partitionKey: who.id, rowKey: key,
+      name: existing.name || (key === DEFAULT_LIST ? "Call list" : key),
+      items: payload, cursor,
+      cycle: Math.max(1, Number(existing.cycle) || 1),
+      cycleStartedUtc: existing.cycleStartedUtc || "",
+      updatedUtc: new Date().toISOString(), userName: clean(who.name),
+    };
+    try {
+      const result = await client.updateEntity(entity, "Replace", { etag: existing.etag });
+      const written = { ...entity, etag: (result && result.etag) || "" };
+      return { ...summarise(written), items,
+               added: op === "add", removed: op === "remove" };
+    } catch (e) {
+      if (e.statusCode !== 412 || attempt === 4) throw e;
+    }
+  }
+}
 /* ---------- do not call --------------------------------------------------- */
 // Firm-wide, not per-user. A rep who is told "take me off your list" has been
 // told on behalf of the firm, and the next rep dialling the same person three
@@ -406,21 +483,20 @@ async function listDnc() {
   return out;
 }
 
-/* KEY CONTACT and DUE DILIGENCE, per advisor.
+/* KEY PERSON, ANALYST (legacy `dd`) and SCHEDULER, per advisor.
  *
  * FIRM-WIDE, like the do-not-call list and unlike a call queue. Which person at
  * a firm runs manager due diligence is a fact about that firm, not a private
  * note: if Kate works it out, Will should not have to work it out again. Each
  * flag records who set it and when, so the knowledge has a source.
  *
- * Two independent booleans rather than one "role" field. They are usually the
- * same person and sometimes not, and two flags make "both" render as two icons
- * with no third state to invent.
+ * Independent booleans rather than one exclusive role field. A contact may hold
+ * more than one sales role, and each mark keeps its own per-rep membership.
  *
  * Deletable, unlike a do-not-call entry: this is sales knowledge that goes out
  * of date, not a compliance suppression.
  */
-const FLAG_KINDS = new Set(["key", "dd"]);
+const FLAG_KINDS = new Set(["key", "dd", "scheduler"]);
 
 /* A FLAG IS A SET OF REPS, not a boolean.
  *
@@ -466,10 +542,12 @@ async function listFlags() {
     const last = e.userName || "";
     const keyBy = e.keyContact === true ? flagMembers(e.keyBy, last) : [];
     const ddBy = e.dueDiligence === true ? flagMembers(e.ddBy, last) : [];
+    const schedulerBy = e.scheduler === true ? flagMembers(e.schedulerBy, last) : [];
     out.push({ crd: e.rowKey, key: keyBy.length > 0, dd: ddBy.length > 0,
+               scheduler: schedulerBy.length > 0,
                name: e.advisorName || "", firmCrd: e.firmCrd || "",
                by: last, at: e.atUtc || "",
-               keyBy, ddBy });
+               keyBy, ddBy, schedulerBy });
   }
   return out;
 }
@@ -480,48 +558,53 @@ async function setFlag(who, crd, kind, on, name, firmCrd) {
   }
   const rowKey = String(crd).slice(0, 32);
   const client = await table("contactflags");
-  // A 404 means "no flags yet", which is the normal case and not an error.
-  let existing = null;
-  try { existing = await client.getEntity("flags", rowKey); }
-  catch (e) { if (e.statusCode !== 404) throw e; }
-
-  const last = (existing && existing.userName) || "";
-  const members = {
-    key: existing && existing.keyContact === true ? flagMembers(existing.keyBy, last) : [],
-    dd: existing && existing.dueDiligence === true ? flagMembers(existing.ddBy, last) : [],
-  };
-  // ONE MEMBER CHANGES, and only ever the caller's own. Another rep's mark is
-  // not this rep's to remove.
   const me = clean(who.name);
-  const target = kind === "key" ? "key" : "dd";
-  const without = members[target].filter((n) => n.toLowerCase() !== me.toLowerCase());
-  members[target] = on
-    ? [...without, me].slice(0, FLAG_MEMBER_CAP)
-    : without;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    let existing = null;
+    try { existing = await client.getEntity("flags", rowKey); }
+    catch (e) { if (e.statusCode !== 404) throw e; }
 
-  // Nobody left on either flag: remove the row rather than keeping a tombstone
-  // that says "this person is nothing", which would ship to every client
-  // forever. Note this now means nobody AT ALL, not merely nobody recently.
-  if (!members.key.length && !members.dd.length) {
-    if (existing) await client.deleteEntity("flags", rowKey);
-    return { crd: rowKey, key: false, dd: false, keyBy: [], ddBy: [], removed: true };
+    const last = (existing && existing.userName) || "";
+    const members = {
+      key: existing && existing.keyContact === true ? flagMembers(existing.keyBy, last) : [],
+      dd: existing && existing.dueDiligence === true ? flagMembers(existing.ddBy, last) : [],
+      scheduler: existing && existing.scheduler === true
+        ? flagMembers(existing.schedulerBy, last) : [],
+    };
+    const target = String(kind);
+    const without = members[target].filter((n) => n.toLowerCase() !== me.toLowerCase());
+    members[target] = on ? [...without, me].slice(0, FLAG_MEMBER_CAP) : without;
+
+    try {
+      if (!members.key.length && !members.dd.length && !members.scheduler.length) {
+        if (existing) await client.deleteEntity("flags", rowKey, { etag: existing.etag });
+        return { crd: rowKey, key: false, dd: false, scheduler: false,
+                 keyBy: [], ddBy: [], schedulerBy: [], removed: true };
+      }
+      const at = new Date().toISOString();
+      const entity = {
+        partitionKey: "flags", rowKey,
+        keyContact: members.key.length > 0, dueDiligence: members.dd.length > 0,
+        scheduler: members.scheduler.length > 0,
+        advisorName: clean(name || (existing && existing.advisorName), 256),
+        firmCrd: clean(firmCrd || (existing && existing.firmCrd), 32),
+        keyBy: flagMembersText(members.key), ddBy: flagMembersText(members.dd),
+        schedulerBy: flagMembersText(members.scheduler),
+        userName: me, userId: who.id, atUtc: at,
+      };
+      if (existing) await client.updateEntity(entity, "Replace", { etag: existing.etag });
+      else await client.createEntity(entity);
+      return { crd: rowKey, key: members.key.length > 0, dd: members.dd.length > 0,
+               scheduler: members.scheduler.length > 0,
+               keyBy: members.key, ddBy: members.dd, schedulerBy: members.scheduler,
+               name: entity.advisorName, firmCrd: entity.firmCrd, by: me, at };
+    } catch (e) {
+      // Concurrent final-member deletes can make our conditional delete see a
+      // row that has just disappeared. Re-read: absence is the desired state.
+      if (![404, 409, 412].includes(e.statusCode) || attempt === 4) throw e;
+    }
   }
-  const at = new Date().toISOString();
-  await client.upsertEntity({
-    partitionKey: "flags", rowKey,
-    keyContact: members.key.length > 0, dueDiligence: members.dd.length > 0,
-    advisorName: clean(name || (existing && existing.advisorName), 256),
-    firmCrd: clean(firmCrd || (existing && existing.firmCrd), 32),
-    keyBy: flagMembersText(members.key), ddBy: flagMembersText(members.dd),
-    userName: me, userId: who.id, atUtc: at,
-  }, "Replace");
-  return { crd: rowKey, key: members.key.length > 0, dd: members.dd.length > 0,
-           keyBy: members.key, ddBy: members.dd,
-           name: clean(name || (existing && existing.advisorName), 256),
-           firmCrd: clean(firmCrd || (existing && existing.firmCrd), 32),
-           by: me, at };
 }
-
 async function addDnc(who, crd, reason, name) {
   const client = await table("dnc");
   const at = new Date().toISOString();
@@ -663,7 +746,7 @@ function fail(context, err) {
 
 module.exports = {
   configured, identity, appendEvent, setActStatus, eventsForCrd, recentForUser,
-  getQueue, putQueue, listQueues, deleteQueue, listDnc, addDnc,
+  getQueue, putQueue, listQueues, deleteQueue, mutateQueueMember, listDnc, addDnc,
   listFlags, setFlag,
   getSettings, putSettings, SETTING_KEYS,
   ok, fail, MAX_QUEUE, DEFAULT_LIST,

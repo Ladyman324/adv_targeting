@@ -1,6 +1,7 @@
 /* GET    /api/queue           every list I have, as summaries
  * GET    /api/queue?id=X      one list, with its people
  * PUT    /api/queue           create or replace a list
+ * PATCH  /api/queue           atomically add/remove one member from any list
  * DELETE /api/queue?id=X      remove a list
  *
  * Server-side rather than in the browser so a list built at a desk in the
@@ -39,6 +40,12 @@ module.exports = async function (context, req) {
     }
 
     const body = req.body || {};
+    if (req.method === "PATCH") {
+      const operation = String(body.operation || "").toLowerCase();
+      const value = operation === "add" ? body.item : body.crd;
+      const saved = await store.mutateQueueMember(who, body.id || id, operation, value);
+      return store.ok(context, { ...saved, max: store.MAX_QUEUE });
+    }
     if (!Array.isArray(body.items)) {
       const err = new Error("items must be an array of advisor snapshots.");
       err.statusCode = 400;
