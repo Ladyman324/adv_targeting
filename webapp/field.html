@@ -19,8 +19,8 @@
   form-action 'none';
   object-src 'none'">
 <link rel="manifest" href="manifest.webmanifest">
-<link rel="stylesheet" href="field.css?v=857224d1d5">
-<link rel="stylesheet" href="email.css?v=857224d1d5">
+<link rel="stylesheet" href="field.css?v=52ec2b1a36">
+<link rel="stylesheet" href="email.css?v=52ec2b1a36">
 </head>
 <body>
 
@@ -31,6 +31,8 @@
        reading zero is a badge nobody looks at twice. -->
   <button id="workBtn" type="button" aria-label="Needs attention"
           title="Needs attention">&#9873;<span id="workCount" hidden></span></button>
+  <button id="listsBtn" type="button" aria-label="Lists and saved audiences"
+          title="Lists and saved audiences">&#9776;<span>Lists</span></button>
   <button id="settingsBtn" type="button" aria-label="Settings">&#9881;</button>
   <a id="deskLink" href="index.html" title="Open the full map">Full map</a>
 </header>
@@ -84,7 +86,7 @@
      The bar's picker can switch lists and nothing else could rename, empty or
      delete one without opening it first -- which is also how the wrong list
      gets emptied. -->
-<div id="lists" hidden>
+<div id="lists" role="dialog" aria-modal="true" aria-labelledby="listsTitle" hidden>
   <div id="listsInner"></div>
 </div>
 
@@ -105,9 +107,9 @@
   <div id="workInner"></div>
 </div>
 
-<script src="dial.js?v=857224d1d5"></script>
-<script src="field.js?v=857224d1d5"></script>
-<script src="email.js?v=857224d1d5"></script>
+<script src="dial.js?v=52ec2b1a36"></script>
+<script src="field.js?v=52ec2b1a36"></script>
+<script src="email.js?v=52ec2b1a36"></script>
 <!-- The service-worker registration moved into field.js. Keeping it inline
      would have required either 'unsafe-inline' or a hash in the CSP above,
      and 'unsafe-inline' is not a thing to spend on eight lines. -->

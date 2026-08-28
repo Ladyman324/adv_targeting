@@ -136,6 +136,8 @@ body.scope-pending #map{cursor:progress}
 .filter-state{margin-top:8px;padding-top:8px;border-top:1px solid var(--hair)}
 .filter-state[hidden]{display:none}
 .filter-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:var(--space-tight)}
+.filter-head-actions{display:flex;align-items:center;gap:8px}
+#saveAudience{color:var(--accent);font-weight:650}
 .active-filters{display:flex;gap:var(--space-tight);flex-wrap:wrap;min-height:18px}
 .filter-chip{font:inherit;font-size:10.5px;color:var(--ink);background:var(--panel-2);
   border:1px solid var(--hair);border-radius:999px;padding:3px 7px;cursor:pointer}
@@ -1240,6 +1242,10 @@ body.scope-pending #map{cursor:progress}
 .settings-btn{font:inherit; font-size:15px; line-height:1; color:var(--muted);
   background:none; border:0; cursor:pointer; padding:2px 4px}
 .settings-btn:hover{color:var(--accent)}
+.settings-btn.lists-header-btn{font-size:11px;font-weight:700;line-height:1.2;padding:4px 7px;
+  border:1px solid var(--hair);border-radius:7px;color:var(--ink);background:var(--panel-2)}
+.settings-btn.lists-header-btn:hover,.settings-btn.lists-header-btn:focus-visible{color:var(--accent);
+  border-color:var(--accent);outline:none}
 
 /* ---- preferences ---- */
 .set-row{display:flex; align-items:center; justify-content:space-between; gap:12px;
@@ -1318,6 +1324,33 @@ body.scope-pending #map{cursor:progress}
    person, and with no height limit the dialog simply grew past the window and
    clipped everyone below the fold with no way to reach them. */
 .ask.lists{width:min(520px,94vw); max-height:86vh; display:flex; flex-direction:column}
+.ask.lists.lists-workspace{width:min(780px,94vw);max-height:88vh;overflow-y:auto;
+  -webkit-overflow-scrolling:touch;overscroll-behavior:contain}
+.lists-title{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;
+  padding-bottom:12px;border-bottom:1px solid var(--hair)}
+.lists-title h3{font-size:18px}.lists-title p{margin:3px 0 0}
+.lists-title>.ask-btn{width:auto;flex:0 0 auto;margin:0}
+.lists-section{padding:14px 0;border-bottom:1px solid var(--hair)}
+.lists-section:last-child{border-bottom:0;padding-bottom:0}
+.lists-section h4{margin:0;font-size:12px;text-transform:uppercase;letter-spacing:.07em;color:var(--ink)}
+.lists-section-note{margin:3px 0 7px!important;font-size:11.5px!important}
+.list-type{display:inline-block;margin-bottom:5px;padding:3px 6px;border-radius:999px;
+  background:var(--panel-2);color:var(--muted);font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.05em}
+.list-type.dynamic{color:var(--accent);background:color-mix(in srgb,var(--accent) 11%,var(--panel))}
+.audience-counts{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin:16px 0}
+.audience-counts span{padding:11px;border:1px solid var(--hair);border-radius:9px;background:var(--panel-2);
+  color:var(--muted);font-size:11px}
+.audience-counts b{display:block;color:var(--ink);font-size:19px;font-variant-numeric:tabular-nums}
+.audience-counts .excluded b{color:var(--warn,#b4690e)}
+.audience-owner{padding:9px 10px;border-left:3px solid var(--accent);background:var(--panel-2);
+  border-radius:0 8px 8px 0;line-height:1.45}
+.lists-preview-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:16px}
+.lists-preview-actions .ask-btn{width:auto;margin:0}
+@media(max-width:620px){
+  .audience-counts{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .lists-row{align-items:flex-start;flex-wrap:wrap}.lists-acts{width:100%;justify-content:flex-end}
+  .filter-head{align-items:flex-start}.filter-head-actions{flex-wrap:wrap;justify-content:flex-end}
+}
 .ask.lists .lists-ul{flex:1 1 auto; min-height:0; overflow-y:auto; -webkit-overflow-scrolling:touch}
 /* A panel whose own BODY scrolls, for dialogs with no single scrollable list.
    Settings is a stack of blocks: capped at 86vh with nothing able to scroll, it

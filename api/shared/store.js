@@ -42,7 +42,7 @@ const CONN = process.env.AZURE_STORAGE_CONNECTION_STRING || "";
 // contact flags shipped broken: the store function, the API route and the
 // client were all correct and the table simply had no name.
 const TABLES = { log: "CallLog", queue: "DialQueue", dnc: "DoNotCall",
-                 settings: "RepSettings", contactflags: "ContactFlags" };
+                 settings: "RepSettings", contactflags: "ContactFlags", audience: "Audience" };
 
 // A queue entry is a SNAPSHOT, not a CRD reference. The desktop resolves an
 // advisor from contacts.json and the field view resolves them from whichever
@@ -465,6 +465,106 @@ async function mutateQueueMember(who, id, operation, itemOrCrd) {
     }
   }
 }
+/* ---------- saved dynamic audiences ------------------------------------- */
+function audienceSummary(entity) {
+  let definition = {};
+  try { definition = JSON.parse(entity.definitionJson || "{}"); } catch {}
+  return {
+    id: entity.rowKey,
+    name: entity.name || "Untitled audience",
+    type: "dynamic",
+    scopeLabel: (definition.scope && definition.scope.label) || "",
+    updatedUtc: entity.updatedUtc || "",
+    createdUtc: entity.createdUtc || "",
+    description: entity.description || "",
+    etag: entity.etag || "",
+  };
+}
+
+async function listAudiences(who) {
+  const client = await table("audience");
+  const out = [];
+  for await (const entity of client.listEntities({
+    queryOptions: { filter: odata`PartitionKey eq ${who.id}` },
+  })) out.push(audienceSummary(entity));
+  out.sort((a, b) => String(b.updatedUtc).localeCompare(String(a.updatedUtc)));
+  return out;
+}
+
+async function getAudience(who, id) {
+  const client = await table("audience");
+  try {
+    const entity = await client.getEntity(who.id, id);
+    let definition = null;
+    try { definition = JSON.parse(entity.definitionJson || ""); } catch {}
+    return { ...audienceSummary(entity), definition,
+      invalidDefinition: definition === null };
+  } catch (error) {
+    if (error.statusCode === 404) {
+      const missing = new Error("That audience does not exist.");
+      missing.statusCode = 404;
+      throw missing;
+    }
+    throw error;
+  }
+}
+
+async function putAudience(who, options) {
+  const client = await table("audience");
+  const now = new Date().toISOString();
+  let existing = null;
+  try {
+    existing = await client.getEntity(who.id, options.id);
+  } catch (error) {
+    if (error.statusCode !== 404) throw error;
+  }
+  const entity = {
+    partitionKey: who.id,
+    rowKey: options.id,
+    name: clean(options.name, 100) || "Untitled audience",
+    description: clean(options.description, 500),
+    definitionJson: options.definitionJson,
+    createdUtc: (existing && existing.createdUtc) || now,
+    updatedUtc: now,
+    userName: clean(who.name),
+  };
+  let result;
+  if (!existing) {
+    result = await client.createEntity(entity);
+  } else {
+    if (!options.etag) {
+      const conflict = new Error(
+        "This audience already exists; reload it before saving changes.");
+      conflict.statusCode = 409;
+      throw conflict;
+    }
+    try {
+      result = await client.updateEntity(entity, "Replace", { etag: options.etag });
+    } catch (error) {
+      if ([404, 412].includes(error.statusCode)) {
+        const conflict = new Error(
+          "This audience changed on another device. Reload it before saving.");
+        conflict.statusCode = 409;
+        throw conflict;
+      }
+      throw error;
+    }
+  }
+  return {
+    ...audienceSummary({ ...entity, etag: (result && result.etag) || "" }),
+    definition: options.definition,
+  };
+}
+async function deleteAudience(who, id) {
+  const client = await table("audience");
+  try {
+    await client.deleteEntity(who.id, id);
+  } catch (error) {
+    if (error.statusCode !== 404) throw error;
+  }
+  return { id, deleted: true };
+}
+
 /* ---------- do not call --------------------------------------------------- */
 // Firm-wide, not per-user. A rep who is told "take me off your list" has been
 // told on behalf of the firm, and the next rep dialling the same person three
@@ -747,6 +847,7 @@ function fail(context, err) {
 module.exports = {
   configured, identity, appendEvent, setActStatus, eventsForCrd, recentForUser,
   getQueue, putQueue, listQueues, deleteQueue, mutateQueueMember, listDnc, addDnc,
+  getAudience, putAudience, listAudiences, deleteAudience,
   listFlags, setFlag,
   getSettings, putSettings, SETTING_KEYS,
   ok, fail, MAX_QUEUE, DEFAULT_LIST,

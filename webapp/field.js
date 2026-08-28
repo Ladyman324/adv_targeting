@@ -748,6 +748,11 @@ let adhocPurpose = "";
 let listMenuOpen = false;          // the ⋮ list menu
 let listsOpen = false;             // the full list-management sheet
 let listsMode = "all";             // "all" = every list, "edit" = who is on this one
+let listsReturnFocus = null;
+let savedAudiences = [];           // summaries only; fetched when Lists is opened
+let audiencesLoading = false;      // never part of field startup or nearby search
+let audiencesLoaded = false;
+let audiencesError = "";
 let placesOpen = false;            // the "work from somewhere else" sheet
 let placeTerm = "";                // what is typed in it
 let settingsOpen = false;          // the preferences sheet
@@ -822,6 +827,71 @@ function renderListEdit(){
     <div class="lists-new"><button data-ledit="back">Back to all lists</button></div>`;
 }
 
+function relativeAudienceUpdated(iso){
+  if (!iso) return "";
+  const at = new Date(iso).getTime();
+  if (!Number.isFinite(at)) return "";
+  const minutes = Math.max(0, Math.round((Date.now() - at) / 60000));
+  if (minutes < 2) return "updated just now";
+  if (minutes < 60) return `updated ${minutes}m ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `updated ${hours}h ago`;
+  return `updated ${Math.round(hours / 24)}d ago`;
+}
+
+function audienceSummaries(payload){
+  const rows = Array.isArray(payload) ? payload
+    : (payload && (payload.audiences || payload.items || payload.results)) || [];
+  return rows.filter((a) => a && a.id).map((a) => {
+    const rawCount = a.eligibleCount ?? a.count ?? a.memberCount;
+    return {
+      id: String(a.id),
+      name: String(a.name || "Saved audience"),
+      count: Number.isFinite(Number(rawCount)) ? Number(rawCount) : null,
+      updatedUtc: a.updatedUtc || a.lastRefreshedUtc || a.refreshedUtc || "",
+      scope: String(a.scopeLabel || a.scope || a.territory || "My territory"),
+      criteria: String(a.criteriaSummary || a.summary || a.description || "Saved filters"),
+    };
+  });
+}
+
+function dynamicAudienceRows(){
+  if (audiencesLoading) return `<p class="lists-none" role="status">Loading saved audiences...</p>`;
+  if (audiencesError) return `<p class="lists-error" role="status">${esc(audiencesError)}
+    <button type="button" data-audiences-retry>Try again</button></p>`;
+  if (!savedAudiences.length) return `<p class="lists-none">No saved dynamic audiences yet.</p>`;
+  return `<ul class="lists-ul audience-list">${savedAudiences.map((a) => `
+    <li class="lists-row audience-row">
+      <span class="lists-main"><span class="list-title-line"><b>${esc(a.name)}</b>
+        <span class="list-type dynamic">Dynamic</span></span>
+        <small>${a.count == null ? "Live membership" : `${a.count} currently eligible`} &middot; ${esc(a.scope)}
+          ${a.updatedUtc ? ` &middot; ${esc(relativeAudienceUpdated(a.updatedUtc))}` : ""}</small>
+        <span class="audience-criteria">${esc(a.criteria)}</span></span>
+      <a class="audience-open" href="index.html?audience=${encodeURIComponent(a.id)}#audience"
+         aria-label="Open ${esc(a.name)} in the full map">Open in full map</a>
+    </li>`).join("")}</ul>`;
+}
+
+async function loadAudienceSummaries(force = false){
+  if (audiencesLoading || (audiencesLoaded && !force)) return;
+  audiencesLoading = true;
+  audiencesError = "";
+  renderLists();
+  try {
+    const response = await fetch("/api/audiences", { headers: { Accept: "application/json" } });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`);
+    savedAudiences = audienceSummaries(body);
+    audiencesLoaded = true;
+  } catch (err) {
+    audiencesError = err && err.message ? err.message : "Saved audiences could not be loaded.";
+  } finally {
+    audiencesLoading = false;
+    renderLists();
+    if (listsOpen && !$("lists").contains(document.activeElement)) $("listsClose")?.focus();
+  }
+}
+
 function renderLists(){
   const el = $("lists");
   el.hidden = !listsOpen;
@@ -831,11 +901,18 @@ function renderLists(){
   const ls = (S.lists || []).filter((list) => !standingKindOf(list.id));
   $("listsInner").innerHTML = `
     <button id="listsClose" aria-label="Close">&times;</button>
-    <h2>Call lists</h2>
-    <ul class="lists-ul">${flagListRowsField()}</ul>
+    <h2 id="listsTitle">Lists &amp; audiences</h2>
+    <section class="list-section" aria-labelledby="roleViewsTitle">
+      <h3 id="roleViewsTitle">Role smart views</h3>
+      <p class="list-section-note">Your role labels, ready to turn into a calling queue.</p>
+      <ul class="lists-ul">${flagListRowsField()}</ul>
+    </section>
+    <section class="list-section" aria-labelledby="callListsTitle">
+      <h3 id="callListsTitle">Active &amp; static call lists</h3>
     ${ls.length ? `<ul class="lists-ul">${ls.map((l) => `
       <li class="lists-row${l.id === S.listId ? " on" : ""}">
-        <span class="lists-main"><b>${esc(l.name)}</b>
+        <span class="lists-main"><span class="list-title-line"><b>${esc(l.name)}</b>
+          <span class="list-type ${l.id === S.listId ? "active" : "static"}">${l.id === S.listId ? "Active" : "Static"}</span></span>
           <small>${l.count} ${l.count === 1 ? "person" : "people"}`
           + `${l.cycle > 1 ? ` &middot; pass ${l.cycle}` : ""}`
           + `${l.id === S.listId ? " &middot; open" : ""}</small></span>
@@ -847,13 +924,19 @@ function renderLists(){
             ${l.count ? "" : "disabled"}>Empty</button>
           <button class="grave" data-lists="drop" data-id="${esc(l.id)}">Delete</button>
         </span>
-      </li>`).join("")}</ul>` : `<p class="lists-none">No lists yet.</p>`}
+      </li>`).join("")}</ul>` : `<p class="lists-none">No call lists yet.</p>`}
     <div class="lists-new">
       <input id="listsName" type="text" placeholder="Name for a new list"
         value="${esc(defaultListName())}" aria-label="Name for a new list">
       <button data-lists="new">Create</button>
     </div>
-    <p class="lm-note">Your call history is kept whatever you do here.</p>`;
+    <p class="lm-note">Your call history is kept whatever you do here.</p>
+    </section>
+    <section class="list-section" aria-labelledby="audiencesTitle">
+      <h3 id="audiencesTitle">Saved dynamic audiences</h3>
+      <p class="list-section-note">Live filter views are managed in the full map. Opening this section never loads their members.</p>
+      ${dynamicAudienceRows()}
+    </section>`;
 }
 
 /* KEY CONTACTS and DUE DILIGENCE, as two standing lists on the phone.
@@ -974,6 +1057,24 @@ function openPersonActionsField(trigger){
 }
 
 document.addEventListener("keydown", (event) => {
+  if (!personActionBack && listsOpen) {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      $("listsClose")?.click();
+      return;
+    }
+    if (event.key !== "Tab") return;
+    const focusable = [...$("lists").querySelectorAll(
+      'button:not([disabled]),[href],input:not([disabled]),select:not([disabled]),textarea:not([disabled])')];
+    if (!focusable.length) return;
+    const first = focusable[0], last = focusable[focusable.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault(); last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault(); first.focus();
+    }
+    return;
+  }
   if (!personActionBack) return;
   if (event.key === "Escape") return closePersonActionsField();
   if (event.key !== "Tab") return;
@@ -1188,6 +1289,7 @@ function defaultListName(){
 }
 
 async function openLists(){
+  if (!listsOpen) listsReturnFocus = document.activeElement;
   listsOpen = true;
   renderLists();
   // Refreshed rather than trusted. The counts in Dial.state.lists were last
@@ -1195,6 +1297,11 @@ async function openLists(){
   // how big each list is has to be believable.
   try { await Dial.loadLists(); } catch { /* stale is still legible */ }
   renderLists();
+  $("listsClose")?.focus();
+  // Summary fetch is triggered by opening this sheet, never by field startup.
+  // The phone keeps its nearby-search first paint and never downloads audience
+  // membership or evaluates dynamic filters.
+  loadAudienceSummaries().catch(() => {});
 }
 
 // Rename, empty and delete all write to whichever list is OPEN, so acting on
@@ -2637,6 +2744,11 @@ document.addEventListener("click", (e) => {
     openLists();
     return;
   }
+  if (e.target.closest("#listsBtn")) {
+    listsMode = "all";
+    openLists();
+    return;
+  }
   if (e.target.closest("#lmEdit")) {
     listMenuOpen = false;
     listsMode = "edit";
@@ -2645,7 +2757,19 @@ document.addEventListener("click", (e) => {
     renderLists();
     return;
   }
-  if (e.target.closest("#listsClose")) { listsOpen = false; listsMode = "all"; renderLists(); return; }
+  if (e.target.closest("#listsClose")) {
+    listsOpen = false;
+    listsMode = "all";
+    renderLists();
+    if (listsReturnFocus && listsReturnFocus.isConnected) listsReturnFocus.focus();
+    listsReturnFocus = null;
+    return;
+  }
+  if (e.target.closest("[data-audiences-retry]")) {
+    audiencesLoaded = false;
+    loadAudienceSummaries(true).catch(() => {});
+    return;
+  }
   const ledit = e.target.closest("[data-ledit]");
   if (ledit) {
     if (ledit.dataset.ledit === "back") { listsMode = "all"; openLists(); return; }

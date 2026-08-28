@@ -2568,12 +2568,164 @@ function askDestination(count, listName, existing){
  * picking up a saved list and working it is the reason lists exist -- and it
  * is the one thing the ⋮ menu could not do at all.
  */
+const AUDIENCE_API = "/api/audiences";
+let dynamicAudiences = [];
+let audiencePreview = null;
+let audienceProblem = "";
+
+async function audienceCall(url, options){
+  const response = await fetch(url, options);
+  let data = {};
+  try { data = await response.json(); } catch {}
+  if (!response.ok) throw new Error(data.error || data.message || `Saved audiences returned ${response.status}.`);
+  return data;
+}
+async function loadDynamicAudiences(){
+  const data = await audienceCall(AUDIENCE_API);
+  dynamicAudiences = data.audiences || data.items || [];
+  return dynamicAudiences;
+}
+function audienceScopeDefinition(){
+  const territory = scope.startsWith("T:") ? scope.slice(2) : "";
+  return { kind:territory ? "territory" : "state", value:scope, label:scopeLabel(scope),
+    states:territory ? [...(TERRITORIES[territory] || [])] : [scope] };
+}
+function captureAudienceDefinition(){
+  return { version:1, scope:audienceScopeDefinition(), filters:{
+    selectedFirms:[...selectedFirms], selectsOnly, aum:[...aumSel], reg,
+    exp:[...expSel], reach:[...reachSel], geo:[...geoSel], ownerOnly,
+    rankedOnly, excluded:[...excludedFirms], continentalOnly,
+    contactableOnly, assetsOnly,
+  }};
+}
+async function saveCurrentAudience(){
+  if (scope === "US") return showNotice("Choose a state or sales territory before saving. The national layer contains offices, not advisor identities.");
+  if (lassoPolygon) return showNotice("Clear the map lasso before saving. A movable map shape is not a stable audience rule.");
+  const name = prompt("Name this dynamic audience", `${scopeLabel(scope)} prospects`);
+  if (!name || !name.trim()) return;
+  const description = prompt("Optional description", "") || "";
+  try {
+    await audienceCall(AUDIENCE_API, { method:"PUT", headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({ name:name.trim(), description:description.trim(), definition:captureAudienceDefinition() }) });
+    await loadDynamicAudiences();
+    showNotice(`Saved dynamic audience "${name.trim()}".`);
+    if (listsBack) paintListManager();
+  } catch (error) { showNotice(error.message || "The audience could not be saved."); }
+}
+async function applyAudienceDefinition(audience){
+  const definition = audience && audience.definition;
+  if (!definition || definition.version !== 1) throw new Error("This audience uses an unsupported rule version.");
+  const target = definition.scope && definition.scope.value;
+  if (!target || target === "US") throw new Error("This audience does not identify an advisor-level state or territory.");
+  if (target !== scope) {
+    const result = await switchScope(target);
+    if (!result || result.status !== "applied") throw new Error(`Could not load ${definition.scope.label || target}.`);
+  }
+  const f = definition.filters || {};
+  selectedFirms = Array.isArray(f.selectedFirms) ? f.selectedFirms.map(String) : [];
+  selectsOnly = !!f.selectsOnly;
+  selectsBox.checked = selectsOnly;
+  selectsBox.closest(".switch").classList.toggle("on", selectsOnly);
+  refill(aumSel, f.aum); reg = f.reg || "all";
+  refill(expSel, f.exp); refill(reachSel, f.reach); refill(geoSel, f.geo);
+  ownerOnly = !!f.ownerOnly; rankedOnly = !!f.rankedOnly;
+  excludedFirms = new Set((f.excluded || []).map(String));
+  setContinentalOnly(f.continentalOnly !== false, false);
+  contactableOnly = !!f.contactableOnly; assetsOnly = !!f.assetsOnly;
+  focusedAdvisorId = null; focusedAdvisorLabel = ""; clearLasso(false);
+  syncFirmColors(); document.getElementById("clearFirms").hidden = !selectedFirms.length;
+  syncFilterButtons(); redraw();
+}
+function currentAudiencePreview(audience){
+  const byCrd = new Map();
+  for (const feature of ALL) {
+    const p = feature.properties;
+    if (passesFilters(p) && !byCrd.has(String(p.id))) byCrd.set(String(p.id), dialSnapshot(p.id));
+  }
+  const rows = [...byCrd.values()].map(item => {
+    const dnc = Dial.isDnc(item.crd);
+    const phoneStatus = item.phone ? Dial.routeStatus(item) : { ok:false };
+    const emailStatus = item.email ? Dial.emailRouteStatus(item) : { ok:false };
+    const callable = !dnc && !!item.phone && phoneStatus.ok;
+    const emailable = !dnc && !!item.email && emailStatus.ok;
+    const identityIssue = (!!item.phone && !phoneStatus.ok) || (!!item.email && !emailStatus.ok);
+    return { item, callable, emailable, dnc, identityIssue, owner:territoryFor(item.state) };
+  });
+  return { audience, rows, matches:rows.length, callable:rows.filter(x => x.callable).length,
+    emailable:rows.filter(x => x.emailable).length,
+    excluded:rows.filter(x => !x.callable && !x.emailable).length,
+    dnc:rows.filter(x => x.dnc).length, identity:rows.filter(x => x.identityIssue).length };
+}
+async function ensureAudienceIdentity(){
+  if (ME) return ME;
+  try { ME = await Dial.whoAmI(); } catch { ME = null; }
+  return ME;
+}
+async function prepareAudiencePreviewData(audience){
+  const f = audience && audience.definition && audience.definition.filters || {};
+  const support = f.ownerOnly || f.rankedOnly
+    ? loadRegionalSupport()
+    : (SUPPORT.territories === "ready" ? Promise.resolve() : loadTerritories());
+  await Promise.all([loadContacts(), ensureAudienceIdentity(), support]);
+  if (!CONTACTS_READY)
+    throw new Error("Contact eligibility is unavailable, so this audience cannot be previewed safely. Try again after contact data loads.");
+  if (SUPPORT.territories !== "ready")
+    throw new Error("Territory assignments are unavailable, so ownership cannot be reviewed safely.");
+  if (f.ownerOnly && SUPPORT.owner !== "ready")
+    throw new Error("Owner and officer data is unavailable for this saved audience.");
+  if (f.rankedOnly && (SUPPORT.barrons !== "ready" || SUPPORT.forbes !== "ready"))
+    throw new Error("Advisor ranking data is unavailable for this saved audience.");
+}
+function audienceTerritoryPolicy(preview){
+  const email = String(ME && ME.userDetails || "").trim().toLowerCase();
+  const national = Object.values((SALES_TERRITORY && SALES_TERRITORY.national) || {});
+  const nationalRep = national.find(rep => String(rep && rep.e || "").trim().toLowerCase() === email);
+  if (email && nationalRep)
+    return { kind:"national", rows:preview.rows, outside:0,
+      text:`National coverage account (${esc(nationalRep.n || email)}): all ${preview.matches.toLocaleString()} matches are within national coverage.` };
+  const assigned = Object.values((SALES_TERRITORY && SALES_TERRITORY.states) || {})
+    .find(rep => String(rep && rep.e || "").trim().toLowerCase() === email);
+  if (email && assigned) {
+    const rows = preview.rows.filter(row => String(row.owner && row.owner.e || "").trim().toLowerCase() === email);
+    return { kind:"territory", rows, outside:preview.matches - rows.length,
+      text:`${esc(assigned.n || email)}: ${rows.length.toLocaleString()} in my assigned territory; ${(preview.matches - rows.length).toLocaleString()} outside and excluded from new snapshots.` };
+  }
+  return { kind:"unassigned", rows:preview.rows, outside:0,
+    text:`No sales territory is assigned to this account${email ? ` (${esc(email)})` : ""}. Review the owner distribution before preparing a contact list.` };
+}
+function dynamicAudienceRows(){
+  if (audienceProblem) return `<p class="lists-none">${esc(audienceProblem)}</p>`;
+  if (!dynamicAudiences.length) return `<p class="lists-none">No dynamic audiences saved yet. Use <b>save as audience</b> beside Active filters.</p>`;
+  return `<ul class="lists-ul">${dynamicAudiences.map(a => `<li class="lists-row audience-row">
+    <span class="lists-main"><b>${esc(a.name || "Untitled audience")}</b><small>Dynamic &middot; ${esc(a.scopeLabel || (a.definition && a.definition.scope && a.definition.scope.label) || "saved scope")}${a.description ? ` &middot; ${esc(a.description)}` : ""}</small></span>
+    <span class="lists-acts"><button type="button" class="ask-btn primary" data-lists="audience-open" data-id="${esc(a.id)}">Preview</button><button type="button" class="grave" data-lists="audience-drop" data-id="${esc(a.id)}">Delete</button></span>
+  </li>`).join("")}</ul>`;
+}
+function paintAudiencePreview(){
+  const p = audiencePreview;
+  if (!listsBack || !p) return;
+  const owners = new Map();
+  p.rows.forEach(r => { if (r.owner && r.owner.n) owners.set(r.owner.n, (owners.get(r.owner.n) || 0) + 1); });
+  const policy = audienceTerritoryPolicy(p);
+  const readyCall = policy.rows.filter(row => row.callable).length;
+  const readyEmail = policy.rows.filter(row => row.emailable).length;
+  listsBack.innerHTML = `<div class="ask lists lists-workspace" role="dialog" aria-modal="true" aria-label="Dynamic audience preview">
+    <div class="lists-title"><div><span class="list-type dynamic">Dynamic audience</span><h3>${esc(p.audience.name)}</h3><p>${esc(p.audience.description || "Updates when source data or saved rules change.")}</p></div><button type="button" class="ask-btn ghost" data-lists="close">Close</button></div>
+    <div class="audience-counts"><span><b>${p.matches.toLocaleString()}</b> matches</span><span><b>${p.callable.toLocaleString()}</b> callable</span><span><b>${p.emailable.toLocaleString()}</b> emailable</span><span class="excluded"><b>${p.excluded.toLocaleString()}</b> no usable route</span></div>
+    <p class="audience-owner"><b>${policy.text}</b><br>Owner distribution: ${owners.size ? [...owners].map(([n,c]) => `${esc(n)} (${c})`).join("; ") : "assignment information unavailable"}. Raw channel counts above describe the full audience; snapshot actions below use ${policy.kind === "territory" ? "only this account's assigned territory" : policy.kind === "national" ? "national coverage" : "all matches after an explicit ownership review"}.</p>
+    <p class="dial-menu-note">Ready for a new snapshot: ${readyCall.toLocaleString()} callable; ${readyEmail.toLocaleString()} emailable${policy.outside ? `; ${policy.outside.toLocaleString()} outside-territory matches excluded before channel checks` : ""}.</p>
+    ${p.excluded ? `<p class="dial-menu-note">Review: ${p.dnc.toLocaleString()} do-not-call; ${p.identity.toLocaleString()} with non-actionable identity evidence; ${p.excluded.toLocaleString()} with neither a callable nor emailable route. Excluded contacts remain in the match count and never enter the call snapshot.</p>` : ""}
+    <div class="lists-preview-actions"><button type="button" class="ask-btn" data-lists="audience-back">Back to lists</button><button type="button" class="ask-btn" data-lists="audience-queue"${readyCall ? "" : " disabled"}>Create call list</button><button type="button" class="ask-btn primary" data-lists="audience-email"${readyEmail ? "" : " disabled"}>Prepare email batch</button></div>
+  </div>`;
+  focusListDialog('[data-lists="audience-back"]');
+}
+
 function listRowActions(l){
   const cur = l.id === Dial.state.listId;
   return `<li class="lists-row${cur ? " on" : ""}">
     <span class="lists-main">
       <b>${esc(l.name)}</b>
-      <small>${l.count} ${l.count === 1 ? "person" : "people"}`
+      <small>Static &middot; ${l.count} ${l.count === 1 ? "person" : "people"}`
       + `${l.cycle > 1 ? ` &middot; pass ${l.cycle}` : ""}`
       + `${cur ? " &middot; open" : ""}</small>
     </span>
@@ -2592,13 +2744,31 @@ function listRowActions(l){
 
 let listsBack = null;
 let listsEditMode = false;   // showing who is on the open list, not every list
+let listsReturnFocus = null;
+
+function focusListDialog(selector){
+  if (!listsBack) return;
+  const target = listsBack.querySelector(selector ||
+    '[data-lists="audience-open"], [data-lists="flag-call"]:not([disabled]), .ask-name, [data-lists="close"]');
+  if (target) target.focus();
+}
 
 async function openListManager(){
   if (listsBack) return;
+  listsReturnFocus = document.activeElement;
   listsBack = document.createElement("div");
   listsBack.className = "ask-back";
   document.body.appendChild(listsBack);
-  const onKey = (e) => { if (e.key === "Escape") closeListManager(); };
+  const onKey = (e) => {
+    if (e.key === "Escape") { e.preventDefault(); closeListManager(); return; }
+    if (e.key !== "Tab" || !listsBack) return;
+    const focusable = [...listsBack.querySelectorAll(
+      'button:not([disabled]),[href],input:not([disabled]),select:not([disabled]),textarea:not([disabled])')];
+    if (!focusable.length) return;
+    const first = focusable[0], last = focusable[focusable.length - 1];
+    if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+    else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+  };
   document.addEventListener("keydown", onKey);
   listsBack._onKey = onKey;
   listsBack.addEventListener("click", (e) => {
@@ -2607,7 +2777,22 @@ async function openListManager(){
   paintListManager();
   // Refreshed rather than trusted: the counts in Dial.state.lists are summaries
   // last fetched who-knows-when, and this screen exists to be believed.
-  try { await Dial.loadLists(); paintListManager(); } catch { /* stale is legible */ }
+  const results = await Promise.allSettled([Dial.loadLists(), loadDynamicAudiences()]);
+  audienceProblem = results[1].status === "rejected" ? results[1].reason.message : "";
+  paintListManager();
+}
+
+async function openAudienceFromLink(id){
+  if (!id) return;
+  await openListManager();
+  try {
+    const data = await audienceCall(`${AUDIENCE_API}?id=${encodeURIComponent(id)}`);
+    const audience = data.audience || data;
+    await applyAudienceDefinition(audience);
+    await prepareAudiencePreviewData(audience);
+    audiencePreview = currentAudiencePreview(audience);
+    paintAudiencePreview();
+  } catch (error) { closeListManager(); showNotice(error.message || "That saved audience could not be opened."); }
 }
 
 function closeListManager(){
@@ -2615,6 +2800,9 @@ function closeListManager(){
   document.removeEventListener("keydown", listsBack._onKey);
   listsBack.remove();
   listsBack = null;
+  const restore = listsReturnFocus;
+  listsReturnFocus = null;
+  if (restore && restore.isConnected && typeof restore.focus === "function") restore.focus();
 }
 
 // Membership editing was missing on both sides: "Empty" was the only answer to
@@ -2638,6 +2826,7 @@ function paintListEdit(){
     + `<p class="dial-menu-note">To add people, use the lasso or bulk add on the map.</p>`
     + `<button type="button" class="ask-btn" data-lists="edit-back">Back to all lists</button>`
     + `<button type="button" class="ask-btn ghost" data-lists="close">Close</button></div>`;
+  focusListDialog('[data-lists="edit-drop"], [data-lists="edit-back"]');
 }
 
 /* Key contacts and due-diligence contacts, as two standing lists.
@@ -2695,7 +2884,7 @@ function flagListRows(){
     const callable = people.filter(p => p.callable).length;
     return `<li class="lists-row flag-list">
       <span class="lists-main"><b>${icon} ${label}</b>
-        <small>${people.length} ${people.length === 1 ? "person" : "people"}`
+        <small>Smart view &middot; ${people.length} ${people.length === 1 ? "person" : "people"}`
       + `${people.length && callable !== people.length
             ? ` &middot; ${callable} with a number` : ""}`
       + `${people.length ? "" : " &middot; mark someone on their card"}</small></span>
@@ -2713,8 +2902,9 @@ function paintListManager(){
   if (listsEditMode) return paintListEdit();
   const ls = (Dial.state.lists || []).filter((list) => !standingKindOf(list.id));
   listsBack.innerHTML =
-    `<div class="ask lists" role="dialog" aria-modal="true" aria-label="Call lists">`
-    + `<h3>Call lists</h3>`
+    `<div class="ask lists lists-workspace" role="dialog" aria-modal="true" aria-label="Lists and saved audiences">`
+    + `<div class="lists-title"><div><h3>Lists</h3><p>Save reusable rules, then create a frozen call list or prepare an email from reviewed contacts.</p></div><button type="button" class="ask-btn ghost" data-lists="close">Close</button></div>`
+    + `<section class="lists-section"><h4>Smart views</h4><p class="lists-section-note">Live views from labels you applied. Membership updates automatically.</p>`
     /* The two standing lists.
      *
      * DERIVED, not stored: they are whoever currently carries the flag, so
@@ -2723,16 +2913,18 @@ function paintListManager(){
      * also why they cannot be renamed, emptied or deleted -- there is no list
      * object underneath, only the flags.
      */
-    + flagListRows()
+    + flagListRows() + `</section>`
+    + `<section class="lists-section"><h4>Dynamic audiences</h4><p class="lists-section-note">Saved map rules. Preview current matches before preparing a channel-specific list.</p>${dynamicAudienceRows()}</section>`
+    + `<section class="lists-section"><h4>Static contact lists</h4><p class="lists-section-note">Frozen working lists used for calls or email, limited to 250 people.</p>`
     + (ls.length
         ? `<ul class="lists-ul">${ls.map(listRowActions).join("")}</ul>`
-        : `<p class="lists-none">No call lists of your own yet.</p>`)
+        : `<p class="lists-none">No static contact lists of your own yet.</p>`)
     + `<div class="lists-new">`
     + `<input class="ask-name" type="text" placeholder="Name for a new list" `
     + `value="${esc(defaultListName())}" aria-label="Name for a new list">`
     + `<button type="button" class="ask-btn" data-lists="new">Create</button></div>`
-    + `<p class="dial-menu-note">Your call history is kept whatever you do here.</p>`
-    + `<button type="button" class="ask-btn ghost" data-lists="close">Close</button></div>`;
+    + `<p class="dial-menu-note">Your call history is kept whatever you do here.</p></section></div>`;
+  focusListDialog();
 }
 
 document.addEventListener("click", async e => {
@@ -2744,6 +2936,43 @@ document.addEventListener("click", async e => {
   try {
     if (act === "close") { listsEditMode = false; return closeListManager(); }
     if (act === "edit-back") { listsEditMode = false; return paintListManager(); }
+    if (act === "audience-back") { audiencePreview = null; return paintListManager(); }
+    if (act === "audience-open") {
+      const data = await audienceCall(`${AUDIENCE_API}?id=${encodeURIComponent(id)}`);
+      const audience = data.audience || data;
+      await applyAudienceDefinition(audience);
+      await prepareAudiencePreviewData(audience);
+      audiencePreview = currentAudiencePreview(audience);
+      return paintAudiencePreview();
+    }
+    if (act === "audience-drop") {
+      const audience = dynamicAudiences.find(x => x.id === id);
+      if (!audience || !confirm(`Delete the dynamic audience "${audience.name}"?\n\nExisting call lists are not affected.`)) return;
+      await audienceCall(`${AUDIENCE_API}?id=${encodeURIComponent(id)}`, { method:"DELETE" });
+      await loadDynamicAudiences(); return paintListManager();
+    }
+    if (act === "audience-queue" || act === "audience-email") {
+      if (!audiencePreview) return;
+      const channel = act === "audience-email" ? "email" : "call";
+      const policy = audienceTerritoryPolicy(audiencePreview);
+      if (policy.kind === "unassigned" && !confirm("No sales territory is assigned to this account. Review the owner distribution above before continuing.\n\nHave you reviewed ownership and want to prepare this list?")) return;
+      const eligible = policy.rows.filter(x => channel === "email" ? x.emailable : x.callable).map(x => x.item);
+      if (eligible.length > 250) {
+        showNotice(`This audience has ${eligible.length.toLocaleString()} ${channel === "email" ? "emailable" : "callable"} people in the permitted snapshot scope; a static list holds 250. Refine the saved filters so contacts are not selected arbitrarily.`);
+        return;
+      }
+      const name = prompt(`Name this static ${channel === "email" ? "email" : "call"} list`, audiencePreview.audience.name) || "";
+      if (!name.trim()) return;
+      await Dial.createList(name.trim());
+      const result = await Dial.addMany(eligible, { phoneOnly:channel === "call" });
+      closeListManager(); renderDialer();
+      if (channel === "email") {
+        const openEmail = document.querySelector('[data-email="open-list"]');
+        if (!openEmail) return showNotice(`Created "${name.trim()}" with ${result.added.toLocaleString()} emailable people, but the email composer could not be opened.`);
+        openEmail.click();
+      } else showNotice(`Created "${name.trim()}" with ${result.added.toLocaleString()} callable people.`);
+      return;
+    }
     /* "Edit who's on it" for a list that is NOT open.
      *
      * The list manager could rename, empty and delete any list but could only
@@ -4397,6 +4626,11 @@ PERF.time("data:national", loadNational).then(() => {
   openFirmFromHash();
   searchFromHash();
   dialReady.then(() => {
+    const audienceId = new URLSearchParams(location.search).get("audience");
+    if (audienceId) {
+      openAudienceFromLink(audienceId);
+      return;
+    }
     // The rep's opening area, applied only when nothing more specific already
     // decided it. A URL hash and a search are both things the rep asked for
     // just now; a saved default is what to do in the absence of those, and
@@ -7188,8 +7422,8 @@ function refreshActiveFilters(){
   const wrap = document.getElementById("activeFilters");
   wrap.innerHTML = items.length
     ? items.map(item => `<button class="filter-chip" data-clear-filter="${item.key}">${esc(item.label)}</button>`).join("")
-    : "";
-  document.getElementById("filterState").hidden = !items.length;
+    : `<span class="hint">None</span>`;
+  document.getElementById("filterState").hidden = false;
   document.getElementById("resetAll").hidden = !items.length;
 }
 
@@ -7222,6 +7456,11 @@ function resetAllFilters(){
 }
 
 document.getElementById("resetAll").addEventListener("click", resetAllFilters);
+document.getElementById("listsBtn").addEventListener("click", () => {
+  listsEditMode = false; audiencePreview = null;
+  openListManager().catch(error => showNotice(error.message || "Lists could not be opened."));
+});
+document.getElementById("saveAudience").addEventListener("click", saveCurrentAudience);
 document.getElementById("activeFilters").addEventListener("click", e => {
   const button = e.target.closest("[data-clear-filter]"); if (!button) return;
   const key = button.dataset.clearFilter;

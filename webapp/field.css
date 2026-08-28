@@ -54,6 +54,13 @@ body{
 #workBtn{
   flex:none; width:32px; height:32px; margin-left:auto; position:relative;
   font-size:17px; line-height:1; color:var(--muted); background:transparent; border:0}
+#listsBtn{
+  flex:none; min-width:58px; height:36px; padding:0 8px; display:inline-flex;
+  align-items:center; justify-content:center; gap:5px; font:inherit;
+  font-size:12px; font-weight:700; color:var(--accent); background:transparent;
+  border:1px solid color-mix(in srgb,var(--accent) 45%,var(--hair)); border-radius:9px}
+#listsBtn:focus-visible,#settingsBtn:focus-visible,#workBtn:focus-visible{
+  outline:2px solid var(--accent); outline-offset:2px}
 /* The count rides on the flag. Absolute so it cannot change the button's
    size and shove the header about when it appears. */
 #workCount{
@@ -509,6 +516,11 @@ body{
   max-height:82vh; overflow-y:auto}
 #lists[hidden]{display:none}
 #lists h2{margin:0 0 10px; font-size:18px}
+#lists .list-section{margin:16px 0 0}
+#lists .list-section:first-of-type{margin-top:8px}
+#lists .list-section h3{margin:0; font-size:12px; line-height:1.3;
+  color:var(--muted); text-transform:uppercase; letter-spacing:.055em}
+.list-section-note{margin:4px 0 8px; color:var(--muted); font-size:11.5px}
 #listsClose{
   position:absolute; top:10px; right:12px; width:34px; height:34px;
   font-size:22px; line-height:1; color:var(--muted);
@@ -589,7 +601,26 @@ body{
   border-bottom-right-radius:0; padding-bottom:12px}
 .lists-main{display:block}
 .lists-main b{font-size:15px}
+.list-title-line{display:flex; align-items:center; gap:7px; min-width:0}
+.list-title-line b{min-width:0; overflow-wrap:anywhere}
+.list-type{flex:none; padding:2px 6px; border-radius:10px; font-size:9.5px;
+  line-height:1.3; font-weight:800; letter-spacing:.04em; text-transform:uppercase;
+  color:var(--muted); background:var(--panel-2); border:1px solid var(--hair)}
+.list-type.active{color:var(--accent); border-color:color-mix(in srgb,var(--accent) 45%,var(--hair))}
+.list-type.dynamic{color:var(--rank); border-color:color-mix(in srgb,var(--rank) 45%,var(--hair))}
 .lists-main small{display:block; margin-top:2px; font-size:11.5px; color:var(--muted)}
+.audience-list{max-height:none; overflow:visible}
+.audience-row{display:grid; grid-template-columns:minmax(0,1fr) auto; gap:10px; align-items:center}
+.audience-criteria{display:block; margin-top:5px; color:var(--ink); font-size:12px;
+  line-height:1.35; overflow-wrap:anywhere}
+.audience-open{min-height:var(--tap); padding:0 10px; display:inline-flex; align-items:center;
+  justify-content:center; color:var(--accent); font-size:12px; font-weight:700;
+  text-decoration:none; border:1px solid var(--hair); border-radius:9px; text-align:center}
+.audience-open:focus-visible{outline:2px solid var(--accent); outline-offset:2px}
+.lists-error{padding:10px; color:var(--warn); background:var(--panel-2); border-radius:9px;
+  font-size:12px}
+.lists-error button{min-height:36px; margin-left:6px; color:var(--ink);
+  background:transparent; border:1px solid var(--hair); border-radius:8px}
 /* Four actions on one row at 360px. Call is widest because it is the one that
    gets pressed; the destructive one is last, farthest from the thumb's rest. */
 .lists-acts{display:flex; gap:6px; margin-top:8px}

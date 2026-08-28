@@ -21,7 +21,8 @@ STAGE_DIR=""
 #   35: email-campaign-repair.test.js -- approved work survives lost queue hints
 #   36: queue-member.test.js -- arbitrary-list membership is atomic and session-safe
 #   37: role-list-contract.test.js -- derived role lists stay distinct and disposable
-EXPECTED_API_TEST_FILE_COUNT=37
+#   38: audiences.test.js -- personal dynamic definitions, validation, and ETags
+EXPECTED_API_TEST_FILE_COUNT=38
 
 cleanup() {
   test -z "$TEMP_ROOT" && return
@@ -369,7 +370,9 @@ TEST_API="$TEST_ROOT/api"
 mkdir -p "$TEST_API/test" "$TEST_ROOT/webapp"
 cp -R "$STAGE_DIR/." "$TEST_API/"
 cp -R "$API/test/." "$TEST_API/test/"
-cp "$ROOT/webapp/email.js" "$ROOT/webapp/field.js" "$TEST_ROOT/webapp/"
+# UI contract tests inspect both clients. Keep the isolated test workspace
+# explicit so a missing production dependency fails here, before packaging.
+cp "$ROOT/webapp/app.js" "$ROOT/webapp/dial.js" "$ROOT/webapp/email.js" "$ROOT/webapp/field.js" "$TEST_ROOT/webapp/"
 API_PACKAGE_SOURCE_ROOT="$ROOT" NODE_PATH="$API/node_modules" \
   run_api_tests "$TEST_API" "$EXPECTED_API_TEST_FILE_COUNT"
 diff -r -q --exclude=test "$STAGE_DIR" "$TEST_API" >/dev/null \
