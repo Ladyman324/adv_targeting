@@ -2732,6 +2732,8 @@ function listRowActions(l){
     <span class="lists-acts">
       <button type="button" class="ask-btn primary" data-lists="call" data-id="${esc(l.id)}"
         ${l.count ? "" : "disabled"}>Call</button>
+      <button type="button" data-lists="email" data-id="${esc(l.id)}"
+        ${l.count ? "" : "disabled"}>Email</button>
       <button type="button" data-lists="edit-open" data-id="${esc(l.id)}"
         ${l.count ? "" : "disabled"}>Edit</button>
       <button type="button" data-lists="rename" data-id="${esc(l.id)}">Rename</button>
@@ -3055,6 +3057,22 @@ document.addEventListener("click", async e => {
       await Dial.openList(id);
       Dial.start();
       renderDialer();
+      return;
+    }
+    if (act === "email") {
+      try {
+        closeListManager();
+        if (id !== Dial.state.listId) await Dial.openList(id);
+        renderDialer();
+        const openEmail = document.querySelector('[data-email="open-list"]');
+        if (!openEmail) {
+          showNotice(`Opened "${l.name}", but the email review could not be opened.`);
+          return;
+        }
+        openEmail.click();
+      } catch (error) {
+        showNotice(error.message || `The list "${l.name}" could not be opened for email review.`);
+      }
       return;
     }
     if (act === "rename"){
