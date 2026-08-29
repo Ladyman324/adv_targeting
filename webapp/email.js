@@ -24,6 +24,9 @@
   // Approval is the only browser-bound portion of a send. Once its 202 response
   // arrives, Azure owns the work and this window may close.
   let approvalPending = false;
+  let sendTiming = "now";
+  let scheduleDate = "";
+  let scheduleTime = "09:00";
   global.addEventListener("beforeunload", (event) => {
     if (!approvalPending) return;
     event.preventDefault();
@@ -34,6 +37,63 @@
     "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
   })[c]);
   const bytes = (n) => n >= 1048576 ? `${(n / 1048576).toFixed(1)} MB` : `${Math.ceil(n / 1024)} KB`;
+
+  const EASTERN = "America/New_York";
+  function easternParts(date) {
+    const parts = new Intl.DateTimeFormat("en-CA", { timeZone: EASTERN, year: "numeric",
+      month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit",
+      hourCycle: "h23" }).formatToParts(date);
+    return Object.fromEntries(parts.filter((p) => p.type !== "literal").map((p) => [p.type, p.value]));
+  }
+  function easternLocalToDate(day, time) {
+    const match = `${day}T${time}`.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/);
+    if (!match) return null;
+    const wanted = match.slice(1).map(Number), anchor = Date.UTC(wanted[0], wanted[1] - 1,
+      wanted[2], wanted[3], wanted[4]);
+    const matches = [];
+    for (let t = anchor - 12 * 3600000; t <= anchor + 12 * 3600000; t += 15 * 60000) {
+      const p = easternParts(new Date(t));
+      if (+p.year === wanted[0] && +p.month === wanted[1] && +p.day === wanted[2]
+          && +p.hour === wanted[3] && +p.minute === wanted[4]) matches.push(new Date(t));
+    }
+    return matches.length === 1 ? matches[0] : null;
+  }
+  function easternLabel(date) {
+    return new Intl.DateTimeFormat("en-US", { timeZone: EASTERN, weekday: "long", year: "numeric",
+      month: "long", day: "numeric", hour: "numeric", minute: "2-digit",
+      timeZoneName: "short" }).format(date);
+  }
+  function ensureScheduleDefaults() {
+    if (scheduleDate) return;
+    const soon = new Date(Date.now() + 3600000);
+    const p = easternParts(soon);
+    scheduleDate = `${p.year}-${p.month}-${p.day}`;
+    scheduleTime = `${p.hour}:${String(Math.ceil(+p.minute / 15) * 15 % 60).padStart(2, "0")}`;
+    if (+p.minute > 45) {
+      const later = easternParts(new Date(soon.getTime() + 3600000));
+      scheduleDate = `${later.year}-${later.month}-${later.day}`; scheduleTime = `${later.hour}:00`;
+    }
+  }
+  function scheduleCheck(batch) {
+    if (sendTiming !== "later") return { date: null, error: "", quarter: "" };
+    const date = easternLocalToDate(scheduleDate, scheduleTime);
+    if (!date) return { date: null, error: "Choose a valid, unambiguous Eastern time.", quarter: "" };
+    const earliest = Date.now() + Number(((catalog || {}).limits || {}).cancellationSeconds || 0) * 1000;
+    if (date.getTime() < earliest) return { date, error: "Choose a time after the cancellation window.", quarter: "" };
+    if (date.getTime() > Date.now() + 7 * 86400000)
+      return { date, error: "Scheduled sending can begin no more than 7 days from now.", quarter: "" };
+    const now = easternParts(new Date()), then = easternParts(date);
+    const nowQuarter = `${now.year}-Q${Math.floor((+now.month - 1) / 3) + 1}`;
+    const thenQuarter = `${then.year}-Q${Math.floor((+then.month - 1) / 3) + 1}`;
+    if (nowQuarter !== thenQuarter) {
+      const ids = new Set((batch.attachmentIds || []).map(String));
+      const quarterly = ((catalog && catalog.documents) || []).filter((d) =>
+        ids.has(String(d.id)) && d.periodKind === "quarter");
+      if (quarterly.length) return { date, error: "", quarter:
+        `This schedule crosses a calendar-quarter boundary and includes quarterly material (${quarterly.map((d) => d.name).join(", ")}). After the quarter ends, select the refreshed material and schedule the batch then.` };
+    }
+    return { date, error: "", quarter: "" };
+  }
 
   async function api(op, body, method = "POST") {
     const [operation, extraQuery = ""] = String(op).split("&", 2);
@@ -499,6 +559,25 @@
 
   function setupView(){
     const templates = catalog.templates || [], docs = catalog.documents || [];
+    const legacyDocs = docs.filter((d) => !d.familyId && materialStatus(d) === "current");
+
+    const familyMap = new Map();
+    docs.filter((d) => d.familyId && materialStatus(d) === "current").forEach((d) => {
+      const family = familyMap.get(d.familyId) || { id: d.familyId, name: d.name, category: d.category, channels: new Set() };
+      family.channels.add(d.channel || "generic"); familyMap.set(d.familyId, family);
+    });
+    const families = [...familyMap.values()];
+    const routeRules = (((catalog || {}).materialRoutes || {}).rules || []);
+
+    const domains = [...new Set(keptRecipients().map((r) => String(r.email || "").split("@")[1]).filter(Boolean))];
+    const preflight = families.length ? '<div class="email-material-preflight"><b>Recipient routing</b><span>'
+      + domains.map((domain) => esc(domain) + ' ->  ' + esc(channelLabel(routedChannel(domain, routeRules)))).join(' / ')
+      + '</span><small>The server verifies the exact approved version for every recipient when emails are generated.</small></div>' : '';
+    const familyPicker = families.length ? '<fieldset class="email-docs email-families"><legend>Material families</legend>'
+      + families.map((f) => '<label><input type="checkbox" class="email-family" value="' + esc(f.id) + '"><span><b>'
+        + esc(f.name) + '</b><small>' + esc(f.category || 'Material') + ' / '
+        + [...f.channels].map(channelLabel).map(esc).join(', ') + '</small></span></label>').join('')
+      + '<p>Choose the material once; the approved client-group version is selected per recipient.</p></fieldset>' + preflight : '';
     document.getElementById("emailBody").innerHTML = `<div class="email-setup">
       <p class="email-summary"><b id="emailKeptCount">${keptRecipients().length}</b> recipient${keptRecipients().length === 1 ? "" : "s"} · From <b>${esc(catalog.connection.mailbox)}</b></p>
       ${templates.length ? `<label class="email-label">Template<select id="emailTemplate">${templates.map((t) =>
@@ -507,9 +586,10 @@
             ? ` Use <b>Manage templates</b> below to publish one.`
             : ` An email administrator needs to publish one before you can send.`}</p>`}
       <p id="emailTplNotes" class="email-tpl-notes"></p>
-      <fieldset class="email-docs" id="emailDocs"><legend>Approved attachments</legend>${docs.length ? docs.map((d) =>
+      ${familyPicker}
+      <fieldset class="email-docs" id="emailDocs"><legend>Approved attachments</legend>${legacyDocs.length ? legacyDocs.map((d) =>
         `<label data-doc="${esc(d.id)}"><input type="checkbox" value="${esc(d.id)}"> <span>${esc(d.name)}</span><small>${bytes(d.size)}</small></label>`).join("")
-        : `<p>No approved documents are configured. You can continue without attachments.</p>`}</fieldset>
+        : `<p>No additional legacy attachments are available. You can continue without them.</p>`}</fieldset>
       ${catalog.isAdmin ? `<p class="email-admin-link">
         <button type="button" class="email-small" data-email="templates">Manage templates</button>
         <button type="button" class="email-small" data-email="docs">Manage approved documents</button></p>` : ""}
@@ -656,46 +736,212 @@
    */
   let replacing = null;      // { id, name } or null
 
+  const MATERIAL_CHANNELS = [["generic", "Generic"], ["ubs", "UBS"], ["rj", "Raymond James"],
+    ["mswm", "Morgan Stanley"], ["ml", "Merrill"]];
+  const MATERIAL_CATEGORIES = ["Presentation", "Update & Positioning", "Case for Value vs Growth",
+    "Performance", "Cash Allocation", "Periodic Table", "Standard Deviation", "Tax Policy", "Other"];
+  let materialQueue = [], materialSearch = "", routeSearch = "";
+
+function suggestMaterial(file) {
+    const raw = String(file.name || "").replace(/\.pdf$/i, "").replace(/^p\s+/i, "")
+      .replace(/\s*-\s*/g, " - ").replace(/\s+/g, " ").trim();
+    let channel = "generic";
+    if (/\bUBS\b/i.test(raw)) channel = "ubs";
+    else if (/\b(RJ|Raymond James)\b/i.test(raw)) channel = "rj";
+    else if (/\b(MSWM|Morgan Stanley)\b/i.test(raw)) channel = "mswm";
+    else if (/\b(ML|Merrill)\b/i.test(raw)) channel = "ml";
+    let category = "Other";
+    if (/standard deviation/i.test(raw)) category = "Standard Deviation";
+    else if (/periodic table/i.test(raw)) category = "Periodic Table";
+    else if (/cash allocation/i.test(raw)) category = "Cash Allocation";
+    else if (/performance page/i.test(raw)) category = "Performance";
+    else if (/update\s*&\s*positioning/i.test(raw)) category = "Update & Positioning";
+    else if (/case for value vs growth/i.test(raw)) category = "Case for Value vs Growth";
+    else if (/presentation/i.test(raw)) category = "Presentation";
+    else if (/tax selling policy/i.test(raw)) category = "Tax Policy";
+    const q = raw.match(/\bQ([1-4])\s*(\d{2})\b/i);
+    const months = ["january", "february", "march", "april", "may", "june",
+      "july", "august", "september", "october", "november", "december"];
+    const month = raw.match(/\b(January|February|March|April|May|June|July|August|September|October|November|December)\s+(20\d{2})\b/i);
+    let periodKind = q ? "quarter" : month ? "month" : "as_of";
+    let periodKey = q ? "20" + q[2] + "-Q" + q[1]
+      : month ? month[2] + "-" + String(months.indexOf(month[1].toLowerCase()) + 1).padStart(2, "0") : "";
+    let asOfDate = "";
+    const code = raw.match(/(?:^|\s)(\d{6})(?:\d{2})?(?:-|$)/);
+    if (code) {
+      const yy = +code[1].slice(0, 2), mm = +code[1].slice(2, 4), dd = +code[1].slice(4, 6);
+      if (mm > 0 && mm < 13 && dd > 0 && dd < 32)
+        asOfDate = (2000 + yy) + "-" + String(mm).padStart(2, "0") + "-" + String(dd).padStart(2, "0");
+    }
+    const displayName = raw.replace(/\s+-\s+\d{6,}(?:\s*-\s*\d+)*\s*$/i, "").trim();
+    const familyName = displayName
+      .replace(/\b(UBS|RJ|MSWM|ML|Raymond James|Morgan Stanley|Merrill)\b/ig, "")
+      .replace(/\bQ[1-4]\s*\d{2}\b/ig, "")
+      .replace(/\b(January|February|March|April|May|June|July|August|September|October|November|December)\s+20\d{2}\b/ig, "")
+      .replace(/\s+-\s*/g, " ").replace(/\s+/g, " ").trim();
+    const familyId = (familyName || displayName).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+    const logicalId = (displayName + "-" + channel + "-" + (periodKey || asOfDate || "current"))
+      .toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 80);
+    return { file, name: displayName, familyId, logicalId, category, channel, periodKind, periodKey,
+      asOfDate, status: "ready", error: "", duplicate: "" };
+  }
+
+  const channelLabel = (value) => (MATERIAL_CHANNELS.find(([key]) => key === String(value || "").toLowerCase())
+    || [null, value || "Generic"])[1];
+function latestEndedQuarter(now = new Date()) {
+    let year = now.getFullYear(), quarter = Math.floor(now.getMonth() / 3) + 1;
+    quarter -= 1;
+    if (!quarter) { quarter = 4; year -= 1; }
+    return year * 4 + quarter;
+  }
+  function materialStatus(doc) {
+    const explicit = String(doc.freshness || "").toLowerCase();
+    if (["withdrawn", "expired", "superseded"].includes(explicit)) return explicit;
+    const q = String(doc.periodKey || "").match(/^(\d{4})-Q([1-4])$/i);
+    if (q) {
+      const value = Number(q[1]) * 4 + Number(q[2]), latest = latestEndedQuarter();
+      return value === latest ? "current" : value < latest ? "stale" : "future";
+    }
+    return ["current", "stale", "future", "missing"].includes(explicit) ? explicit : "current";
+  }
+
+  function routeSource(rule) {
+    if (Array.isArray(rule && rule.sources) && rule.sources.length) return rule.sources.join(", ");
+    if (typeof (rule && rule.source) === "string" && rule.source) return rule.source;
+    if (Array.isArray(rule && rule.provenance) && rule.provenance.length) return rule.provenance.join(", ");
+    if (typeof (rule && rule.provenance) === "string" && rule.provenance) return rule.provenance;
+    return rule && rule.seeded ? "Firm roster seed" : "Administrator";
+  }
+
+  function routedChannel(domain, rules) {
+    const value = String(domain || "").toLowerCase();
+    const matches = (rules || []).filter((r) => !r.disabled && r.domain
+      && (value === String(r.domain).toLowerCase() || value.endsWith("." + String(r.domain).toLowerCase())));
+    matches.sort((a, b) => String(b.domain).length - String(a.domain).length);
+    return matches.length ? matches[0].channel : "generic";
+  }
+
+
+  function uploadLogicalId(row) {
+    return (String(row.name || "") + "-" + String(row.channel || "generic") + "-"
+      + String(row.periodKey || row.asOfDate || "current")).toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 80);
+  }
+  function uploadTuple(row) {
+    return [row.familyId, row.channel || "generic", row.periodKind || "", row.periodKey || "", row.asOfDate || ""].join("|");
+  }
+
+  function queueRows() {
+    return materialQueue.map((row, i) => '<div class="email-material-upload ' + esc(row.status) + '" data-upload-row="' + i + '">'
+      + '<div class="email-material-file"><b>' + esc(row.file.name) + '</b><small>' + bytes(row.file.size)
+      + (row.duplicate ? ' / ' + esc(row.duplicate) : '') + '</small></div>'
+      + '<label>Display name<input data-upload-field="name" value="' + esc(row.name) + '"></label>'
+      + '<label>Family<input data-upload-field="familyId" value="' + esc(row.familyId) + '"></label>'
+      + '<label>Category<select data-upload-field="category">' + MATERIAL_CATEGORIES.map((v) =>
+        '<option' + (v === row.category ? ' selected' : '') + '>' + esc(v) + '</option>').join('') + '</select></label>'
+      + '<label>Version for<select data-upload-field="channel">' + MATERIAL_CHANNELS.map(([v, label]) =>
+        '<option value="' + v + '"' + (v === row.channel ? ' selected' : '') + '>' + esc(label) + '</option>').join('') + '</select></label>'
+      + '<label>Period<select data-upload-field="periodKind"><option value="quarter"' + (row.periodKind === 'quarter' ? ' selected' : '') + '>Quarter</option>'
+      + '<option value="month"' + (row.periodKind === 'month' ? ' selected' : '') + '>Month</option><option value="as_of"' + (row.periodKind === 'as_of' ? ' selected' : '') + '>As of</option>'
+      + '<option value="evergreen"' + (row.periodKind === 'evergreen' ? ' selected' : '') + '>Evergreen</option></select></label>'
+      + '<label>Period key<input data-upload-field="periodKey" value="' + esc(row.periodKey) + '" placeholder="2026-Q2"></label>'
+      + '<label>As of<input type="date" data-upload-field="asOfDate" value="' + esc(row.asOfDate) + '"></label>'
+      + '<button type="button" class="email-small grave" data-email="material-queue-remove" data-index="' + i + '">Remove</button>'
+      + '<p class="email-material-result">' + (row.status === 'uploading' ? 'Publishing...' : row.status === 'done' ? 'Published'
+        : row.error ? esc(row.error) : row.duplicate ? 'Check this duplicate before publishing.' : 'Ready') + '</p></div>').join('');
+  }
+
+function materialEditFields(d) {
+    const option = (value, label, selected) => '<option value="' + value + '"' + (value === selected ? ' selected' : '') + '>' + label + '</option>';
+    return '<div class="email-material-edit">'
+      + '<label>Display name<input data-material-field="name" value="' + esc(d.name) + '"></label>'
+      + '<label>Family<input data-material-field="familyId" value="' + esc(d.familyId || d.id) + '"></label>'
+      + '<label>Category<select data-material-field="category">' + MATERIAL_CATEGORIES.map((v) =>
+        '<option' + (v === (d.category || 'Other') ? ' selected' : '') + '>' + esc(v) + '</option>').join('') + '</select></label>'
+      + '<label>Version for<select data-material-field="channel">' + MATERIAL_CHANNELS.map(([v, label]) =>
+        option(v, esc(label), d.channel || 'generic')).join('') + '</select></label>'
+      + '<label>Period type<select data-material-field="periodKind">' + [['quarter','Quarter'],['month','Month'],['as_of','As of'],['evergreen','Evergreen']].map((v) =>
+        option(v[0], v[1], d.periodKind || 'as_of')).join('') + '</select></label>'
+      + '<label>Period key<input data-material-field="periodKey" value="' + esc(d.periodKey || '') + '"></label>'
+      + '<label>As of<input type="date" data-material-field="asOfDate" value="' + esc(d.asOfDate || '') + '"></label>'
+      + '<label>Freshness<select data-material-field="freshness">' + [['current','Current'],['stale','Stale'],['future','Future'],['superseded','Superseded'],['expired','Expired'],['withdrawn','Withdrawn']].map((v) =>
+        option(v[0], v[1], materialStatus(d))).join('') + '</select></label>'
+      + '<button type="button" class="email-small primary" data-email="material-save" data-id="' + esc(d.id) + '">Save metadata</button></div>';
+  }
+
+  function libraryHtml(docs) {
+    const q = materialSearch.toLowerCase();
+    const shown = docs.filter((d) => !q || [d.name, d.familyId, d.category, d.channel, d.periodKey, d.fileName].join(' ').toLowerCase().includes(q));
+    const groups = new Map();
+    shown.forEach((d) => {
+      const key = d.familyId || d.id, group = groups.get(key) || { key, category: d.category || 'Uncategorized', docs: [] };
+      group.docs.push(d); groups.set(key, group);
+    });
+    if (!groups.size) return '<p class="email-doc-none">No materials match this search.</p>';
+    return [...groups.values()].sort((a, b) => a.category.localeCompare(b.category) || a.key.localeCompare(b.key)).map((g) => {
+      const active = g.docs.filter((d) => materialStatus(d) === 'current');
+      const periodOf = (d) => String(d.periodKey || (d.periodKind === 'evergreen' ? 'evergreen' : d.asOfDate || 'unspecified'));
+      const targetPeriod = active.map(periodOf).sort((a, b) => b.localeCompare(a))[0] || '';
+      const targetDocs = active.filter((d) => periodOf(d) === targetPeriod);
+      const channels = new Set(targetDocs.map((d) => d.channel || 'generic'));
+      const missing = MATERIAL_CHANNELS.filter(([key]) => !channels.has(key)).map(([, label]) => label);
+      const health = !targetPeriod ? 'No current period'
+        : missing.length ? missing.length + ' versions missing for ' + targetPeriod : 'All ' + targetPeriod + ' versions current';
+      return '<section class="email-material-family"><header><div><span class="email-material-category">' + esc(g.category)
+        + '</span><h3>' + esc(g.docs[0].name || g.key) + '</h3></div><span class="email-material-health '
+        + (missing.length || !targetPeriod ? 'incomplete' : 'complete') + '">' + esc(health) + '</span></header>'
+        + '<div class="email-channel-badges">' + MATERIAL_CHANNELS.map(([key, label]) =>
+          '<span class="' + (channels.has(key) ? 'on' : 'off') + '">' + esc(label) + '</span>').join('') + '</div>'
+        + g.docs.sort((a, b) => String(b.periodKey || b.asOfDate || '').localeCompare(String(a.periodKey || a.asOfDate || ''))).map((d) =>
+          '<details class="email-material-version"><summary><b>' + esc(channelLabel(d.channel)) + '</b> / '
+          + esc(d.periodKey || d.asOfDate || 'Evergreen') + '<span class="email-fresh ' + esc(materialStatus(d)) + '">'
+          + esc(materialStatus(d)) + '</span></summary><p>' + esc(d.fileName || d.name + '.pdf') + ' / ' + bytes(d.size)
+          + ' / v' + d.version + '</p>' + materialEditFields(d)
+          + '<p><button type="button" class="email-small" data-email="doc-replace" data-id="' + esc(d.id) + '" data-name="' + esc(d.name) + '">Replace PDF</button> '
+          + '<button type="button" class="grave email-small" data-email="doc-delete" data-id="' + esc(d.id) + '" data-name="' + esc(d.name) + '">'
+          + 'Remove' + '</button></p></details>').join('')
+        + '</section>';
+    }).join('');
+  }
+
+function routesHtml() {
+    const routeSet = catalog.materialRoutes || {}, rules = routeSet.rules || [];
+    const active = rules.filter((r) => !r.disabled);
+    const removed = rules.filter((r) => r.disabled);
+    const q = routeSearch.toLowerCase(), shown = active.filter((r) => !q || (r.domain + ' ' + r.channel + ' ' + routeSource(r)).toLowerCase().includes(q));
+    return '<section class="email-route-card"><header><div><h3>Recipient routing</h3><p>Domains recommend the approved client-group version. Canonical contact identity is still checked by the server.</p></div>'
+      + '<label class="email-search">Search routes<input id="routeSearch" value="' + esc(routeSearch) + '" placeholder="ubs.com"></label></header>'
+      + '<div id="routeRows">' + shown.map((r) => '<div class="email-route-row" data-route-key="' + esc(r.domain) + '"><input data-route-field="domain" value="' + esc(r.domain) + '" aria-label="Domain">'
+        + '<select data-route-field="channel">' + MATERIAL_CHANNELS.filter(([key]) => key !== 'generic').map(([key, label]) =>
+          '<option value="' + key + '"' + (key === r.channel ? ' selected' : '') + '>' + esc(label) + '</option>').join('') + '</select>'
+        + '<small>' + esc(routeSource(r)) + '</small><button type="button" class="email-small grave" data-email="route-remove" data-domain="' + esc(r.domain) + '">Remove</button></div>').join('')
+      + '</div><button type="button" class="email-small" data-email="route-add">Add domain</button> '
+      + '<button type="button" class="ask-btn primary" data-email="routes-save">Save routing rules</button>'
+      + (removed.length ? '<details class="email-route-removed"><summary>Removed routes (' + removed.length + ')</summary>'
+        + removed.map((r) => '<p><span>' + esc(r.domain) + ' / ' + esc(channelLabel(r.channel)) + '</span> <button type="button" class="email-small" data-email="route-restore" data-domain="' + esc(r.domain) + '">Restore</button></p>').join('') + '</details>' : '')
+      + '</section>';
+  }
+
   function docsView(message = "", bad = false) {
     const docs = (catalog && catalog.documents) || [];
-    document.getElementById("emailTitle").textContent = "Approved documents";
-    document.getElementById("emailBody").innerHTML = `<div class="email-docs-admin">
-      <p class="email-next">Reps can only attach documents listed here. Publishing a new
-      version of an existing document invalidates any batch still carrying the old one.
-      <b>PDF only.</b></p>
-      ${message ? `<p class="${bad ? "email-error" : "email-ok"}">${esc(message)}</p>` : ""}
-      <ul class="email-doclist">${docs.length ? docs.map((d) => `<li>
-        <span class="email-doc-main"><b>${esc(d.name)}</b>
-          <small>${esc(d.id)} &middot; ${bytes(d.size)} &middot; v${d.version}</small>
-          ${/* What the ADVISOR will see. The bold line above is a label for
-                this picker; the attachment now goes out under the name the
-                file was uploaded with, and those differ on purpose -- so the
-                one that leaves the building is stated rather than assumed.
-                Documents published before this was recorded have no uploaded
-                name, and for those the display name is still what is sent. */
-            d.fileName
-              ? `<small class="email-doc-file">Sent as ${esc(d.fileName)}</small>`
-              : `<small class="email-doc-file">Sent as ${esc(d.name)}.pdf &middot; republish to attach it under its own filename</small>`}</span>
-        <button type="button" class="email-small" data-email="doc-replace"
-          data-id="${esc(d.id)}" data-name="${esc(d.name)}">Replace</button>
-        <button type="button" class="grave email-small" data-email="doc-delete"
-          data-id="${esc(d.id)}" data-name="${esc(d.name)}">Remove</button></li>`).join("")
-        : `<li class="email-doc-none">No approved documents yet.</li>`}</ul>
-      <fieldset class="email-doc-add"><legend>${replacing
-        ? `Replace &ldquo;${esc(replacing.name)}&rdquo;` : "Publish a PDF"}</legend>
-        ${replacing ? `<p class="email-fine">The new file takes the same place as the old one:
-          same document id, next version, and every template that requires it keeps working.
-          Batches still carrying the old version will fail validation, which is the point.
-          <button type="button" class="link-btn" data-email="doc-replace-cancel">Cancel replacement</button></p>` : ""}
-        <label class="email-label">Display name<input id="docName" maxlength="120"
-          placeholder="EIC Value Fund Fact Sheet"></label>
-        <label class="email-label">File<input id="docFile" type="file" accept="application/pdf,.pdf"></label>
-        ${replacing ? "" : `<p class="email-fine">To replace an existing document, use its
-          <b>Replace</b> button rather than publishing a second copy.</p>`}
-        <button type="button" class="ask-btn primary" data-email="doc-upload">${
-          replacing ? "Publish replacement" : "Publish"}</button>
-      </fieldset>
-      <div class="email-done-actions"><button type="button" class="ask-btn" data-email="docs-back">Back</button></div></div>`;
+    document.getElementById("emailTitle").textContent = "Materials Library";
+    document.getElementById("emailBody").innerHTML = '<div class="email-docs-admin email-materials">'
+      + '<div class="email-material-intro"><div><h2>Approved sales materials</h2><p>Upload PDFs together, confirm the suggested organization, and publish. Reps see only approved, current versions.</p></div>'
+      + '<label class="email-upload-button">Choose PDFs<input id="docFiles" type="file" accept="application/pdf,.pdf" multiple></label></div>'
+      + (replacing ? '<fieldset class="email-doc-add"><legend>Replace ' + esc(replacing.name) + '</legend>'
+        + '<p class="email-fine">The new PDF keeps this material ID and advances its version. Existing unapproved batches carrying the old version become invalid.</p>'
+        + '<label class="email-label">Display name<input id="docName" maxlength="120" value="' + esc(replacing.name) + '"></label>'
+        + '<label class="email-label">Replacement PDF<input id="docFile" type="file" accept="application/pdf,.pdf"></label>'
+        + '<button type="button" class="ask-btn primary" data-email="doc-upload">Publish replacement</button> '
+        + '<button type="button" class="email-small" data-email="doc-replace-cancel">Cancel</button></fieldset>' : '')
+      + (message ? '<p class="' + (bad ? 'email-error' : 'email-ok') + '">' + esc(message) + '</p>' : '')
+      + (materialQueue.length ? '<section class="email-upload-queue"><header><h3>Ready to publish</h3><button type="button" class="ask-btn primary" data-email="materials-upload">Publish ready PDFs</button></header>'
+        + '<div id="materialQueue">' + queueRows() + '</div></section>' : '')
+      + '<div class="email-material-tools"><label class="email-search">Search materials<input id="materialSearch" value="' + esc(materialSearch) + '" placeholder="ACV, UBS, Q2 2026..."></label>'
+      + '<span>' + docs.length + ' approved version' + (docs.length === 1 ? '' : 's') + '</span></div>'
+      + '<div class="email-material-library">' + libraryHtml(docs) + '</div>'
+      + routesHtml()
+      + '<div class="email-done-actions"><button type="button" class="ask-btn" data-email="docs-back">Back</button></div></div>';
   }
 
   // ---- template authoring (EmailAdministrator only) ------------------------
@@ -978,9 +1224,9 @@ ${t.bodyText}`);
   function stateLabel(state) {
     return ({ editing: "Editing", invalid: "Needs attention", draft_pending: "Queued for draft",
       draft_creating: "Creating draft", draft_ambiguous: "Reconciling draft", draft_ready: "Outlook draft ready",
-      send_scheduled: "Scheduled", sending: "Submitting", send_ambiguous: "Reconciling send",
+      send_scheduled: "Scheduled", scheduled: "Scheduled", schedule_held: "Held for review", sending: "Submitting", send_ambiguous: "Reconciling send",
       submitted: "Submitted — checking Sent Items", sent: "Sent · no known failure", auth_required: "Reconnect Microsoft 365",
-      failed: "Failed", canceled: "Canceled", action_required: "Action required", drafts_ready: "Drafts ready",
+      failed: "Failed", canceled: "Canceled", paused: "Paused", held: "Held for review", needs_review: "Needs review", action_required: "Action required", drafts_ready: "Drafts ready",
       completed: "Complete", partial_failure: "Completed with failures" })[state] || state;
   }
 
@@ -1398,12 +1644,34 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
     const b = detail.batch, m = detail.messages[cursor], locked = !["editing", "invalid"].includes(b.status);
     const errors = m.validation && m.validation.errors || [], warnings = m.validation && m.validation.warnings || [];
     const attachments = m.attachments || [];
+    ensureScheduleDefaults();
+    const schedule = scheduleCheck(b);
+    const minParts = easternParts(new Date()), maxParts = easternParts(new Date(Date.now() + 7 * 86400000));
+    const scheduleMin = `${minParts.year}-${minParts.month}-${minParts.day}`;
+    const scheduleMax = `${maxParts.year}-${maxParts.month}-${maxParts.day}`;
+    const scheduleHtml = locked ? "" : `<fieldset class="email-schedule"><legend>When should sending begin?</legend>
+      <label><input type="radio" name="emailTiming" value="now" ${sendTiming === "now" ? "checked" : ""}> Send now</label>
+      <label><input type="radio" name="emailTiming" value="later" ${sendTiming === "later" ? "checked" : ""}> Schedule for later</label>
+      <div class="email-schedule-fields" ${sendTiming === "later" ? "" : "hidden"}>
+        <label>Date <input id="emailScheduleDate" type="date" min="${scheduleMin}" max="${scheduleMax}" aria-describedby="emailScheduleHelp emailScheduleError" value="${esc(scheduleDate)}"></label>
+        <label>Time <input id="emailScheduleTime" type="time" step="900" aria-describedby="emailScheduleHelp emailScheduleError" value="${esc(scheduleTime)}"></label>
+        <small id="emailScheduleHelp">Eastern Time. Sending may continue after this start time.</small>
+        <p id="emailScheduleError" class="${schedule.error || schedule.quarter ? "bad" : "good"}" role="alert">${esc(schedule.error || schedule.quarter || (schedule.date ? `Starts ${easternLabel(schedule.date)}` : ""))}</p>
+      </div></fieldset>`;
     // The poll below re-renders every three seconds while a batch is working.
     // Replacing innerHTML resets scroll, which threw the rep back to the top of
     // a long recipient list mid-read. Keep where they were.
     const sendBlocked = locked ? "" : sendBlockedReason(b);
     const overridden = detail.messages.filter((x) => x.subjectOverridden || x.bodyOverridden).length;
     const takers = detail.messages.length - overridden;
+    const lockedNotice = ["held", "needs_review", "schedule_held"].includes(b.status)
+      ? "This scheduled batch is held. Review it before choosing a new send time."
+      : b.status === "paused" ? "This batch is paused. It will not continue until you resume it."
+      : ["drafting", "sending", "scheduled"].includes(b.status)
+        ? (b.mode === "send"
+          ? "Queued on the server - safe to close this window; sending continues in Microsoft 365."
+          : "Draft creation is queued on the server - safe to close this window.")
+        : "";
     /* Two different elements scroll, depending on the layout.
      *
      * On a phone .email-grid is display:block and #emailBody is the scroller.
@@ -1493,26 +1761,19 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
           <p><b>Subject:</b> ${esc(m.subject)}</p><p><b>Attachments:</b> ${attachments.length ? attachments.map((a) => `${esc(a.name)} (${bytes(a.size)})`).join(", ") : "None"}</p></div>
           <div class="email-rendered">${previewWithImages(m.bodyHtml, m.inlineImages, b.templateId)}${m.signatureHtml || ""}</div></section>
       </main></div>
-      <footer class="email-footer"><p id="emailNotice" class="email-notice${
-        sendBlocked ? " bad" : ""}">${esc(
-        (!locked && sendBlocked) ? sendBlocked : (b.warningMessage || (locked
-          ? (b.status === "paused"
-            ? "This batch is paused. It will not continue until you resume it."
-            : (["drafting", "sending"].includes(b.status)
-              ? (b.mode === "send"
-                ? "Queued on the server - safe to close this window; sending continues in Microsoft 365."
-                : "Draft creation is queued on the server - safe to close this window.")
-              : ""))
-          : "")))}</p><div>
+      <footer class="email-footer">${scheduleHtml}<p id="emailNotice" class="email-notice${
+        sendBlocked ? " bad" : ""}">${esc((!locked && sendBlocked) ? sendBlocked
+          : (b.warningMessage || (locked ? lockedNotice : "")))}</p><div>
         ${b.status === "completed" && b.mode === "send" && !b.parentBatchId && !b.followUpSentUtc
           ? `<button type="button" class="ask-btn" data-email="follow-up-open" data-id="${esc(b.id)}">Follow up on no reply</button>` : ""}
         ${b.status === "action_required" ? `<button type="button" class="ask-btn" data-email="connect">Reconnect Microsoft 365</button><button type="button" class="ask-btn" data-email="retry">Retry remaining</button>` : ""}
-        ${locked && b.mode === "send" && !["completed", "canceled", "action_required"].includes(b.status) ? `<button type="button" class="ask-btn" data-email="pause">${b.status === "paused" ? "Resume remaining" : "Pause remaining"}</button>` : ""}
+        ${["held", "needs_review", "schedule_held"].includes(b.status) ? `<button type="button" class="ask-btn primary" data-email="review-reschedule">Review &amp; reschedule</button>` : ""}
+        ${locked && b.mode === "send" && !["completed", "canceled", "action_required", "held", "needs_review", "schedule_held"].includes(b.status) ? `<button type="button" class="ask-btn" data-email="pause">${b.status === "paused" ? "Resume remaining" : "Pause remaining"}</button>` : ""}
         ${locked && !["completed", "canceled", "drafts_ready"].includes(b.status) ? `<button type="button" class="ask-btn ghost" data-email="cancel">Cancel remaining</button>` : ""}
         ${locked ? "" : `<button type="button" class="ask-btn primary" data-email="approve-drafts">Create drafts</button>
           ${sendBlocked
             ? `<span class="email-sendoff" title="${esc(sendBlocked)}">Cannot send directly &#9432;</span>`
-            : `<button type="button" class="ask-btn grave" data-email="approve-send">Approve &amp; Send</button>`}`}
+            : `<button type="button" class="ask-btn grave" data-email="approve-send">${sendTiming === "later" ? "Approve &amp; Schedule" : "Approve &amp; Send"}</button>`}`}
       </div></footer>`;
     // requestAnimationFrame, not a straight assignment: immediately after
     // innerHTML the new content has no layout yet, so scrollTop is clamped to
@@ -1706,7 +1967,7 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
             .map(([k, label]) => (f[k] || []).length
               ? `<p class="email-fine"><b>${label}:</b> ${(f[k] || []).map((x) => esc(x.name || x.email)).join(", ")}</p>`
               : "").join("")}</div></details>` : ""}
-      <footer class="email-footer"><p id="emailNotice" class="email-notice"></p><div>
+      <footer class="email-footer">${scheduleHtml}<p id="emailNotice" class="email-notice"></p><div>
         <button type="button" class="ask-btn ghost" data-email="close">Close</button>
         <button type="button" class="ask-btn primary" data-email="follow-up-create"
           ${c.remaining ? "" : "disabled"}>Prepare ${c.remaining} follow-up${c.remaining === 1 ? "" : "s"}</button>
@@ -1716,19 +1977,57 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
 
   const FOLLOW_UP_DEFAULT = "Just following up on the note below in case it reached you at a busy moment.";
 
+  function batchScheduleText(batch) {
+    const raw = batch.scheduledForUtc || (["held", "needs_review"].includes(batch.status) ? batch.sendNotBeforeUtc : "");
+    const date = raw && new Date(raw);
+    return date && !Number.isNaN(date.getTime()) ? `Scheduled for ${easternLabel(date)}` : "";
+  }
+
+  function emailUrl(batchId, connected) {
+    const url = new URL(location.href);
+    for (const key of ["email", "message"]) url.searchParams.delete(key);
+    if (batchId) url.searchParams.set("emailBatch", batchId); else url.searchParams.delete("emailBatch");
+    if (connected) url.searchParams.set("email", "connected");
+    return `${url.pathname}${url.search}${url.hash}`;
+  }
+
+  function cleanEmailUrl() { history.replaceState(null, "", emailUrl("", false)); }
+
+  async function openBatchById(id, pushUrl) {
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(id || ""))) {
+      const back = shell(); back.hidden = false;
+      document.getElementById("emailTitle").textContent = "Email batch unavailable";
+      document.getElementById("emailBody").innerHTML = `<div class="email-history-error"><p>This email batch is unavailable.</p><button type="button" class="ask-btn primary" data-email="history">Open email activity</button></div>`;
+      return;
+    }
+    const back = shell(); back.hidden = false;
+    document.getElementById("emailTitle").textContent = "Loading email batch…";
+    document.getElementById("emailBody").innerHTML = "";
+    try {
+      await loadCatalog(); detail = await api(`batch&id=${encodeURIComponent(id)}`, null, "GET");
+      cursor = 0; forceDetail = false;
+      if (pushUrl && new URL(location.href).searchParams.get("emailBatch") !== id)
+        history.pushState({ emailBatch: id }, "", emailUrl(id, false));
+      composerView();
+    } catch (_) {
+      document.getElementById("emailTitle").textContent = "Email batch unavailable";
+      document.getElementById("emailBody").innerHTML = `<div class="email-history-error"><p>This email batch is unavailable.</p><button type="button" class="ask-btn primary" data-email="history">Open email activity</button></div>`;
+    }
+  }
+
   async function openHistory() {
     const back = shell(); back.hidden = false;
     document.getElementById("emailTitle").textContent = "Email activity";
     try {
       const data = await api("batches", null, "GET");
       document.getElementById("emailBody").innerHTML = `<div class="email-history">${data.batches.length ? data.batches.map((b) =>
-        `<button type="button" data-email="open-batch" data-id="${esc(b.id)}"><b>${esc(b.name)}</b><span>${b.recipientCount} recipients · ${esc(stateLabel(b.status))}</span><small>${esc(b.createdUtc || "")}</small></button>`).join("") : "<p>No email batches yet.</p>"}</div>`;
+        `<button type="button" data-email="open-batch" data-id="${esc(b.id)}"><b>${esc(b.name)}</b><span>${b.recipientCount} recipients · ${esc(stateLabel(b.status))}</span><small>${esc(batchScheduleText(b) || b.createdUtc || "")}</small></button>`).join("") : "<p>No email batches yet.</p>"}</div>`;
     } catch (e) { document.getElementById("emailBody").innerHTML = `<p class="email-error">${esc(e.message)}</p>`; }
   }
 
   async function act(button) {
     const action = button.dataset.email;
-    if (action === "close") { shell().hidden = true; clearTimeout(pollTimer); clearInterval(tickTimer); forceDetail = false; return; }
+    if (action === "close") { shell().hidden = true; clearTimeout(pollTimer); clearInterval(tickTimer); forceDetail = false; cleanEmailUrl(); return; }
     if (action === "details") { forceDetail = true; composerView(); return; }
     // ---- recipient domain grouping ----
     // Every one of these re-renders the setup screen, which would otherwise
@@ -1737,7 +2036,8 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
     if (["dom-toggle", "dom-open", "dom-all", "dom-none", "person-toggle"].includes(action)) {
       const tplEl = document.getElementById("emailTemplate");
       const keepTemplate = tplEl ? tplEl.value : "";
-      const keepDocs = [...document.querySelectorAll(".email-docs input:checked")].map((x) => x.value);
+      const keepDocs = [...document.querySelectorAll("#emailDocs input:checked")].map((x) => x.value);
+      const keepFamilies = [...document.querySelectorAll(".email-family:checked")].map((x) => x.value);
       const addrIn = (domain) => recipients.filter((r) => domainOf(r) === domain)
         .map((r) => String(r.email || "").toLowerCase());
 
@@ -1773,8 +2073,9 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
       if (scroller) scroller.scrollTop = wasAt;
       const tplBack = document.getElementById("emailTemplate");
       if (tplBack && keepTemplate) tplBack.value = keepTemplate;
-      for (const box of document.querySelectorAll(".email-docs input"))
+      for (const box of document.querySelectorAll("#emailDocs input"))
         if (!box.disabled) box.checked = keepDocs.includes(box.value);
+      for (const box of document.querySelectorAll(".email-family")) box.checked = keepFamilies.includes(box.value);
       const notes = document.getElementById("emailTemplate");
       if (notes) notes.dispatchEvent(new Event("change"));
       return;
@@ -1961,6 +2262,105 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
       return;
     }
     if (action === "docs-back") { return detail ? composerView() : setupView(); }
+
+    if (action === "material-queue-remove") {
+      materialQueue.splice(Number(button.dataset.index), 1); return docsView();
+    }
+    if (action === "materials-upload") {
+      const candidates = materialQueue.filter((row) => !["done", "invalid"].includes(row.status));
+      const existing = (catalog && catalog.documents) || [], seenIds = new Set(), seenTuples = new Set(), seenNames = new Set();
+      for (const row of candidates) {
+        row.logicalId = uploadLogicalId(row);
+        const tuple = uploadTuple(row), fileName = String(row.file.name || "").toLowerCase();
+        const conflict = existing.some((d) => d.id === row.logicalId || uploadTuple(d) === tuple
+          || String(d.fileName || "").toLowerCase() === fileName)
+          || seenIds.has(row.logicalId) || seenTuples.has(tuple) || seenNames.has(fileName);
+        if (conflict) {
+          row.status = "duplicate"; row.duplicate = "Already published or queued for this family, version, and period. Remove it and use Replace PDF when it supersedes an existing version.";
+        } else {
+          row.status = "ready"; row.error = ""; row.duplicate = "";
+          seenIds.add(row.logicalId); seenTuples.add(tuple); seenNames.add(fileName);
+        }
+      }
+      const pending = candidates.filter((row) => row.status === "ready");
+      if (!pending.length) return docsView("Nothing was published. Remove duplicate rows or use Replace PDF on the existing material.", true);
+      button.disabled = true;
+      let next = 0;
+      const worker = async () => {
+        while (next < pending.length) {
+          const row = pending[next++];
+          if (!row.name || !row.familyId) { row.status = "error"; row.error = "Display name and family are required."; continue; }
+          row.status = "uploading"; docsView();
+          try {
+            const dataBase64 = await readAsBase64(row.file);
+            const result = await api("put_document", { id: row.logicalId,
+              name: row.name, fileName: row.file.name, dataBase64, familyId: row.familyId,
+              category: row.category, channel: row.channel, periodKind: row.periodKind,
+              periodKey: row.periodKey, asOfDate: row.asOfDate, freshness: "current" });
+            catalog.documents = result.documents || catalog.documents;
+            row.status = "done";
+          } catch (error) { row.status = "error"; row.error = error.message; }
+          docsView();
+        }
+      };
+      await Promise.all([worker(), worker()]);
+      try { await loadCatalog(); }
+      catch (error) { return docsView("Publishing finished, but the refreshed library could not be loaded: " + error.message, true); }
+      return docsView(pending.some((row) => row.status === "error")
+        ? "Some PDFs could not be published. Correct the marked rows and try those again."
+        : "Published " + pending.length + " approved PDF" + (pending.length === 1 ? "." : "s."),
+        pending.some((row) => row.status === "error"));
+    }
+    if (action === "material-save") {
+      const box = button.closest(".email-material-version");
+      const value = (name) => ((box.querySelector('[data-material-field="' + name + '"]') || {}).value || "").trim();
+      button.disabled = true;
+      try {
+        const result = await api("update_document", { id: button.dataset.id, name: value("name"),
+          familyId: value("familyId"), category: value("category"), channel: value("channel"),
+          periodKind: value("periodKind"), periodKey: value("periodKey"), asOfDate: value("asOfDate"),
+          freshness: value("freshness") });
+        catalog.documents = result.documents || catalog.documents;
+        return docsView("Material details saved.");
+      } catch (error) { button.disabled = false; return docsView(error.message, true); }
+    }
+    if (action === "route-add") {
+      const set = catalog.materialRoutes || (catalog.materialRoutes = { rules: [] });
+      set.rules.push({ domain: "", channel: "ubs", source: "manual",
+        evidenceCount: 0, status: "active", disabled: false }); return docsView();
+    }
+    if (action === "route-remove") {
+      const rules = (((catalog || {}).materialRoutes || {}).rules || []);
+      const row = rules.find((r) => r.domain === button.dataset.domain);
+      if (row) { row.disabled = true; row.status = "disabled"; }
+      return docsView("Route removed locally. Save routing rules to publish the change.");
+    }
+    if (action === "route-restore") {
+      const rules = (((catalog || {}).materialRoutes || {}).rules || []);
+      const row = rules.find((r) => r.domain === button.dataset.domain);
+      if (row) { row.disabled = false; row.status = "active"; }
+      return docsView("Route restored. Save routing rules to publish it.");
+    }
+    if (action === "routes-save") {
+      const routePolicy = (catalog && catalog.materialRoutes) || {};
+      const routeRows = (routePolicy.rules || []).map((row) => ({
+        domain: String(row.domain || "").trim().toLowerCase(),
+        channel: row.channel || "ubs",
+        source: row.source,
+        evidenceCount: row.evidenceCount,
+        status: row.status,
+        disabled: row.disabled === true,
+      })).filter((row) => row.domain);
+      button.disabled = true;
+      try {
+        const result = await api("put_material_routes", { rules: routeRows,
+          seedVersion: routePolicy.seedVersion,
+          etag: routePolicy.etag || "" });
+        catalog.materialRoutes = result.materialRoutes;
+
+        return docsView("Recipient routing rules saved.");
+      } catch (error) { button.disabled = false; return docsView(error.message, true); }
+    }
     if (action === "doc-delete") {
       const name = button.dataset.name || button.dataset.id;
       if (!confirm(`Remove "${name}" from the approved catalog?\n\nReps will no longer be able to attach it. Batches already carrying it will fail validation.`)) return;
@@ -2017,7 +2417,7 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
     if (action === "open-list") {
       return open(global.AdvisorEmailData ? await global.AdvisorEmailData.list() : []);
     }
-    if (action === "history") { return openHistory(); }
+    if (action === "history") { cleanEmailUrl(); return openHistory(); }
     if (action === "follow-up-open") { return openFollowUp(button.dataset.id); }
     if (action === "follow-up-create") {
       button.disabled = true; notice("Preparing the follow-up…");
@@ -2033,7 +2433,7 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
     }
     if (action === "connect") {
       button.disabled = true;
-      try { const r = await api("connect", { returnTo: `${location.pathname}?email=connected` }); location.assign(r.authorizeUrl); }
+      try { const batchId = new URL(location.href).searchParams.get("emailBatch") || (detail && detail.batch && detail.batch.id) || ""; const r = await api("connect", { returnTo: emailUrl(batchId, true) }); location.assign(r.authorizeUrl); }
       catch (e) { connectView(e.message); }
       return;
     }
@@ -2055,13 +2455,15 @@ Generate emails for all of them?`)) return;
       try {
         // Includes the disabled ones: :checked is independent of :disabled, and
         // the required documents are checked-and-disabled by design.
-        const attachmentIds = [...document.querySelectorAll(".email-docs input:checked")].map((x) => x.value);
+        const attachmentIds = [...document.querySelectorAll("#emailDocs input:checked")].map((x) => x.value);
+        const materialFamilyIds = [...document.querySelectorAll(".email-family:checked")].map((x) => x.value);
 
         const ccColleague = ((document.getElementById("ccColleague") || {}).value || "").trim();
         const followUpDays = Number((document.getElementById("followUpDays") || {}).value || 0);
+        sendTiming = "now"; scheduleDate = ""; scheduleTime = "09:00";
         detail = await api("create_batch", { recipients: kept,
           templateId: (document.getElementById("emailTemplate") || {}).value || "",
-          attachmentIds, ccColleague, followUpDays });
+          attachmentIds, materialFamilyIds, ccColleague, followUpDays });
         composerView();
       } catch (e) { button.disabled = false; notice(e.message, true); }
       return;
@@ -2222,8 +2624,13 @@ They stay on your call list and keep their history — this only takes them out 
           + "Press Apply first, or restore the approved wording.", true);
       }
       const mode = action === "approve-send" ? "send" : "drafts", b = detail.batch;
+      const timing = mode === "send" ? scheduleCheck(b) : { date: null, error: "", quarter: "" };
+      if (timing.error || timing.quarter) return notice(timing.error || timing.quarter, true);
       const attachmentText = b.attachmentSummary.length ? b.attachmentSummary.map((a) => `${a.name} (${bytes(a.size)})`).join("\n") : "No attachments";
-      const verb = mode === "send" ? `approve ${b.recipientCount} emails for sending after the ${catalog.limits.cancellationSeconds}-second cancellation window` : `create ${b.recipientCount} Outlook drafts`;
+      const verb = mode === "send" ? (timing.date
+        ? `approve and schedule ${b.recipientCount} emails to begin ${easternLabel(timing.date)}`
+        : `approve ${b.recipientCount} emails for sending after the ${catalog.limits.cancellationSeconds}-second cancellation window`)
+        : `create ${b.recipientCount} Outlook drafts`;
       // The unreviewed count belongs in this dialog, not only in the tally row
       // above it. This is the last moment anyone can stop the send, and "8 not
       // yet opened" is exactly the fact a rep needs at that moment.
@@ -2246,9 +2653,24 @@ They stay on your call list and keep their history — this only takes them out 
       button.disabled = true;
       approvalPending = true;
       try { detail = await api("approve", { batchId: b.id, mode, reviewed: true, passcode,
-        confirmation: { recipientCount: b.recipientCount, attachmentIds: b.attachmentIds } }); composerView(); }
+        scheduledForUtc: timing.date ? timing.date.toISOString() : "",
+        confirmation: { recipientCount: b.recipientCount, attachmentIds: b.attachmentIds,
+          scheduledForUtc: timing.date ? timing.date.toISOString() : "" } }); composerView(); }
       catch (e) { button.disabled = false; notice(e.message, true); }
       finally { approvalPending = false; }
+      return;
+    }
+    if (action === "review-reschedule") {
+      try {
+        const previousTime = detail.batch.scheduledForUtc || detail.batch.sendNotBeforeUtc;
+        detail = await api("review_schedule", { batchId: detail.batch.id });
+        sendTiming = "later";
+        if (previousTime) {
+          const p = easternParts(new Date(previousTime));
+          scheduleDate = `${p.year}-${p.month}-${p.day}`; scheduleTime = `${p.hour}:${p.minute}`;
+        }
+        composerView();
+      } catch (e) { notice(e.message, true); }
       return;
     }
     if (["pause", "cancel", "retry"].includes(action)) {
@@ -2262,10 +2684,86 @@ They stay on your call list and keep their history — this only takes them out 
       catch (e) { notice(e.message, true); } return;
     }
     if (action === "open-batch") {
-      try { await loadCatalog(); detail = await api(`batch&id=${encodeURIComponent(button.dataset.id)}`, null, "GET"); cursor = 0; forceDetail = false; composerView(); }
-      catch (e) { document.getElementById("emailBody").innerHTML = `<p class="email-error">${esc(e.message)}</p>`; }
+      await openBatchById(button.dataset.id, true);
     }
   }
+
+
+  document.addEventListener("change", (event) => {
+    if (event.target.name === "emailTiming") {
+      sendTiming = event.target.value === "later" ? "later" : "now";
+      composerView();
+      const first = document.getElementById("emailScheduleDate");
+      if (sendTiming === "later" && first) first.focus();
+      return;
+    }
+    if (["emailScheduleDate", "emailScheduleTime"].includes(event.target.id)) {
+      scheduleDate = (document.getElementById("emailScheduleDate") || {}).value || "";
+      scheduleTime = (document.getElementById("emailScheduleTime") || {}).value || "";
+      composerView(); return;
+    }
+    if (event.target.id === "docFiles") {
+      const existingNames = new Set(((catalog && catalog.documents) || []).map((d) => String(d.fileName || "").toLowerCase()));
+      const queuedNames = new Set(materialQueue.map((r) => String(r.file.name).toLowerCase()));
+      for (const file of [...(event.target.files || [])]) {
+        const row = suggestMaterial(file), key = file.name.toLowerCase();
+        if (!/\.pdf$/i.test(file.name) && file.type !== "application/pdf") {
+          row.status = "invalid"; row.error = "Only PDF files can be published.";
+          materialQueue.push(row); continue;
+        }
+        row.logicalId = uploadLogicalId(row);
+        if (existingNames.has(key)) row.duplicate = "A published file has this name";
+        else if (queuedNames.has(key)) row.duplicate = "This filename is already queued";
+        else if (((catalog && catalog.documents) || []).some((d) =>
+          d.id === row.logicalId || uploadTuple(d) === uploadTuple(row)))
+          row.duplicate = "This logical material or family/version/period already exists; use Replace PDF if this supersedes it";
+        else if (materialQueue.some((d) =>
+          uploadLogicalId(d) === row.logicalId || uploadTuple(d) === uploadTuple(row)))
+          row.duplicate = "Another queued PDF has the same logical ID or family/version/period";
+        if (row.duplicate) row.status = "duplicate";
+        materialQueue.push(row); queuedNames.add(key);
+      }
+      docsView();
+      const first = document.querySelector(".email-material-upload input");
+      if (first) first.focus();
+      return;
+    }
+    const routeRow = event.target.closest(".email-route-row");
+    if (routeRow && event.target.dataset.routeField) {
+      const rules = (((catalog || {}).materialRoutes || {}).rules || []);
+      const rule = rules.find((item) => String(item.domain || "") === String(routeRow.dataset.routeKey || ""));
+      if (rule) {
+        if (event.target.dataset.routeField === "domain") {
+          rule.domain = event.target.value.trim().toLowerCase(); routeRow.dataset.routeKey = rule.domain;
+          const remove = routeRow.querySelector('[data-email="route-remove"]');
+          if (remove) remove.dataset.domain = rule.domain;
+        } else rule.channel = event.target.value;
+      }
+      return;
+    }
+    const row = event.target.closest("[data-upload-row]");
+    if (row && event.target.dataset.uploadField) {
+      const item = materialQueue[Number(row.dataset.uploadRow)];
+      if (item) { item[event.target.dataset.uploadField] = event.target.value; item.status = "ready"; item.error = ""; item.duplicate = ""; }
+    }
+  }, true);
+
+  document.addEventListener("input", (event) => {
+    if (event.target.id === "materialSearch") {
+      materialSearch = event.target.value;
+      const slot = document.querySelector(".email-material-library");
+      if (slot) slot.innerHTML = libraryHtml((catalog && catalog.documents) || []);
+    } else if (event.target.id === "routeSearch") {
+      routeSearch = event.target.value;
+      const slot = document.querySelector(".email-route-card");
+      if (slot) {
+        const cursorAt = event.target.selectionStart;
+        slot.outerHTML = routesHtml();
+        const next = document.getElementById("routeSearch");
+        if (next) { next.focus(); next.setSelectionRange(cursorAt, cursorAt); }
+      }
+    }
+  }, true);
 
   document.addEventListener("click", async (event) => {
     const direct = event.target.closest("[data-email]");
@@ -2298,8 +2796,20 @@ They stay on your call list and keep their history — this only takes them out 
   }, true);
 
   const params = new URLSearchParams(location.search);
-  if (params.get("email") === "connected") setTimeout(() => openHistory(), 0);
+  const linkedBatch = params.get("emailBatch") || "";
+  if (linkedBatch) setTimeout(() => {
+    history.replaceState({ emailBatch: linkedBatch }, "", emailUrl(linkedBatch, false));
+    openBatchById(linkedBatch, false);
+  }, 0);
+  else if (params.get("email") === "connected") setTimeout(() => {
+    history.replaceState(null, "", emailUrl("", false)); openHistory();
+  }, 0);
   else if (params.get("email") === "error") setTimeout(() => { shell().hidden = false; connectView(params.get("message") || "Microsoft connection failed."); }, 0);
+  global.addEventListener("popstate", () => {
+    const id = new URL(location.href).searchParams.get("emailBatch");
+    if (id) openBatchById(id, false);
+    else { shell().hidden = true; clearTimeout(pollTimer); clearInterval(tickTimer); }
+  });
 
   // Opens a management screen directly, with no batch and no recipients. The
   // admin screens were previously reachable only from the compose setup view,

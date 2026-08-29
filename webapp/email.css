@@ -590,3 +590,72 @@
 @media (prefers-color-scheme:dark){
   .email-held{color:#ffd98a;background:#3a2c07;border-color:#6b5210}
 }
+/* Materials Library: shared by desktop and Field administration. */
+.email-materials{max-width:980px}
+.email-material-intro,.email-upload-queue>header,.email-material-tools,.email-material-family>header,.email-route-card>header{
+  display:flex;align-items:flex-start;justify-content:space-between;gap:14px}
+.email-material-intro h2,.email-material-family h3,.email-route-card h3{margin:0 0 3px}
+.email-material-intro p,.email-route-card p{margin:0;color:var(--muted);font-size:12px;line-height:1.45}
+.email-upload-button{display:inline-flex;align-items:center;justify-content:center;min-height:38px;padding:0 14px;
+  border-radius:9px;background:var(--accent);color:#fff;font-size:12.5px;font-weight:750;cursor:pointer;white-space:nowrap}
+.email-upload-button input{position:absolute;width:1px;height:1px;opacity:0}
+.email-upload-queue,.email-route-card{margin:16px 0;padding:13px;border:1px solid var(--hair);border-radius:12px;background:var(--panel-2)}
+.email-upload-queue h3{margin:5px 0}
+.email-material-upload{display:grid;grid-template-columns:minmax(210px,1.5fr) repeat(6,minmax(105px,1fr)) auto;
+  align-items:end;gap:8px;padding:11px 0;border-top:1px solid var(--hair)}
+.email-material-upload label,.email-material-edit label{font-size:10.5px;color:var(--muted)}
+.email-material-upload input,.email-material-upload select,.email-material-edit input,.email-material-edit select,
+.email-route-row input,.email-route-row select,.email-search input{display:block;width:100%;box-sizing:border-box;height:34px;margin-top:3px;
+  padding:6px 7px;border:1px solid var(--hair);border-radius:7px;background:var(--panel);color:var(--ink);font:inherit;font-size:12px}
+.email-material-file{align-self:center;min-width:0}.email-material-file b,.email-material-file small{display:block;overflow-wrap:anywhere}
+.email-material-file small,.email-material-result{color:var(--muted);font-size:11px}
+.email-material-result{grid-column:2/-1;margin:0}.email-material-upload.error .email-material-result,.email-material-upload.duplicate .email-material-result,.email-material-upload.invalid .email-material-result{color:var(--warn)}
+.email-material-upload.done{opacity:.65}
+.email-material-tools{align-items:center;margin:17px 0 10px}.email-material-tools>span{font-size:11.5px;color:var(--muted)}
+.email-search{font-size:10.5px;color:var(--muted);min-width:min(320px,60%)}.email-search input{margin-top:3px}
+.email-material-family{margin:0 0 12px;padding:13px;border:1px solid var(--hair);border-radius:12px}
+.email-material-category{display:block;color:var(--muted);font-size:10.5px;text-transform:uppercase;letter-spacing:.05em}
+.email-material-health,.email-fresh{display:inline-block;border-radius:999px;padding:3px 7px;font-size:10px;font-weight:750}
+.email-material-health.complete,.email-fresh.current{color:var(--accent);background:color-mix(in srgb,var(--accent) 12%,transparent)}
+.email-material-health.incomplete,.email-fresh.stale,.email-fresh.expired,.email-fresh.withdrawn{color:var(--warn);background:color-mix(in srgb,var(--warn) 12%,transparent)}
+.email-fresh.future,.email-fresh.superseded,.email-fresh.missing{color:var(--muted);background:var(--panel-2)}
+.email-channel-badges{display:flex;flex-wrap:wrap;gap:5px;margin:9px 0}.email-channel-badges span{
+  padding:3px 7px;border-radius:999px;border:1px solid var(--hair);font-size:10.5px}.email-channel-badges .off{opacity:.38}
+.email-material-version{border-top:1px solid var(--hair);padding:8px 0}.email-material-version summary{cursor:pointer;font-size:12px}
+.email-material-version summary .email-fresh{float:right}.email-material-version>p{font-size:11px;color:var(--muted);overflow-wrap:anywhere}
+.email-material-edit{display:grid;grid-template-columns:repeat(4,minmax(130px,1fr));gap:8px;margin:9px 0}
+.email-material-edit button{align-self:end}
+.email-route-row{display:grid;grid-template-columns:minmax(180px,1fr) 160px minmax(110px,.6fr) auto;gap:8px;align-items:center;margin:8px 0}
+.email-route-row small{color:var(--muted);font-size:10.5px}.email-route-removed{margin-top:10px;font-size:11px}
+.email-route-removed p{display:flex;justify-content:space-between;align-items:center;margin:5px 0}
+.email-families label span small{display:block}.email-material-preflight{margin:-6px 0 12px;padding:9px 10px;border-left:3px solid var(--accent);
+  background:var(--panel-2);font-size:11.5px}.email-material-preflight span,.email-material-preflight small{display:block;margin-top:3px}.email-material-preflight small{color:var(--muted)}
+@media(max-width:760px){
+  .email-material-intro,.email-upload-queue>header,.email-material-family>header,.email-route-card>header{display:block}
+  .email-upload-button{margin-top:10px}.email-material-upload{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .email-material-file,.email-material-result{grid-column:1/-1}.email-material-edit{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .email-route-row{grid-template-columns:1fr 1fr}.email-route-row small{grid-column:1/-1}.email-search{min-width:0;width:100%}
+}
+
+/* A scheduled campaign is still prepared by the server, so this control only
+   chooses its first-send instant. It wraps above the ordinary footer actions
+   and stays usable in the shared Field composer. */
+.email-footer:has(.email-schedule){flex-wrap:wrap}
+.email-schedule{display:flex;align-items:center;gap:12px;flex:1 1 100%;margin:0;padding:7px 9px;
+  border:1px solid var(--hair);border-radius:9px;background:var(--panel-2);font-size:12px}
+.email-schedule legend{padding:0 5px;color:var(--muted);font-size:11px}
+.email-schedule>label{display:flex;align-items:center;gap:5px;white-space:nowrap;cursor:pointer}
+.email-schedule-fields{display:flex;align-items:center;gap:8px;flex:1;min-width:0}
+.email-schedule-fields[hidden]{display:none}
+.email-schedule-fields label{display:flex;align-items:center;gap:5px;color:var(--muted)}
+.email-schedule-fields input{height:30px;box-sizing:border-box;padding:4px 6px;border:1px solid var(--hair);
+  border-radius:7px;background:var(--panel);color:var(--ink);font:inherit;font-size:12px}
+.email-schedule-fields small{color:var(--muted)}
+.email-schedule-fields p{margin:0;font-size:11px;line-height:1.25}
+.email-history-error{max-width:440px;margin:30px auto;padding:18px;text-align:center}
+@media(max-width:760px){
+  .email-grid:has(+.email-footer .email-schedule) .email-editor{padding-bottom:230px}
+  .email-schedule,.email-schedule-fields{align-items:flex-start;flex-wrap:wrap}
+  .email-schedule-fields{flex-basis:100%}.email-schedule-fields p{flex-basis:100%}
+  .email-schedule-fields input{font-size:16px;min-height:44px}
+}

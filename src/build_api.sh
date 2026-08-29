@@ -22,7 +22,9 @@ STAGE_DIR=""
 #   36: queue-member.test.js -- arbitrary-list membership is atomic and session-safe
 #   37: role-list-contract.test.js -- derived role lists stay distinct and disposable
 #   38: audiences.test.js -- personal dynamic definitions, validation, and ETags
-EXPECTED_API_TEST_FILE_COUNT=38
+#   39: email-materials.test.js -- material routing, lifecycle, provenance, and freshness
+#   40: email-schedule.test.js -- durable scheduling, preflight, holds, and notification
+EXPECTED_API_TEST_FILE_COUNT=40
 
 cleanup() {
   test -z "$TEMP_ROOT" && return

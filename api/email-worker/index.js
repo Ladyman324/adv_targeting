@@ -8,6 +8,8 @@ const core = require("../shared/email-core");
 const mailboxGate = require("../shared/email-mailbox-gate");
 const suppress = require("../shared/email-suppress");
 const recipientRegistry = require("../shared/recipient-registry");
+const materials = require("../shared/email-materials");
+const schedule = require("../shared/email-schedule");
 
 function parseWork(value) {
   if (value && typeof value === "object") return value;
@@ -147,9 +149,195 @@ async function failOrRetry(work, claimed, err, phase, deps) {
     code: err.graphCode || "", requestId: err.requestId || "" });
 }
 
+function safeHold(err) {
+  if (["graph_not_connected", "graph_reconnect_required", "interaction_required"].includes(String(err && err.code || "")))
+    return { code: "schedule_mailbox_changed", message: "The Microsoft 365 mailbox must be reconnected." };
+  const allowed = new Set(["schedule_template_changed", "schedule_mailbox_changed",
+    "schedule_validation_changed", "schedule_recipient_suppressed", "schedule_sending_disabled",
+    "schedule_allowlist_changed"]);
+  const code = allowed.has(String(err && err.code || "")) ? String(err.code) : "schedule_preflight_failed";
+  const messages = {
+    schedule_template_changed: "The approved template changed.",
+    schedule_mailbox_changed: "The Microsoft 365 mailbox must be reconnected.",
+    schedule_validation_changed: "A recipient, attachment, or rendered message changed.",
+    schedule_recipient_suppressed: "A recipient is now suppressed.",
+    schedule_sending_disabled: "Direct sending is currently disabled.",
+    schedule_allowlist_changed: "A recipient is outside the current sending allowlist.",
+    schedule_preflight_failed: "The scheduled safety check could not be completed.",
+  };
+  return { code, message: messages[code] };
+}
+
+async function preflight(work, deps) {
+  let batch = await deps.store.getBatch(work.userId, work.batchId);
+  if (!batch || batch.status !== "scheduled" || batch.scheduleState !== "pending"
+      || !schedule.currentRevision(batch, work) || !schedule.due(batch)) return;
+  try {
+    batch = await deps.store.patchBatch(work.userId, work.batchId, {
+      scheduleState: "checking", scheduleLeaseUntilUtc: new Date(Date.now() + 300000).toISOString(),
+    }, batch.etag);
+  } catch (err) { if (Number(err && err.statusCode) === 412) return; throw err; }
+  try {
+    const checked = await deps.service.preflightScheduled(work.userId, work.batchId,
+      work.scheduleRevision, deps);
+    const latest = await deps.store.getBatch(work.userId, work.batchId);
+    if (!latest || latest.status !== "scheduled" || latest.scheduleState !== "checking"
+        || !schedule.currentRevision(latest, work)) return;
+    await deps.store.patchBatch(work.userId, work.batchId, { status: "drafting", scheduleState: "passed",
+      schedulePassedUtc: new Date().toISOString(), scheduleLeaseUntilUtc: "",
+      scheduleHoldCode: "", scheduleHoldMessage: "" }, latest.etag);
+    const interval = deps.core.config().mailboxIntervalSeconds;
+    for (const message of checked.messages) {
+      const current = await deps.store.getMessage(work.userId, work.batchId, message.id);
+      if (!current || current.state !== "scheduled_pending"
+          || Number(current.scheduleRevision) !== Number(work.scheduleRevision)) continue;
+      await deps.store.patchMessage(work.userId, work.batchId, message.id, {
+        state: "draft_pending", leaseUntilUtc: "", queuedUtc: new Date().toISOString(),
+      }, current.etag);
+      await deps.enqueue({ kind: "draft", userId: work.userId, batchId: work.batchId,
+        messageId: message.id, scheduleRevision: Number(work.scheduleRevision) },
+      Math.max(0, Number(message.sendPosition) || 0) * interval);
+    }
+    await deps.store.audit(work.userId, work.batchId, "scheduled_preflight_passed",
+      { scheduleRevision: Number(work.scheduleRevision), recipientCount: checked.messages.length });
+  } catch (err) {
+    const latest = await deps.store.getBatch(work.userId, work.batchId);
+    if (!latest || latest.status !== "scheduled" || latest.scheduleState !== "checking"
+        || !schedule.currentRevision(latest, work)) return;
+    const hold = safeHold(err);
+    const notificationId = `schedule-hold-${latest.id}-r${latest.scheduleRevision}`;
+    await deps.store.patchBatch(work.userId, work.batchId, { status: "schedule_held",
+      scheduleState: "held", scheduleLeaseUntilUtc: "", scheduleHeldUtc: new Date().toISOString(),
+      scheduleHoldCode: hold.code, scheduleHoldMessage: hold.message,
+      scheduleNotificationState: latest.scheduleNotificationSentUtc ? "sent" : "pending",
+      scheduleNotificationId: notificationId,
+      warningLevel: "blocked", warningMessage: hold.message }, latest.etag);
+    await deps.store.audit(work.userId, work.batchId, "scheduled_preflight_held",
+      { scheduleRevision: Number(work.scheduleRevision), reason: hold.code });
+    await deps.enqueue({ kind: "schedule_notify", userId: work.userId, batchId: work.batchId,
+      scheduleRevision: Number(work.scheduleRevision) });
+  }
+}
+
+function scheduleLink(batchId) {
+  try {
+    const url = new URL(String(process.env.EMAIL_PUBLIC_BASE_URL || ""));
+    if (url.protocol !== "https:") return "";
+    url.pathname = "/"; url.search = `?emailBatch=${encodeURIComponent(batchId)}`; url.hash = "";
+    return url.toString();
+  } catch { return ""; }
+}
+
+async function terminalizeNotification(work, batch, deps, reason) {
+  const latest = await deps.store.getBatch(work.userId, work.batchId);
+  if (!latest || !schedule.currentRevision(latest, work)
+      || ["sent", "outcome_unknown", "failed"].includes(latest.scheduleNotificationState)) return;
+  await deps.store.patchBatch(work.userId, work.batchId, {
+    scheduleNotificationState: "outcome_unknown",
+    scheduleNotificationCompletedUtc: new Date().toISOString(),
+  }, latest.etag);
+  await deps.store.audit(work.userId, work.batchId, "schedule_notification_outcome_unknown",
+    { scheduleRevision: Number(work.scheduleRevision), reason: String(reason || "reconcile_horizon_expired") });
+}
+async function notifyScheduleHold(work, deps) {
+  let batch = await deps.store.getBatch(work.userId, work.batchId);
+  if (!batch || batch.status !== "schedule_held"
+      || ["sent", "outcome_unknown", "failed"].includes(batch.scheduleNotificationState)
+      || !schedule.currentRevision(batch, work)) return;
+  try {
+    const connection = await deps.auth.status(work.userId);
+    const token = await deps.auth.tokenFor(work.userId);
+    const owner = String(connection.profile && (connection.profile.mail || connection.profile.userPrincipalName)
+      || connection.mailbox || "").toLowerCase();
+    if (!connection.connected || !owner
+        || owner !== String(batch.senderMail || batch.graphMailbox || "").toLowerCase()
+        || String(token.mailboxId || "").toLowerCase() !== String(batch.graphMailboxId || "").toLowerCase()) return;
+    const notificationId = batch.scheduleNotificationId
+      || `schedule-hold-${batch.id}-r${batch.scheduleRevision}`;
+    let mayCreate = false;
+    if (batch.scheduleNotificationState === "pending") {
+      try {
+        batch = await deps.store.patchBatch(work.userId, work.batchId, {
+          scheduleNotificationState: "creating", scheduleNotificationPhase: "create",
+          scheduleNotificationId: notificationId,
+          scheduleNotificationReconcileUntilUtc: new Date(Date.now() + 86400000).toISOString(),
+        }, batch.etag);
+        mayCreate = true;
+      } catch (err) { if (Number(err && err.statusCode) === 412) return; throw err; }
+    }
+    let remote = batch.scheduleNotificationGraphId
+      ? await deps.graph.getMessage(token.accessToken, batch.scheduleNotificationGraphId).catch((err) => {
+        if (Number(err && err.statusCode) === 404) return null; throw err;
+      }) : await deps.graph.findByAppId(token.accessToken, notificationId);
+    if (!remote && mayCreate) {
+      const link = scheduleLink(batch.id);
+      remote = await deps.graph.createDraft(token.accessToken, { id: notificationId,
+        subject: "Scheduled email batch needs review", recipientEmail: owner,
+        recipientName: batch.userName || "", signatureHtml: "",
+        bodyHtml: `<p>Your scheduled email batch is on hold. No advisor emails were started.</p>`
+          + `<p>${batch.scheduleHoldMessage || "Open the application to review it."}</p>`
+          + (link ? `<p><a href="${link}">Review the held batch</a></p>` : ""),
+      });
+      const latest = await deps.store.getBatch(work.userId, work.batchId);
+      if (!latest || !schedule.currentRevision(latest, work)) return;
+      batch = await deps.store.patchBatch(work.userId, work.batchId, {
+        scheduleNotificationState: "draft_ready", scheduleNotificationPhase: "create",
+        scheduleNotificationGraphId: remote.id, scheduleNotificationCreatedUtc: new Date().toISOString(),
+      }, latest.etag);
+    } else if (!remote) {
+      const latest = await deps.store.getBatch(work.userId, work.batchId);
+      if (!latest || !schedule.currentRevision(latest, work)) return;
+      const horizon = Date.parse(latest.scheduleNotificationReconcileUntilUtc || "");
+      if (Number.isFinite(horizon) && horizon <= Date.now()) {
+        await terminalizeNotification(work, latest, deps, "create_reconcile_horizon_expired");
+        return;
+      }
+      await deps.store.patchBatch(work.userId, work.batchId, {
+        scheduleNotificationState: "ambiguous",
+      }, latest.etag);
+      await deps.enqueue({ ...work, kind: "schedule_notify" }, 30);
+      return;
+    }
+    if (remote.isDraft === false) {
+      const latest = await deps.store.getBatch(work.userId, work.batchId);
+      if (latest && schedule.currentRevision(latest, work)) await deps.store.patchBatch(work.userId, work.batchId, {
+        scheduleNotificationState: "sent", scheduleNotificationGraphId: remote.id,
+        scheduleNotificationSentUtc: remote.sentDateTime || new Date().toISOString(),
+      }, latest.etag);
+      return;
+    }
+    const latest = await deps.store.getBatch(work.userId, work.batchId);
+    if (!latest || !schedule.currentRevision(latest, work)) return;
+    if (latest.scheduleNotificationPhase === "submit"
+        && ["submitting", "submitted", "ambiguous"].includes(latest.scheduleNotificationState)) {
+      const horizon = Date.parse(latest.scheduleNotificationReconcileUntilUtc || "");
+      if (Number.isFinite(horizon) && horizon > Date.now())
+        await deps.enqueue({ ...work, kind: "schedule_notify" }, 30);
+      else await terminalizeNotification(work, latest, deps, "submit_reconcile_horizon_expired");
+      return;
+    }
+    batch = await deps.store.patchBatch(work.userId, work.batchId, {
+      scheduleNotificationState: "submitting", scheduleNotificationPhase: "submit",
+      scheduleNotificationGraphId: remote.id,
+    }, latest.etag);
+    try {
+      await deps.graph.sendDraft(token.accessToken, remote.id);
+      const after = await deps.store.getBatch(work.userId, work.batchId);
+      if (after && schedule.currentRevision(after, work)) await deps.store.patchBatch(work.userId, work.batchId, {
+        scheduleNotificationState: "submitted", scheduleNotificationSubmittedUtc: new Date().toISOString(),
+      }, after.etag);
+    } catch {
+      const after = await deps.store.getBatch(work.userId, work.batchId);
+      if (after && schedule.currentRevision(after, work)) await deps.store.patchBatch(work.userId, work.batchId,
+        { scheduleNotificationState: "ambiguous" }, after.etag).catch(() => {});
+    }
+    await deps.enqueue({ ...work, kind: "schedule_notify" }, 30);
+  } catch { /* the durable in-app hold is the primary notification */ }
+}
 async function draft(work, deps) {
   const batch = await deps.store.getBatch(work.userId, work.batchId);
   if (!batch || ["canceled"].includes(batch.status)) return;
+  if (Number(work.scheduleRevision) > 0 && (!schedule.currentRevision(batch, work) || batch.scheduleState !== "passed")) return;
   const claimed = await deps.store.claimMessage(work.userId, work.batchId, work.messageId,
     ["draft_pending", "draft_ambiguous", "draft_creating"], "draft_creating", 300, "draft");
   if (!claimed) return;
@@ -158,6 +346,17 @@ async function draft(work, deps) {
     if (String(token.mailboxId).toLowerCase() !== String(batch.graphMailboxId).toLowerCase())
       throw service.httpError(403, "Mailbox identity changed after batch creation; refusing to create a draft.");
     await verifyIdentity(claimed, batch, deps, { force: true });
+    const attachmentIds = (claimed.attachments || []).map((doc) => doc.id);
+    const currentAttachments = attachmentIds.length ? await deps.store.getDocuments(attachmentIds) : [];
+    const currentById = new Map(currentAttachments.map((doc) => [doc.id, doc]));
+    for (const frozen of claimed.attachments || []) {
+      const current = currentById.get(frozen.id);
+      if (!current || !materials.currentDocument(current) || current.version !== frozen.version
+          || current.sha256 !== frozen.sha256)
+        throw service.httpError(409,
+          `${frozen.name || "An attachment"} is no longer the currently approved version.`,
+          "attachment_unavailable");
+    }
     let found = claimed.graphMessageId ? await deps.graph.getMessage(token.accessToken, claimed.graphMessageId).catch((e) => {
       if (e.statusCode === 404) return null; throw e;
     }) : await deps.graph.findByAppId(token.accessToken, claimed.id);
@@ -215,6 +414,7 @@ async function draft(work, deps) {
       graphRequestId: found.requestId || "", draftCreatedUtc: claimed.draftCreatedUtc || new Date().toISOString(),
       leaseUntilUtc: "",
     }, (await deps.store.getMessage(work.userId, work.batchId, work.messageId)).etag);
+
     await deps.graph.attachDocuments(token.accessToken, found.id, claimed.attachments);
     // Inline charts go on after the documents and before any send. The body
     // already carries <img src="cid:...">, so a draft sent without this step
@@ -233,9 +433,9 @@ async function draft(work, deps) {
       // sendPosition, not ordinal: ordinal is list order, and lists arrive grouped
       // by firm, so pacing on it sent 130 consecutive messages to one wirehouse.
       // Falls back to ordinal for batches approved before positions existed.
-      const slot = claimed.sendPosition >= 0 ? claimed.sendPosition : claimed.ordinal;
-      const due = new Date(batch.sendNotBeforeUtc).getTime() + slot * deps.core.config().mailboxIntervalSeconds * 1000;
-      await deps.enqueue({ kind: "send", userId: work.userId, batchId: work.batchId, messageId: work.messageId },
+      const due = Date.parse(schedule.messageDueUtc(batch, claimed, deps.core.config()));
+      await deps.enqueue({ kind: "send", userId: work.userId, batchId: work.batchId, messageId: work.messageId,
+        ...(Number(work.scheduleRevision) > 0 ? { scheduleRevision: Number(work.scheduleRevision) } : {}) },
         Math.max(0, Math.ceil((due - Date.now()) / 1000)));
     } else await deps.store.patchMessage(work.userId, work.batchId, work.messageId, { state: "draft_ready", leaseUntilUtc: "" }, latest.etag);
     await deps.store.audit(work.userId, work.batchId, "draft_ready", { messageId: work.messageId, graphMessageId: found.id });
@@ -247,7 +447,8 @@ async function send(work, deps) {
   const batch = await deps.store.getBatch(work.userId, work.batchId);
   if (!batch || batch.status === "paused") { if (batch) await deps.enqueue(work, 30); return; }
   if (batch.status === "canceled") return;
-  const due = new Date(batch.sendNotBeforeUtc).getTime();
+  if (Number(work.scheduleRevision) > 0 && (!schedule.currentRevision(batch, work) || batch.scheduleState !== "passed")) return;
+  const due = Date.parse(schedule.messageDueUtc(batch, await deps.store.getMessage(work.userId, work.batchId, work.messageId), deps.core.config()));
   if (due > Date.now()) { await deps.enqueue(work, Math.ceil((due - Date.now()) / 1000)); return; }
   const claimed = await deps.store.claimMessage(work.userId, work.batchId, work.messageId,
     ["send_scheduled", "send_ambiguous", "sending"], "sending", 180, "send");
@@ -418,8 +619,11 @@ async function reconcile(work, deps) {
 async function processWork(raw, overrides = {}) {
   const work = parseWork(raw);
   const deps = { auth, store, graph, enqueue: service.enqueue, core, mailboxGate, suppress,
-    recipientRegistry, ...overrides };
-  if (!work.userId || !work.batchId || !work.messageId) throw new Error("Incomplete email queue message.");
+    recipientRegistry, service, ...overrides };
+  if (!work.userId || !work.batchId || (!work.messageId && !["preflight", "schedule_notify"].includes(work.kind)))
+    throw new Error("Incomplete email queue message.");
+  if (work.kind === "preflight") return preflight(work, deps);
+  if (work.kind === "schedule_notify") return notifyScheduleHold(work, deps);
   if (work.kind === "draft") return draft(work, deps);
   if (work.kind === "send") return send(work, deps);
   if (work.kind === "reconcile") return reconcile(work, deps);
@@ -430,3 +634,5 @@ module.exports = async function (context, workItem) { await processWork(workItem
 module.exports.processWork = processWork;
 module.exports.parseWork = parseWork;
 module.exports.refreshBatch = refreshBatch;
+module.exports.preflight = preflight;
+module.exports.notifyScheduleHold = notifyScheduleHold;

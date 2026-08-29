@@ -1,6 +1,7 @@
 "use strict";
 
 const crypto = require("crypto");
+const materials = require("./email-materials");
 const { TableClient, odata } = require("@azure/data-tables");
 
 const CONN = process.env.AZURE_STORAGE_CONNECTION_STRING || "";
@@ -121,7 +122,7 @@ function batchFromEntity(e) {
   if (!e) return null;
   return { id: e.rowKey, userId: e.partitionKey, userName: e.userName,
     status: e.status, mode: e.mode || "", name: e.name || "",
-    templateId: e.templateId, templateName: e.templateName,
+    templateId: e.templateId, templateName: e.templateName, templateVersion: Number(e.templateVersion) || 1,
     commonSubject: e.commonSubject || "", commonBodyText: e.commonBodyText || "",
     commonRevision: Number(e.commonRevision) || 1,
     attachmentIds: parse(e.attachmentIdsJson, []), attachmentSummary: parse(e.attachmentSummaryJson, []),
@@ -152,6 +153,17 @@ function batchFromEntity(e) {
     copyInternalTo: e.copyInternalTo || "", senderMail: e.senderMail || "",
     recipientRegistryHash: e.recipientRegistryHash || "",
     approvedUtc: e.approvedUtc || "", sendNotBeforeUtc: e.sendNotBeforeUtc || "",
+    scheduledForUtc: e.scheduledForUtc || "", scheduleState: e.scheduleState || "",
+    scheduleRevision: Number(e.scheduleRevision) || 0, scheduleLeaseUntilUtc: e.scheduleLeaseUntilUtc || "",
+    schedulePassedUtc: e.schedulePassedUtc || "", scheduleHeldUtc: e.scheduleHeldUtc || "",
+    scheduleHoldCode: e.scheduleHoldCode || "", scheduleHoldMessage: e.scheduleHoldMessage || "",
+    scheduleNotificationState: e.scheduleNotificationState || "", scheduleNotificationPhase: e.scheduleNotificationPhase || "",
+    scheduleNotificationId: e.scheduleNotificationId || "", scheduleNotificationGraphId: e.scheduleNotificationGraphId || "",
+    scheduleNotificationCreatedUtc: e.scheduleNotificationCreatedUtc || "",
+    scheduleNotificationSubmittedUtc: e.scheduleNotificationSubmittedUtc || "",
+    scheduleNotificationReconcileUntilUtc: e.scheduleNotificationReconcileUntilUtc || "",
+    scheduleNotificationCompletedUtc: e.scheduleNotificationCompletedUtc || "",
+    scheduleNotificationSentUtc: e.scheduleNotificationSentUtc || "",
     pausedUtc: e.pausedUtc || "", canceledUtc: e.canceledUtc || "",
     createdUtc: e.createdUtc, updatedUtc: e.updatedUtc, etag: e.etag };
 }
@@ -160,7 +172,7 @@ async function createBatch(who, batch) {
   const at = now();
   const entity = { partitionKey: who.id, rowKey: batch.id, userName: clean(who.name, 256),
     status: batch.status || "editing", mode: "", name: clean(batch.name, 120),
-    templateId: clean(batch.templateId, 80), templateName: clean(batch.templateName, 120),
+    templateId: clean(batch.templateId, 80), templateName: clean(batch.templateName, 120), templateVersion: Number(batch.templateVersion) || 1,
     commonSubject: clean(batch.commonSubject, 500), commonBodyText: clean(batch.commonBodyText, 50000),
     commonRevision: 1, attachmentIdsJson: json(batch.attachmentIds || []),
     attachmentSummaryJson: json(batch.attachmentSummary || []), recipientCount: batch.recipientCount,
@@ -190,22 +202,31 @@ const getBatch = async (userId, batchId) => batchFromEntity(await getOptional("b
 async function patchBatch(userId, batchId, patch, etag) {
   const entity = { partitionKey: userId, rowKey: batchId, updatedUtc: now() };
   const strings = ["status", "mode", "name", "commonSubject", "commonBodyText", "warningLevel",
-    "warningMessage", "reviewedUtc", "approvedUtc", "sendNotBeforeUtc", "pausedUtc", "canceledUtc",
+    "warningMessage", "reviewedUtc", "approvedUtc", "sendNotBeforeUtc", "scheduledForUtc",
+    "scheduleState", "scheduleLeaseUntilUtc", "schedulePassedUtc", "scheduleHeldUtc",
+    "scheduleHoldCode", "scheduleHoldMessage", "scheduleNotificationState", "scheduleNotificationPhase",
+    "scheduleNotificationId", "scheduleNotificationGraphId", "scheduleNotificationCreatedUtc",
+    "scheduleNotificationSubmittedUtc", "scheduleNotificationReconcileUntilUtc",
+    "scheduleNotificationCompletedUtc",
+    "scheduleNotificationSentUtc", "pausedUtc", "canceledUtc",
     "parentBatchId", "followUpSentUtc", "recipientRegistryHash"];
   for (const k of strings) if (k in patch) entity[k] = clean(patch[k], k.includes("Body") ? 50000 : 500);
   for (const k of ["commonRevision", "recipientCount", "externalCount", "sentCount",
-                   "hardBounceCount", "followUpDays"]) if (k in patch) entity[k] = Number(patch[k]) || 0;
+                   "hardBounceCount", "followUpDays", "scheduleRevision", "templateVersion"]) if (k in patch) entity[k] = Number(patch[k]) || 0;
   for (const [key, field] of [["attachmentIds", "attachmentIdsJson"], ["attachmentSummary", "attachmentSummaryJson"]])
     if (key in patch) entity[field] = json(patch[key]);
   await (await table("batches")).updateEntity(entity, "Merge", etag ? { etag } : undefined);
   return getBatch(userId, batchId);
 }
 
-async function listBatches(userId, limit = 30) {
+async function listBatches(userId, limit = 30, includeActiveScheduled = false) {
   const out = [];
   const iter = (await table("batches")).listEntities({ queryOptions: { filter: odata`PartitionKey eq ${userId}` } });
   for await (const e of iter) out.push(batchFromEntity(e));
-  return out.sort((a, b) => String(b.createdUtc).localeCompare(String(a.createdUtc))).slice(0, limit);
+  const ordered = out.sort((a, b) => String(b.createdUtc).localeCompare(String(a.createdUtc)));
+  if (!includeActiveScheduled) return ordered.slice(0, limit);
+  const active = ordered.filter((batch) => ["scheduled", "schedule_held"].includes(batch.status));
+  return [...new Map([...active, ...ordered.slice(0, limit)].map((batch) => [batch.id, batch])).values()];
 }
 
 function messageFromEntity(e) {
@@ -248,6 +269,7 @@ function messageFromEntity(e) {
     draftAttempts: Number(e.draftAttempts) || 0,
     sendAttempts: Number(e.sendAttempts) || 0,
     reconcileAttempts: Number(e.reconcileAttempts) || 0,
+    scheduleRevision: Number(e.scheduleRevision) || 0,
     leaseUntilUtc: e.leaseUntilUtc || "", createdUtc: e.createdUtc, updatedUtc: e.updatedUtc, etag: e.etag };
 }
 
@@ -319,7 +341,7 @@ async function patchMessage(userId, batchId, messageId, patch, etag) {
   for (const k of strings) if (k in patch) entity[k] = clean(patch[k], ["bodyText", "bodyHtml"].includes(k) ? 50000 : 2000);
   for (const k of ["subjectOverridden", "bodyOverridden", "reviewed"]) if (k in patch) entity[k] = !!patch[k];
   for (const k of ["baseRevision", "attemptCount", "draftAttempts", "sendAttempts",
-                   "reconcileAttempts", "sendPosition", "hardBounceCount"])
+                   "reconcileAttempts", "sendPosition", "hardBounceCount", "scheduleRevision"])
     if (k in patch) entity[k] = Number(patch[k]) || 0;
   for (const k of ["recipientMatchScore", "recipientMatchGap"]) {
     if (!(k in patch)) continue;
@@ -574,7 +596,13 @@ async function listDocuments() {
       // attachmentFileName() still falls back to the display name.
       fileName: e.fileName || "",
       contentType: e.contentType || "application/octet-stream", size: Number(e.size) || 0,
-      sha256: e.sha256 || "", version: Number(e.version) || 1, approved: true });
+      sha256: e.sha256 || "", version: Number(e.version) || 1, approved: true,
+      familyId: e.familyId || "", category: e.category || "", channel: e.materialChannel || "generic",
+      periodKey: e.periodKey || "", periodKind: e.periodKind || "", asOfDate: e.asOfDate || "",
+      freshness: materials.freshnessOf({ approved: true, freshness: e.freshness || "current",
+        periodKind: e.periodKind || "", periodKey: e.periodKey || "",
+        effectiveFrom: e.effectiveFrom || "", effectiveUntil: e.effectiveUntil || "" }),
+      genericFallbackChannels: parse(e.genericFallbackChannelsJson, []) });
   }
   return out.sort((a, b) => a.name.localeCompare(b.name));
 }
@@ -636,7 +664,7 @@ async function container() {
  * Conflating the two meant the attachment arrived under a display name shaped
  * for a dropdown, which is a fine label and a poor filename.
  */
-async function putDocument(who, { id: rawId, name, fileName, bytes, maxBytes }) {
+async function putDocument(who, { id: rawId, name, fileName, bytes, maxBytes, ...metadata }) {
   const docId = safeDocId(rawId || name);
   assertPdf(bytes);
   if (maxBytes && bytes.length > maxBytes) {
@@ -662,16 +690,66 @@ async function putDocument(who, { id: rawId, name, fileName, bytes, maxBytes }) 
   // bytes. Falling back to the old value would be worse than falling back to
   // the display name: it would be confidently wrong.
   const storedFileName = clean(fileName || "", 256);
+  const meta = materials.replacementMetadata(metadata, old ? {
+    familyId: old.familyId || "", category: old.category || "",
+    channel: old.materialChannel || "generic", periodKey: old.periodKey || "",
+    periodKind: old.periodKind || "", asOfDate: old.asOfDate || "",
+    freshness: old.freshness || "current",
+    genericFallbackChannels: parse(old.genericFallbackChannelsJson, []),
+  } : {});
   await client.upsertEntity({ partitionKey: "approved", rowKey: docId,
     name: clean(name || docId, 256), fileName: storedFileName,
     blobName, contentType: "application/pdf",
     size: bytes.length, sha256, version: (Number(old && old.version) || 0) + 1,
-    approved: true, updatedUtc: now(), updatedBy: clean(who && who.name, 256) }, "Replace");
+    approved: true, familyId: meta.familyId, category: meta.category, materialChannel: meta.channel,
+    periodKey: meta.periodKey, periodKind: meta.periodKind, asOfDate: meta.asOfDate,
+    freshness: meta.freshness, genericFallbackChannelsJson: json(meta.genericFallbackChannels),
+    updatedUtc: now(), updatedBy: clean(who && who.name, 256) }, "Replace");
   return { id: docId, name: clean(name || docId, 256), fileName: storedFileName,
            size: bytes.length, sha256,
-           version: (Number(old && old.version) || 0) + 1, replaced: !!old };
+           version: (Number(old && old.version) || 0) + 1, replaced: !!old, ...meta };
 }
 
+
+async function updateDocument(who, rawId, patch) {
+  const docId = safeDocId(rawId), existing = await getOptional("documents", "approved", docId);
+  if (!existing) { const e = new Error("That document is not in the approved catalog."); e.statusCode = 404; throw e; }
+  const meta = materials.normalizeMetadata({
+    familyId: patch.familyId === undefined ? existing.familyId : patch.familyId,
+    category: patch.category === undefined ? existing.category : patch.category,
+    channel: patch.channel === undefined ? (existing.materialChannel || "generic") : patch.channel,
+    periodKey: patch.periodKey === undefined ? existing.periodKey : patch.periodKey,
+    periodKind: patch.periodKind === undefined ? existing.periodKind : patch.periodKind,
+    asOfDate: patch.asOfDate === undefined ? existing.asOfDate : patch.asOfDate,
+    freshness: patch.freshness === undefined ? (existing.freshness || "current") : patch.freshness,
+    genericFallbackChannels: patch.genericFallbackChannels === undefined
+      ? parse(existing.genericFallbackChannelsJson, []) : patch.genericFallbackChannels,
+  });
+  await (await table("documents")).updateEntity({ partitionKey: "approved", rowKey: docId,
+    ...(patch.name === undefined ? {} : { name: clean(patch.name || docId, 256) }),
+    familyId: meta.familyId, category: meta.category, materialChannel: meta.channel,
+    periodKey: meta.periodKey, periodKind: meta.periodKind, asOfDate: meta.asOfDate,
+    freshness: meta.freshness, genericFallbackChannelsJson: json(meta.genericFallbackChannels),
+    updatedUtc: now(), updatedBy: clean(who && who.name, 256) }, "Merge", patch.etag ? { etag: patch.etag } : undefined);
+  return (await getDocuments([docId]))[0];
+}
+
+async function materialRoutes() {
+  const row = await getOptional("policy", "global", "material-domain-routes-v1");
+  if (!row) return materials.loadSeed();
+  return { ...materials.validateRoutes({ seedVersion: row.seedVersion || "", rules: parse(row.rulesJson, []) }), etag: row.etag || "",
+    updatedUtc: row.updatedUtc || "", updatedBy: row.updatedBy || "" };
+}
+async function putMaterialRoutes(who, input) {
+  const valid = materials.validateRoutes(input);
+  const entity = { partitionKey: "global", rowKey: "material-domain-routes-v1",
+    schemaVersion: 1, rulesJson: json(valid.rules), policyHash: valid.hash, seedVersion: valid.seedVersion || "",
+    updatedUtc: now(), updatedBy: clean(who && who.name, 256) };
+  const client = await table("policy");
+  if (input && input.etag) await client.updateEntity(entity, "Replace", { etag: input.etag });
+  else await client.upsertEntity(entity, "Replace");
+  return materialRoutes();
+}
 async function deleteDocument(who, rawId) {
   const docId = safeDocId(rawId);
   const existing = await getOptional("documents", "approved", docId);
@@ -1321,7 +1399,7 @@ module.exports = {
   id, now, batchPartition, putConnection, getConnection, putAuthState, consumeAuthState,
   createBatch, getBatch, patchBatch, listBatches, createMessage, getMessage, listMessages,
   patchMessage, deleteMessage, claimMessage, listTemplates, getTemplate, setTemplatePublished, listDocuments, getDocuments,
-  putDocument, deleteDocument, putTemplate, deleteTemplate,
+  putDocument, updateDocument, deleteDocument, materialRoutes, putMaterialRoutes, putTemplate, deleteTemplate,
   putTemplateImage, deleteTemplateImage, templateImageBytes,
   getSuppression, suppressEmail, listConnections, sentByInternetId,
   bounceAlreadySeen, markBounceSeen, recordDeliveryEvent, deliveryEvents,

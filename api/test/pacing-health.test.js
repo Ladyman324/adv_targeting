@@ -87,6 +87,6 @@ test("the brake pauses and never cancels", () => {
 
 test("sending is paced on the interleaved position, not list order", () => {
   const src = require("fs").readFileSync(require.resolve("../email-worker/index.js"), "utf8");
-  assert.match(src, /claimed\.sendPosition >= 0 \? claimed\.sendPosition : claimed\.ordinal/,
+  assert.match(src, /schedule\.messageDueUtc\(batch, claimed, deps\.core\.config\(\)\)/,
     "with a fallback for batches approved before positions existed");
 });

@@ -82,9 +82,13 @@ module.exports = async function (context, req) {
        * somebody may reply in between. */
       if (op === "follow_up_candidates")
         return ok(context, await service.followUpCandidates(who, String(req.query.id || "")));
-      if (op === "batches") return ok(context, { batches: await store.listBatches(who.id) });
+      if (op === "batches") return ok(context, { batches: await store.listBatches(who.id, 30, true) });
       if (op === "connection") return ok(context, await auth.status(who.id));
       if (op === "policy") return ok(context, await store.policy());
+      if (op === "material_routes") {
+        if (!isAdmin(who)) throw service.httpError(403, "EmailAdministrator role is required.");
+        return ok(context, await store.materialRoutes());
+      }
       /* The bytes behind an inline chart, so the on-screen preview can show the
        * actual image.
        *
@@ -348,7 +352,7 @@ module.exports = async function (context, req) {
     if (op === "validate") return ok(context, await service.validateBatch(who, body.batchId));
     if (op === "remove_recipient") return ok(context, await service.removeRecipient(who, body));
     if (op === "approve") return ok(context, await service.approve(who, body), 202);
-    if (["pause", "cancel", "resume", "retry"].includes(op)) return ok(context, await service.control(who, { ...body, action: op }));
+    if (["pause", "cancel", "resume", "retry", "review_schedule"].includes(op)) return ok(context, await service.control(who, { ...body, action: op }));
     if (op === "policy") {
       if (!isAdmin(who)) throw service.httpError(403, "EmailAdministrator role is required.");
       return ok(context, await store.setPolicy(who, body.killed, body.reason));
@@ -409,7 +413,18 @@ module.exports = async function (context, req) {
         imageId: body.imageId, name: body.name, bytes, maxBytes: service.attachmentLimit() });
       return ok(context, { ok: true, saved, templates: await store.listTemplates() }, 201);
     }
-    if (op === "put_document" || op === "delete_document") {
+    if (["put_document", "update_document", "delete_document", "put_material_routes"].includes(op)) {
+      if (!isAdmin(who)) throw service.httpError(403, "EmailAdministrator role is required.");
+      if (op === "put_material_routes") {
+        const saved = await store.putMaterialRoutes(who, body);
+        await store.audit(who.id, "material-routes", "material_routes_updated", { hash: saved.hash, rules: saved.rules.length });
+        return ok(context, { ok: true, materialRoutes: saved });
+      }
+      if (op === "update_document") {
+        const saved = await store.updateDocument(who, body.id, body);
+        await store.audit(who.id, `document:${saved.id}`, "document_metadata_updated", { id: saved.id, familyId: saved.familyId, channel: saved.channel });
+        return ok(context, { ok: true, saved, documents: await store.listDocuments() });
+      }
       if (!isAdmin(who)) throw service.httpError(403, "EmailAdministrator role is required.");
       if (op === "delete_document") {
         const gone = await store.deleteDocument(who, body.id);
@@ -425,7 +440,7 @@ module.exports = async function (context, req) {
       // fileName rides alongside the display name: the advisor should receive
       // the document called what it was called when it was uploaded, while the
       // picker in the app keeps the readable label.
-      const saved = await store.putDocument(who, { id: body.id, name: body.name,
+      const saved = await store.putDocument(who, { ...body, id: body.id, name: body.name,
         fileName: body.fileName, bytes, maxBytes: service.attachmentLimit() });
       await store.audit(who.id, `document:${saved.id}`, "document_published", { id: saved.id, name: saved.name,
         fileName: saved.fileName, version: saved.version, sha256: saved.sha256, replaced: saved.replaced });

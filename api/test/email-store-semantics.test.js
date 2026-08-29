@@ -671,3 +671,30 @@ test("a reply arriving AFTER the backfill still surfaces", async () => {
       "seeding history must not deafen the queue to what happens next");
   } finally { restore(); }
 });
+test("material route provenance and seed version survive store round-trip", async () => {
+  const { store, restore } = loadStore();
+  try {
+    const saved = await store.putMaterialRoutes({ name: "Admin User" }, {
+      seedVersion: "material-domains-v1-test",
+      rules: [
+        { domain: "rjf.com", channel: "rj", status: "active", source: "Roster seed",
+          evidenceCount: 42, seedVersion: "material-domains-v1-test" },
+        { domain: "newfirm.com", channel: "ml", status: "disabled", disabled: true },
+      ],
+    });
+    assert.equal(saved.seedVersion, "material-domains-v1-test");
+    assert.deepEqual(saved.rules.map(({ domain, channel, status, source, evidenceCount, seedVersion }) =>
+      ({ domain, channel, status, source, evidenceCount, seedVersion })), [
+      { domain: "newfirm.com", channel: "ml", status: "disabled", source: "Administrator",
+        evidenceCount: 0, seedVersion: "material-domains-v1-test" },
+      { domain: "rjf.com", channel: "rj", status: "active", source: "Roster seed",
+        evidenceCount: 42, seedVersion: "material-domains-v1-test" },
+    ]);
+
+    const reread = await store.materialRoutes();
+    assert.equal(reread.seedVersion, "material-domains-v1-test");
+    assert.equal(reread.rules.find(r => r.domain === "rjf.com").evidenceCount, 42);
+    assert.equal(reread.rules.find(r => r.domain === "newfirm.com").source, "Administrator");
+    assert.equal(reread.rules.find(r => r.domain === "newfirm.com").status, "disabled");
+  } finally { restore(); }
+});

@@ -8,6 +8,8 @@ const limitGuard = require("./email-limit-guard");
 const suppress = require("./email-suppress");
 const health = require("./email-health");
 const recipientRegistry = require("./recipient-registry");
+const materials = require("./email-materials");
+const schedule = require("./email-schedule");
 // The rep's own account settings live in the app store, not the email store --
 // same table the map's default scope and call list come from.
 const appStore = require("./store");
@@ -139,16 +141,17 @@ function recipientEvidenceSummary(records) {
 }
 
 async function catalog(who, opts) {
-  const [connection, templates, documents, policy, rollingUsed] = await Promise.all([
+  const [connection, templates, documents, policy, rollingUsed, materialRoutes] = await Promise.all([
     auth.status(who.id), store.listTemplates(), store.listDocuments(), store.policy(),
     // What this rep has already spent of their 24-hour allowance. Sent to the
     // client so the composer can say what is possible BEFORE a batch is built,
     // rather than only at the moment approval is refused.
     store.rollingExternalCount(who.id).catch(() => 0),
+    typeof store.materialRoutes === "function" ? store.materialRoutes() : Promise.resolve({ rules: [] }),
   ]);
   const cfg = core.config();
   return { connection,
-    templates: visibleTemplates(templates, !!(opts && opts.isAdmin)), documents,
+    templates: visibleTemplates(templates, !!(opts && opts.isAdmin)), documents, materialRoutes,
     // Addresses a rep may copy, straight from the App Setting. Sent with the
     // catalog so the Settings picker cannot offer anything the server would
     // then refuse.
@@ -317,7 +320,8 @@ async function validateMessage(message, duplicateEmails, cfg, currentDocsById, c
   let attachmentBytes = 0;
   for (const doc of message.attachments || []) {
     const current = currentDocsById.get(doc.id);
-    if (!doc.approved || !doc.blobName || !current || current.version !== doc.version || current.sha256 !== doc.sha256)
+    if (!doc.approved || !doc.blobName || !current || !materials.currentDocument(current)
+        || current.version !== doc.version || current.sha256 !== doc.sha256)
       errors.push({ code: "attachment_unavailable", message: `${doc.name || "An attachment"} is no longer the currently approved version.` });
     if (Number(doc.size) > cfg.maxAttachmentBytes) errors.push({ code: "attachment_too_large", message: `${doc.name} exceeds the application attachment limit.` });
     attachmentBytes += Number(doc.size) || 0;
@@ -576,7 +580,7 @@ async function createFollowUp(who, input, deps = {}) {
   // at the review screen for an hour while somebody replied.
   const fresh = await followUpCandidates(who, parentId, deps);
   if (!fresh.remaining.length)
-    throw httpError(409, "Everybody has replied, bounced or opted out — there is nobody to follow up.", "nobody_to_follow_up");
+    throw httpError(409, "Everybody has replied, bounced or opted out â€” there is nobody to follow up.", "nobody_to_follow_up");
 
   await registry.load({ force: true });
   const verifiedRemaining = [];
@@ -589,10 +593,13 @@ async function createFollowUp(who, input, deps = {}) {
   const withAttachments = input.includeAttachments === true;
   const documents = withAttachments && parent.attachmentIds.length
     ? await st.getDocuments(parent.attachmentIds) : [];
+  const unavailableDocuments = documents.filter((doc) => !materials.currentDocument(doc));
+  if (unavailableDocuments.length) throw httpError(409,
+    `${unavailableDocuments[0].name || "An attachment"} is not current approved material.`, "attachment_unavailable");
 
   const batchId = st.id();
   await st.createBatch(who, { id: batchId, status: "editing",
-    name: `Follow-up — ${parent.name || "campaign"}`,
+    name: `Follow-up â€” ${parent.name || "campaign"}`,
     templateId: parent.templateId, templateName: parent.templateName,
     commonSubject: "", commonBodyText: note, commonRevision: 1,
     attachmentIds: documents.map((d) => d.id),
@@ -676,11 +683,18 @@ async function createBatch(who, input) {
   const required = [...new Set((template.requiredDocumentIds || template.defaultAttachmentIds || []).map(String))];
   const requested = [...new Set([...required, ...(input.attachmentIds || []).map(String)])];
   const documents = await store.getDocuments(requested);
+  const materialFamilyIds = [...new Set((Array.isArray(input.materialFamilyIds) ? input.materialFamilyIds : [])
+    .map((x) => String(x || "").trim()).filter(Boolean))];
+  const allDocuments = materialFamilyIds.length ? await store.listDocuments() : documents;
+  const routePolicy = materialFamilyIds.length ? await store.materialRoutes() : { rules: [] };
   const missingDocs = requested.filter((x) => !documents.some((d) => d.id === x));
   if (missingDocs.length) throw httpError(400,
     missingDocs.some((x) => required.includes(x))
       ? `This template requires attachments that are no longer in the approved catalog: ${missingDocs.join(", ")}. An email administrator needs to republish them.`
       : `Approved attachments are unavailable: ${missingDocs.join(", ")}.`);
+  const noncurrentDocs = documents.filter((doc) => !materials.currentDocument(doc));
+  if (noncurrentDocs.length) throw httpError(409,
+    `${noncurrentDocs[0].name || "An attachment"} is not current approved material.`, "attachment_unavailable");
   // Anyone who has opted out is removed HERE, before the batch exists, rather
   // than being filtered at send time. A rep who sees 60 recipients and gets 57
   // sent has no idea who the other three were; a rep told up front that three
@@ -711,6 +725,12 @@ async function createBatch(who, input) {
    * removed from the direct list at that moment instead, which is the same
    * guarantee made at the point the decision is actually taken.
    */
+  const routedMaterials = new Map();
+  for (const recipient of notBlocked) {
+    if (!materialFamilyIds.length) { routedMaterials.set(recipient.email, { channel: "", documents: [] }); continue; }
+    routedMaterials.set(recipient.email,
+      materials.resolveFamilies(allDocuments, materialFamilyIds, recipient.email, routePolicy));
+  }
   const teamCc = new Map();
   const { kept, removed: copiedInstead } = dropCopiedRecipients(notBlocked, teamCc);
   if (!kept.length) throw httpError(400, dropped.length
@@ -730,11 +750,16 @@ async function createBatch(who, input) {
   // if the rep edits the setting while the batch is being built.
   const prefs = await appStore.getSettings(who).catch(() => ({}));
   const signatureHtml = core.corporateSignature(profile, "", cfg);
+  const unionDocuments = new Map(documents.map((doc) => [doc.id, doc]));
+  for (const routed of routedMaterials.values()) for (const doc of routed.documents)
+    unionDocuments.set(doc.id, doc);
+  const batchDocuments = [...unionDocuments.values()];
+  const batchAttachmentIds = batchDocuments.map((doc) => doc.id);
   const batch = await store.createBatch(who, { id: batchId,
-    name: input.name || `${template.name} — ${new Date().toLocaleDateString("en-US")}`,
-    templateId: template.id, templateName: template.name, commonSubject: template.subject,
-    commonBodyText: template.bodyText, attachmentIds: requested,
-    attachmentSummary: documents.map(({ id, name, size, contentType, version }) => ({ id, name, size, contentType, version })),
+    name: input.name || `${template.name} â€” ${new Date().toLocaleDateString("en-US")}`,
+    templateId: template.id, templateName: template.name, templateVersion: template.version, commonSubject: template.subject,
+    commonBodyText: template.bodyText, attachmentIds: batchAttachmentIds,
+    attachmentSummary: batchDocuments.map(({ id, name, size, contentType, version }) => ({ id, name, size, contentType, version })),
     recipientCount: kept.length, externalCount: kept.filter((r) => core.isExternal(r.email, cfg)).length,
     warningLevel: warning.level, warningMessage: warning.message, signatureHtml,
     suppressedCount: dropped.length,
@@ -797,14 +822,14 @@ async function createBatch(who, input) {
       // Per-recipient: the footer's preference link is signed for THIS address.
       signatureHtml: core.corporateSignature(profile,
         suppress.manageUrl(r.email, r.contactId), cfg),
-      baseRevision: 1, attachments: documents, validation: { errors: [
+      baseRevision: 1, attachments: [...new Map([...documents, ...(routedMaterials.get(r.email) || { documents: [] }).documents].map((doc) => [doc.id, doc])).values()], validation: { errors: [
         ...subject.missing.map((f) => ({ code: "missing_merge_value", message: `Missing ${f}.` })),
         ...body.missing.map((f) => ({ code: "missing_merge_value", message: `Missing ${f}.` })),
       ], warnings: [] } });
   }
   await store.audit(who.id, batchId, "batch_created", { recipientCount: kept.length,
     suppressedCount: dropped.length,
-    templateId: template.id, attachmentIds: requested,
+    templateId: template.id, attachmentIds: batchAttachmentIds, materialFamilyIds,
     recipientIdentity: recipientEvidenceSummary(kept) });
   return validateBatch(who, batchId);
 }
@@ -1047,15 +1072,23 @@ async function approve(who, input) {
   const validation = await validateBatch(who, input.batchId,
     { reviewed: input.reviewed === true, identityForce: true });
   const batch = validation.batch;
+  const cfg = core.config(), approvalNow = Date.now();
+  const scheduledForUtc = mode === "send" && input.scheduledForUtc
+    ? schedule.scheduledInstant(input.scheduledForUtc, approvalNow, cfg.cancellationSeconds) : "";
   if (!input.confirmation || Number(input.confirmation.recipientCount) !== batch.recipientCount)
     throw httpError(400, "Confirm the exact recipient count before approval.");
   const confirmedAttachments = [...new Set(input.confirmation.attachmentIds || [])].map(String).sort();
   const actualAttachments = [...batch.attachmentIds].map(String).sort();
   if (JSON.stringify(confirmedAttachments) !== JSON.stringify(actualAttachments))
     throw httpError(400, "Confirm the exact approved attachment set before approval.");
+  if (scheduledForUtc) {
+    const confirmedSchedule = schedule.scheduledInstant(input.confirmation.scheduledForUtc, approvalNow, cfg.cancellationSeconds);
+    if (confirmedSchedule !== scheduledForUtc)
+      throw httpError(400, "Confirm the exact scheduled send time before approval.", "schedule_confirmation_mismatch");
+  }
   if (validation.errors.length) throw httpError(400, `The batch has ${validation.errors.length} validation problem(s).`);
   if (validation.messages.some((m) => !m.reviewed)) throw httpError(400, "Approve the final previews before continuing.");
-  const cfg = core.config(), warning = core.guardrail(batch.recipientCount, mode, cfg);
+  const warning = core.guardrail(batch.recipientCount, mode, cfg);
   if (warning.blocked) throw httpError(400, warning.message);
 
   // The passcode. Its job is to interrupt a reflex, not to withstand an
@@ -1100,12 +1133,33 @@ async function approve(who, input) {
       currentPolicy.reason || "Direct sending is disabled by environment policy or the administrator kill switch.");
     if (cfg.testAllowlist.size && validation.messages.some((m) => !cfg.testAllowlist.has(m.recipientEmail)))
       throw httpError(403, "At least one recipient is outside the configured production test allowlist.");
-    await limitGuard.reserve(who.id, batch.id, batch.externalCount, cfg.rollingExternalLimit);
+    if (!scheduledForUtc) await limitGuard.reserve(who.id, batch.id, batch.externalCount, cfg.rollingExternalLimit);
   }
   const approvedUtc = new Date().toISOString();
-  const sendNotBeforeUtc = mode === "send" ? new Date(Date.now() + cfg.cancellationSeconds * 1000).toISOString() : "";
-  await store.patchBatch(who.id, batch.id, { status: "drafting", mode, approvedUtc,
-    reviewedUtc: approvedUtc, sendNotBeforeUtc, warningLevel: warning.level, warningMessage: warning.message }, batch.etag);
+  const sendNotBeforeUtc = mode === "send" ? (scheduledForUtc
+    || new Date(Date.now() + cfg.cancellationSeconds * 1000).toISOString()) : "";
+  const scheduleRevision = scheduledForUtc ? (Number(batch.scheduleRevision) || 0) + 1 : 0;
+  await store.patchBatch(who.id, batch.id, { status: scheduledForUtc ? "scheduled" : "drafting", mode, approvedUtc,
+    reviewedUtc: approvedUtc, sendNotBeforeUtc, scheduledForUtc,
+    scheduleState: scheduledForUtc ? "pending" : "", scheduleRevision,
+    scheduleLeaseUntilUtc: "", schedulePassedUtc: "", scheduleHeldUtc: "",
+    scheduleHoldCode: "", scheduleHoldMessage: "", scheduleNotificationState: "",
+    scheduleNotificationId: "", scheduleNotificationGraphId: "", scheduleNotificationCreatedUtc: "",
+    scheduleNotificationSubmittedUtc: "", scheduleNotificationReconcileUntilUtc: "",
+    scheduleNotificationSentUtc: "",
+    warningLevel: warning.level, warningMessage: warning.message }, batch.etag);
+  if (scheduledForUtc) {
+    const order = new Map(core.interleaveByDomain(validation.messages).map((m, i) => [m.id, i]));
+    for (const m of validation.messages) await store.patchMessage(who.id, batch.id, m.id, {
+      state: "scheduled_pending", queuedUtc: approvedUtc, sendPosition: order.get(m.id),
+      scheduleRevision, leaseUntilUtc: "",
+    }, m.etag);
+    await store.audit(who.id, batch.id, "direct_send_scheduled", {
+      recipientCount: batch.recipientCount, attachmentIds: batch.attachmentIds,
+      scheduledForUtc, scheduleRevision,
+    });
+    return getBatchDetail(who, batch.id);
+  }
   // Send order is decided HERE, once, and stored. Deciding it in the worker
   // would need global knowledge of the batch on every message, and a retry could
   // reshuffle the queue underneath a send already scheduled.
@@ -1138,6 +1192,59 @@ async function approve(who, input) {
   return getBatchDetail(who, batch.id);
 }
 
+async function preflightScheduled(userId, batchId, revision, deps = {}) {
+  const st = deps.store || store, au = deps.auth || auth, registry = deps.recipientRegistry || recipientRegistry,
+    sup = deps.suppress || suppress;
+  const batch = await st.getBatch(userId, batchId);
+  if (!batch || batch.status !== "scheduled" || batch.scheduleState !== "checking"
+      || Number(batch.scheduleRevision) !== Number(revision))
+    throw httpError(409, "This schedule is no longer awaiting that preflight.", "schedule_stale");
+  const template = await st.getTemplate(batch.templateId);
+  if (!template || template.published === false || Number(template.version || 1) !== Number(batch.templateVersion || 1))
+    throw httpError(409, "The approved template changed after this batch was scheduled.", "schedule_template_changed");
+  const connection = await au.status(userId);
+  const connectedMail = String(connection.profile && (connection.profile.mail || connection.profile.userPrincipalName)
+    || connection.mailbox || "").toLowerCase();
+  const token = await au.tokenFor(userId);
+  if (!connection.connected || !connection.profile || !connectedMail
+      || connectedMail !== String(batch.senderMail || batch.graphMailbox || "").toLowerCase()
+      || String(connection.profile.id || "").toLowerCase() !== String(batch.graphMailboxId || "").toLowerCase()
+      || String(token.mailboxId || "").toLowerCase() !== String(batch.graphMailboxId || "").toLowerCase())
+    throw httpError(409, "Reconnect the scheduled batch mailbox before sending.", "schedule_mailbox_changed");
+  const frozenMessages = await st.listMessages(userId, batchId);
+  const frozenById = new Map(frozenMessages.map((message) => [message.id, message]));
+  const validation = await validateBatch({ id: userId, name: batch.userName || "" }, batchId,
+    { reviewed: true, identityForce: true });
+  const identityChanged = validation.messages.some((message) => {
+    const frozen = frozenById.get(message.id);
+    if (!frozen) return true;
+    return ["recipientEmail", "recipientName", "greetingName", "recipientLastName",
+      "companyName", "recipientRoutingHash"].some((field) => String(frozen[field] || "") !== String(message[field] || ""))
+      || JSON.stringify(frozen.teammateCc || []) !== JSON.stringify(message.teammateCc || [])
+      || JSON.stringify(frozen.teammateCcCrds || []) !== JSON.stringify(message.teammateCcCrds || []);
+  });
+  if (identityChanged)
+    throw httpError(409, "A scheduled recipient identity or routing changed.", "schedule_validation_changed");
+  if (validation.errors.length)
+    throw httpError(409, "One or more recipients, attachments, or rendered messages changed.", "schedule_validation_changed");
+  const cfg = core.config();
+  const identities = validation.messages.flatMap((message) => [
+    { email: message.recipientEmail, contactId: message.contactId },
+    ...(message.teammateCc || []).map((email, index) => ({ email,
+      contactId: (message.teammateCcCrds || [])[index] || "" })),
+  ]);
+  const blocked = await sup.blockedAmong(identities);
+  if (blocked.size) throw httpError(409, "A scheduled recipient is now suppressed.", "schedule_recipient_suppressed");
+  const policy = await st.policy();
+  if (!cfg.directSendEnvironmentEnabled || policy.killed)
+    throw httpError(403, policy.reason || "Direct sending is disabled.", "schedule_sending_disabled");
+  if (cfg.testAllowlist.size && validation.messages.some((message) =>
+      !cfg.testAllowlist.has(String(message.recipientEmail || "").toLowerCase())))
+    throw httpError(403, "A scheduled recipient is outside the production allowlist.", "schedule_allowlist_changed");
+  await registry.load({ force: true });
+  await (deps.limitGuard || limitGuard).reserve(userId, batch.id, batch.externalCount, cfg.rollingExternalLimit);
+  return { batch: validation.batch, messages: validation.messages, connection };
+}
 async function getBatchDetail(who, batchId) {
   const batch = await store.getBatch(who.id, batchId);
   if (!batch) throw httpError(404, "Email batch not found.");
@@ -1169,6 +1276,22 @@ async function control(who, input) {
     if (batch.mode !== "send") throw httpError(409, "Only a direct-send batch can be paused.");
     await store.patchBatch(who.id, batch.id, { status: "paused", pausedUtc: new Date().toISOString() }, batch.etag);
     await store.audit(who.id, batch.id, "remaining_paused", {});
+  } else if (input.action === "review_schedule") {
+    if (!['scheduled', 'schedule_held'].includes(batch.status))
+      throw httpError(409, "This batch is not a scheduled batch awaiting review.");
+    const messages = await store.listMessages(who.id, batch.id);
+    if (messages.some((message) => message.graphMessageId || ["submitted", "sent"].includes(message.state)))
+      throw httpError(409, "A scheduled batch with Outlook activity cannot return to editing.");
+    const revision = (Number(batch.scheduleRevision) || 0) + 1;
+    await store.patchBatch(who.id, batch.id, { status: "editing", mode: "", scheduledForUtc: "",
+      sendNotBeforeUtc: "", scheduleState: "", scheduleRevision: revision,
+      scheduleLeaseUntilUtc: "", schedulePassedUtc: "", scheduleHeldUtc: "",
+      scheduleHoldCode: "", scheduleHoldMessage: "", warningLevel: "normal", warningMessage: "" }, batch.etag);
+    for (const message of messages) await store.patchMessage(who.id, batch.id, message.id, {
+      state: "editing", scheduleRevision: revision, leaseUntilUtc: "",
+      failureCode: "", failureMessage: "",
+    }, message.etag);
+    await store.audit(who.id, batch.id, "scheduled_batch_returned_to_review", { scheduleRevision: revision });
   } else if (input.action === "cancel") {
     await store.patchBatch(who.id, batch.id, { status: "canceled", canceledUtc: new Date().toISOString() }, batch.etag);
     const messages = await store.listMessages(who.id, batch.id);

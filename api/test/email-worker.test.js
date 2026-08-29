@@ -359,3 +359,21 @@ test("backfill never overwrites a conversation id the draft already captured", a
   await worker.processWork({ kind: "send", userId: "user-1", batchId: "batch-1", messageId: "message-1" }, { ...f, graph });
   assert.equal(f.message.graphConversationId, "conv-from-draft");
 });
+
+test("a document replaced after approval is refused before the worker attaches it", async () => {
+  const f = fixture("drafts", "draft_pending");
+  f.batch.graphMailbox = "safe@example.test"; f.message.contactId = "";
+  f.message.attachments = [{ id: "deck", name: "Deck", version: 1, sha256: "old", approved: true }];
+  f.store.getDocuments = async () => [{ id: "deck", name: "Deck", version: 2, sha256: "new", approved: true }];
+  let attached = 0;
+  const graph = {
+    findByAppId: async () => routedDraft("immutable-1"),
+    createDraft: async () => { throw new Error("not expected"); },
+    attachDocuments: async () => { attached++; },
+    getMessage: async () => routedDraft("immutable-1"),
+  };
+  await worker.processWork({ kind: "draft", userId: "user-1", batchId: "batch-1", messageId: "message-1" }, { ...f, graph });
+  assert.equal(attached, 0);
+  assert.equal(f.message.state, "failed");
+  assert.match(f.message.failureMessage, /currently approved/);
+});

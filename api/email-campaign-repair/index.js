@@ -15,8 +15,9 @@
 const store = require("../shared/email-store");
 const service = require("../shared/email-service");
 const core = require("../shared/email-core");
+const schedule = require("../shared/email-schedule");
 
-const ACTIVE_BATCHES = new Set(["drafting", "sending"]);
+const ACTIVE_BATCHES = new Set(["drafting", "sending", "scheduled", "schedule_held"]);
 const TERMINAL_MESSAGES = new Set(["draft_ready", "sent", "failed", "canceled", "auth_required"]);
 const MAX_BATCHES_PER_USER = 500;
 const MAX_ENQUEUED = 50;
@@ -53,7 +54,7 @@ function workFor(message, batch, nowMs, intervalSeconds) {
   if (!sendNotBefore) return null;
   if (["submitted", "send_ambiguous"].includes(message.state)) return "reconcile";
   if (["send_scheduled", "sending"].includes(message.state)) {
-    const due = sendNotBefore + position * intervalSeconds * 1000;
+    const due = timestamp(schedule.messageDueUtc(batch, message, { mailboxIntervalSeconds: intervalSeconds }));
     return due && due > nowMs ? null : "send";
   }
   return null;
@@ -88,10 +89,43 @@ async function run(context = {}, overrides = {}) {
     summary.users++;
     let userEnqueued = 0;
     let recoverySlot = 0;
-    const batches = await deps.store.listBatches(userId, MAX_BATCHES_PER_USER);
+    const batches = await deps.store.listBatches(userId, MAX_BATCHES_PER_USER, true);
     for (const batch of batches) {
       if (!ACTIVE_BATCHES.has(batch.status)) continue;
       summary.batches++;
+      if (batch.status === "scheduled") {
+        const due = timestamp(batch.scheduledForUtc);
+        const leaseExpired = !timestamp(batch.scheduleLeaseUntilUtc) || timestamp(batch.scheduleLeaseUntilUtc) <= nowMs;
+        if (batch.scheduleState === "checking" && leaseExpired) {
+          try { await deps.store.patchBatch(userId, batch.id,
+            { scheduleState: "pending", scheduleLeaseUntilUtc: "" }, batch.etag); }
+          catch (err) { if (Number(err && err.statusCode) === 412) summary.conflicts++; else summary.failed++; }
+        }
+        if (due && due <= nowMs && leaseExpired) {
+          summary.eligible++; summary.attempted++;
+          try {
+            await deps.enqueue({ kind: "preflight", userId, batchId: batch.id,
+              scheduleRevision: Number(batch.scheduleRevision) });
+            summary.enqueued++; userEnqueued++;
+          } catch { summary.failed++; }
+        }
+        if (userEnqueued >= MAX_ENQUEUED_PER_USER || summary.attempted >= MAX_ATTEMPTS) break;
+        continue;
+      }
+      if (batch.status === "schedule_held") {
+        if (batch.scheduleNotificationState === "pending"
+            || (["creating", "draft_ready", "submitting", "submitted", "ambiguous"].includes(batch.scheduleNotificationState)
+              && timestamp(batch.updatedUtc) <= nowMs - GRACE_MS)) {
+          summary.eligible++; summary.attempted++;
+          try {
+            await deps.enqueue({ kind: "schedule_notify", userId, batchId: batch.id,
+              scheduleRevision: Number(batch.scheduleRevision) });
+            summary.enqueued++; userEnqueued++;
+          } catch { summary.failed++; }
+        }
+        if (userEnqueued >= MAX_ENQUEUED_PER_USER || summary.attempted >= MAX_ATTEMPTS) break;
+        continue;
+      }
       for (let message of await deps.store.listMessages(userId, batch.id)) {
         summary.messages++;
         let promoted = false;
@@ -100,7 +134,7 @@ async function run(context = {}, overrides = {}) {
         // that no ordinary worker is allowed to claim. Promote them
         // conditionally; an approval worker that got there first wins the ETag.
         const approvedAt = timestamp(batch.approvedUtc);
-        if (message.state === "editing" && approvedAt
+        if ((message.state === "editing" || (message.state === "scheduled_pending" && batch.scheduleState === "passed")) && approvedAt
             && approvedAt <= nowMs - GRACE_MS) {
           try {
             message = await deps.store.patchMessage(userId, batch.id, message.id, {
@@ -127,7 +161,8 @@ async function run(context = {}, overrides = {}) {
           // Preserve the same per-mailbox pacing used by approval. Recovery can
           // find many overdue drafts at once; zero-delay fan-out would recreate
           // the Graph mailbox concurrency burst this queue was built to avoid.
-          await deps.enqueue({ kind, userId, batchId: batch.id, messageId: message.id },
+          await deps.enqueue({ kind, userId, batchId: batch.id, messageId: message.id,
+            ...(Number(message.scheduleRevision) > 0 ? { scheduleRevision: Number(message.scheduleRevision) } : {}) },
             recoverySlot * interval);
           summary.enqueued++;
           userEnqueued++;
