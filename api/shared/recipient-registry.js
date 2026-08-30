@@ -96,6 +96,8 @@ function cleanRecord(crd, raw) {
   const record = { crd: id, email,
     name: String((raw && raw.name) || "").slice(0, 256),
     greetingName: String((raw && (raw.greetingName || raw.firstName)) || "").slice(0, 120),
+    greetingSource: String((raw && raw.greetingSource) || "").slice(0, 120),
+    greetingEvidenceHash: String((raw && raw.greetingEvidenceHash) || "").slice(0, 128),
     lastName: String((raw && raw.lastName) || "").slice(0, 120),
     firm: String((raw && raw.firm) || "").slice(0, 256), tier,
     source: String((raw && raw.source) || "").slice(0, 120),

@@ -180,17 +180,27 @@ setting was active for the release.
 ## Preferred names
 
 Preferred greeting/display names are separate from the legal identity link.
-Strict common forms such as Christopher/Chris can approve automatically only
-after the CRD identity is approved. Other forms, including Robert/Bo, require a
-hash-bound human decision.
+Strict common forms such as Christopher/Chris can approve automatically after
+the ACT identity is approved. They may also be used as a presentation-only
+overlay on an independently authorized roster route when every stricter gate
+in src/preferred_names.py agrees: active ACT record; unique, personal primary
+email; no asserted ACT CRD; unique high-tier CRD candidate at score 1.0 and gap
+at least 0.25; exact surname/name/roster email; current roster firm, email
+domain and SEC firm agreement; no hard conflicts; and either a strict nickname
+or the SEC's own used first name. Alternate ACT emails are never considered.
+
+The overlay never supplies routing authority, never attaches an ACT GUID and
+never authorizes an ACT write. The legal/formal name remains visible as
+Christopher (Chris) Tolman; only the greeting uses Chris. Other forms,
+including Robert/Bo, still require a hash-bound human decision.
 
 Current named examples:
 
 - Robert Ladyman / CRD 4996584 is approved and displays/greeted as Bo.
-- Chris Tolman's ACT record is pinned in the correction report but remains
-  unmatched until CRD 2066775 is explicitly reviewed. The independently
-  scraped UBS record remains visible as high-confidence research evidence, with
-  no ACT GUID and therefore no ACT write capability.
+- Chris Tolman's ACT record remains unmatched for CRD/write purposes. Its exact
+  primary email and preferred Chris now overlay the independently authorized
+  UBS route for CRD 2066775. It displays as Christopher (Chris) Tolman, greets
+  as Chris, and still carries no ACT GUID or ACT write capability.
 
 ## Colleague workflow
 

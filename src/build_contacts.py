@@ -76,7 +76,8 @@ from contact_provenance import sha256_file, validate_owner_artifact
 from firm_rosters import FIRMS, allowed_crds
 from identity_schema import (IDENTITY_DIRNAME, LINKS_FILENAME,
                              MANIFEST_FILENAME, content_hash)
-from identity_normalize import is_generic_email
+from identity_normalize import is_generic_email, normalize_email
+from preferred_names import load_greeting_overlays, preferred_display_name
 from roster_firm_policy import (authoritative_families, build_domain_policy,
                                 crd_tuple)
 from web_assets import write_json_gz
@@ -609,17 +610,9 @@ def load_crm(domains: dict[str, tuple[str, ...]]) -> pd.DataFrame:
         return (row.get("businessAddress") or {}).get(key)
 
     def display_name(normalized_row, link):
-        base = strip_designations(normalized_row["name"])
-        if (link.get("identity_status") != "approved"
-                or link.get("preferred_status") not in
-                {"approved_auto", "approved_reviewed"}):
-            return base
-        preferred = usable_salutation(link.get("email_greeting"))
-        parts = base.split()
-        if preferred and parts:
-            parts[0] = preferred
-            return " ".join(parts)
-        return base
+        # Preserve the ACT/SEC-compatible formal identity here. Preferred names
+        # are presentation metadata (sal/pn), never replacements for identity.
+        return strip_designations(normalized_row["name"])
 
     normalized = [(r, normalize_act_contact(r, path.name),
                    identity_links.get(str(r.get("id") or ""), {}))
@@ -1897,6 +1890,11 @@ def main() -> None:
     people = load_people(args.limit)
     index = load_index()
     people = score_contacts(people, index)
+    act_path = newest_act_pull()
+    preferred_overlays = (
+        load_greeting_overlays(IDENTITY, act_path) if act_path else {})
+    print(f"[*] safe ACT preferred-name overlays: "
+          f"{len(preferred_overlays):,} independently corroborated")
     dist = people["tier"].value_counts()
     print("[*] match tiers: " + ", ".join(f"{k} {v:,}" for k, v in dist.items()))
 
@@ -1923,6 +1921,7 @@ def main() -> None:
     usable = people[(people["tier"].isin(["confirmed", "high", "review"]))
                     & (people["advisor_crd"] != "")].copy()
     contacts = {}
+    overlays_applied = 0
     member_state: dict = {}
     for crd, group in usable.groupby("advisor_crd"):
         row = pick_best(group)
@@ -1992,12 +1991,24 @@ def main() -> None:
         # almost certainly right and is refused, because nothing distinguishes
         # it from Deborah except knowing the person.
         sal = salutation_of(group)
+        overlay = preferred_overlays.get(str(crd))
+        if (not sal and overlay
+                and str(row["tier"]) in {"confirmed", "high"}
+                and str(row["source"]).upper() not in {"CRM", "EIC"}
+                and normalize_email(entry["e"]) == overlay["email"]):
+            sal = overlay["greeting"]
+            entry["ps"] = overlay["source"]
+            entry["pih"] = overlay["evidenceHash"]
+            overlays_applied += 1
         if sal:
             # load_crm exposes only the ledger's email_greeting. That value is
             # either a deterministic SEC/strict-nickname fallback or a
             # hash-bound reviewed preference such as Bo. Re-running the old
             # nickname gate here would erase exactly those reviewed exceptions.
             entry["sal"] = sal
+            presented = preferred_display_name(entry["n"], sal)
+            if presented != entry["n"]:
+                entry["pn"] = presented
         cs = str(row.get("state", "") or "").strip().upper()[:2]
         if cs:
             entry["cs"] = cs
@@ -2035,6 +2046,9 @@ def main() -> None:
         # clickable from the national view, where the map holds no per-state
         # features yet and the panel has to know which scope to switch to.
         member_state[crd] = str(row["state"] or "")
+
+    print(f"[*] preferred-name overlays applied to authorized roster routes: "
+          f"{overlays_applied:,}")
 
     # WHO ELSE IS ON THAT TEAM.
     #

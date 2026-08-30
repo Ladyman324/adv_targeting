@@ -239,7 +239,7 @@ def build_registry(links: pd.DataFrame, contacts_payload: dict | None = None,
         # GUID only when its email agrees, so later CRM writes remain exact.
         exact_act = approved if approved and normalize_email(
             approved.get("email")) == email else None
-        name = clean_text(contact.get("n") or
+        name = clean_text(contact.get("pn") or contact.get("n") or
                           (exact_act or {}).get("display_name"))
         greeting = clean_text(contact.get("sal") or
                               (exact_act or {}).get("email_greeting"))
@@ -257,6 +257,10 @@ def build_registry(links: pd.DataFrame, contacts_payload: dict | None = None,
                 (exact_act or {}).get("source_record_id")),
             "teammates": [],
         }
+        if clean_text(contact.get("ps")):
+            recipient["greetingSource"] = clean_text(contact.get("ps"))
+        if clean_text(contact.get("pih")):
+            recipient["greetingEvidenceHash"] = clean_text(contact.get("pih"))
         if match_score is not None:
             recipient["matchScore"] = match_score
         recipients[crd] = recipient

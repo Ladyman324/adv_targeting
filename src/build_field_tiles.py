@@ -56,6 +56,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
 import pandas as pd
 
+from preferred_names import preferred_display_name
 from web_assets import write_json_gz
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -191,6 +192,8 @@ def main() -> None:
         money = float(c.get("ia", 0) or 0)
         if not money and c.get("tm") in teams:
             money = float(teams[c["tm"]].get("a", 0) or 0)
+        formal_name = str(index_names.get(str(crd)) or c.get("n", ""))
+        shown_name = preferred_display_name(formal_name, c.get("sal", ""))
         buckets[cell_of(lat, lon)].append([
             crd,
             # THE DESKTOP'S NAME, not the contact record's.
@@ -206,7 +209,7 @@ def main() -> None:
             # AFTER reconcile_display_names.py has had its say, so taking the
             # name from here means the phone shows exactly what the desk shows,
             # including the roster-corroborated corrections.
-            index_names.get(str(crd)) or c.get("n", ""),
+            shown_name,
             c.get("ti", ""),
             c.get("cn", ""),
             # City and state come from the PLACED office rather than the
@@ -233,7 +236,7 @@ def main() -> None:
             # Empty unless it says something the name does not.
             (lambda g, n: g if g and g.split()[0].lower() != n.split()[0].lower() else "")(
                 str(c.get("sal", "") or "").strip(),
-                str(index_names.get(str(crd)) or c.get("n", "") or "x")),
+                formal_name or "x"),
         ])
 
     if TILES.exists():
@@ -294,6 +297,11 @@ def main() -> None:
     # never loads. This closes that gap at the only place both views agree --
     # the file itself. Costs roughly 25 bytes per member.
     shard: dict = collections.defaultdict(dict)
+    def shown_member_name(crd):
+        contact = advisors.get(str(crd), {})
+        formal = index_names.get(str(crd)) or contact.get("n", "")
+        return preferred_display_name(formal, contact.get("sal", ""))
+
     for key, rec in practices.items():
         entry = {"n": rec.get("n", ""),
                  # Member contract: [crd, display name, state, email, tier, source].
@@ -303,7 +311,7 @@ def main() -> None:
                  # tile loaded at all. Carrying the tier in this small shard
                  # keeps unconfirmed people out of the picker before the API's
                  # independent registry check rejects them.
-                 "m": [[crd, index_names.get(str(crd)) or advisors.get(crd, {}).get("n", ""), st,
+                 "m": [[crd, shown_member_name(crd), st,
                         advisors.get(crd, {}).get("e", ""),
                         advisors.get(crd, {}).get("t", ""),
                         advisors.get(crd, {}).get("src", "")]

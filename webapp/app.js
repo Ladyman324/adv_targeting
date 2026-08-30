@@ -39,7 +39,7 @@ const COMPARE = ["#12b39c", "#e0a53a", "#8079e0", "#e8615d", "#4aa3e0", "#9fc93c
 // of every deployed JSON path and byte. It changes for standalone shard
 // rebuilds too, and its leading date keeps the stale-build warning readable.
 // Do not edit it by hand.
-const DATA_VERSION = "20260827T164513Z-e1640cd5ffa1da00";
+const DATA_VERSION = "20260827T164513Z-74101c1225f79d90";
 const dataUrl = file => `data/${file}?v=${DATA_VERSION}`;
 Dial.setContactRouteVersion(DATA_VERSION);
 // ONE scale for every mark on the map. There used to be two, and they were not
@@ -916,6 +916,12 @@ function loadContacts(signal=null){
       CONTACTS = j;
       CONTACTS_READY = true;
       CONTACTS_ERROR = "";
+      // Pins can win the race against the deferred contact shards. Enrich any
+      // names already on screen now; later scopes do this in rehydrate().
+      for (const feature of ALL){
+        const p = feature.properties;
+        p.n = advisorDisplayName(p.id, p.n);
+      }
       // Anything already on screen that was drawn without contact detail:
       // the panel's cards, the queue buttons in list rows, and the two
       // filter switches that were held disabled.
@@ -925,6 +931,8 @@ function loadContacts(signal=null){
       // it in place rather than leaving a card that says a person has no phone
       // when the file listing it has just arrived.
       if (detailsCurrent) renderDetailEntry(detailsCurrent, false);
+      if (advQuery && advQuery.length >= 2 && !advOut.hidden)
+        renderNationalSearch();
       reconcileDesktopDialRoutes().catch(() => {});
     });
   return contactsPromise;
@@ -932,6 +940,30 @@ function loadContacts(signal=null){
 
 function contactFor(advisorId){
   return (CONTACTS && CONTACTS.advisors[String(advisorId)]) || null;
+}
+
+function preferredDisplayName(formalName, preferredFirst){
+  const formal = String(formalName || "").trim().replace(/\s+/g, " ");
+  const preferred = String(preferredFirst || "").trim();
+  if (!formal || !/^[\p{L}][\p{L}'’\-]{0,39}$/u.test(preferred)) return formal;
+  const parts = formal.split(" ");
+  const token = value => String(value || "").normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/[^a-z0-9]/g, "");
+  if (token(parts[0]) === token(preferred)) return formal;
+  if (parts[1] && /^\(.+\)$/.test(parts[1])) return formal;
+  return parts[0] + " (" + preferred + ")" +
+    (parts.length > 1 ? " " + parts.slice(1).join(" ") : "");
+}
+
+function advisorDisplayName(advisorId, fallback=""){
+  const c = contactFor(advisorId);
+  const formal = fallback || (c && c.n) || "";
+  // Preserve the map/search/field view's canonical formal name when supplied;
+  // contacts.json contributes a preference only when the producer explicitly
+  // emitted a preferred presentation. This prevents Chris (Christopher).
+  const preferred = c && c.pn ? c.sal : "";
+  return preferredDisplayName(formal, preferred || "")
+    || (c && c.pn) || formal;
 }
 
 // ---- EIC's book, split by product ----
@@ -1289,7 +1321,7 @@ function openPersonActions(trigger){
   closePersonActions();
   const crd = String(trigger.dataset.personActions || "");
   const c = contactFor(crd) || {};
-  const name = trigger.dataset.personName || c.n || `CRD ${crd}`;
+  const name = trigger.dataset.personName || advisorDisplayName(crd) || `CRD ${crd}`;
   // Standing role lists are projections of the toggles above, not ordinary
   // destinations. Manually adding here would be silently undone on rebuild.
   const lists = (Dial.state.lists || []).filter((list) => !standingKindOf(list.id));
@@ -1946,7 +1978,8 @@ document.addEventListener("click", async e => {
   const crd = String(grid.dataset.cardOutcome);
   const disposition = b.dataset.cardOut;
   const c = contactFor(crd);
-  const name = (c && c.n) || document.getElementById("firmOverviewName")?.textContent || "";
+  const name = advisorDisplayName(crd)
+    || document.getElementById("firmOverviewName")?.textContent || "";
   if (!Dial.confirmGrave(disposition, { name, unconfirmed: !!(c && c.t === "review") })) return;
 
   const det = b.closest(".log-out");
@@ -2012,7 +2045,7 @@ function dialSnapshot(id){
   const p = f ? f.properties : null;
   return {
     crd: String(id),
-    name: (p && p.n) || (c && c.n) || `CRD ${id}`,
+    name: advisorDisplayName(id, p && p.n) || `CRD ${id}`,
     firm: (c && c.cn) || (p && p.f) || "",
     phone: (c && c.w) ? c.w + (c.wx ? "," + c.wx : "") : "",
     phoneKind: (c && c.wk) || "",
@@ -2100,7 +2133,7 @@ function teammatesOf(crd){
     // recipients. The server enforces this too; filtering here prevents the UI
     // from offering a choice it will correctly refuse.
     if (mate && mate.e && Dial.tierCanEmail(mate.t, mate.src))
-      out.push({ crd: String(id), name: mate.n || "", email: mate.e });
+      out.push({ crd: String(id), name: advisorDisplayName(id), email: mate.e });
   }
   return out;
 }
@@ -2845,7 +2878,7 @@ function flaggedAdvisors(kind){
     // the card control cannot disagree about whose flag this is.
     if (!Dial.flaggedByMe(crd, kind)) continue;
     const c = contactFor(crd);
-    out.push({ crd, name: (c && c.n) || f.name || `CRD ${crd}`,
+    out.push({ crd, name: advisorDisplayName(crd, f.name) || `CRD ${crd}`,
                firm: (c && c.cn) || "", callable: !!(c && (c.w || c.c)) });
   }
   return out.sort((a, b) => a.name.localeCompare(b.name));
@@ -3976,7 +4009,7 @@ document.addEventListener("click", async e => {
     const c = contactFor(id) || {};
     flag.disabled = true;
     try {
-      await Dial.setFlag(id, kind, on, c.n || "", c.fc || "");
+      await Dial.setFlag(id, kind, on, advisorDisplayName(id), c.fc || "");
       const dropped = await dropFromStandingList(id, kind, Dial.flaggedByMe(id, kind));
       // Redraw the card in place so both marks reflect the new state, and the
       // map so a star appears on the pin without a reload.
@@ -4342,7 +4375,7 @@ function rehydrate(c, sourceState=""){
     out[k] = {
       geometry: { coordinates: [p[0], p[1]] },
       properties: {
-        id: p[6], n: p[7],
+        id: p[6], n: advisorDisplayName(p[6], p[7]),
         f: fm[0], m: motions[fm[1]], s: fm[2], ra: fm[3], sg: fm[4], sf: fm[5], sz: fm[6],
         // WHICH signal made sg true, and how big the wrap book is. Appended to
         // the firm row by export_geojson.py, so older builds simply omit them.
@@ -8032,11 +8065,12 @@ function renderNationalSearch(){
       const territory = STATE_TO_TERRITORY[row[3]] || "Outside assigned territories";
       const outside = currentTerritory && territory !== currentTerritory
         ? " · outside current territory" : "";
-      return `<div class="ares-person"><button type="button" class="ares" data-national-advisor="${i}"><span class="an">${esc(row[1])}</span>` +
+      const shownName = advisorDisplayName(row[0], row[1]);
+      return `<div class="ares-person"><button type="button" class="ares" data-national-advisor="${i}"><span class="an">${esc(shownName)}</span>` +
         `<span class="af">${esc(searchFirm(row[2]))} · CRD ${esc(row[0])}` +
         `${row[6] ? ` · filed as ${esc(row[6])}` : ""}</span>` +
         `<span class="ac">${esc(searchCity(row[4]))}, ${esc(row[3])} · ${esc(territory)}${outside}${row[5].includes("|") ? ` · also ${esc(row[5].split("|").filter(s => s !== row[3]).join(", "))}` : ""}</span></button>`
-        + personActionButton(row[0], row[1]) + `</div>`;
+        + personActionButton(row[0], shownName) + `</div>`;
     }).join("")
     : `<p class="result-label">Advisors</p><p class="hint">${SEARCH_MAN_ERROR
         ? "National advisor search is unavailable."
@@ -8057,6 +8091,7 @@ function renderNationalSearch(){
 
 function openNationalAdvisor(row){
   const id = String(row[0]), state = row[3];
+  const label = advisorDisplayName(id, row[1]);
   const priorDetail = detailsCurrent
     ? { entry:detailsCurrent, map:captureDetailMap() } : null;
   map.closePopup();
@@ -8070,20 +8105,20 @@ function openNationalAdvisor(row){
   const load = targetScope === scope ? Promise.resolve() : switchScope(targetScope);
   load.then(() => {
     if (scope !== targetScope){
-      showNotice(`Could not load ${territory || scopeLabel(targetScope)} for ${row[1]}.`);
+      showNotice(`Could not load ${territory || scopeLabel(targetScope)} for ${label}.`);
       return;
     }
     restoreAdvisorFilters(savedFilters);
     searchBox.value = savedQuery; advQuery = savedQuery.trim().toLowerCase();
     const features = ALL.filter(f => String(f.properties.id) === id);
     if (!features.length){
-      showNotice(`${row[1]} is in the national index but has no mapped pin in ${territory || scopeLabel(targetScope)}.`);
+      showNotice(`${label} is in the national index but has no mapped pin in ${territory || scopeLabel(targetScope)}.`);
       return;
     }
-    const cleared = relaxFiltersForAdvisor(features, row[1], false);
+    const cleared = relaxFiltersForAdvisor(features, label, false);
     if (priorLasso && targetScope !== priorScope && !cleared.includes("the map lasso"))
       cleared.push("the map lasso");
-    focusedAdvisorId = id; focusedAdvisorLabel = row[1];
+    focusedAdvisorId = id; focusedAdvisorLabel = label;
     redraw(); advOut.hidden = true; advOut.innerHTML = "";
     const visible = features.filter(f => passesFilters(f.properties));
     if (visible.length){
@@ -8097,11 +8132,11 @@ function openNationalAdvisor(row){
     const switched = targetScope !== priorScope;
     const territoryLabel = territory ? `${territory} sales territory` : scopeLabel(targetScope);
     if (switched && cleared.length)
-      showNotice(`Switched to ${territoryLabel} and cleared ${joinLabels(cleared)} to show ${row[1]}.`);
+      showNotice(`Switched to ${territoryLabel} and cleared ${joinLabels(cleared)} to show ${label}.`);
     else if (switched)
-      showNotice(`Switched to ${territoryLabel} to show ${row[1]}.`);
+      showNotice(`Switched to ${territoryLabel} to show ${label}.`);
     else if (cleared.length)
-      showNotice(`To show ${row[1]}, cleared ${joinLabels(cleared)}.`);
+      showNotice(`To show ${label}, cleared ${joinLabels(cleared)}.`);
   });
 }
 
@@ -8281,7 +8316,7 @@ document.addEventListener("click", async e => {
   if (!b) return;
   const id = String(b.dataset.teammate);
   const c = contactFor(id);
-  const label = (c && c.n) || ("CRD " + id);
+  const label = advisorDisplayName(id) || ("CRD " + id);
   // At national scope ALL is empty -- the map draws from the aggregate file
   // and loads per-state features only inside a scope. Without this the click
   // always reported "no mapped office", which is not what happened.

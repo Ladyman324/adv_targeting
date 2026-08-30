@@ -163,6 +163,24 @@ class RegistryTests(unittest.TestCase):
                          payload["recipients"]["901"]["email"])
         self.assertEqual("", payload["recipients"]["901"]["actContactId"])
 
+    def test_roster_preferred_name_carries_provenance_but_no_act_authority(self):
+        contacts = {"advisors": {"901": {
+            "e": "c.tolman@ubs.com", "n": "Christopher Tolman",
+            "pn": "Christopher (Chris) Tolman", "sal": "Chris",
+            "ps": "act_primary_email_overlay_v1", "pih": "evidence-hash",
+            "cn": "UBS", "src": "UBS", "t": "high", "ms": 1.0,
+        }}, "teams": {}, "practices": {}}
+        payload = build_registry(pd.DataFrame(columns=[
+            "advisor_crd", "identity_status", "can_email", "email"]),
+            contacts)
+        recipient = payload["recipients"]["901"]
+        self.assertEqual("Christopher (Chris) Tolman", recipient["name"])
+        self.assertEqual("Chris", recipient["greetingName"])
+        self.assertEqual("act_primary_email_overlay_v1",
+                         recipient["greetingSource"])
+        self.assertEqual("evidence-hash", recipient["greetingEvidenceHash"])
+        self.assertEqual("", recipient["actContactId"])
+
     def test_roster_route_requires_current_sec_firm_family_in_production(self):
         contacts = {"advisors": {"901": {
             "e": "person@ubs.com", "n": "Person", "cn": "UBS",

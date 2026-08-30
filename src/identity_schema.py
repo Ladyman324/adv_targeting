@@ -62,7 +62,11 @@ DECISION_COLUMNS = [
     "canonical_for_crd", "act_record_action", "preferred_decision",
     "preferred_first", "reviewer", "reviewed_utc", "reason_code", "notes",
 ]
-REGISTRY_RECIPIENT_FIELDS = ["email", "name", "greetingName", "lastName", "firm", "tier", "source", "actContactId", "teammates"]
+REGISTRY_RECIPIENT_FIELDS = [
+    "email", "name", "greetingName", "greetingSource",
+    "greetingEvidenceHash", "lastName", "firm", "tier", "source",
+    "actContactId", "teammates",
+]
 
 # Files below data/identity are ignored build/review artifacts. Keeping their
 # names here prevents the report, importer, ledger and registry from drifting.

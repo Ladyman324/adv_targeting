@@ -54,6 +54,8 @@ API = ROOT / "api"
 
 sys.path.insert(0, str(SRC))
 
+from preferred_names import preferred_display_name
+
 RESULTS: list[tuple[str, bool, str]] = []
 VERBOSE = False
 
@@ -516,11 +518,21 @@ def _one_display_name():
     nobody. That is the shape of the whole class -- not an error, an absence.
 
     Checked per CRD across the three artifacts a rep actually reads: the map
-    pin, the desktop search index, and the field tile.
+    pin, the desktop search index, and the field tile. Preferred names are a
+    runtime contact overlay on desktop, so the comparison models that same
+    formatter and also verifies the browser applies it to loaded pins/search.
     """
     index = {str(r[0]): r[1] for r in read(DATA / "advisor_index.json")["advisors"]}
     if not index:
         return False, "advisor_index.json has no advisors"
+    contacts = read(DATA / "contacts.json").get("advisors", {})
+    app = (WEB / "app.js").read_text(encoding="utf-8")
+    runtime_ok = (
+        "function advisorDisplayName(" in app
+        and "p.n = advisorDisplayName(p.id, p.n)" in app
+        and "id: p[6], n: advisorDisplayName(p[6], p[7])" in app
+        and "const shownName = advisorDisplayName(row[0], row[1])" in app
+    )
 
     tiles, bad = 0, []
     for path in (DATA / "tiles").glob("*.json"):
@@ -528,7 +540,9 @@ def _one_display_name():
         C = {c: i for i, c in enumerate(tile["columns"])}
         for row in tile["rows"]:
             crd = str(row[C["crd"]])
-            want = index.get(crd)
+            formal = index.get(crd)
+            want = preferred_display_name(
+                formal, (contacts.get(crd) or {}).get("sal", ""))
             tiles += 1
             if want and row[C["name"]] != want:
                 bad.append(f"{crd} desk {want!r} phone {row[C['name']]!r}")
@@ -541,8 +555,10 @@ def _one_display_name():
             if want and pin[7] != want:
                 bad.append(f"{pin[6]} search {want!r} pin {pin[7]!r}")
 
+    if not runtime_ok:
+        bad.append("desktop does not apply advisorDisplayName to contacts, pins and search")
     return (not bad,
-            f"{tiles:,} field rows and {pins:,} map pins agree with the search index"
+            f"{tiles:,} field rows and {pins:,} map pins agree after presentation overlays"
             if not bad else
             f"{len(bad):,} DISAGREE, e.g. {bad[:3]}")
 
