@@ -189,6 +189,17 @@ FIRMS = {
                                    "map": {"RJA": "705", "IMD": "149018", "FID": "149018"}}},
 }
 
+def allowed_crds(slug: str, row=None):
+    """Return the SEC firm family this authoritative roster row may match."""
+    meta = FIRMS[slug]
+    family = tuple(str(value) for value in meta["crds"])
+    channel = meta.get("channel")
+    if not channel or row is None:
+        return family
+    value = str(row.get(channel["column"], "") or "").strip().upper()
+    mapped = channel["map"].get(value)
+    return (str(mapped),) if mapped else family
+
 # Filenames seen in the wild -> slug. Extend as new sources arrive.
 ALIASES = {
     "ubs_advisors": "ubs", "ubs_advisors_all_fields": "ubs",

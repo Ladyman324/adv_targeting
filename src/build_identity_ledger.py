@@ -27,6 +27,7 @@ from identity_schema import (
     LINKS_FILENAME, LINK_COLUMNS, MANIFEST_FILENAME, RULESET_VERSION,
     SOURCE_RECORD_COLUMNS, SOURCE_RECORDS_FILENAME, content_hash,
 )
+from roster_firm_policy import build_domain_policy
 
 RAW, INTERIM = ROOT / "data" / "raw", ROOT / "data" / "interim"
 OUT = ROOT / "data" / IDENTITY_DIRNAME
@@ -124,7 +125,7 @@ def records_by_crd(frame: pd.DataFrame) -> dict[str, dict]:
     return out
 
 
-def sec_context() -> tuple[dict, dict, dict, dict]:
+def sec_context() -> tuple[dict, dict, dict, dict, dict]:
     advisors = pd.read_parquet(INTERIM / "advisors.parquet",
                                columns=["advisor_crd", "first_name", "middle_name",
                                         "last_name", "suffix", "used_first_name"])
@@ -157,7 +158,24 @@ def sec_context() -> tuple[dict, dict, dict, dict]:
                 "postal": clean_text(row["branch_postal"])}
         if crd and item not in branches[crd]:
             branches[crd].append(item)
-    return sec, current, prior, branches
+    alias_path = INTERIM / "advisor_other_names.parquet"
+    if not alias_path.exists():
+        raise SystemExit(
+            "advisor_other_names.parquet is missing; re-run parse_advisors.py "
+            "so ACT identity uses every SEC-filed name")
+    alias_frame = pd.read_parquet(alias_path).fillna("")
+    aliases = defaultdict(list)
+    for row in alias_frame.to_dict("records"):
+        crd = normalize_crd(row.get("advisor_crd"))
+        if crd:
+            aliases[crd].append({
+                "first_name": clean_text(row.get("first_name")),
+                "middle_name": clean_text(row.get("middle_name")),
+                "last_name": clean_text(row.get("last_name")),
+                "suffix": clean_text(row.get("suffix")),
+                "used_first_name": "",
+            })
+    return sec, current, prior, branches, dict(aliases)
 
 
 def crosswalk_suggestions(source_name: str) -> dict[str, dict]:
@@ -179,7 +197,7 @@ def crosswalk_suggestions(source_name: str) -> dict[str, dict]:
     return out
 
 
-def independent_roster_evidence() -> dict[str, list[dict]]:
+def independent_roster_evidence() -> tuple[dict[str, list[dict]], dict]:
     """Index scraped firm-roster rows by exact email with explicit provenance."""
     from build_contacts import load_rosters
     frame = load_rosters().fillna("")
@@ -197,12 +215,14 @@ def independent_roster_evidence() -> dict[str, list[dict]]:
             "name_last": tokens[-1] if len(tokens) > 1 else "",
             "phone": clean_text(row.get("phone")),
             "firm_crd": normalize_crd(row.get("firm_crd")),
+            "allowed_firm_crds": clean_text(row.get("allowed_firm_crds")),
+            "source_slug": clean_text(row.get("source_slug")),
             "city": clean_text(row.get("city")),
             "state": clean_text(row.get("state")).upper(),
         }
         if item not in out[email]:
             out[email].append(item)
-    return dict(out)
+    return dict(out), build_domain_policy(frame.to_dict("records"))
 
 
 def load_decisions() -> tuple[dict[str, dict], str]:
@@ -262,9 +282,12 @@ def main() -> None:
     rows = json.loads(source.read_text(encoding="utf-8"))
     records = prepare_act_records(rows, source.name, source_hash)
     del rows
-    sec, current, prior, branches = sec_context()
+    sec, current, prior, branches, aliases = sec_context()
     suggestions = crosswalk_suggestions(source.name)
-    rosters = {} if args.no_rosters else independent_roster_evidence()
+    if args.no_rosters:
+        rosters, domain_policy = {}, {}
+    else:
+        rosters, domain_policy = independent_roster_evidence()
     roster_sources = ({p.name: sha256_file(p) for p in
                        sorted((RAW / "firm_rosters").glob("*")) if p.is_file()}
                       if not args.no_rosters else {})
@@ -283,6 +306,9 @@ def main() -> None:
             "prior_firm_names": sorted(prior.get(target, set())),
             "branches": branches.get(target, []),
             "roster": rosters.get(record["norm_email"], []),
+            "email_domain_policy": domain_policy.get(
+                record.get("email_domain", ""), {}),
+            "sec_aliases": aliases.get(target, []),
         }
         evidence, link = evaluate_assertion(record, sec.get(target), context)
         if act_id in decisions:
@@ -315,13 +341,15 @@ def main() -> None:
         "secSources": {p.name: sha256_file(p) for p in (
             INTERIM / "advisors.parquet", INTERIM / "advisor_branches.parquet",
             INTERIM / "advisor_employments.parquet",
-            INTERIM / "advisor_employment_history.parquet")},
+            INTERIM / "advisor_employment_history.parquet",
+            INTERIM / "advisor_other_names.parquet")},
         "crosswalkSource": {
             "file": "act_crosswalk.parquet",
             "sha256": sha256_file(INTERIM / "act_crosswalk.parquet"),
         },
         "rosterEvidence": not args.no_rosters,
         "rosterSources": roster_sources,
+        "rosterDomainPolicyHash": content_hash(domain_policy),
         "decisionsHash": decisions_hash, "statusCounts": status_counts,
         "outputs": {
             SOURCE_RECORDS_FILENAME: {"sha256": sha256_file(source_records_path),

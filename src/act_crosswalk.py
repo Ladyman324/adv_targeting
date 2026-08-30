@@ -46,8 +46,8 @@ ROOT = pathlib.Path(__file__).parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT))
 
-from build_contacts import (clean_email, derive_domain_map, load_index,   # noqa: E402
-                            score_contacts, strip_designations)
+from build_contacts import (clean_email, derive_domain_families, load_index,  # noqa: E402
+                            load_rosters, score_contacts, strip_designations)
 from nicknames import any_name_agrees, same_person                       # noqa: E402
 
 RAW = ROOT / "data" / "raw"
@@ -96,12 +96,14 @@ def to_frame(rows: list[dict], domains: dict) -> pd.DataFrame:
         email = clean_email(r.get("emailAddress") or "")
         name = strip_designations(
             f"{r.get('firstName') or ''} {r.get('lastName') or ''}".strip())
+        family = tuple(domains.get(email.split("@")[-1], ())) if email else ()
         out.append({
             "act_id": str(r.get("id") or ""),
             "name": name,
             "email": email,
             # Same rule the CRM loader uses: the email domain names the firm.
-            "firm_crd": domains.get(email.split("@")[-1], "") if email else "",
+            "firm_crd": family[0] if len(family) == 1 else "",
+            "allowed_firm_crds": "|".join(family),
             "city": str(addr.get("city") or "").strip(),
             "state": str(addr.get("state") or "").strip().upper(),
             "company": str(r.get("company") or "").strip(),
@@ -127,7 +129,7 @@ def main() -> None:
     rows = json.loads(src.read_text(encoding="utf-8"))
     print(f"[*] {src.name}: {len(rows):,} Act! contacts")
 
-    domains = derive_domain_map()
+    _, domains = derive_domain_families(load_rosters())
     people = to_frame(rows, domains)
 
     # STAFF ARE NOT EXCLUDED. They used to be -- `people[~people.is_user]`, on

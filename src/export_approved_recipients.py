@@ -64,6 +64,17 @@ def load_contacts() -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def load_current_firms() -> dict[str, set[str]]:
+    path = ROOT / "data" / "interim" / "advisor_employments.parquet"
+    frame = pd.read_parquet(path, columns=["advisor_crd", "firm_crd"]).fillna("")
+    out: dict[str, set[str]] = {}
+    for row in frame.to_dict("records"):
+        crd, firm = normalize_crd(row["advisor_crd"]), normalize_crd(row["firm_crd"])
+        if crd and firm:
+            out.setdefault(crd, set()).add(firm)
+    return out
+
+
 def bounded_match_score(value) -> float | None:
     """Return a finite matcher score in the producer's real range."""
     try:
@@ -148,7 +159,8 @@ def _contacts_from_links(links: pd.DataFrame) -> dict:
 
 
 def build_registry(links: pd.DataFrame, contacts_payload: dict | None = None,
-                   provenance: dict | None = None) -> dict:
+                   provenance: dict | None = None,
+                   current_firms: dict[str, set[str]] | None = None) -> dict:
     """Build every business-authorized route; the ledger gates Act routes.
 
     ``confirmed`` and ``high`` are authorized for the controlled composer by
@@ -195,6 +207,15 @@ def build_registry(links: pd.DataFrame, contacts_payload: dict | None = None,
         if tier == "high" and (not source or match_score is None):
             ineligible[crd] = "high_match_evidence_missing"
             continue
+        if current_firms is not None and source.upper() not in {"CRM", "EIC"}:
+            allowed = {normalize_crd(value) for value in contact.get("rf", [])
+                       if normalize_crd(value)}
+            if not allowed:
+                ineligible[crd] = "roster_firm_evidence_missing"
+                continue
+            if not allowed & current_firms.get(crd, set()):
+                ineligible[crd] = "roster_current_firm_conflict"
+                continue
         # Internal colleagues are EXPORTED, flagged, and refused at run time
         # unless the address or domain is on EMAIL_INTERNAL_RECIPIENT_ALLOWLIST.
         #
@@ -396,7 +417,7 @@ def main() -> int:
         "contactsSha256": file_hash(contacts_path),
         "actSource": (manifest.get("actSource") or {}).get("file", ""),
         "actSourceSha256": (manifest.get("actSource") or {}).get("sha256", ""),
-    })
+    }, load_current_firms())
     json_path, gzip_path = write_registry(payload)
     descriptor_path = write_release_descriptor(payload)
     print(f"[+] {json_path}: {len(payload['recipients']):,} approved; "

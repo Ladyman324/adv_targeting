@@ -10,12 +10,32 @@ import unittest
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from export_act_crd_corrections import validate_identity_manifest
+import pandas as pd
+
+from export_act_crd_corrections import (claimed_domain_conflict_mask,
+                                        is_claimed_domain_conflict,
+                                        report_email_domain,
+                                        validate_identity_manifest)
 from identity_schema import (EVIDENCE_FILENAME, LINKS_FILENAME,
                              SOURCE_RECORDS_FILENAME, content_hash)
 
 
 class CorrectionReportProvenanceTests(unittest.TestCase):
+    def test_report_uses_suffixed_evidence_email_domain(self):
+        row = {"email_domain_ev": "ubs.com", "email_domain_act": ""}
+        self.assertEqual("ubs.com", report_email_domain(row))
+
+    def test_domain_conflict_is_a_correction_only_when_act_supplied_a_crd(self):
+        rows = pd.DataFrame([
+            {"claimed_crd": "", "email_domain_current_conflicts": True},
+            {"claimed_crd": "123", "email_domain_current_conflicts": True},
+            {"claimed_crd": "456", "email_domain_current_conflicts": False},
+        ])
+        self.assertEqual([False, True, False],
+                         claimed_domain_conflict_mask(rows).tolist())
+        self.assertFalse(is_claimed_domain_conflict(rows.iloc[0]))
+        self.assertTrue(is_claimed_domain_conflict(rows.iloc[1]))
+
     def write_manifest(self, root: pathlib.Path) -> pathlib.Path:
         outputs = {}
         for filename in (SOURCE_RECORDS_FILENAME, EVIDENCE_FILENAME,

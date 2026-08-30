@@ -19,6 +19,7 @@ import pandas as pd
 
 sys.path.insert(0, str(pathlib.Path(__file__).parents[1]))
 import config
+from sec_names import OTHER_NAME_COLUMNS, build_nickname_evidence
 
 ROOT = pathlib.Path(__file__).parents[1]
 RAW = ROOT / "data" / "raw"
@@ -87,8 +88,14 @@ def _drp_flags(ind) -> dict:
     return out
 
 
-def parse(zip_path: pathlib.Path):
+def parse(zip_path: pathlib.Path, *, include_other_names: bool = False):
+    """Parse the feed, optionally returning normalized ``OthrNm`` rows.
+
+    The default five-frame result remains compatible with older callers. The
+    production build opts in to a sixth frame for the complete SEC name forms.
+    """
     advisors, employments, emp_hist, exams, othr = [], [], [], [], []
+    other_names = []
     z = zipfile.ZipFile(zip_path)
     members = sorted(z.namelist())
 
@@ -102,6 +109,7 @@ def parse(zip_path: pathlib.Path):
                     el.clear(); continue
                 pk = info.get("indvlPK")
 
+                names = _other_names(el)
                 rec = {
                     "advisor_crd": pk,
                     "iapd_url": info.get("link"),
@@ -110,7 +118,7 @@ def parse(zip_path: pathlib.Path):
                     "last_name": info.get("lastNm"),
                     "suffix": info.get("sufNm"),
                     # "" when the filed first name is the one they use
-                    "used_first_name": _used_first(info, _other_names(el)),
+                    "used_first_name": _used_first(info, names),
                     "active_ag_reg": info.get("actvAGReg"),
                     "designations": _designations(el),
                     "n_exams": len(el.findall("./Exms/Exm")),
@@ -119,6 +127,15 @@ def parse(zip_path: pathlib.Path):
                 }
                 rec.update(_drp_flags(el))
                 advisors.append(rec)
+                for ordinal, name in enumerate(names, 1):
+                    other_names.append({
+                        "advisor_crd": pk,
+                        "alias_ordinal": ordinal,
+                        "first_name": name["firstNm"],
+                        "middle_name": name["midNm"],
+                        "last_name": name["lastNm"],
+                        "suffix": name["sufNm"],
+                    })
 
                 for eh in el.findall("./EmpHss/EmpHs"):
                     emp_hist.append({
@@ -169,8 +186,11 @@ def parse(zip_path: pathlib.Path):
         print(f"  [{mi:>2}/{len(members)}] {member:24s} advisors={len(advisors):>8,} "
               f"emp={len(employments):>8,} hist={len(emp_hist):>9,} exams={len(exams):>8,}")
 
-    return (pd.DataFrame(advisors), pd.DataFrame(employments),
+    base = (pd.DataFrame(advisors), pd.DataFrame(employments),
             pd.DataFrame(emp_hist), pd.DataFrame(exams), pd.DataFrame(othr))
+    if include_other_names:
+        return base + (pd.DataFrame(other_names, columns=OTHER_NAME_COLUMNS),)
+    return base
 
 
 def parse_prior_registrations(zip_path: pathlib.Path) -> pd.DataFrame:
@@ -201,12 +221,21 @@ def parse_prior_registrations(zip_path: pathlib.Path) -> pd.DataFrame:
 def main() -> None:
     src = config.newest_feed(RAW, "IA_INDVL_Feed_*.xml.zip")
     print(f"parsing {src.name} ...")
-    adv, emp, hist, exams, othr = parse(src)
+    adv, emp, hist, exams, othr, other_names = parse(
+        src, include_other_names=True)
     INTERIM.mkdir(parents=True, exist_ok=True)
     adv.to_parquet(INTERIM / "advisors.parquet", index=False)
     emp.to_parquet(INTERIM / "advisor_employments.parquet", index=False)
+    other_names.to_parquet(INTERIM / "advisor_other_names.parquet", index=False)
+    nickname_evidence = build_nickname_evidence(adv, other_names)
+    nickname_evidence.to_parquet(
+        INTERIM / "sec_nickname_evidence.parquet", index=False)
     print(f"\nadvisors    {len(adv):,} rows -> advisors.parquet")
     print(f"employments {len(emp):,} rows -> advisor_employments.parquet")
+    print(f"other names {len(other_names):,} rows -> advisor_other_names.parquet")
+    common = int((nickname_evidence["evidence_status"] == "common_candidate").sum())
+    print(f"nicknames   {len(nickname_evidence):,} observed pairs; {common:,} "
+          "common candidates -> sec_nickname_evidence.parquet")
     for df, nm in [(hist, "advisor_employment_history"), (exams, "advisor_exams"),
                    (othr, "advisor_other_business")]:
         df.to_parquet(INTERIM / f"{nm}.parquet", index=False)

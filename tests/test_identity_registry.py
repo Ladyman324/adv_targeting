@@ -163,6 +163,22 @@ class RegistryTests(unittest.TestCase):
                          payload["recipients"]["901"]["email"])
         self.assertEqual("", payload["recipients"]["901"]["actContactId"])
 
+    def test_roster_route_requires_current_sec_firm_family_in_production(self):
+        contacts = {"advisors": {"901": {
+            "e": "person@ubs.com", "n": "Person", "cn": "UBS",
+            "src": "UBS", "t": "high", "ms": 0.9, "rf": ["8174"],
+        }}, "teams": {}, "practices": {}}
+        links = pd.DataFrame(columns=[
+            "advisor_crd", "identity_status", "can_email", "email"])
+        blocked = build_registry(links, contacts, current_firms={
+            "901": {"999"}})
+        self.assertNotIn("901", blocked["recipients"])
+        self.assertEqual("roster_current_firm_conflict",
+                         blocked["ineligible"]["901"])
+        allowed = build_registry(links, contacts, current_firms={
+            "901": {"8174"}})
+        self.assertIn("901", allowed["recipients"])
+
     def test_crm_contact_requires_exact_approved_ledger_email(self):
         contacts = {"advisors": {"123": {
             "e": "changed@example.com", "n": "Act Person",

@@ -22,6 +22,8 @@ TABLES = {
     "advisor_employment_history":  ("advisor_employment_history.parquet", "advisor_crd"),
     "advisor_exams":               ("advisor_exams.parquet", "advisor_crd"),
     "advisor_other_business":      ("advisor_other_business.parquet", "advisor_crd"),
+    "advisor_other_names":         ("advisor_other_names.parquet", "advisor_crd"),
+    "sec_nickname_evidence":       ("sec_nickname_evidence.parquet", "unfiltered"),
     "firm_state_registrations":    ("firm_state_registrations.parquet", "firm_crd"),
     "firm_websites":               ("firm_websites.parquet", "firm_crd"),
     "firm_other_names":            ("firm_other_names.parquet", "firm_crd"),

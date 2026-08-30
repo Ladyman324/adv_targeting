@@ -28,10 +28,12 @@ REQUIRED_ACT_IDS = frozenset({
 })
 
 REVIEW_COLUMNS = [
-    "priority", "issue_type", "identity_status", "decision_reason", "act_id",
+    "priority", "issue_type", "recommended_action", "identity_status",
+    "decision_reason", "act_id",
     "current_crd", "proposed_crd", "act_full_name", "act_structured_name",
     "act_salutation", "act_company", "act_city", "act_state", "act_postal",
-    "act_email", "sec_name", "sec_used_first", "candidate_tier",
+    "act_email", "act_email_domain", "expected_sec_firm_crds",
+    "actual_sec_firm_crds", "sec_name", "sec_used_first", "candidate_tier",
     "candidate_score", "candidate_gap", "positive_evidence", "hard_conflicts",
     "warnings", "roster_evidence", "expected_evidence_hash", "link_decision",
     "identity_manifest_hash", "act_source_file", "act_source_sha256",
@@ -39,6 +41,26 @@ REVIEW_COLUMNS = [
     "preferred_decision", "preferred_first", "reviewer", "reviewed_utc",
     "reason_code", "notes",
 ]
+
+
+def report_email_domain(row) -> str:
+    """Read the domain across current and pre-suffix ledger schemas."""
+    return (row.get("email_domain_ev", "") or
+            row.get("email_domain_act", "") or
+            row.get("email_domain", ""))
+
+
+def claimed_domain_conflict_mask(rows: pd.DataFrame) -> pd.Series:
+    """Only an actual ACT CRD can be an ACT CRD/domain correction."""
+    claimed = rows["claimed_crd"].astype(str).str.strip().ne("")
+    conflicts = rows["email_domain_current_conflicts"].astype(bool)
+    return claimed & conflicts
+
+
+def is_claimed_domain_conflict(row) -> bool:
+    """Scalar form also used after manual sentinel/pinned-row selection."""
+    return bool(str(row.get("claimed_crd", "") or "").strip() and
+                row.get("email_domain_current_conflicts"))
 
 
 def validate_identity_manifest(identity: pathlib.Path = IDENTITY) -> dict:
@@ -73,10 +95,13 @@ def build_review_frame(candidate_limit: int = 250,
         links, on=["record_key", "source_record_id"], suffixes=("", "_link"),
         validate="one_to_one")
     problems = rows[rows["identity_status"].isin(["quarantine", "rejected"])].copy()
+    domain_conflict_mask = claimed_domain_conflict_mask(rows)
+    domain_conflicts = rows[domain_conflict_mask].copy()
     preferred = rows[(rows["identity_status"] == "approved") &
                      (rows["preferred_status"] == "review")].copy()
     candidates = rows[(rows["identity_status"] == "unmatched") &
-                      rows["candidate_tier"].isin(["confirmed", "high"])].copy()
+                      rows["candidate_tier"].isin(["confirmed", "high"]) &
+                      ~rows["email_domain_current_conflicts"].astype(bool)].copy()
     candidates = candidates.sort_values(
         ["candidate_tier", "candidate_score", "candidate_gap"],
         ascending=[True, False, False]).head(candidate_limit)
@@ -84,17 +109,24 @@ def build_review_frame(candidate_limit: int = 250,
         str(act_id).strip() for act_id in include_act_ids if str(act_id).strip()
     }
     pinned = rows[rows["source_record_id"].isin(pinned_ids)].copy()
-    picked = pd.concat([problems, preferred, candidates, pinned],
+    picked = pd.concat([problems, domain_conflicts, preferred, candidates, pinned],
                        ignore_index=True).drop_duplicates(
                            subset=["source_record_id"], keep="first")
 
     def report_row(row):
-        if row["identity_status"] in {"quarantine", "rejected"}:
+        if is_claimed_domain_conflict(row):
+            issue, priority = "act_crd_firm_conflict", 1
+            recommended = ("Verify whether the person moved firms. Correct or clear the "
+                           "ACT CRD if the roster-domain firm family is current.")
+        elif row["identity_status"] in {"quarantine", "rejected"}:
             issue, priority = "existing_crd_correction", 1
+            recommended = "Verify the CRD and correct, replace, or clear it in ACT."
         elif row["preferred_status"] == "review":
             issue, priority = "preferred_name_review", 2
+            recommended = "Confirm the preferred greeting name."
         else:
             issue, priority = "candidate_crd_addition", 3
+            recommended = "Verify the proposed CRD before adding it to ACT."
         sec_full = " ".join(x for x in (
             row["sec_first_name"], row["sec_middle_name"], row["sec_last_name"],
             row["sec_suffix"]) if x)
@@ -104,6 +136,7 @@ def build_review_frame(candidate_limit: int = 250,
             proposed = final_crd if final_crd != row["claimed_crd"] else ""
         return {
             "priority": priority, "issue_type": issue,
+            "recommended_action": recommended,
             "identity_status": row["identity_status"],
             "decision_reason": row["decision_reason"],
             "act_id": row["source_record_id"], "current_crd": row["claimed_crd"],
@@ -115,7 +148,14 @@ def build_review_frame(candidate_limit: int = 250,
             "act_salutation": row["raw_salutation"],
             "act_company": row["raw_company"], "act_city": row["raw_city"],
             "act_state": row["raw_state"], "act_postal": row["raw_postal"],
-            "act_email": row["norm_email"], "sec_name": sec_full,
+            "act_email": row["norm_email"],
+            # Both source records and evidence carry this field, so the first
+            # merge suffixes it. Prefer the normalized evidence value and
+            # retain fallbacks for older ledger schemas.
+            "act_email_domain": report_email_domain(row),
+            "expected_sec_firm_crds": row.get("email_domain_firms_json", ""),
+            "actual_sec_firm_crds": row.get("current_firms_json", ""),
+            "sec_name": sec_full,
             "sec_used_first": row["sec_used_first_name"],
             "candidate_tier": row["candidate_tier"],
             "candidate_score": row["candidate_score"],

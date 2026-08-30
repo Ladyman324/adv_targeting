@@ -11,6 +11,7 @@ from identity_normalize import (
     structured_name,
 )
 from identity_schema import RULESET_VERSION, evidence_hash
+from roster_firm_policy import crd_tuple
 
 
 def _json(values: Iterable[str]) -> str:
@@ -111,21 +112,33 @@ def evaluate_assertion(record: Mapping[str, Any],
 
     full_exact = structured_exact = given_exact = given_used = nickname = False
     suffix_ok = True
+    sec_aliases = list(context.get("sec_aliases", []))
     if sec is not None:
-        sec_last, act_last = name_token(sec.get("last_name")), name_token(record.get("norm_last_name"))
-        full_exact = bool(act_last and sec_last and act_last == sec_last)
+        identity_names = [sec, *sec_aliases]
+        sec_last = name_token(sec.get("last_name"))
+        act_last = name_token(record.get("norm_last_name"))
+        sec_last_tokens = {name_token(item.get("last_name"))
+                           for item in identity_names
+                           if name_token(item.get("last_name"))}
+        full_exact = bool(act_last and act_last in sec_last_tokens)
         structured_last = name_token(record.get("raw_last_name"))
         structured_exact = bool(structured_last and sec_last and structured_last == sec_last)
         if full_exact:
             positive.append("surname_exact")
         else:
             conflicts.append("surname_conflict_or_missing")
-        sec_given = [sec.get("first_name"), sec.get("middle_name"), sec.get("used_first_name")]
+        surname_names = [item for item in identity_names
+                         if name_token(item.get("last_name")) == act_last]
+        sec_given = [item.get(field) for item in surname_names
+                     for field in ("first_name", "middle_name", "used_first_name")]
         act_given = [record.get("norm_first_name"), record.get("raw_first_name")]
         agrees, given_reason = given_agreement(act_given, sec_given)
         given_exact = given_reason == "given_exact"
-        given_used = bool(name_token(sec.get("used_first_name")) and
-                          name_token(sec.get("used_first_name")) in
+        used_tokens = {name_token(item.get("used_first_name"))
+                       for item in surname_names
+                       if name_token(item.get("used_first_name"))}
+        given_used = bool(used_tokens and
+                          used_tokens &
                           {name_token(x) for x in act_given})
         nickname = given_reason == "given_strict_nickname"
         if agrees:
@@ -145,6 +158,16 @@ def evaluate_assertion(record: Mapping[str, Any],
         warnings.append("missing_or_invalid_primary_email")
     current_firms = {clean_text(x) for x in context.get("current_firms", [])
                      if clean_text(x)}
+    domain_policy = dict(context.get("email_domain_policy") or {})
+    domain_status = clean_text(domain_policy.get("status"))
+    domain_firms = {normalize_crd(x)
+                    for x in domain_policy.get("allowedFirmCrds", [])
+                    if normalize_crd(x)}
+    domain_current_agrees = bool(
+        domain_status == "authoritative" and current_firms & domain_firms)
+    domain_current_conflicts = bool(
+        domain_status == "authoritative" and current_firms and domain_firms
+        and not current_firms & domain_firms)
     prior_firms = {clean_text(x) for x in context.get("prior_firms", [])
                    if clean_text(x)}
     current_firm_names = {name_token(x) for x in
@@ -174,20 +197,29 @@ def evaluate_assertion(record: Mapping[str, Any],
     roster_phone_exact = bool(record.get("norm_phone") and any(
         normalize_phone(r.get("phone")) == record.get("norm_phone")
         for r in roster))
-    sec_last = name_token((sec or {}).get("last_name"))
+    identity_names = [sec or {}, *sec_aliases]
+    sec_last_tokens = {name_token(item.get("last_name"))
+                       for item in identity_names
+                       if name_token(item.get("last_name"))}
     roster_name_agrees = False
+    roster_firm_agrees = False
     for item in roster:
+        item_firms = set(crd_tuple(item.get("allowed_firm_crds"))) or set(
+            crd_tuple(item.get("firm_crd")))
+        item_firm_agrees = bool(current_firms & item_firms)
+        roster_firm_agrees = roster_firm_agrees or item_firm_agrees
         parts = clean_text(item.get("name")).split()
         roster_last = name_token(item.get("name_last") or
                                  (parts[-1] if parts else ""))
-        agrees = given_agreement(
+        comparable = [name for name in identity_names
+                      if name_token(name.get("last_name")) == roster_last]
+        agrees = any(given_agreement(
             [item.get("name_first"), item.get("name")],
-            [(sec or {}).get("first_name"), (sec or {}).get("middle_name"),
-             (sec or {}).get("used_first_name")])[0]
+            [name.get("first_name"), name.get("middle_name"),
+             name.get("used_first_name")])[0] for name in comparable)
         roster_name_agrees = roster_name_agrees or bool(
-            agrees and roster_last and roster_last == sec_last)
-    roster_firm_agrees = bool(current_firms and any(
-        clean_text(r.get("firm_crd")) in current_firms for r in roster))
+            agrees and roster_last and roster_last in sec_last_tokens and
+            item_firm_agrees)
     act_company = name_token(record.get("raw_company"))
     act_firm_current = bool(act_company and act_company in current_firm_names)
     act_firm_prior = bool(act_company and act_company in prior_firm_names)
@@ -203,10 +235,12 @@ def evaluate_assertion(record: Mapping[str, Any],
         positive.append("independent_roster_name_agrees")
     if roster_firm_agrees:
         positive.append("independent_roster_firm_current_agrees")
+    if domain_current_agrees:
+        positive.append("authoritative_email_domain_current_firm_agrees")
     # The CRD and name are both claims from ACT. Automatic approval needs a
     # second source connecting this ACT row to the SEC person.
     independently_corroborated = bool(
-        act_firm_current or street_exact or postal_exact or
+        domain_current_agrees or act_firm_current or street_exact or postal_exact or
         (city_exact and state_exact) or roster_name_agrees)
     firm_comparable = bool(act_company and current_firm_names)
     firm_contradiction = bool(
@@ -224,6 +258,10 @@ def evaluate_assertion(record: Mapping[str, Any],
         (city_state_comparable and not (city_exact and state_exact)))
     if firm_contradiction:
         warnings.append("current_firm_differs")
+    if domain_current_conflicts:
+        warnings.append("authoritative_email_domain_current_firm_conflict")
+    if domain_current_agrees and firm_contradiction:
+        warnings.append("act_company_conflicts_authoritative_domain")
     if address_contradiction:
         warnings.append("current_address_differs")
     conflicts, warnings, positive = map(lambda v: sorted(set(v)),
@@ -246,6 +284,9 @@ def evaluate_assertion(record: Mapping[str, Any],
         "priorFirms": sorted(prior_firms),
         "priorFirmNames": sorted(prior_firm_names),
         "branches": branches, "rosterEvidence": roster,
+        "emailDomain": clean_text(record.get("email_domain")),
+        "emailDomainPolicy": domain_policy,
+        "secAliases": sec_aliases,
     }
     ev_hash = evidence_hash(payload)
     evidence = {
@@ -272,9 +313,17 @@ def evaluate_assertion(record: Mapping[str, Any],
         "email_unique_in_act": int(record.get("email_claim_count") or 0) <= 1,
         "email_personal": bool(email and not record.get("generic_email")),
         "email_surname_exact": False, "email_given_exact": False,
+        "email_domain": clean_text(record.get("email_domain")),
+        "email_domain_policy_status": domain_status,
+        "email_domain_firms_json": _json(domain_firms),
+        "email_domain_current_agrees": domain_current_agrees,
+        "email_domain_current_conflicts": domain_current_conflicts,
+        "sec_aliases_json": json.dumps(sec_aliases, sort_keys=True,
+                                        separators=(",", ":")),
         "current_firms_json": _json(current_firms),
         "prior_firms_json": _json(prior_firms),
-        "firm_current_agrees": roster_firm_agrees or act_firm_current,
+        "firm_current_agrees": (domain_current_agrees or roster_firm_agrees
+                                or act_firm_current),
         "firm_prior_agrees": act_firm_prior,
         "sec_branches_json": json.dumps(branches, sort_keys=True,
                                          separators=(",", ":")),
@@ -294,6 +343,8 @@ def evaluate_assertion(record: Mapping[str, Any],
         status, reason = "unmatched", "no_asserted_crd"
     elif conflicts:
         status, reason = "quarantine", conflicts[0]
+    elif domain_current_conflicts:
+        status, reason = "review", "email_domain_current_firm_conflict_review"
     elif not independently_corroborated:
         if firm_contradiction:
             status, reason = "review", "current_firm_conflict_review"

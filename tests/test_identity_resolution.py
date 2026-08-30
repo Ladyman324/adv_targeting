@@ -77,6 +77,69 @@ class ResolverTests(unittest.TestCase):
         self.assertEqual("current_firm_conflict_review",
                          link["decision_reason"])
 
+    def test_authoritative_email_domain_corroborates_claimed_crd_family(self):
+        record = prepare_act_records(
+            [act(email="chris@ubs.com")], "act.json", "abc")[0]
+        evidence, link = evaluate_assertion(record, sec(), {
+            "current_firms": ["8174"],
+            "email_domain_policy": {
+                "status": "authoritative", "allowedFirmCrds": ["8174"]},
+        })
+        self.assertEqual("approved", link["identity_status"])
+        self.assertTrue(evidence["email_domain_current_agrees"])
+
+    def test_authoritative_email_domain_conflict_is_never_auto_approved(self):
+        record = prepare_act_records(
+            [act(email="chris@ubs.com")], "act.json", "abc")[0]
+        evidence, link = evaluate_assertion(record, sec(), {
+            "current_firms": ["999"],
+            "branches": [{"street": "1 Main St", "city": "New York",
+                          "state": "NY", "postal": "10001"}],
+            "email_domain_policy": {
+                "status": "authoritative", "allowedFirmCrds": ["8174"]},
+        })
+        self.assertEqual("review", link["identity_status"])
+        self.assertFalse(link["can_email"])
+        self.assertTrue(evidence["email_domain_current_conflicts"])
+
+    def test_roster_name_corroboration_requires_current_sec_firm_family(self):
+        record = prepare_act_records([act()], "act.json", "abc")[0]
+        roster = [{"name": "Chris Tolman", "name_first": "Chris",
+                   "name_last": "Tolman", "firm_crd": "19616",
+                   "allowed_firm_crds": "11025|19616"}]
+        evidence, link = evaluate_assertion(
+            record, sec(), {"current_firms": ["999"], "roster": roster})
+        self.assertFalse(evidence["roster_name_agrees"])
+        self.assertFalse(evidence["roster_firm_current_agrees"])
+        self.assertEqual("review", link["identity_status"])
+
+    def test_roster_family_accepts_wells_finet_current_entity(self):
+        record = prepare_act_records([act()], "act.json", "abc")[0]
+        roster = [{"name": "Chris Tolman", "name_first": "Chris",
+                   "name_last": "Tolman", "firm_crd": "19616",
+                   "allowed_firm_crds": "11025|19616"}]
+        evidence, link = evaluate_assertion(
+            record, sec(), {"current_firms": ["11025"], "roster": roster})
+        self.assertTrue(evidence["roster_name_agrees"])
+        self.assertTrue(evidence["roster_firm_current_agrees"])
+        self.assertEqual("approved", link["identity_status"])
+
+    def test_asserted_name_can_match_a_person_specific_sec_alias(self):
+        record = prepare_act_records(
+            [act(crd="4784023", first="Nicole", last="Tesoriero",
+                 email="nicole.tesoriero@ubs.com")], "act.json", "abc")[0]
+        _, link = evaluate_assertion(
+            record, sec("4784023", "Nicole", "Flores"), {
+                "current_firms": ["8174"],
+                "email_domain_policy": {
+                    "status": "authoritative", "allowedFirmCrds": ["8174"]},
+                "sec_aliases": [{
+                    "first_name": "Nicole", "middle_name": "",
+                    "last_name": "Tesoriero", "suffix": "",
+                    "used_first_name": ""}],
+            })
+        self.assertEqual("approved", link["identity_status"])
+
     def test_address_contradiction_without_other_corroboration_requires_review(self):
         record = prepare_act_records([act()], "act.json", "abc")[0]
         _, link = evaluate_assertion(record, sec(), {

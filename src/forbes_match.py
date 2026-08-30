@@ -44,6 +44,8 @@ from collections import defaultdict
 
 import pandas as pd
 
+from sec_names import load_advisor_aliases, surname_given_groups
+
 ROOT = pathlib.Path(__file__).parents[1]
 INTERIM = ROOT / "data" / "interim"
 WEB = ROOT / "webapp" / "data"
@@ -222,7 +224,10 @@ def name_score(forbes_given: list[str], sec_forms: set[str]) -> float:
     for token in forbes_given:
         for form in sec_forms:
             if token == form:
-                best = max(best, 1.0)
+                # Equal one-letter tokens are still only initials. Treating
+                # J == a filed middle initial J as a full-name match redirected
+                # J.R. Randall to Kathy J. Randall instead of John P. Randall.
+                best = max(best, 0.45 if len(token) == 1 else 1.0)
             elif len(token) > 1 and len(form) > 1 and edit1(token, form):
                 best = max(best, 0.80)
             elif (len(token) == 1 or len(form) == 1) and token[0] == form[0]:
@@ -324,7 +329,7 @@ def load_reference():
     return advisors, branches, employment, firm_name, aliases
 
 
-def build_index(advisors, branches, employment):
+def build_index(advisors, branches, employment, advisor_aliases=None):
     """(surname, state) -> candidate rows. The hard gate lives here: anything
     not sharing a surname AND a state is never even scored."""
     where = defaultdict(lambda: {"states": set(), "cities": set(),
@@ -367,13 +372,23 @@ def build_index(advisors, branches, employment):
     # city wins uncontested with a perfect score. State is now scored, not
     # gated, so the true candidate is present to win or to force a tie -- and
     # a tie is rejected, which is safe.
+    # Legacy builds have no alias artifact and retain the exact old behavior.
+    # Production builds load it automatically, so load_reference() remains a
+    # backward-compatible five-tuple for existing callers.
+    if advisor_aliases is None:
+        advisor_aliases = load_advisor_aliases(
+            INTERIM / "advisor_other_names.parquet")
     index = defaultdict(list)
     for row in advisors.itertuples(index=False):
         entry = where.get(row.advisor_crd)
         if not entry:
             continue
-        forms = given_forms(row)
-        if not forms or not row.last_key:
+        legal_forms = given_forms(row)
+        groups = surname_given_groups(
+            row, advisor_aliases.get(str(row.advisor_crd), []))
+        if row.last_key and legal_forms:
+            groups.setdefault(row.last_key, set()).update(legal_forms)
+        if not groups:
             continue
         # The SEC bakes a generational suffix into last_name, so CRD 5281870
         # ("LYNN TRUSTY SHAW II") is keyed under "shawii" -- while split_name
@@ -384,14 +399,22 @@ def build_index(advisors, branches, employment):
         # reachable, and carry the suffix so scoring can tell them apart.
         suffix = suffix_of(getattr(row, "last_name", ""))
         entry = {**entry, "suffix": suffix}
-        keys = {row.last_key}
+        keys = set(groups)
         if suffix:
             stripped = norm(re.sub(r"\s*(?:jr|sr|ii|iii|iv|v|vi)\.?\s*$", " ",
                                    str(row.last_name or ""), flags=re.I))
             if stripped:
+                # This is an alternate spelling of the legal surname key, not
+                # a separate OthrNm. Copy only the legal surname's given forms.
+                groups.setdefault(stripped, set()).update(
+                    groups.get(row.last_key, set()))
                 keys.add(stripped)
         for key in keys:
-            index[key].append((row.advisor_crd, forms, entry))
+            forms = set(groups.get(key, set()))
+            for token in list(forms):
+                forms |= NICKNAMES.get(token, set())
+            if forms:
+                index[key].append((row.advisor_crd, forms, entry))
     return index
 
 

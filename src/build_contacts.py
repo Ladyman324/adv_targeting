@@ -73,10 +73,12 @@ from nicknames import same_person
 
 from contact_normalization import normalize_act_contact
 from contact_provenance import sha256_file, validate_owner_artifact
-from firm_rosters import FIRMS
+from firm_rosters import FIRMS, allowed_crds
 from identity_schema import (IDENTITY_DIRNAME, LINKS_FILENAME,
                              MANIFEST_FILENAME, content_hash)
 from identity_normalize import is_generic_email
+from roster_firm_policy import (authoritative_families, build_domain_policy,
+                                crd_tuple)
 from web_assets import write_json_gz
 from forbes_match import (ACCEPT, MARGIN, NICKNAMES, W_SUFFIX, build_index,
                           load_reference, name_score, norm, split_name,
@@ -364,13 +366,20 @@ def clean_email(raw) -> str:
     return e if re.match(r"^[^@\s]+@[^@\s]+\.[a-z]{2,}$", e) else ""
 
 
-def derive_domain_map() -> dict[str, str]:
+def derive_domain_map(rosters: pd.DataFrame | None = None) -> dict[str, str]:
     """Which email domain belongs to which firm, learned from the rosters.
 
     A roster's CRD is known, so its email column IS the evidence. Only domains
     that point at ONE firm are kept: gmail.com appears under a dozen firms and
     means nothing, and a domain split across two CRDs cannot resolve a contact.
     """
+    if rosters is not None:
+        families = authoritative_families(
+            build_domain_policy(rosters.fillna("").to_dict("records")))
+        # Compatibility for diagnostics that still expect one CRD. Multi-CRD
+        # families are intentionally absent rather than collapsed.
+        return {domain: crds[0] for domain, crds in families.items()
+                if len(crds) == 1}
     seen: dict[str, collections.Counter] = collections.defaultdict(collections.Counter)
     for slug, meta in FIRMS.items():
         files = sorted(glob.glob(str(ROSTERS / f"{slug}_*.csv")))
@@ -394,6 +403,12 @@ def derive_domain_map() -> dict[str, str]:
             mapping[domain] = crd
     mapping.update(EXTRA_DOMAINS)
     return mapping
+
+
+def derive_domain_families(rosters: pd.DataFrame) -> tuple[dict, dict]:
+    """Authoritative roster-derived domain policy and its compact lookup."""
+    policy = build_domain_policy(rosters.fillna("").to_dict("records"))
+    return policy, authoritative_families(policy)
 
 
 # ---------------------------------------------------------------------------
@@ -560,7 +575,7 @@ def owner_by_contact_id(contacts_path) -> dict:
     return owners
 
 
-def load_crm(domains: dict[str, str]) -> pd.DataFrame:
+def load_crm(domains: dict[str, tuple[str, ...]]) -> pd.DataFrame:
     """The CRM half of the population, from the Act! API pull.
 
     THIS USED TO READ AN EXCEL EXPORT. The dated Act JSON is now the sole
@@ -646,8 +661,13 @@ def load_crm(domains: dict[str, str]) -> pd.DataFrame:
         "assets_raw": cf(r, "user10"),
     } for r, n, link in normalized])
 
-    frame["firm_crd"] = frame["email"].map(
-        lambda e: domains.get(e.split("@")[-1], "") if e else "")
+    frame["allowed_firm_crds"] = frame["email"].map(
+        lambda e: "|".join(crd_tuple(domains.get(e.split("@")[-1], ())))
+        if e else "")
+    # Legacy scalar consumers may use a singleton only. A multi-entity family
+    # (Raymond James/Wells Fargo) must stay a family until SEC is compared.
+    frame["firm_crd"] = frame["allowed_firm_crds"].map(
+        lambda value: crd_tuple(value)[0] if len(crd_tuple(value)) == 1 else "")
     missing_phone = int((frame["phone"] == "").sum())
     if missing_phone:
         print(f"[*] {missing_phone:,} Act contacts have no API business phone; "
@@ -665,6 +685,7 @@ def load_crm(domains: dict[str, str]) -> pd.DataFrame:
         for c, t, a in zip(frame["company"], frame["city"], frame["assets"])
     ]
     frame["source"] = "CRM"
+    frame["source_slug"] = "act"
     frame["source_file"] = path.name
     frame["phone_kind"] = ""        # derived below; the CRM does not say
     # The Act GUID remains attached through winner selection. It is emitted
@@ -929,8 +950,10 @@ def load_eic() -> pd.DataFrame:
         "assets": pd.NA,
         "team_key": "",
         "firm_crd": EIC_CRD,
+        "allowed_firm_crds": EIC_CRD,
         "given_crd": "",
         "source": "EIC",
+        "source_slug": "eic",
         "source_file": EIC_FILE.name,
     })
     rec = rec[rec["name"].str.strip() != ""]
@@ -1104,7 +1127,9 @@ def load_rosters() -> pd.DataFrame:
             "assets": pd.NA,
             "team_key": "",
             "firm_crd": meta["crds"][0],
+            "allowed_firm_crds": "|".join(allowed_crds(slug)),
             "source": meta["label"],
+            "source_slug": slug,
             "source_file": path.name,
         })
         # A roster that publishes the ADVISOR's own CRD needs no matching at
@@ -1120,8 +1145,11 @@ def load_rosters() -> pd.DataFrame:
         # A per-row channel column means the roster spans several CRDs.
         channel = meta.get("channel")
         if channel and channel["column"] in frame.columns:
-            rec["firm_crd"] = (frame[channel["column"]].astype(str)
-                               .map(channel["map"]).fillna(meta["crds"][0]))
+            mapped = (frame[channel["column"]].astype(str).str.strip().str.upper()
+                      .map(channel["map"]).fillna(""))
+            rec["firm_crd"] = mapped.where(mapped.ne(""), meta["crds"][0])
+            rec["allowed_firm_crds"] = mapped.where(
+                mapped.ne(""), "|".join(allowed_crds(slug)))
         # IS THAT COLUMN ACTUALLY A TEAM?
         # A "team_name" is not always a practice. Baird's holds 150 values over
         # 1,591 advisors and they are BRANCH labels -- "Milwaukee", "Seattle".
@@ -1237,6 +1265,7 @@ def score_contacts(people: pd.DataFrame, index) -> pd.DataFrame:
     forbes_match: below threshold, ambiguous, or too many namesakes means the
     row keeps its contact detail but is not attached to a pin."""
     tiers, crds, scores, namesakes_out, gaps = [], [], [], [], []
+    proposed_crds, match_reasons = [], []
     known_crds = {crd for entries in index.values() for crd, _, _ in entries}
     for rec in people.itertuples(index=False):
         # The independent evidence ledger is authoritative for Act. The legacy
@@ -1256,6 +1285,8 @@ def score_contacts(people: pd.DataFrame, index) -> pd.DataFrame:
             scores.append(score)
             namesakes_out.append(0)
             gaps.append(gap)
+            proposed_crds.append("")
+            match_reasons.append("act_identity_ledger_" + status)
             continue
 
         # A scraped roster may explicitly publish a CRD. An identifier is
@@ -1270,21 +1301,38 @@ def score_contacts(people: pd.DataFrame, index) -> pd.DataFrame:
             stated_rows = [row for row in index.get(last, [])
                            if str(row[0]) == stated]
             name_ok = False
-            firm_ok = True
+            allowed = set(crd_tuple(
+                getattr(rec, "allowed_firm_crds", ""))) or {
+                    str(getattr(rec, "firm_crd", "") or "")}
+            allowed.discard("")
+            firm_ok = False
             if stated_rows:
                 _, forms, entry = stated_rows[0]
                 name_ok = (name_score(given, forms) >= 0.8 and
                            suffix_agreement(suffix_of(rec.name),
                                             entry.get("suffix", "")) >= 0)
                 firms = set(entry.get("firms") or [])
-                if rec.firm_crd and firms:
-                    firm_ok = rec.firm_crd in firms
-            tier = "confirmed" if name_ok and firm_ok else "review"
+                firm_ok = bool(allowed & firms)
+            tier = "confirmed" if name_ok and firm_ok else "none"
             tiers.append(tier)
-            crds.append(stated)
+            crds.append(stated if tier == "confirmed" else "")
             scores.append(1.0 if tier == "confirmed" else 0.0)
             namesakes_out.append(len(index.get(last, [])))
             gaps.append(1.0 if tier == "confirmed" else 0.0)
+            proposed_crds.append("" if tier == "confirmed" else stated)
+            match_reasons.append(
+                "stated_crd_confirmed" if tier == "confirmed" else
+                "stated_crd_name_conflict" if firm_ok else
+                "stated_crd_current_firm_conflict")
+            continue
+        if stated:
+            tiers.append("none")
+            crds.append("")
+            scores.append(0.0)
+            namesakes_out.append(0)
+            gaps.append(0.0)
+            proposed_crds.append(stated)
+            match_reasons.append("stated_crd_not_found")
             continue
         given, last = resolve_surname(rec.name, index)
         # A published nickname the filing never records is invisible to
@@ -1300,10 +1348,23 @@ def score_contacts(people: pd.DataFrame, index) -> pd.DataFrame:
         # what can be corroborated: it agrees with the filed surname we are
         # already gating on, at a firm we can check.
         use_alt = bool(alt_last) and alt_last == last
+        allowed = set(crd_tuple(
+            getattr(rec, "allowed_firm_crds", ""))) or {
+                str(getattr(rec, "firm_crd", "") or "")}
+        allowed.discard("")
         scored = []
         for crd, forms, entry in index.get(last, []):
+            firms = set(entry.get("firms") or [])
+            if allowed and not (allowed & firms):
+                continue
             n = name_score(given, forms)
-            if n <= 0 and use_alt and rec.firm_crd and rec.firm_crd in entry["firms"]:
+            email_n = name_score(alt_given, forms) if use_alt else 0.0
+            # Firm-issued personal addresses often spell out a name hidden by
+            # display initials (J.R. Randall -> john.p.randall). When surname
+            # and current firm family already agree, that is safer evidence
+            # than allowing a shared initial to decide between colleagues.
+            n = max(n, email_n)
+            if n <= 0 and use_alt and allowed & firms:
                 # Surname and firm both agree and the filed given name simply
                 # never records the nickname. Deliberately BELOW the 0.8 that
                 # counts toward CONTACT_NAMESAKE_CAP: identifies a surname at a
@@ -1312,10 +1373,10 @@ def score_contacts(people: pd.DataFrame, index) -> pd.DataFrame:
                 n = 0.60
             if n <= 0:
                 continue
-            f = 1.0 if rec.firm_crd and rec.firm_crd in entry["firms"] else 0.0
+            f = 1.0 if allowed and allowed & firms else 0.0
             c = 1.0 if rec.city and norm(rec.city) in entry["cities"] else 0.0
             s = 1.0 if rec.state and rec.state in entry["states"] else 0.0
-            if not rec.firm_crd:
+            if not allowed:
                 # No firm to compare: renormalise so an unknown firm neither
                 # helps nor penalises, exactly as forbes_match does.
                 total = (W_NAME * n + W_CITY * c + W_STATE * s) / (W_NAME + W_CITY + W_STATE)
@@ -1343,6 +1404,8 @@ def score_contacts(people: pd.DataFrame, index) -> pd.DataFrame:
         crds.append(crd)
         scores.append(round(score, 3))
         namesakes_out.append(namesakes)
+        proposed_crds.append("")
+        match_reasons.append("firm_constrained_" + tier)
         # How far clear of the runner-up. Retained because contact_calibrate
         # showed MARGIN, not ACCEPT, is what actually decides most rejections:
         # sweeping ACCEPT from 0.50 to 0.72 changed nothing at all.
@@ -1353,6 +1416,8 @@ def score_contacts(people: pd.DataFrame, index) -> pd.DataFrame:
     people["match_score"] = scores
     people["namesakes"] = namesakes_out
     people["match_gap"] = gaps
+    people["proposed_crd"] = proposed_crds
+    people["match_reason"] = match_reasons
     return people
 
 
@@ -1700,13 +1765,13 @@ def load_people(limit: int | None = None) -> pd.DataFrame:
     already broken production -- which is exactly how the Captrust phone loss
     and the Morgan Stanley zero-phone bug both stayed silent.
     """
-    domains = derive_domain_map()
-    print(f"[*] domain -> firm CRD: {len(domains):,} domains "
-          f"({len(domains) - len(EXTRA_DOMAINS):,} derived from rosters, "
-          f"{len(EXTRA_DOMAINS)} added by hand)")
-
-    crm = load_crm(domains)
     rosters = load_rosters()
+    domain_policy, domains = derive_domain_families(rosters)
+    ambiguous = sum(1 for row in domain_policy.values()
+                    if row["status"] == "ambiguous")
+    print(f"[*] authoritative roster domains: {len(domains):,}; "
+          f"{ambiguous:,} ambiguous domains excluded")
+    crm = load_crm(domains)
     eic = load_eic()
     people = pd.concat([f for f in (crm, rosters, eic) if len(f)], ignore_index=True)
     # A WHITELIST. A column produced upstream and not named here is dropped
@@ -1717,7 +1782,8 @@ def load_people(limit: int | None = None) -> pd.DataFrame:
     keep = ["name", "title", "team", "team_url", "profile_url", "linkedin", "email",
             "phone", "phone_ext", "mobile", "city", "state",
             "office", "company", "owner", "assets", "team_key", "firm_crd",
-            "given_crd", "phone_kind", "source", "source_file",
+            "allowed_firm_crds", "given_crd", "phone_kind", "source",
+            "source_slug", "source_file",
             "act_id", "identity_crd", "identity_status", "identity_can_call",
             "identity_can_email", "identity_evidence_hash",
             # The CRM's Dear field. Added here the moment it was added to
@@ -1945,6 +2011,11 @@ def main() -> None:
         # would destroy the very thing worth surfacing.
         if row["firm_crd"]:
             entry["fc"] = str(row["firm_crd"])
+        allowed = list(crd_tuple(row.get("allowed_firm_crds", "")))
+        if allowed and str(row.get("source", "")) not in {"CRM", "EIC"}:
+            # Defense-in-depth input for the controlled-recipient exporter:
+            # the authoritative source boundary, not a guessed employer.
+            entry["rf"] = allowed
         if str(row["company"]).strip():
             entry["cn"] = str(row["company"]).strip()[:60]
         if team_key and team_key in teams:
