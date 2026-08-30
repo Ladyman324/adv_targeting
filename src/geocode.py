@@ -38,6 +38,8 @@ import requests
 ROOT = pathlib.Path(__file__).parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 from normalize_addr import normalize, pick_street  # noqa: E402
+from branch_geography import effective_branches  # noqa: E402
+from geography_integrity import state_agrees  # noqa: E402
 
 INTERIM = ROOT / "data" / "interim"
 OUTPUT = ROOT / "data" / "output"
@@ -110,7 +112,10 @@ def _coords(lonlat: str) -> tuple[float, float]:
 
 
 def _distinct(state: str):
-    b = pd.read_parquet(OUTPUT / "advisor_branches.parquet")
+    # Apply exact-identity, evidence-bound geography corrections BEFORE state
+    # partitioning. Patching only lat/lon inside an IL parquet would still give
+    # that Mississippi advisor to the Midwest territory everywhere else.
+    b = effective_branches()
     sub = b[(b["branch_state"] == state) & b["branch_street1"].notna()].copy()
     for c in ("branch_street1", "branch_city", "branch_postal"):
         sub[c] = sub[c].astype(str).str.strip()
@@ -156,14 +161,19 @@ def tier1(uniq: pd.DataFrame, state: str) -> pd.DataFrame:
             for _, r in uniq.iterrows()]
     res = _post(rows).merge(uniq[["id", "addr_key"]], on="id", how="left")
     res["lat"], res["lon"] = zip(*res["lonlat"].map(_coords))
-    hit = res["match"].eq("Match") & res["lat"].notna()
+    candidate = res["match"].eq("Match") & res["lat"].notna()
+    same_state = res["matched"].map(lambda value: state_agrees(value, state))
+    hit = candidate & same_state
     res["geocode_precision"] = None
     res.loc[hit & res["matchtype"].eq("Exact"), "geocode_precision"] = "rooftop"
     res.loc[hit & ~res["matchtype"].eq("Exact"), "geocode_precision"] = "approximate"
+    res.loc[hit, "geocode_source"] = "census"
     ok = res[res["geocode_precision"].notna()]
+    rejected = int((candidate & ~same_state).sum())
     print(f"    matched {len(ok):,}/{len(res):,} = {len(ok)/max(len(res),1):.1%} "
           f"(rooftop {(res['geocode_precision']=='rooftop').sum():,}, "
-          f"approximate {(res['geocode_precision']=='approximate').sum():,})")
+          f"approximate {(res['geocode_precision']=='approximate').sum():,}, "
+          f"rejected wrong/unparseable state {rejected:,})")
     return res
 
 
@@ -197,7 +207,10 @@ def tier2(uniq: pd.DataFrame, failed_keys: set, state: str) -> pd.DataFrame:
             continue
         key, off, rest, zip5 = m
         _, ret_rest, ret_zip = _returned_street(r["matched"])
-        if ret_rest != rest or ret_zip != zip5:     # strict: same street, same ZIP
+        if (not state_agrees(r["matched"], state)
+                or ret_rest != rest or ret_zip != zip5):
+            # strict: same state, street, and ZIP. A point across a sales
+            # boundary is never an acceptable neighbour fallback.
             continue
         if key not in best or abs(off) < abs(best[key][0]):
             lat, lon = _coords(r["lonlat"])
@@ -205,6 +218,7 @@ def tier2(uniq: pd.DataFrame, failed_keys: set, state: str) -> pd.DataFrame:
 
     out = pd.DataFrame([{"addr_key": k, "lat": v[1], "lon": v[2],
                          "geocode_precision": "neighbour", "matched": v[3],
+                         "geocode_source": "census",
                          "neighbour_offset": v[0]} for k, v in best.items()])
     print(f"    recovered {len(out):,}/{len(todo):,} = {len(out)/max(len(todo),1):.1%} "
           f"(rejected as wrong street/ZIP: {res['match'].eq('Match').sum() - len(best):,} candidate hits)")
@@ -217,12 +231,13 @@ def geocode_state(state: str) -> pd.DataFrame:
 
     t1 = tier1(uniq, state)
     good = t1[t1["geocode_precision"].notna()][
-        ["addr_key", "lat", "lon", "geocode_precision", "matched"]]
+        ["addr_key", "lat", "lon", "geocode_precision", "matched", "geocode_source"]]
     failed = set(uniq["addr_key"]) - set(good["addr_key"])
 
     t2 = tier2(uniq, failed, state)
     if not t2.empty:
-        good = pd.concat([good, t2[["addr_key", "lat", "lon", "geocode_precision", "matched"]]],
+        good = pd.concat([good, t2[["addr_key", "lat", "lon", "geocode_precision",
+                                    "matched", "geocode_source"]]],
                          ignore_index=True)
 
     still = len(uniq) - len(good)

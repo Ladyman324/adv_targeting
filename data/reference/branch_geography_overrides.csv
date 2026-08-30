@@ -1,0 +1,2 @@
+advisor_crd,firm_crd,old_street1,old_city,old_state,old_postal,new_street1,new_street2,new_city,new_state,new_postal,new_country,source,verified_on,note
+2811870,116140,949 WHITEWATER AVENUE,ST CHARLES,IL,55972,949 WHITEWATER AVENUE,,ST CHARLES,MN,55972,United States,census_exact_street_zip,2026-08-30,"Census returned the same street, city, and ZIP in Minnesota; the filed Illinois state conflicts with ZIP 55972."

@@ -2133,6 +2133,40 @@ def _territories():
             + ("; " + "; ".join(problems) if problems else ""))
 
 
+# A state shard is also a sales-ownership boundary.  Census once returned an
+# Ohio address in Texas and two internally inconsistent SEC rows in the states
+# named by their street/ZIP rather than their filed state.  Every downstream
+# consumer trusted the shard, so all prior territory audits still passed.
+@check("placed coordinates agree with their state shard")
+def _geography_shards():
+    import pandas as pd                                  # noqa: PLC0415
+    from geography_integrity import returned_state      # noqa: PLC0415
+
+    files = sorted((ROOT / "data" / "interim").glob("branch_geocoded_*.parquet"))
+    mismatches = []
+    placed = 0
+    for path in files:
+        state = path.stem.replace("branch_geocoded_", "")
+        frame = pd.read_parquet(path, columns=[
+            "advisor_crd", "branch_street1", "branch_city", "branch_state",
+            "branch_postal", "lat", "lon", "matched",
+        ])
+        frame = frame[frame["lat"].notna() & frame["lon"].notna()].copy()
+        placed += len(frame)
+        actual = frame["matched"].map(returned_state)
+        bad = frame[
+            frame["branch_state"].fillna("").astype(str).str.upper().str.strip().ne(state)
+            | (actual.ne("") & actual.ne(state))
+        ]
+        for row in bad.head(max(0, 8 - len(mismatches))).itertuples():
+            mismatches.append(
+                f"{state}: CRD {row.advisor_crd} {row.branch_street1}, "
+                f"{row.branch_city} returned {returned_state(row.matched) or '?'}")
+    return (not mismatches,
+            f"{placed:,} placed branch rows across {len(files)} shards"
+            + ("; " + "; ".join(mismatches) if mismatches else ""))
+
+
 @check("call outcomes agree across the app, the API and the Act! mapping")
 def _outcome_act_map():
     """The vocabulary now lives in three places, which is three chances to drift.

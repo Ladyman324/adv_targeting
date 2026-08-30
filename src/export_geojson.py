@@ -21,6 +21,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 # ONE definition of what an advisor is called, shared with export_national.py
 # and build_field_tiles.py.
 from display_name import display_name
+from geography_integrity import validate_geocoded_frame
 
 ROOT = pathlib.Path(__file__).parents[1]
 INTERIM = ROOT / "data" / "interim"
@@ -180,6 +181,7 @@ def load_state_branches(state: str) -> pd.DataFrame:
     compete with its headquarters, because only one of the two existed.
     """
     p = pd.read_parquet(INTERIM / f"branch_geocoded_{state}.parquet")
+    validate_geocoded_frame(p, state, f"branch_geocoded_{state}.parquet")
     p["city_level"] = False
     city_path = INTERIM / "branch_city_level.parquet"
     if city_path.exists():

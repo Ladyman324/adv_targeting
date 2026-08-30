@@ -29,6 +29,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 import geocode          # noqa: E402
 import export_geojson   # noqa: E402
+from branch_geography import effective_branches  # noqa: E402
 
 INTERIM = ROOT / "data" / "interim"
 OUTPUT = ROOT / "data" / "output"
@@ -36,7 +37,7 @@ PAUSE_SECONDS = 3
 
 
 def states_with_addresses() -> list:
-    b = pd.read_parquet(OUTPUT / "advisor_branches.parquet")
+    b = effective_branches()
     b = b[b["branch_street1"].notna() & b["branch_state"].notna()]
     codes = sorted({s for s in b["branch_state"].unique()
                     if isinstance(s, str) and len(s) == 2 and s.isalpha()})

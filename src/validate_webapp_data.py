@@ -102,12 +102,15 @@ def main() -> None:
     offices = national["offices"]
     states = national["states"]
     firm_crds = [str(firm[1]) for firm in firms]
-    assert all(len(firm) == 8 for firm in firms), "national firm rows must include opportunity-pool fields"
+    assert all(len(firm) == 9 for firm in firms), (
+        "national firm rows must include opportunity-pool and outside-manager reason fields")
     assert all(firm[3] is None or firm[3] >= 0 for firm in firms), "invalid national firm AUM"
     assert all(firm[4] in (0, 1) for firm in firms), "invalid national outside-manager flag"
     assert all(firm[5] is None or firm[5] >= 0 for firm in firms), "invalid equity opportunity pool"
     assert all(firm[6] is None or firm[6] >= 0 for firm in firms), "invalid fund opportunity pool"
     assert all(isinstance(firm[7], int) and firm[7] > 0 for firm in firms), "invalid mapped-advisor total"
+    assert all(firm[8] in ("", "selects", "wrap", "both") for firm in firms), (
+        "invalid national outside-manager reason")
     assert len(firm_crds) == len(set(firm_crds)), "duplicate CRD in national firms"
     assert len(firms) == metadata["firms"]
     assert len(offices) == metadata["firm_office_records"]

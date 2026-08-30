@@ -28,6 +28,7 @@ from enrich_national_opportunity import write_national_view
 # ONE definition of what an advisor is called, shared with build_field_tiles.py.
 from display_name import display_name, filed_name
 from firm_names import dedupe
+from geography_integrity import validate_geocoded_frame
 
 ROOT = pathlib.Path(__file__).parents[1]
 INTERIM = ROOT / "data" / "interim"
@@ -119,7 +120,7 @@ def main() -> None:
     columns = [
         "advisor_crd", "lat", "lon", "branch_street1", "branch_city", "branch_postal",
         "firm_display", "firm_crd", "motion", "opportunity_score",
-        "geocode_precision", "first_name", "last_name",
+        "geocode_precision", "first_name", "last_name", "branch_state", "matched",
     ]
 
     # The name a person goes by lives on the advisor table, not the branch
@@ -136,6 +137,7 @@ def main() -> None:
     for path in sorted(INTERIM.glob("branch_geocoded_*.parquet")):
         state = path.stem.replace("branch_geocoded_", "")
         source = pd.read_parquet(path, columns=columns)
+        validate_geocoded_frame(source, state, path.name)
         source["city_level"] = False
         # Same union as the state layers. If the national view read only
         # street-addressed branches it would place people the state layers
