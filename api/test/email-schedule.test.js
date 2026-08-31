@@ -104,6 +104,30 @@ test("one preflight failure holds every message and queues only owner notificati
   assert.deepEqual(f.queued.map((x) => x.work.kind), ["schedule_notify"]);
 });
 
+test("unexpected preflight failures persist a reference and emit redacted diagnostics", async () => {
+  const f = scheduledFixture(), errors = [];
+  const logger = () => {};
+  logger.error = (line) => errors.push(line);
+  await worker.processWork({ kind: "preflight", userId: "u1", batchId: "b1", scheduleRevision: 4 }, {
+    ...f, logger, invocationId: "invocation-1",
+    service: { preflightScheduled: async () => {
+      throw new TypeError("lookup failed for advisor@example.com CRD 4784023");
+    } },
+  });
+  assert.equal(f.batch.status, "schedule_held");
+  assert.match(f.batch.scheduleLastErrorId, /^spf-[0-9a-f-]{36}$/);
+  assert.equal(f.batch.scheduleLastErrorCode, "unexpected_error");
+  assert.equal(f.batch.scheduleLastErrorStage, "scheduled_validation");
+  assert.equal(errors.length, 1);
+  assert.match(errors[0], /^scheduled_preflight_exception /);
+  assert.match(errors[0], /\[email\]/);
+  assert.match(errors[0], /\[id\]/);
+  assert.doesNotMatch(errors[0], /advisor@example\.com|4784023/);
+  assert.match(errors[0], /"invocationId":"invocation-1"/);
+  const heldAudit = f.audits.find((entry) => entry[2] === "scheduled_preflight_held");
+  assert.equal(heldAudit[3].reference, f.batch.scheduleLastErrorId);
+});
+
 test("a transient cold recipient-registry failure retries without alarming the rep", async () => {
   const f = scheduledFixture();
   await worker.processWork({ kind: "preflight", userId: "u1", batchId: "b1", scheduleRevision: 4 }, {
@@ -182,7 +206,8 @@ test("schedule review links use the anonymous sign-in relay", () => {
 test("hold notification reconciles its deterministic self-addressed message", async () => {
   const f = scheduledFixture();
   Object.assign(f.batch, { status: "schedule_held", scheduleState: "held",
-    scheduleNotificationState: "pending", scheduleHoldMessage: "Review required." });
+    scheduleNotificationState: "pending", scheduleHoldMessage: "Review required.",
+    scheduleLastErrorId: "spf-123e4567-e89b-12d3-a456-426614174000" });
   const created = [], sent = [];
   await worker.processWork({ kind: "schedule_notify", userId: "u1", batchId: "b1", scheduleRevision: 4 }, {
     ...f,
@@ -199,6 +224,7 @@ test("hold notification reconciles its deterministic self-addressed message", as
   });
   assert.equal(created[0].recipientEmail, "rep@eicatlanta.com");
   assert.equal(created[0].id, "schedule-hold-b1-r4");
+  assert.match(created[0].bodyHtml, /Support reference:.*spf-123e4567/);
   assert.deepEqual(sent, ["graph-1"]);
   assert.equal(f.batch.scheduleNotificationState, "submitted");
   await worker.processWork({ kind: "schedule_notify", userId: "u1", batchId: "b1", scheduleRevision: 4 }, {

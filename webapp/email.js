@@ -1672,6 +1672,8 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
           ? "Queued on the server - safe to close this window; sending continues in Microsoft 365."
           : "Draft creation is queued on the server - safe to close this window.")
         : "";
+    const supportReference = b.status === "schedule_held" && b.scheduleLastErrorId
+      ? ` Support reference: ${b.scheduleLastErrorId}.` : "";
     /* Two different elements scroll, depending on the layout.
      *
      * On a phone .email-grid is display:block and #emailBody is the scroller.
@@ -1762,8 +1764,8 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
           <div class="email-rendered">${previewWithImages(m.bodyHtml, m.inlineImages, b.templateId)}${m.signatureHtml || ""}</div></section>
       </main></div>
       <footer class="email-footer">${scheduleHtml}<p id="emailNotice" class="email-notice${
-        sendBlocked ? " bad" : ""}">${esc((!locked && sendBlocked) ? sendBlocked
-          : (b.warningMessage || (locked ? lockedNotice : "")))}</p><div>
+        sendBlocked ? " bad" : ""}">${esc(((!locked && sendBlocked) ? sendBlocked
+          : (b.warningMessage || (locked ? lockedNotice : ""))) + supportReference)}</p><div>
         ${b.status === "completed" && b.mode === "send" && !b.parentBatchId && !b.followUpSentUtc
           ? `<button type="button" class="ask-btn" data-email="follow-up-open" data-id="${esc(b.id)}">Follow up on no reply</button>` : ""}
         ${b.status === "action_required" ? `<button type="button" class="ask-btn" data-email="connect">Reconnect Microsoft 365</button><button type="button" class="ask-btn" data-email="retry">Retry remaining</button>` : ""}

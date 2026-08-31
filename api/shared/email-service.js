@@ -1152,7 +1152,7 @@ async function approve(who, input) {
     reviewedUtc: approvedUtc, sendNotBeforeUtc, scheduledForUtc,
     scheduleState: scheduledForUtc ? "pending" : "", scheduleRevision,
     schedulePreflightAttempts: 0, scheduleRetryAfterUtc: "",
-    scheduleLastErrorCode: "", scheduleLastErrorStage: "",
+    scheduleLastErrorCode: "", scheduleLastErrorStage: "", scheduleLastErrorId: "",
     scheduleLeaseUntilUtc: "", schedulePassedUtc: "", scheduleHeldUtc: "",
     scheduleHoldCode: "", scheduleHoldMessage: "", scheduleNotificationState: "",
     scheduleNotificationId: "", scheduleNotificationGraphId: "", scheduleNotificationCreatedUtc: "",
@@ -1218,10 +1218,13 @@ async function approve(who, input) {
 async function preflightScheduled(userId, batchId, revision, deps = {}) {
   const st = deps.store || store, au = deps.auth || auth,
     sup = deps.suppress || suppress;
+  let currentStage = "initialization";
   const stage = async (name, action) => {
+    currentStage = name;
     try { return await action(); }
     catch (error) { if (!error.preflightStage) error.preflightStage = name; throw error; }
   };
+  try {
   const batch = await stage("batch", () => st.getBatch(userId, batchId));
   if (!batch || batch.status !== "scheduled" || batch.scheduleState !== "checking"
       || Number(batch.scheduleRevision) !== Number(revision))
@@ -1233,16 +1236,19 @@ async function preflightScheduled(userId, batchId, revision, deps = {}) {
   const connectedMail = String(connection.profile && (connection.profile.mail || connection.profile.userPrincipalName)
     || connection.mailbox || "").toLowerCase();
   const token = await stage("mailbox_token", () => au.tokenFor(userId));
+  currentStage = "mailbox_identity";
   if (!connection.connected || !connection.profile || !connectedMail
       || connectedMail !== String(batch.senderMail || batch.graphMailbox || "").toLowerCase()
       || String(connection.profile.id || "").toLowerCase() !== String(batch.graphMailboxId || "").toLowerCase()
       || String(token.mailboxId || "").toLowerCase() !== String(batch.graphMailboxId || "").toLowerCase())
     throw httpError(409, "Reconnect the scheduled batch mailbox before sending.", "schedule_mailbox_changed");
   const frozenMessages = await stage("messages", () => st.listMessages(userId, batchId));
+  currentStage = "message_snapshot";
   const frozenById = new Map(frozenMessages.map((message) => [message.id, message]));
   const validation = await stage("validation", () => validateBatch(
     { id: userId, name: batch.userName || "" }, batchId,
     { reviewed: true, identityForce: true, preflight: true }));
+  currentStage = "identity_comparison";
   const identityChanged = validation.messages.some((message) => {
     const frozen = frozenById.get(message.id);
     if (!frozen) return true;
@@ -1255,6 +1261,7 @@ async function preflightScheduled(userId, batchId, revision, deps = {}) {
     throw httpError(409, "A scheduled recipient identity or routing changed.", "schedule_validation_changed");
   if (validation.errors.length)
     throw httpError(409, "One or more recipients, attachments, or rendered messages changed.", "schedule_validation_changed");
+  currentStage = "suppression_input";
   const cfg = core.config();
   const identities = validation.messages.flatMap((message) => [
     { email: message.recipientEmail, contactId: message.contactId },
@@ -1264,6 +1271,7 @@ async function preflightScheduled(userId, batchId, revision, deps = {}) {
   const blocked = await stage("suppression", () => sup.blockedAmong(identities));
   if (blocked.size) throw httpError(409, "A scheduled recipient is now suppressed.", "schedule_recipient_suppressed");
   const policy = await stage("policy", () => st.policy());
+  currentStage = "sending_policy";
   if (!cfg.directSendEnvironmentEnabled || policy.killed)
     throw httpError(403, policy.reason || "Direct sending is disabled.", "schedule_sending_disabled");
   if (cfg.testAllowlist.size && validation.messages.some((message) =>
@@ -1275,6 +1283,10 @@ async function preflightScheduled(userId, batchId, revision, deps = {}) {
   await stage("capacity", () => (deps.limitGuard || limitGuard)
     .reserve(userId, batch.id, batch.externalCount, cfg.rollingExternalLimit));
   return { batch: validation.batch, messages: validation.messages, connection };
+  } catch (error) {
+    if (!error.preflightStage) error.preflightStage = currentStage;
+    throw error;
+  }
 }
 async function getBatchDetail(who, batchId) {
   const batch = await store.getBatch(who.id, batchId);
@@ -1317,7 +1329,7 @@ async function control(who, input) {
     await store.patchBatch(who.id, batch.id, { status: "editing", mode: "", scheduledForUtc: "",
       sendNotBeforeUtc: "", scheduleState: "", scheduleRevision: revision,
       schedulePreflightAttempts: 0, scheduleRetryAfterUtc: "",
-      scheduleLastErrorCode: "", scheduleLastErrorStage: "",
+      scheduleLastErrorCode: "", scheduleLastErrorStage: "", scheduleLastErrorId: "",
       scheduleLeaseUntilUtc: "", schedulePassedUtc: "", scheduleHeldUtc: "",
       scheduleHoldCode: "", scheduleHoldMessage: "", warningLevel: "normal", warningMessage: "" }, batch.etag);
     for (const message of messages) await store.patchMessage(who.id, batch.id, message.id, {

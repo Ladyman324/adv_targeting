@@ -1,5 +1,8 @@
 "use strict";
 
+const crypto = require("node:crypto");
+const fs = require("node:fs");
+const path = require("node:path");
 const auth = require("../shared/email-auth");
 const store = require("../shared/email-store");
 const graph = require("../shared/graph-mail");
@@ -10,6 +13,58 @@ const suppress = require("../shared/email-suppress");
 const recipientRegistry = require("../shared/recipient-registry");
 const materials = require("../shared/email-materials");
 const schedule = require("../shared/email-schedule");
+
+function releaseMetadata() {
+  try {
+    const value = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "release.json"), "utf8"));
+    return {
+      id: /^[A-Za-z0-9._-]{1,128}$/.test(String(value.id || "")) ? String(value.id) : "development",
+      commit: /^[0-9a-f]{7,40}$/i.test(String(value.commit || "")) ? String(value.commit).toLowerCase() : "",
+    };
+  } catch { return { id: "development", commit: "" }; }
+}
+
+const RELEASE = releaseMetadata();
+
+function diagnosticId() {
+  return `spf-${crypto.randomUUID()}`;
+}
+
+function sanitizedDiagnosticText(value, limit) {
+  return String(value || "")
+    .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, "[email]")
+    .replace(/\b[0-9]{5,10}\b/g, "[id]")
+    .replace(/\b(?:Bearer\s+)?eyJ[A-Za-z0-9._-]+/gi, "[token]")
+    .replace(/([?&](?:token|sig|code)=)[^&\s]+/gi, "$1[redacted]")
+    .slice(0, limit);
+}
+
+function reportPreflightFailure(work, err, failure, reference, deps) {
+  const logger = deps.logger;
+  if (!logger) return;
+  const unexpected = failure.code === "unexpected_error" || failure.stage === "unknown";
+  const event = unexpected ? "scheduled_preflight_exception" : "scheduled_preflight_rejected";
+  const detail = {
+    event, reference, batchId: String(work.batchId || ""), userId: String(work.userId || ""),
+    scheduleRevision: Number(work.scheduleRevision) || 0,
+    invocationId: String(deps.invocationId || ""), attempt: Number(deps.preflightAttempt) || 0,
+    code: failure.code, stage: failure.stage, statusCode: failure.statusCode,
+    errorType: sanitizedDiagnosticText(err && err.name || "Error", 120),
+    releaseId: RELEASE.id, releaseCommit: RELEASE.commit,
+  };
+  if (unexpected) {
+    detail.errorMessage = sanitizedDiagnosticText(err && err.message, 600);
+    detail.stack = sanitizedDiagnosticText(err && err.stack, 4000);
+  }
+  const line = `${event} ${JSON.stringify(detail)}`;
+  const method = unexpected ? "error" : "warn";
+  // Diagnostics must never weaken the fail-safe. If the host logger itself is
+  // unavailable, the durable hold and audit record still have to complete.
+  try {
+    if (typeof logger[method] === "function") logger[method](line);
+    else if (typeof logger === "function") logger(line);
+  } catch {}
+}
 
 function parseWork(value) {
   if (value && typeof value === "object") return value;
@@ -196,6 +251,7 @@ function preflightFailure(err) {
 }
 
 async function preflight(work, deps) {
+  let currentStage = "batch_read";
   let batch = await deps.store.getBatch(work.userId, work.batchId);
   if (!batch || batch.status !== "scheduled" || batch.scheduleState !== "pending"
       || !schedule.currentRevision(batch, work) || !schedule.due(batch)) return;
@@ -206,50 +262,65 @@ async function preflight(work, deps) {
   }
   const attempt = (Number(batch.schedulePreflightAttempts) || 0) + 1;
   try {
+    currentStage = "batch_claim";
     batch = await deps.store.patchBatch(work.userId, work.batchId, {
       scheduleState: "checking", scheduleLeaseUntilUtc: new Date(Date.now() + 300000).toISOString(),
       schedulePreflightAttempts: attempt, scheduleRetryAfterUtc: "",
     }, batch.etag);
   } catch (err) { if (Number(err && err.statusCode) === 412) return; throw err; }
   try {
+    currentStage = "scheduled_validation";
     const checked = await deps.service.preflightScheduled(work.userId, work.batchId,
       work.scheduleRevision, deps);
+    currentStage = "batch_refresh";
     const latest = await deps.store.getBatch(work.userId, work.batchId);
     if (!latest || latest.status !== "scheduled" || latest.scheduleState !== "checking"
         || !schedule.currentRevision(latest, work)) return;
+    currentStage = "batch_transition";
     await deps.store.patchBatch(work.userId, work.batchId, { status: "drafting", scheduleState: "passed",
       schedulePassedUtc: new Date().toISOString(), scheduleLeaseUntilUtc: "",
       scheduleHoldCode: "", scheduleHoldMessage: "", scheduleRetryAfterUtc: "",
-      scheduleLastErrorCode: "", scheduleLastErrorStage: "" }, latest.etag);
+      scheduleLastErrorCode: "", scheduleLastErrorStage: "", scheduleLastErrorId: "" }, latest.etag);
+    currentStage = "queue_configuration";
     const interval = deps.core.config().mailboxIntervalSeconds;
     for (const message of checked.messages) {
+      currentStage = "message_refresh";
       const current = await deps.store.getMessage(work.userId, work.batchId, message.id);
       if (!current || current.state !== "scheduled_pending"
           || Number(current.scheduleRevision) !== Number(work.scheduleRevision)) continue;
+      currentStage = "message_transition";
       await deps.store.patchMessage(work.userId, work.batchId, message.id, {
         state: "draft_pending", leaseUntilUtc: "", queuedUtc: new Date().toISOString(),
       }, current.etag);
+      currentStage = "message_enqueue";
       await deps.enqueue({ kind: "draft", userId: work.userId, batchId: work.batchId,
         messageId: message.id, scheduleRevision: Number(work.scheduleRevision) },
       Math.max(0, Number(message.sendPosition) || 0) * interval);
     }
+    currentStage = "pass_audit";
     await deps.store.audit(work.userId, work.batchId, "scheduled_preflight_passed",
       { scheduleRevision: Number(work.scheduleRevision), recipientCount: checked.messages.length });
   } catch (err) {
+    if (!err.preflightStage) err.preflightStage = currentStage;
+    const failure = preflightFailure(err);
+    const reference = diagnosticId();
+    reportPreflightFailure(work, err, failure, reference,
+      { ...deps, preflightAttempt: attempt });
     const latest = await deps.store.getBatch(work.userId, work.batchId);
     if (!latest || latest.status !== "scheduled" || latest.scheduleState !== "checking"
         || !schedule.currentRevision(latest, work)) return;
-    const failure = preflightFailure(err);
     if (failure.retryable && attempt < PREFLIGHT_ATTEMPTS) {
       const delay = attempt === 1 ? 15 : 45;
       const retryAfterUtc = new Date(Date.now() + delay * 1000).toISOString();
       await deps.store.patchBatch(work.userId, work.batchId, {
         scheduleState: "pending", scheduleLeaseUntilUtc: "", scheduleRetryAfterUtc: retryAfterUtc,
         scheduleLastErrorCode: failure.code, scheduleLastErrorStage: failure.stage,
+        scheduleLastErrorId: reference,
       }, latest.etag);
       await deps.store.audit(work.userId, work.batchId, "scheduled_preflight_retry", {
         scheduleRevision: Number(work.scheduleRevision), attempt,
         code: failure.code, stage: failure.stage, statusCode: failure.statusCode,
+        reference,
         retryAfterUtc,
       });
       await deps.enqueue({ kind: "preflight", userId: work.userId, batchId: work.batchId,
@@ -262,13 +333,14 @@ async function preflight(work, deps) {
       scheduleState: "held", scheduleLeaseUntilUtc: "", scheduleHeldUtc: new Date().toISOString(),
       scheduleHoldCode: hold.code, scheduleHoldMessage: hold.message,
       scheduleRetryAfterUtc: "", scheduleLastErrorCode: failure.code,
-      scheduleLastErrorStage: failure.stage,
+      scheduleLastErrorStage: failure.stage, scheduleLastErrorId: reference,
       scheduleNotificationState: latest.scheduleNotificationSentUtc ? "sent" : "pending",
       scheduleNotificationId: notificationId,
       warningLevel: "blocked", warningMessage: hold.message }, latest.etag);
     await deps.store.audit(work.userId, work.batchId, "scheduled_preflight_held",
       { scheduleRevision: Number(work.scheduleRevision), reason: hold.code, attempt,
-        originalCode: failure.code, stage: failure.stage, statusCode: failure.statusCode });
+        originalCode: failure.code, stage: failure.stage, statusCode: failure.statusCode,
+        reference });
     await deps.enqueue({ kind: "schedule_notify", userId: work.userId, batchId: work.batchId,
       scheduleRevision: Number(work.scheduleRevision) });
   }
@@ -335,6 +407,8 @@ async function notifyScheduleHold(work, deps) {
         recipientName: batch.userName || "", signatureHtml: "",
         bodyHtml: `<p>Your scheduled email batch is on hold. No advisor emails were started.</p>`
           + `<p>${batch.scheduleHoldMessage || "Open the application to review it."}</p>`
+          + (batch.scheduleLastErrorId
+            ? `<p>Support reference: <code>${batch.scheduleLastErrorId}</code></p>` : "")
           + (link ? `<p><a href="${link}">Review the held batch</a></p>` : ""),
       });
       const latest = await deps.store.getBatch(work.userId, work.batchId);
@@ -689,7 +763,13 @@ async function processWork(raw, overrides = {}) {
   throw new Error(`Unknown email work kind ${work.kind}.`);
 }
 
-module.exports = async function (context, workItem) { await processWork(workItem); };
+module.exports = async function (context, workItem) {
+  await processWork(workItem, {
+    logger: context && context.log,
+    invocationId: context && (context.invocationId
+      || context.executionContext && context.executionContext.invocationId),
+  });
+};
 module.exports.processWork = processWork;
 module.exports.parseWork = parseWork;
 module.exports.refreshBatch = refreshBatch;
