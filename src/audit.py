@@ -2535,7 +2535,8 @@ def _approved_recipient_registry():
     descriptor = read(API / "shared" / "approved-recipient-release.json")
     descriptor_core = {k: descriptor.get(k) for k in (
         "schemaVersion", "registrySchemaVersion", "registryContentHash",
-        "recipientCount", "ineligibleCount", "provenance")}
+        "recipientCount", "ineligibleCount", "provenance",
+        "shardManifestHash")}
     if descriptor.get("descriptorHash") != content_hash(descriptor_core):
         problems.append("packaged registry descriptor hash is invalid")
     if (descriptor.get("registryContentHash") != registry.get("contentHash") or
@@ -2544,6 +2545,37 @@ def _approved_recipient_registry():
             descriptor.get("ineligibleCount") !=
             len(registry.get("ineligible") or {})):
         problems.append("packaged API release pins a different registry")
+    shard_manifest = read(identity / "approved_recipients_manifest.json")
+    shard_core = {k: shard_manifest.get(k) for k in (
+        "schemaVersion", "registrySchemaVersion", "registryContentHash",
+        "recipientCount", "ineligibleCount", "provenance", "shards")}
+    if shard_manifest.get("contentHash") != content_hash(shard_core):
+        problems.append("approved-recipient shard manifest hash is invalid")
+    if descriptor.get("shardManifestHash") != shard_manifest.get("contentHash"):
+        problems.append("packaged API release pins a different shard manifest")
+    shard_recipients = shard_ineligible = 0
+    for key, entry in (shard_manifest.get("shards") or {}).items():
+        expected_blob = (f"approved_recipients/releases/"
+                         f"{registry.get('contentHash')}/shards/{key}.json.gz")
+        if entry.get("blob") != expected_blob:
+            problems.append(f"approved-recipient shard {key} has a mutable blob path")
+        path = identity / "approved_recipients_shards" / f"{key}.json.gz"
+        if not path.exists():
+            problems.append(f"approved-recipient shard {key} is missing")
+            continue
+        with gzip.open(path, "rt", encoding="utf-8") as handle:
+            shard = json.load(handle)
+        shard_payload = {k: shard.get(k) for k in (
+            "schemaVersion", "registryContentHash", "shardKey",
+            "recipients", "ineligible")}
+        if (shard.get("contentHash") != runtime_content_hash(shard_payload) or
+                shard.get("contentHash") != entry.get("contentHash") or
+                shard.get("shardKey") != key):
+            problems.append(f"approved-recipient shard {key} is not manifest-bound")
+        shard_recipients += len(shard.get("recipients") or {})
+        shard_ineligible += len(shard.get("ineligible") or {})
+    if shard_recipients != count or shard_ineligible != len(registry.get("ineligible") or {}):
+        problems.append("approved-recipient shards do not cover the full registry")
     tiers = ", ".join(f"{tier} {amount:,}"
                       for tier, amount in sorted(tier_counts.items()))
     return (not problems,

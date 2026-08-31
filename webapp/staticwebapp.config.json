@@ -15,6 +15,11 @@
 
   "routes": [
     {
+      "route": "/review.html",
+      "allowedRoles": ["anonymous", "authenticated"],
+      "headers": { "Cache-Control": "no-store" }
+    },
+    {
       "route": "/api/email-preferences",
       "allowedRoles": ["anonymous"],
       "headers": { "Cache-Control": "no-store" }

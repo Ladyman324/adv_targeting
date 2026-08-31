@@ -15,7 +15,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from export_approved_recipients import (
     RELEASE_PROVENANCE_KEYS, bounded_match_score, build_registry,
-    build_release_descriptor, registry_quality_summary,
+    build_release_descriptor, build_shards, registry_quality_summary,
 )
 from export_act_crd_corrections import REQUIRED_ACT_IDS
 import build_act_lookup
@@ -39,8 +39,9 @@ class RegistryTests(unittest.TestCase):
         payload = {"schemaVersion": 1, "contentHash": "a" * 64,
                    "recipients": {"100": {}}, "ineligible": {"200": "x"},
                    "provenance": provenance}
-        first = build_release_descriptor(payload)
-        self.assertEqual(first, build_release_descriptor(payload))
+        manifest, _ = build_shards(payload)
+        first = build_release_descriptor(payload, manifest)
+        self.assertEqual(first, build_release_descriptor(payload, manifest))
         self.assertEqual(set(RELEASE_PROVENANCE_KEYS),
                          set(first["provenance"]))
         self.assertNotIn("recipients", first)
@@ -50,7 +51,27 @@ class RegistryTests(unittest.TestCase):
                          first["descriptorHash"])
         payload["provenance"]["recipientEmail"] = "person@example.com"
         with self.assertRaisesRegex(ValueError, "unapproved fields"):
-            build_release_descriptor(payload)
+            build_release_descriptor(payload, manifest)
+
+    def test_shards_are_point_lookup_sized_and_manifest_bound(self):
+        payload = {"schemaVersion": 1, "contentHash": "b" * 64,
+                   "recipients": {"100": {"email": "one@example.com",
+                                            "matchScore": 1.0},
+                                  "4996584": {"email": "two@example.com"}},
+                   "ineligible": {"200": "blocked"}, "provenance": {}}
+        manifest, shards = build_shards(payload)
+        self.assertEqual({"10", "20", "49"}, set(shards))
+        self.assertNotIn("one@example.com", json.dumps(manifest))
+        self.assertEqual(
+            "approved_recipients/releases/" + "b" * 64 + "/shards/49.json.gz",
+            manifest["shards"]["49"]["blob"])
+        self.assertEqual(content_hash({k: v for k, v in manifest.items()
+                                       if k != "contentHash"}),
+                         manifest["contentHash"])
+        self.assertEqual("b" * 64, shards["49"]["registryContentHash"])
+        self.assertEqual(runtime_content_hash({k: v for k, v in shards["10"].items()
+                                               if k != "contentHash"}),
+                         shards["10"]["contentHash"])
 
     def test_required_correction_report_sentinel_is_pinned_by_default(self):
         self.assertIn("855992fd-e032-4454-947b-3dcd5515dfe3",

@@ -26,6 +26,10 @@ from identity_schema import (
 
 IDENTITY = ROOT / "data" / IDENTITY_DIRNAME
 BLOB_CONTAINER, BLOB_NAME = "lookups", "approved_recipients.json.gz"
+SHARD_PREFIX = "approved_recipients"
+SHARD_WIDTH = 2
+SHARD_DIR = IDENTITY / "approved_recipients_shards"
+SHARD_MANIFEST_PATH = IDENTITY / "approved_recipients_manifest.json"
 RELEASE_DESCRIPTOR_PATH = (ROOT / "api" / "shared" /
                            "approved-recipient-release.json")
 # WHAT MAY BE EXPORTED AND PRESENTED TO THE CONTROLLED COMPOSER.
@@ -338,7 +342,80 @@ def write_registry(payload: dict) -> tuple[pathlib.Path, pathlib.Path]:
     return json_path, gzip_path
 
 
-def build_release_descriptor(payload: dict) -> dict:
+def shard_key(crd: str) -> str:
+    """Stable bounded shard for one numeric CRD."""
+    value = normalize_crd(crd)
+    return value[:SHARD_WIDTH].ljust(SHARD_WIDTH, "0")
+
+
+def build_shards(payload: dict) -> tuple[dict, dict[str, dict]]:
+    """Build release-bound point-lookup shards and their PII-free manifest."""
+    release_prefix = f"{SHARD_PREFIX}/releases/{payload['contentHash']}"
+    grouped: dict[str, dict] = {}
+    for field in ("recipients", "ineligible"):
+        for crd, row in (payload.get(field) or {}).items():
+            key = shard_key(crd)
+            grouped.setdefault(key, {"recipients": {}, "ineligible": {}})
+            grouped[key][field][str(crd)] = row
+    shards = {}
+    entries = {}
+    for key, rows in sorted(grouped.items()):
+        core = {
+            "schemaVersion": 1,
+            "registryContentHash": payload["contentHash"],
+            "shardKey": key,
+            "recipients": dict(sorted(rows["recipients"].items())),
+            "ineligible": dict(sorted(rows["ineligible"].items())),
+        }
+        # Shards are verified after JSON.parse in Node. Preserve the registry's
+        # existing cross-language rule: 1.0 and 1 have the same runtime value.
+        shard = {**core, "contentHash": runtime_content_hash(core)}
+        blob = f"{release_prefix}/shards/{key}.json.gz"
+        shards[key] = shard
+        entries[key] = {
+            "blob": blob,
+            "contentHash": shard["contentHash"],
+            "recipientCount": len(core["recipients"]),
+            "ineligibleCount": len(core["ineligible"]),
+        }
+    manifest_core = {
+        "schemaVersion": 1,
+        "registrySchemaVersion": int(payload.get("schemaVersion") or 0),
+        "registryContentHash": payload["contentHash"],
+        "recipientCount": len(payload.get("recipients") or {}),
+        "ineligibleCount": len(payload.get("ineligible") or {}),
+        "provenance": payload.get("provenance") or {},
+        "shards": entries,
+    }
+    return {**manifest_core, "contentHash": content_hash(manifest_core)}, shards
+
+
+def write_shards(payload: dict) -> tuple[pathlib.Path, list[pathlib.Path]]:
+    manifest, shards = build_shards(payload)
+    SHARD_DIR.mkdir(parents=True, exist_ok=True)
+    expected = set()
+    paths = []
+    for key, shard in shards.items():
+        path = SHARD_DIR / f"{key}.json.gz"
+        raw = json.dumps(shard, ensure_ascii=False, sort_keys=True,
+                         separators=(",", ":")).encode("utf-8")
+        with gzip.GzipFile(filename="", mode="wb", fileobj=path.open("wb"),
+                           mtime=0) as handle:
+            handle.write(raw)
+        expected.add(path.name)
+        paths.append(path)
+    for stale in SHARD_DIR.glob("*.json.gz"):
+        if stale.name not in expected:
+            stale.unlink()
+    raw_manifest = (json.dumps(manifest, ensure_ascii=False,
+                               sort_keys=True, indent=2) + "\n").encode("utf-8")
+    tmp = SHARD_MANIFEST_PATH.with_suffix(".json.tmp")
+    tmp.write_bytes(raw_manifest)
+    tmp.replace(SHARD_MANIFEST_PATH)
+    return SHARD_MANIFEST_PATH, paths
+
+
+def build_release_descriptor(payload: dict, shard_manifest: dict | None = None) -> dict:
     """Pin this registry build into the API without copying recipient PII."""
     provenance = payload.get("provenance") or {}
     unexpected = sorted(set(provenance) - set(RELEASE_PROVENANCE_KEYS))
@@ -361,12 +438,16 @@ def build_release_descriptor(payload: dict) -> dict:
         "ineligibleCount": len(payload.get("ineligible") or {}),
         "provenance": {key: provenance[key]
                        for key in sorted(RELEASE_PROVENANCE_KEYS)},
+        "shardManifestHash": clean_text(
+            (shard_manifest or {}).get("contentHash")).lower(),
     }
+    if len(core["shardManifestHash"]) != 64:
+        raise ValueError("Shard manifest contentHash is invalid")
     return {**core, "descriptorHash": content_hash(core)}
 
 
-def write_release_descriptor(payload: dict) -> pathlib.Path:
-    descriptor = build_release_descriptor(payload)
+def write_release_descriptor(payload: dict, shard_manifest: dict) -> pathlib.Path:
+    descriptor = build_release_descriptor(payload, shard_manifest)
     raw = (json.dumps(descriptor, ensure_ascii=False, sort_keys=True, indent=2) +
            "\n").encode("utf-8")
     tmp = RELEASE_DESCRIPTOR_PATH.with_suffix(".json.tmp")
@@ -375,7 +456,8 @@ def write_release_descriptor(payload: dict) -> pathlib.Path:
     return RELEASE_DESCRIPTOR_PATH
 
 
-def upload(path: pathlib.Path) -> int:
+def upload_shards(manifest_path: pathlib.Path,
+                  shard_paths: list[pathlib.Path]) -> int:
     """Explicit only; local generation never needs the Azure SDK or credential."""
     try:
         from azure.storage.blob import BlobServiceClient, ContentSettings
@@ -392,18 +474,33 @@ def upload(path: pathlib.Path) -> int:
         container.create_container()
     except Exception:
         pass
-    with path.open("rb") as handle:
-        container.get_blob_client(BLOB_NAME).upload_blob(
+    gzip_settings = ContentSettings(content_type="application/json",
+                                    content_encoding="gzip")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    release_prefix = (f"{SHARD_PREFIX}/releases/"
+                      f"{manifest['registryContentHash']}")
+    for shard_path in shard_paths:
+        entry = (manifest.get("shards") or {}).get(shard_path.stem)
+        blob = clean_text((entry or {}).get("blob"))
+        if not blob.startswith(f"{release_prefix}/shards/"):
+            raise ValueError(f"Unsafe shard blob path for {shard_path.name}")
+        with shard_path.open("rb") as handle:
+            container.get_blob_client(blob).upload_blob(
+                handle, overwrite=True, content_settings=gzip_settings)
+    manifest_blob = f"{release_prefix}/manifest.json"
+    with manifest_path.open("rb") as handle:
+        container.get_blob_client(manifest_blob).upload_blob(
             handle, overwrite=True, content_settings=ContentSettings(
-                content_type="application/json", content_encoding="gzip"))
-    print(f"[+] uploaded {BLOB_CONTAINER}/{BLOB_NAME}")
+                content_type="application/json"))
+    print(f"[+] uploaded {len(shard_paths):,} shards and "
+          f"{BLOB_CONTAINER}/{manifest_blob}")
     return 0
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--upload", action="store_true",
-                        help="upload after generation (requires fresh authorization)")
+                        help="upload release-bound shards and manifest")
     args = parser.parse_args()
     links_path = IDENTITY / LINKS_FILENAME
     manifest_path = IDENTITY / MANIFEST_FILENAME
@@ -447,10 +544,13 @@ def main() -> int:
         "actSourceSha256": (manifest.get("actSource") or {}).get("sha256", ""),
     }, load_current_firms())
     json_path, gzip_path = write_registry(payload)
-    descriptor_path = write_release_descriptor(payload)
+    shard_manifest_path, shard_paths = write_shards(payload)
+    shard_manifest = json.loads(shard_manifest_path.read_text(encoding="utf-8"))
+    descriptor_path = write_release_descriptor(payload, shard_manifest)
     print(f"[+] {json_path}: {len(payload['recipients']):,} approved; "
           f"{len(payload['ineligible']):,} ineligible")
     print(f"[+] {gzip_path} ({gzip_path.stat().st_size / 1024:.1f} KiB)")
+    print(f"[+] {shard_manifest_path}: {len(shard_paths):,} CRD shards")
     print(f"[+] {descriptor_path}: release-bound to {payload['contentHash']}")
     summary = registry_quality_summary(payload)
     print("[*] authorized tiers: " + ", ".join(
@@ -466,7 +566,7 @@ def main() -> int:
             f"{reason} {count:,}" for reason, count in
             summary["ineligibleReasons"].items()))
     if args.upload:
-        return upload(gzip_path)
+        return upload_shards(shard_manifest_path, shard_paths)
     print("[*] local only; --upload was not requested")
     return 0
 

@@ -95,13 +95,14 @@ async function run(context = {}, overrides = {}) {
       summary.batches++;
       if (batch.status === "scheduled") {
         const due = timestamp(batch.scheduledForUtc);
+        const retryAfter = timestamp(batch.scheduleRetryAfterUtc);
         const leaseExpired = !timestamp(batch.scheduleLeaseUntilUtc) || timestamp(batch.scheduleLeaseUntilUtc) <= nowMs;
         if (batch.scheduleState === "checking" && leaseExpired) {
           try { await deps.store.patchBatch(userId, batch.id,
             { scheduleState: "pending", scheduleLeaseUntilUtc: "" }, batch.etag); }
           catch (err) { if (Number(err && err.statusCode) === 412) summary.conflicts++; else summary.failed++; }
         }
-        if (due && due <= nowMs && leaseExpired) {
+        if (due && due <= nowMs && leaseExpired && (!retryAfter || retryAfter <= nowMs)) {
           summary.eligible++; summary.attempted++;
           try {
             await deps.enqueue({ kind: "preflight", userId, batchId: batch.id,

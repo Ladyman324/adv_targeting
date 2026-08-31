@@ -150,12 +150,20 @@ async function failOrRetry(work, claimed, err, phase, deps) {
 }
 
 function safeHold(err) {
-  if (["graph_not_connected", "graph_reconnect_required", "interaction_required"].includes(String(err && err.code || "")))
+  const original = String(err && (err.code || err.errorCode) || "");
+  if (["graph_not_connected", "graph_reconnect_required", "graph_connection_changed",
+    "interaction_required"].includes(original))
     return { code: "schedule_mailbox_changed", message: "The Microsoft 365 mailbox must be reconnected." };
+  if (original === "recipient_registry_unavailable")
+    return { code: "schedule_preflight_unavailable",
+      message: "Recipient safety data could not be refreshed. Review and reschedule this batch." };
+  if (original === "rolling_limit")
+    return { code: "schedule_capacity_changed",
+      message: "The current sending allowance cannot accommodate this batch." };
   const allowed = new Set(["schedule_template_changed", "schedule_mailbox_changed",
     "schedule_validation_changed", "schedule_recipient_suppressed", "schedule_sending_disabled",
-    "schedule_allowlist_changed"]);
-  const code = allowed.has(String(err && err.code || "")) ? String(err.code) : "schedule_preflight_failed";
+    "schedule_allowlist_changed", "schedule_preflight_unavailable", "schedule_capacity_changed"]);
+  const code = allowed.has(original) ? original : "schedule_preflight_failed";
   const messages = {
     schedule_template_changed: "The approved template changed.",
     schedule_mailbox_changed: "The Microsoft 365 mailbox must be reconnected.",
@@ -163,18 +171,44 @@ function safeHold(err) {
     schedule_recipient_suppressed: "A recipient is now suppressed.",
     schedule_sending_disabled: "Direct sending is currently disabled.",
     schedule_allowlist_changed: "A recipient is outside the current sending allowlist.",
+    schedule_preflight_unavailable: "Recipient safety data could not be refreshed. Review and reschedule this batch.",
+    schedule_capacity_changed: "The current sending allowance cannot accommodate this batch.",
     schedule_preflight_failed: "The scheduled safety check could not be completed.",
   };
   return { code, message: messages[code] };
+}
+
+const PREFLIGHT_ATTEMPTS = 3;
+function preflightFailure(err) {
+  const code = String(err && (err.code || err.errorCode || err.graphCode) || "unexpected_error").slice(0, 80);
+  const stage = String(err && err.preflightStage || "unknown").slice(0, 80);
+  const statusCode = Math.max(0, Number(err && err.statusCode) || 0);
+  const permanent = new Set(["recipient_registry_release_invalid",
+    "recipient_registry_release_mismatch", "recipient_registry_incompatible",
+    "rolling_limit", "idempotency_conflict"]);
+  const network = new Set(["ECONNRESET", "ETIMEDOUT", "EAI_AGAIN", "ENOTFOUND",
+    "UND_ERR_CONNECT_TIMEOUT", "UND_ERR_HEADERS_TIMEOUT"]);
+  const retryable = !permanent.has(code) && (err && err.safeToRetry === true
+    || statusCode === 408 || statusCode === 429 || statusCode >= 500
+    || code === "recipient_registry_unavailable" || code === "graph_connection_changed"
+    || network.has(code));
+  return { code, stage, statusCode, retryable };
 }
 
 async function preflight(work, deps) {
   let batch = await deps.store.getBatch(work.userId, work.batchId);
   if (!batch || batch.status !== "scheduled" || batch.scheduleState !== "pending"
       || !schedule.currentRevision(batch, work) || !schedule.due(batch)) return;
+  const retryAfter = Date.parse(batch.scheduleRetryAfterUtc || "") || 0;
+  if (retryAfter > Date.now()) {
+    await deps.enqueue(work, Math.max(1, Math.ceil((retryAfter - Date.now()) / 1000)));
+    return;
+  }
+  const attempt = (Number(batch.schedulePreflightAttempts) || 0) + 1;
   try {
     batch = await deps.store.patchBatch(work.userId, work.batchId, {
       scheduleState: "checking", scheduleLeaseUntilUtc: new Date(Date.now() + 300000).toISOString(),
+      schedulePreflightAttempts: attempt, scheduleRetryAfterUtc: "",
     }, batch.etag);
   } catch (err) { if (Number(err && err.statusCode) === 412) return; throw err; }
   try {
@@ -185,7 +219,8 @@ async function preflight(work, deps) {
         || !schedule.currentRevision(latest, work)) return;
     await deps.store.patchBatch(work.userId, work.batchId, { status: "drafting", scheduleState: "passed",
       schedulePassedUtc: new Date().toISOString(), scheduleLeaseUntilUtc: "",
-      scheduleHoldCode: "", scheduleHoldMessage: "" }, latest.etag);
+      scheduleHoldCode: "", scheduleHoldMessage: "", scheduleRetryAfterUtc: "",
+      scheduleLastErrorCode: "", scheduleLastErrorStage: "" }, latest.etag);
     const interval = deps.core.config().mailboxIntervalSeconds;
     for (const message of checked.messages) {
       const current = await deps.store.getMessage(work.userId, work.batchId, message.id);
@@ -204,16 +239,36 @@ async function preflight(work, deps) {
     const latest = await deps.store.getBatch(work.userId, work.batchId);
     if (!latest || latest.status !== "scheduled" || latest.scheduleState !== "checking"
         || !schedule.currentRevision(latest, work)) return;
+    const failure = preflightFailure(err);
+    if (failure.retryable && attempt < PREFLIGHT_ATTEMPTS) {
+      const delay = attempt === 1 ? 15 : 45;
+      const retryAfterUtc = new Date(Date.now() + delay * 1000).toISOString();
+      await deps.store.patchBatch(work.userId, work.batchId, {
+        scheduleState: "pending", scheduleLeaseUntilUtc: "", scheduleRetryAfterUtc: retryAfterUtc,
+        scheduleLastErrorCode: failure.code, scheduleLastErrorStage: failure.stage,
+      }, latest.etag);
+      await deps.store.audit(work.userId, work.batchId, "scheduled_preflight_retry", {
+        scheduleRevision: Number(work.scheduleRevision), attempt,
+        code: failure.code, stage: failure.stage, statusCode: failure.statusCode,
+        retryAfterUtc,
+      });
+      await deps.enqueue({ kind: "preflight", userId: work.userId, batchId: work.batchId,
+        scheduleRevision: Number(work.scheduleRevision) }, delay);
+      return;
+    }
     const hold = safeHold(err);
     const notificationId = `schedule-hold-${latest.id}-r${latest.scheduleRevision}`;
     await deps.store.patchBatch(work.userId, work.batchId, { status: "schedule_held",
       scheduleState: "held", scheduleLeaseUntilUtc: "", scheduleHeldUtc: new Date().toISOString(),
       scheduleHoldCode: hold.code, scheduleHoldMessage: hold.message,
+      scheduleRetryAfterUtc: "", scheduleLastErrorCode: failure.code,
+      scheduleLastErrorStage: failure.stage,
       scheduleNotificationState: latest.scheduleNotificationSentUtc ? "sent" : "pending",
       scheduleNotificationId: notificationId,
       warningLevel: "blocked", warningMessage: hold.message }, latest.etag);
     await deps.store.audit(work.userId, work.batchId, "scheduled_preflight_held",
-      { scheduleRevision: Number(work.scheduleRevision), reason: hold.code });
+      { scheduleRevision: Number(work.scheduleRevision), reason: hold.code, attempt,
+        originalCode: failure.code, stage: failure.stage, statusCode: failure.statusCode });
     await deps.enqueue({ kind: "schedule_notify", userId: work.userId, batchId: work.batchId,
       scheduleRevision: Number(work.scheduleRevision) });
   }
@@ -223,7 +278,11 @@ function scheduleLink(batchId) {
   try {
     const url = new URL(String(process.env.EMAIL_PUBLIC_BASE_URL || ""));
     if (url.protocol !== "https:") return "";
-    url.pathname = "/"; url.search = `?emailBatch=${encodeURIComponent(batchId)}`; url.hash = "";
+    // This anonymous relay preserves the held-batch destination through a
+    // fresh Static Web Apps login. Linking straight to the protected root made
+    // the platform's generic 401 override discard the query string.
+    url.pathname = "/review.html";
+    url.search = `?emailBatch=${encodeURIComponent(batchId)}`; url.hash = "";
     return url.toString();
   } catch { return ""; }
 }
@@ -636,3 +695,5 @@ module.exports.parseWork = parseWork;
 module.exports.refreshBatch = refreshBatch;
 module.exports.preflight = preflight;
 module.exports.notifyScheduleHold = notifyScheduleHold;
+module.exports.preflightFailure = preflightFailure;
+module.exports.scheduleLink = scheduleLink;

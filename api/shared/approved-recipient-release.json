@@ -1,5 +1,5 @@
 {
-  "descriptorHash": "2c6f5b3585dc35d8d027e60c85c180663bfa8041617af1a61fb4f64103c4a3b2",
+  "descriptorHash": "c3ffa22925745c6f7b6175bed46921d55e7250375232ef9382d445e061786be1",
   "ineligibleCount": 14197,
   "provenance": {
     "actSource": "act_contacts_2026-08-26T185802Z.json",
@@ -11,5 +11,6 @@
   "recipientCount": 107259,
   "registryContentHash": "471bda2efce6471cb0bc89dcc79f04d33e8995510c54cf9a32cf07bd2755c134",
   "registrySchemaVersion": 1,
-  "schemaVersion": 1
+  "schemaVersion": 1,
+  "shardManifestHash": "c31da68b42c72cf5f3b4c39be061c5dd04a8e4bf96692e3b947f8c7d176419a9"
 }

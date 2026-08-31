@@ -32,6 +32,9 @@ test("repair publishes one batch preflight only when a schedule is due", async (
         listBatches: async () => [
           { id: "due", status: "scheduled", scheduleState: "pending", scheduleRevision: 3,
             scheduledForUtc: "2026-08-29T12:00:00Z" },
+          { id: "backoff", status: "scheduled", scheduleState: "pending", scheduleRevision: 4,
+            scheduledForUtc: "2026-08-29T11:59:00Z",
+            scheduleRetryAfterUtc: "2026-08-29T12:00:30Z" },
           { id: "later", status: "scheduled", scheduleState: "pending", scheduleRevision: 2,
             scheduledForUtc: "2026-08-29T12:01:00Z" },
         ],
@@ -51,6 +54,7 @@ function scheduledFixture() {
   let version = 1;
   const batch = { id: "b1", userId: "u1", userName: "Rep", status: "scheduled",
     scheduleState: "pending", scheduleRevision: 4, scheduledForUtc: "2020-01-01T00:00:00Z",
+    schedulePreflightAttempts: 0, scheduleRetryAfterUtc: "",
     senderMail: "rep@eicatlanta.com", graphMailbox: "rep@eicatlanta.com", graphMailboxId: "mailbox-1",
     etag: "b1" };
   const messages = [0, 1].map((i) => ({ id: `m${i}`, state: "scheduled_pending",
@@ -98,6 +102,81 @@ test("one preflight failure holds every message and queues only owner notificati
   assert.equal(f.batch.scheduleHoldMessage, "A recipient, attachment, or rendered message changed.");
   assert.deepEqual(f.messages.map((m) => m.state), ["scheduled_pending", "scheduled_pending"]);
   assert.deepEqual(f.queued.map((x) => x.work.kind), ["schedule_notify"]);
+});
+
+test("a transient cold recipient-registry failure retries without alarming the rep", async () => {
+  const f = scheduledFixture();
+  await worker.processWork({ kind: "preflight", userId: "u1", batchId: "b1", scheduleRevision: 4 }, {
+    ...f,
+    service: { preflightScheduled: async () => {
+      const error = new Error("storage detail must not leak");
+      error.code = "recipient_registry_unavailable";
+      error.statusCode = 503;
+      error.preflightStage = "recipient_registry";
+      throw error;
+    } },
+  });
+  assert.equal(f.batch.status, "scheduled");
+  assert.equal(f.batch.scheduleState, "pending");
+  assert.equal(f.batch.schedulePreflightAttempts, 1);
+  assert.equal(f.batch.scheduleLastErrorCode, "recipient_registry_unavailable");
+  assert.equal(f.batch.scheduleLastErrorStage, "recipient_registry");
+  assert.ok(Date.parse(f.batch.scheduleRetryAfterUtc) > Date.now());
+  assert.deepEqual(f.queued.map((x) => [x.work.kind, x.delay]), [["preflight", 15]]);
+  const retryAudit = f.audits.find((entry) => entry[2] === "scheduled_preflight_retry");
+  assert.deepEqual(retryAudit[3].code, "recipient_registry_unavailable");
+  assert.deepEqual(retryAudit[3].stage, "recipient_registry");
+  assert.equal(JSON.stringify(retryAudit).includes("storage detail"), false);
+});
+
+test("a transient safety dependency holds only after three attempts", async () => {
+  const f = scheduledFixture();
+  f.batch.schedulePreflightAttempts = 2;
+  await worker.processWork({ kind: "preflight", userId: "u1", batchId: "b1", scheduleRevision: 4 }, {
+    ...f,
+    service: { preflightScheduled: async () => {
+      const error = new Error("storage detail must not leak");
+      error.code = "recipient_registry_unavailable";
+      error.statusCode = 503;
+      error.preflightStage = "recipient_registry";
+      throw error;
+    } },
+  });
+  assert.equal(f.batch.status, "schedule_held");
+  assert.equal(f.batch.schedulePreflightAttempts, 3);
+  assert.equal(f.batch.scheduleHoldCode, "schedule_preflight_unavailable");
+  assert.match(f.batch.scheduleHoldMessage, /safety data/i);
+  assert.deepEqual(f.queued.map((x) => x.work.kind), ["schedule_notify"]);
+  const heldAudit = f.audits.find((entry) => entry[2] === "scheduled_preflight_held");
+  assert.equal(heldAudit[3].originalCode, "recipient_registry_unavailable");
+  assert.equal(heldAudit[3].stage, "recipient_registry");
+  assert.equal(JSON.stringify(heldAudit).includes("storage detail"), false);
+});
+
+test("a duplicate preflight delivery respects the durable retry time", async () => {
+  const f = scheduledFixture();
+  f.batch.scheduleRetryAfterUtc = new Date(Date.now() + 30000).toISOString();
+  let checked = 0;
+  await worker.processWork({ kind: "preflight", userId: "u1", batchId: "b1", scheduleRevision: 4 }, {
+    ...f, service: { preflightScheduled: async () => { checked++; } },
+  });
+  assert.equal(checked, 0);
+  assert.equal(f.batch.schedulePreflightAttempts, 0);
+  assert.equal(f.queued.length, 1);
+  assert.equal(f.queued[0].work.kind, "preflight");
+  assert.ok(f.queued[0].delay >= 29 && f.queued[0].delay <= 30);
+});
+
+test("schedule review links use the anonymous sign-in relay", () => {
+  const old = process.env.EMAIL_PUBLIC_BASE_URL;
+  process.env.EMAIL_PUBLIC_BASE_URL = "https://map.example.com/old/path?discard=1";
+  try {
+    assert.equal(worker.scheduleLink("123e4567-e89b-12d3-a456-426614174000"),
+      "https://map.example.com/review.html?emailBatch=123e4567-e89b-12d3-a456-426614174000");
+  } finally {
+    if (old === undefined) delete process.env.EMAIL_PUBLIC_BASE_URL;
+    else process.env.EMAIL_PUBLIC_BASE_URL = old;
+  }
 });
 
 test("hold notification reconciles its deterministic self-addressed message", async () => {

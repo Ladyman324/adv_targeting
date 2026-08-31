@@ -109,16 +109,27 @@ evidence hash. Inactive records cannot be manually promoted.
 8. Test, review, then deploy in the safe order:
 
    - run Python and API tests plus `python src/audit.py`;
-   - upload `approved_recipients.json.gz` first with a fresh explicit
-     production approval;
-   - publish the Function App second;
-   - publish static assets separately.
+   - upload the immutable
+     `approved_recipients/releases/<registry-hash>/shards/*.json.gz` objects and
+     their release-specific `manifest.json`, with a fresh explicit production
+     approval;
+   - publish static assets, including the anonymous `/review.html` sign-in
+     relay used by scheduled-batch review notifications;
+   - publish the Function App last; it is release-bound to that exact immutable
+     manifest and cannot discover a different release by accident.
 
-   The exporter also writes a PII-free registry release descriptor into the API
-   package. The Function package preflight refuses to build unless that
-   descriptor exactly pins the local registry and ACT lookup. Runtime rejects a
-   validly self-hashed blob from any other release; all registry failures fail
-   closed.
+   `python src/export_approved_recipients.py --upload` performs only the safe
+   first step. It deliberately leaves the legacy `approved_recipients.json.gz`
+   untouched, so the currently running pre-shard Function App and an emergency
+   rollback keep reading the release they were built against.
+
+   The exporter also writes a PII-free shard manifest and registry release
+   descriptor into the API package. The Function package preflight refuses to
+   build unless that descriptor exactly pins the local registry, shard manifest
+   and ACT lookup. Runtime rejects a validly self-hashed manifest or shard from
+   any other release; all registry failures fail closed. Scheduled sends queue
+   their safety check for the exact send instant, retry transient cold-start or
+   storage failures three times, and use the repair timer only as a fallback.
 
 ## Email authorization and evidence
 

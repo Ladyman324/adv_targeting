@@ -381,7 +381,16 @@ async function validateBatch(who, batchId, options = {}) {
   for (const m of messages) counts.set(m.recipientEmail, (counts.get(m.recipientEmail) || 0) + 1);
   const duplicates = new Set([...counts].filter(([, n]) => n > 1).map(([email]) => email));
   const cfg = core.config(), updated = [];
-  await recipientRegistry.load({ force: options.identityForce === true });
+  try {
+    await recipientRegistry.load({ force: options.identityForce === true });
+  } catch (error) {
+    // Scheduled preflight needs to distinguish a cold registry failure from a
+    // changed message. Preserve a coarse operational stage, never recipient
+    // data or the raw exception text.
+    if (options.preflight === true && !error.preflightStage)
+      error.preflightStage = "recipient_registry";
+    throw error;
+  }
   const currentDocsById = new Map((await store.getDocuments(batch.attachmentIds)).map((d) => [d.id, d]));
   const tpl = await store.getTemplate(batch.templateId);
   const images = (tpl && tpl.images) || [];
@@ -1142,6 +1151,8 @@ async function approve(who, input) {
   await store.patchBatch(who.id, batch.id, { status: scheduledForUtc ? "scheduled" : "drafting", mode, approvedUtc,
     reviewedUtc: approvedUtc, sendNotBeforeUtc, scheduledForUtc,
     scheduleState: scheduledForUtc ? "pending" : "", scheduleRevision,
+    schedulePreflightAttempts: 0, scheduleRetryAfterUtc: "",
+    scheduleLastErrorCode: "", scheduleLastErrorStage: "",
     scheduleLeaseUntilUtc: "", schedulePassedUtc: "", scheduleHeldUtc: "",
     scheduleHoldCode: "", scheduleHoldMessage: "", scheduleNotificationState: "",
     scheduleNotificationId: "", scheduleNotificationGraphId: "", scheduleNotificationCreatedUtc: "",
@@ -1158,6 +1169,18 @@ async function approve(who, input) {
       recipientCount: batch.recipientCount, attachmentIds: batch.attachmentIds,
       scheduledForUtc, scheduleRevision,
     });
+    // Publish the normal path now, with Azure Queue holding it until the exact
+    // scheduled instant. The five-minute repair timer remains the durable
+    // fallback if this independent queue write is interrupted.
+    const delay = Math.max(0, Math.ceil((Date.parse(scheduledForUtc) - Date.now()) / 1000));
+    try {
+      await enqueue({ kind: "preflight", userId: who.id, batchId: batch.id,
+        scheduleRevision }, delay);
+    } catch (error) {
+      await store.audit(who.id, batch.id, "scheduled_preflight_enqueue_deferred", {
+        scheduleRevision, code: String(error && error.code || "queue_unavailable").slice(0, 80),
+      });
+    }
     return getBatchDetail(who, batch.id);
   }
   // Send order is decided HERE, once, and stored. Deciding it in the worker
@@ -1193,28 +1216,33 @@ async function approve(who, input) {
 }
 
 async function preflightScheduled(userId, batchId, revision, deps = {}) {
-  const st = deps.store || store, au = deps.auth || auth, registry = deps.recipientRegistry || recipientRegistry,
+  const st = deps.store || store, au = deps.auth || auth,
     sup = deps.suppress || suppress;
-  const batch = await st.getBatch(userId, batchId);
+  const stage = async (name, action) => {
+    try { return await action(); }
+    catch (error) { if (!error.preflightStage) error.preflightStage = name; throw error; }
+  };
+  const batch = await stage("batch", () => st.getBatch(userId, batchId));
   if (!batch || batch.status !== "scheduled" || batch.scheduleState !== "checking"
       || Number(batch.scheduleRevision) !== Number(revision))
     throw httpError(409, "This schedule is no longer awaiting that preflight.", "schedule_stale");
-  const template = await st.getTemplate(batch.templateId);
+  const template = await stage("template", () => st.getTemplate(batch.templateId));
   if (!template || template.published === false || Number(template.version || 1) !== Number(batch.templateVersion || 1))
     throw httpError(409, "The approved template changed after this batch was scheduled.", "schedule_template_changed");
-  const connection = await au.status(userId);
+  const connection = await stage("mailbox_status", () => au.status(userId));
   const connectedMail = String(connection.profile && (connection.profile.mail || connection.profile.userPrincipalName)
     || connection.mailbox || "").toLowerCase();
-  const token = await au.tokenFor(userId);
+  const token = await stage("mailbox_token", () => au.tokenFor(userId));
   if (!connection.connected || !connection.profile || !connectedMail
       || connectedMail !== String(batch.senderMail || batch.graphMailbox || "").toLowerCase()
       || String(connection.profile.id || "").toLowerCase() !== String(batch.graphMailboxId || "").toLowerCase()
       || String(token.mailboxId || "").toLowerCase() !== String(batch.graphMailboxId || "").toLowerCase())
     throw httpError(409, "Reconnect the scheduled batch mailbox before sending.", "schedule_mailbox_changed");
-  const frozenMessages = await st.listMessages(userId, batchId);
+  const frozenMessages = await stage("messages", () => st.listMessages(userId, batchId));
   const frozenById = new Map(frozenMessages.map((message) => [message.id, message]));
-  const validation = await validateBatch({ id: userId, name: batch.userName || "" }, batchId,
-    { reviewed: true, identityForce: true });
+  const validation = await stage("validation", () => validateBatch(
+    { id: userId, name: batch.userName || "" }, batchId,
+    { reviewed: true, identityForce: true, preflight: true }));
   const identityChanged = validation.messages.some((message) => {
     const frozen = frozenById.get(message.id);
     if (!frozen) return true;
@@ -1233,16 +1261,19 @@ async function preflightScheduled(userId, batchId, revision, deps = {}) {
     ...(message.teammateCc || []).map((email, index) => ({ email,
       contactId: (message.teammateCcCrds || [])[index] || "" })),
   ]);
-  const blocked = await sup.blockedAmong(identities);
+  const blocked = await stage("suppression", () => sup.blockedAmong(identities));
   if (blocked.size) throw httpError(409, "A scheduled recipient is now suppressed.", "schedule_recipient_suppressed");
-  const policy = await st.policy();
+  const policy = await stage("policy", () => st.policy());
   if (!cfg.directSendEnvironmentEnabled || policy.killed)
     throw httpError(403, policy.reason || "Direct sending is disabled.", "schedule_sending_disabled");
   if (cfg.testAllowlist.size && validation.messages.some((message) =>
       !cfg.testAllowlist.has(String(message.recipientEmail || "").toLowerCase())))
     throw httpError(403, "A scheduled recipient is outside the production allowlist.", "schedule_allowlist_changed");
-  await registry.load({ force: true });
-  await (deps.limitGuard || limitGuard).reserve(userId, batch.id, batch.externalCount, cfg.rollingExternalLimit);
+  // validateBatch already forced the registry and every selected CRD through
+  // the release-bound identity check. A second forced blob refresh added a
+  // dependency without adding a safety property.
+  await stage("capacity", () => (deps.limitGuard || limitGuard)
+    .reserve(userId, batch.id, batch.externalCount, cfg.rollingExternalLimit));
   return { batch: validation.batch, messages: validation.messages, connection };
 }
 async function getBatchDetail(who, batchId) {
@@ -1285,6 +1316,8 @@ async function control(who, input) {
     const revision = (Number(batch.scheduleRevision) || 0) + 1;
     await store.patchBatch(who.id, batch.id, { status: "editing", mode: "", scheduledForUtc: "",
       sendNotBeforeUtc: "", scheduleState: "", scheduleRevision: revision,
+      schedulePreflightAttempts: 0, scheduleRetryAfterUtc: "",
+      scheduleLastErrorCode: "", scheduleLastErrorStage: "",
       scheduleLeaseUntilUtc: "", schedulePassedUtc: "", scheduleHeldUtc: "",
       scheduleHoldCode: "", scheduleHoldMessage: "", warningLevel: "normal", warningMessage: "" }, batch.etag);
     for (const message of messages) await store.patchMessage(who.id, batch.id, message.id, {

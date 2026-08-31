@@ -167,6 +167,16 @@ class CachePolicyTests(unittest.TestCase):
         api = next(route for route in self.routes if route["route"] == "/api/*")
         self.assertEqual("no-store", api["headers"]["Cache-Control"])
 
+    def test_scheduled_review_relay_survives_a_fresh_sign_in(self):
+        relay = next(route for route in self.routes
+                     if route["route"] == "/review.html")
+        self.assertIn("anonymous", relay["allowedRoles"])
+        self.assertEqual("no-store", relay["headers"]["Cache-Control"])
+        html = (ROOT / "webapp" / "review.html").read_text(encoding="utf-8")
+        self.assertIn("post_login_redirect_uri=", html)
+        self.assertIn('target = "/?emailBatch="', html)
+        self.assertRegex(html, r"\[0-9a-f\]\{8\}.*\[0-9a-f\]\{12\}")
+
 
     def test_desktop_has_no_raw_generated_data_fetches(self):
         source = (ROOT / "webapp" / "app.js").read_text(encoding="utf-8")

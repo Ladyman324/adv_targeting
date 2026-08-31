@@ -5,7 +5,8 @@ const { BlobServiceClient } = require("@azure/storage-blob");
 const core = require("./email-core");
 const RELEASE_DESCRIPTOR = require("./approved-recipient-release.json");
 const CONTAINER = process.env.APPROVED_RECIPIENT_CONTAINER || "lookups";
-const BLOB = process.env.APPROVED_RECIPIENT_BLOB || "approved_recipients.json.gz";
+const MANIFEST_BLOB = process.env.APPROVED_RECIPIENT_MANIFEST_BLOB
+  || `approved_recipients/releases/${RELEASE_DESCRIPTOR.registryContentHash}/manifest.json`;
 const TTL_MS = Number(process.env.APPROVED_RECIPIENT_TTL_MS || 60 * 1000);
 /* WHICH IDENTITY TIERS MAY BE ADDRESSED.
  *
@@ -34,6 +35,8 @@ const POLICY_VERSION = crypto.createHash("sha256")
   .update(JSON.stringify({ schemaVersion: 1, tiers: POLICY_TIERS,
     blockedHighSources: POLICY_BLOCKED_SOURCES }), "utf8").digest("hex").slice(0, 16);
 let cache = null, loadedAt = 0, sourceEtag = "";
+let manifestCache = null, manifestLoadedAt = 0, manifestEtag = "";
+const shardCache = new Map();
 function norm(value) { return String(value || "").trim().toLowerCase(); }
 function failure(statusCode, code, message, detail = "") {
   const err = new Error(message); err.statusCode = statusCode; err.code = code;
@@ -60,7 +63,8 @@ function releaseDescriptorCore(descriptor) {
     registryContentHash: descriptor.registryContentHash,
     recipientCount: descriptor.recipientCount,
     ineligibleCount: descriptor.ineligibleCount,
-    provenance: descriptor.provenance || {} };
+    provenance: descriptor.provenance || {},
+    shardManifestHash: descriptor.shardManifestHash };
 }
 function assertReleaseBinding(payload) {
   const descriptor = RELEASE_DESCRIPTOR;
@@ -186,43 +190,137 @@ function hydratePayload(payload, enforceReleaseBinding) {
     ready: true };
 }
 function hydrate(payload) { return hydratePayload(payload, true); }
-async function download() {
+function shardKey(crd) { return String(crd || "").trim().slice(0, 2).padEnd(2, "0"); }
+function manifestCore(manifest) {
+  return { schemaVersion: manifest.schemaVersion,
+    registrySchemaVersion: manifest.registrySchemaVersion,
+    registryContentHash: manifest.registryContentHash,
+    recipientCount: manifest.recipientCount,
+    ineligibleCount: manifest.ineligibleCount,
+    provenance: manifest.provenance || {}, shards: manifest.shards || {} };
+}
+function shardCore(shard) {
+  return { schemaVersion: shard.schemaVersion,
+    registryContentHash: shard.registryContentHash, shardKey: shard.shardKey,
+    recipients: shard.recipients || {}, ineligible: shard.ineligible || {} };
+}
+function assertManifest(manifest) {
+  const descriptorHash = sha256(releaseDescriptorCore(RELEASE_DESCRIPTOR));
+  const actual = sha256(manifestCore(manifest));
+  if (Number(RELEASE_DESCRIPTOR.schemaVersion) !== 1
+      || String(RELEASE_DESCRIPTOR.descriptorHash || "").toLowerCase() !== descriptorHash)
+    throw failure(503, "recipient_registry_release_invalid",
+      "This API release has an invalid approved-recipient descriptor.");
+  if (Number(manifest.schemaVersion) !== 1
+      || Number(manifest.registrySchemaVersion) !== 1
+      || String(manifest.contentHash || "").toLowerCase() !== actual)
+    throw failure(503, "recipient_registry_incompatible",
+      "The approved-recipient shard manifest failed its content-integrity check.");
+  const sameRelease = actual === String(RELEASE_DESCRIPTOR.shardManifestHash || "").toLowerCase()
+    && String(manifest.registryContentHash || "").toLowerCase()
+      === String(RELEASE_DESCRIPTOR.registryContentHash || "").toLowerCase()
+    && Number(manifest.recipientCount) === Number(RELEASE_DESCRIPTOR.recipientCount)
+    && Number(manifest.ineligibleCount) === Number(RELEASE_DESCRIPTOR.ineligibleCount)
+    && canonicalJson(manifest.provenance || {})
+      === canonicalJson(RELEASE_DESCRIPTOR.provenance || {});
+  if (!sameRelease) throw failure(503, "recipient_registry_release_mismatch",
+    "The approved-recipient shard manifest does not belong to this API release.");
+  return { ...manifest, contentHash: actual, ready: true };
+}
+function assertShard(payload, key, manifest) {
+  const entry = (manifest.shards || {})[key];
+  const actual = sha256(shardCore(payload));
+  const valid = entry && Number(payload.schemaVersion) === 1
+    && String(payload.shardKey || "") === key
+    && String(payload.registryContentHash || "").toLowerCase()
+      === String(manifest.registryContentHash || "").toLowerCase()
+    && String(payload.contentHash || "").toLowerCase() === actual
+    && String(entry.contentHash || "").toLowerCase() === actual
+    && Number(entry.recipientCount) === Object.keys(payload.recipients || {}).length
+    && Number(entry.ineligibleCount) === Object.keys(payload.ineligible || {}).length;
+  if (!valid) throw failure(503, "recipient_registry_incompatible",
+    "An approved-recipient shard failed its release-integrity check.");
+}
+function blobClient(name) {
   const connection = process.env.AZURE_STORAGE_CONNECTION_STRING || "";
   if (!connection) throw failure(503, "recipient_registry_unavailable",
     "Approved-recipient storage is not configured.");
-  const blob = BlobServiceClient.fromConnectionString(connection)
-    .getContainerClient(CONTAINER).getBlobClient(BLOB);
-  // Forced checks happen immediately before sends. Reading properties is enough
-  // when the blob did not change, so paced batches do not redownload the full
-  // registry for every message.
-  const properties = await blob.getProperties();
-  const etag = String(properties.etag || "");
-  if (cache && etag && sourceEtag === etag) return { unchanged: true, etag };
-  const payload = JSON.parse(zlib.gunzipSync(await blob.downloadToBuffer()).toString("utf8"));
-  return { payload, etag };
+  return BlobServiceClient.fromConnectionString(connection)
+    .getContainerClient(CONTAINER).getBlobClient(name);
+}
+const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+function retryableDownload(error) {
+  const code = String(error && error.code || "");
+  const status = Number(error && error.statusCode) || 0;
+  return status === 408 || status === 429 || status >= 500
+    || ["ECONNRESET", "ETIMEDOUT", "EAI_AGAIN", "ENOTFOUND",
+      "UND_ERR_CONNECT_TIMEOUT", "UND_ERR_HEADERS_TIMEOUT"].includes(code);
+}
+async function downloadJson(name, priorEtag = "", compressed = false) {
+  let last;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const blob = blobClient(name), properties = await blob.getProperties();
+      const etag = String(properties.etag || "");
+      if (priorEtag && etag && etag === priorEtag) return { unchanged: true, etag };
+      const raw = await blob.downloadToBuffer();
+      return { payload: JSON.parse((compressed ? zlib.gunzipSync(raw) : raw).toString("utf8")), etag };
+    } catch (error) {
+      last = error;
+      if (!retryableDownload(error) || attempt === 2) break;
+      await wait(attempt === 0 ? 250 : 750);
+    }
+  }
+  if (last && last.code && String(last.code).startsWith("recipient_registry_")) throw last;
+  throw failure(503, "recipient_registry_unavailable",
+    `The approved-recipient registry could not be refreshed: ${last && last.message || last}`);
+}
+async function loadManifest(options = {}) {
+  const force = options === true || options.force === true;
+  if (manifestCache && !force && Date.now() - manifestLoadedAt < TTL_MS) return manifestCache;
+  const result = await downloadJson(MANIFEST_BLOB, manifestCache ? manifestEtag : "");
+  if (result.unchanged) { manifestLoadedAt = Date.now(); return manifestCache; }
+  manifestCache = assertManifest(result.payload); manifestEtag = result.etag || "";
+  manifestLoadedAt = Date.now();
+  // A new manifest makes every previously hydrated shard stale as a unit.
+  shardCache.clear();
+  return manifestCache;
+}
+async function loadShard(key, manifest, options = {}) {
+  const force = options === true || options.force === true;
+  const held = shardCache.get(key);
+  if (held && !force && Date.now() - held.loadedAt < TTL_MS) return held.index;
+  const entry = (manifest.shards || {})[key];
+  if (!entry || !entry.blob) return { recipients: new Map(), ineligible: new Map(),
+    contentHash: manifest.registryContentHash, ready: true };
+  const result = await downloadJson(String(entry.blob), held ? held.etag : "", true);
+  if (result.unchanged) { held.loadedAt = Date.now(); return held.index; }
+  assertShard(result.payload, key, manifest);
+  const pseudo = { schemaVersion: 1, recipients: result.payload.recipients || {},
+    ineligible: result.payload.ineligible || {}, provenance: {} };
+  pseudo.contentHash = expectedContentHash(pseudo);
+  const index = hydratePayload(pseudo, false);
+  index.contentHash = manifest.registryContentHash;
+  shardCache.set(key, { etag: result.etag || "", loadedAt: Date.now(), index });
+  return index;
 }
 async function load(options = {}) {
-  const force = options === true || options.force === true;
-  if (cache && !force && Date.now() - loadedAt < TTL_MS) return cache;
-  let result;
-  try { result = await download(); }
-  catch (err) {
-    if (err && err.code && String(err.code).startsWith("recipient_registry_")) throw err;
-    throw failure(503, "recipient_registry_unavailable",
-      `The approved-recipient registry could not be refreshed: ${err.message || err}`);
-  }
-  if (result.unchanged) { loadedAt = Date.now(); return cache; }
-  cache = hydrate(result.payload); sourceEtag = result.etag || "";
-  loadedAt = Date.now(); return cache;
+  // useIndex() deliberately retains the old whole-index contract for unit
+  // tests. Production loads only the small PII-free manifest here; resolve()
+  // downloads the one or few CRD shards a batch actually needs.
+  if (cache) return cache;
+  return loadManifest(options);
 }
 async function resolve(crd, options = {}) {
   const id = String(crd || "").trim();
   if (!id) throw failure(400, "recipient_crd_required", "Every advisor recipient needs a CRD.");
-  const index = await load(options), record = index.recipients.get(id);
+  const manifest = cache ? null : await loadManifest(options);
+  const index = cache || await loadShard(shardKey(id), manifest, options);
+  const record = index.recipients.get(id);
   if (!record) throw failure(409, "recipient_not_approved",
     `CRD ${id} does not have an approved email recipient.`,
     index.ineligible.get(id) || "not_in_approved_registry");
-  return { ...record, registryHash: index.contentHash };
+  return { ...record, registryHash: cache ? index.contentHash : manifest.registryContentHash };
 }
 async function verify(crd, email, options = {}) {
   const record = await resolve(crd, options);
@@ -265,9 +363,14 @@ function useIndex(payload) {
   seeded.contentHash = expectedContentHash(seeded);
   // Explicit test seam: production blob loads always call strict hydrate().
   cache = hydratePayload(seeded, false);
-  loadedAt = Date.now(); sourceEtag = "test"; return cache;
+  loadedAt = Date.now(); sourceEtag = "test";
+  manifestCache = null; manifestLoadedAt = 0; manifestEtag = ""; shardCache.clear();
+  return cache;
 }
-function reset() { cache = null; loadedAt = 0; sourceEtag = ""; }
+function reset() {
+  cache = null; loadedAt = 0; sourceEtag = "";
+  manifestCache = null; manifestLoadedAt = 0; manifestEtag = ""; shardCache.clear();
+}
 module.exports = { load, resolve, verify, allowedTeammates, verifyTeammates,
   verifyActPair, useIndex, reset, norm, failure, canonicalJson, expectedContentHash,
-  hydrate, policy };
+  hydrate, policy, shardKey, manifestCore, shardCore, assertManifest, assertShard };

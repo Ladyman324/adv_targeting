@@ -40,14 +40,27 @@ function load(messages, batchOverrides) {
   const storeStub = {
     getBatch: async () => batch,
     listMessages: async () => messages,
-    patchMessage: async () => {},
-    patchBatch: async () => {},
+    patchMessage: async (_userId, _batchId, messageId, patch) => {
+      const message = messages.find((item) => item.id === messageId);
+      Object.assign(message, patch);
+      return { ...message };
+    },
+    patchBatch: async (_userId, _batchId, patch) => {
+      Object.assign(batch, patch);
+      return { ...batch };
+    },
     getDocuments: async () => [],
+    getTemplate: async () => null,
+    getSuppression: async () => null,
+    policy: async () => ({ killed: false, reason: "" }),
     audit: async () => {},
   };
   // retry refuses to run on a disconnected mailbox, which is correct and is not
   // what these tests are about.
-  const authStub = { status: async () => ({ connected: true }) };
+  const authStub = { status: async () => ({ connected: true,
+    profile: { id: "mailbox-1", mail: "rep@eicatlanta.com" } }) };
+  const registryStub = { load: async () => ({ ready: true }) };
+  const suppressStub = { blockedAmong: async () => new Map() };
   class QueueClientStub {
     async createIfNotExists() {}
     async sendMessage(payload, options) {
@@ -61,6 +74,8 @@ function load(messages, batchOverrides) {
     if (parent && parent.filename === servicePath) {
       if (request === "./email-store") return storeStub;
       if (request === "./email-auth") return authStub;
+      if (request === "./recipient-registry") return registryStub;
+      if (request === "./email-suppress") return suppressStub;
       if (request === "@azure/storage-queue") return { QueueClient: QueueClientStub };
     }
     return realLoad.call(this, request, parent, isMain);
@@ -97,6 +112,42 @@ test("a single-recipient batch is not delayed at all", async () => {
   await service.approve({ id: "u1", name: "Rep" }, { batchId: "b1", mode: "drafts" });
   assert.deepEqual(sent.map((s) => s.visibilityTimeout), [0],
     "pacing must not make the common one-off send wait for a slot it is first in");
+});
+
+test("scheduled approval publishes its preflight for the exact scheduled instant", async () => {
+  const prior = {
+    NODE_ENV: process.env.NODE_ENV,
+    EMAIL_DIRECT_SEND_ENABLED: process.env.EMAIL_DIRECT_SEND_ENABLED,
+    EMAIL_DIRECT_SEND_KILL_SWITCH: process.env.EMAIL_DIRECT_SEND_KILL_SWITCH,
+  };
+  process.env.NODE_ENV = "production";
+  process.env.EMAIL_DIRECT_SEND_ENABLED = "1";
+  delete process.env.EMAIL_DIRECT_SEND_KILL_SWITCH;
+  try {
+    const message = pending(1)[0];
+    Object.assign(message, { recipientEmail: "rep@eicatlanta.com", reviewed: true,
+      bodyText: "b", bodyHtml: "<p>b</p>", attachments: [], contactId: "", teammateCc: [],
+      teammateCcCrds: [] });
+    const { service, sent } = load([message], { status: "editing", mode: "",
+      graphMailbox: "rep@eicatlanta.com", graphMailboxId: "mailbox-1",
+      externalCount: 0, templateId: "", commonRevision: 0, scheduleRevision: 0 });
+    const scheduledForUtc = new Date(Date.now() + 120000).toISOString();
+    const validation = await service.validateBatch({ id: "u1", name: "Rep" }, "b1",
+      { reviewed: true, identityForce: true });
+    assert.deepEqual(validation.errors, []);
+    await service.approve({ id: "u1", name: "Rep" }, { batchId: "b1", mode: "send",
+      reviewed: true, scheduledForUtc,
+      confirmation: { recipientCount: 1, attachmentIds: [], scheduledForUtc } });
+    assert.equal(sent.length, 1);
+    assert.deepEqual(sent[0].work, { kind: "preflight", userId: "u1", batchId: "b1",
+      scheduleRevision: 1 });
+    assert.ok(sent[0].visibilityTimeout >= 118 && sent[0].visibilityTimeout <= 120,
+      String(sent[0].visibilityTimeout));
+  } finally {
+    for (const [key, value] of Object.entries(prior)) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+  }
 });
 
 test("retry re-queues genuinely failed messages, paced, but never an unknown send", async () => {

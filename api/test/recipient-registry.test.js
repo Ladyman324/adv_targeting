@@ -153,7 +153,8 @@ test("a validly self-hashed registry from another release is rejected", () => {
 test("the packaged PII-free descriptor accepts the exact local registry", () => {
   assert.deepEqual(Object.keys(descriptor).sort(), ["descriptorHash",
     "ineligibleCount", "provenance", "recipientCount",
-    "registryContentHash", "registrySchemaVersion", "schemaVersion"]);
+    "registryContentHash", "registrySchemaVersion", "schemaVersion",
+    "shardManifestHash"]);
   assert.equal(JSON.stringify(descriptor).includes("@"), false);
   const root = process.env.REPOSITORY_TEST_ROOT
     || path.resolve(__dirname, "../..");
@@ -162,6 +163,20 @@ test("the packaged PII-free descriptor accepts the exact local registry", () => 
   const hydrated = registry.hydrate(payload);
   assert.equal(hydrated.contentHash, descriptor.registryContentHash);
   assert.deepEqual(hydrated.provenance, descriptor.provenance);
+});
+
+test("the packaged descriptor accepts the exact shard manifest and CRD shard", () => {
+  const root = process.env.REPOSITORY_TEST_ROOT || path.resolve(__dirname, "../..");
+  const identity = path.join(root, "data", "identity");
+  const manifest = JSON.parse(fs.readFileSync(path.join(identity,
+    "approved_recipients_manifest.json"), "utf8"));
+  assert.doesNotThrow(() => registry.assertManifest(manifest));
+  assert.equal(manifest.contentHash, descriptor.shardManifestHash);
+  const key = registry.shardKey("4996584");
+  const shard = JSON.parse(zlib.gunzipSync(fs.readFileSync(path.join(identity,
+    "approved_recipients_shards", key + ".json.gz"))).toString("utf8"));
+  assert.doesNotThrow(() => registry.assertShard(shard, key, manifest));
+  assert.ok(shard.recipients["4996584"]);
 });
 
 test("a duplicated Act GUID cannot receive an Act write", async () => {

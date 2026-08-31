@@ -155,6 +155,10 @@ function batchFromEntity(e) {
     approvedUtc: e.approvedUtc || "", sendNotBeforeUtc: e.sendNotBeforeUtc || "",
     scheduledForUtc: e.scheduledForUtc || "", scheduleState: e.scheduleState || "",
     scheduleRevision: Number(e.scheduleRevision) || 0, scheduleLeaseUntilUtc: e.scheduleLeaseUntilUtc || "",
+    schedulePreflightAttempts: Number(e.schedulePreflightAttempts) || 0,
+    scheduleRetryAfterUtc: e.scheduleRetryAfterUtc || "",
+    scheduleLastErrorCode: e.scheduleLastErrorCode || "",
+    scheduleLastErrorStage: e.scheduleLastErrorStage || "",
     schedulePassedUtc: e.schedulePassedUtc || "", scheduleHeldUtc: e.scheduleHeldUtc || "",
     scheduleHoldCode: e.scheduleHoldCode || "", scheduleHoldMessage: e.scheduleHoldMessage || "",
     scheduleNotificationState: e.scheduleNotificationState || "", scheduleNotificationPhase: e.scheduleNotificationPhase || "",
@@ -203,7 +207,8 @@ async function patchBatch(userId, batchId, patch, etag) {
   const entity = { partitionKey: userId, rowKey: batchId, updatedUtc: now() };
   const strings = ["status", "mode", "name", "commonSubject", "commonBodyText", "warningLevel",
     "warningMessage", "reviewedUtc", "approvedUtc", "sendNotBeforeUtc", "scheduledForUtc",
-    "scheduleState", "scheduleLeaseUntilUtc", "schedulePassedUtc", "scheduleHeldUtc",
+    "scheduleState", "scheduleLeaseUntilUtc", "scheduleRetryAfterUtc",
+    "scheduleLastErrorCode", "scheduleLastErrorStage", "schedulePassedUtc", "scheduleHeldUtc",
     "scheduleHoldCode", "scheduleHoldMessage", "scheduleNotificationState", "scheduleNotificationPhase",
     "scheduleNotificationId", "scheduleNotificationGraphId", "scheduleNotificationCreatedUtc",
     "scheduleNotificationSubmittedUtc", "scheduleNotificationReconcileUntilUtc",
@@ -212,7 +217,8 @@ async function patchBatch(userId, batchId, patch, etag) {
     "parentBatchId", "followUpSentUtc", "recipientRegistryHash"];
   for (const k of strings) if (k in patch) entity[k] = clean(patch[k], k.includes("Body") ? 50000 : 500);
   for (const k of ["commonRevision", "recipientCount", "externalCount", "sentCount",
-                   "hardBounceCount", "followUpDays", "scheduleRevision", "templateVersion"]) if (k in patch) entity[k] = Number(patch[k]) || 0;
+                   "hardBounceCount", "followUpDays", "scheduleRevision",
+                   "schedulePreflightAttempts", "templateVersion"]) if (k in patch) entity[k] = Number(patch[k]) || 0;
   for (const [key, field] of [["attachmentIds", "attachmentIdsJson"], ["attachmentSummary", "attachmentSummaryJson"]])
     if (key in patch) entity[field] = json(patch[key]);
   await (await table("batches")).updateEntity(entity, "Merge", etag ? { etag } : undefined);

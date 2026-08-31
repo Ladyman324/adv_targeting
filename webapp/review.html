@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="robots" content="noindex,nofollow">
+  <title>Opening scheduled email review</title>
+  <style>
+    body{margin:0;min-height:100vh;display:grid;place-items:center;background:#f3f6f8;color:#20323d;font:16px/1.45 system-ui,sans-serif}
+    main{max-width:34rem;margin:2rem;padding:2rem;border:1px solid #d8e0e5;border-radius:14px;background:white;box-shadow:0 8px 28px #18344614}
+    h1{margin:0 0 .6rem;font-size:1.3rem}p{margin:.35rem 0;color:#53636d}
+  </style>
+</head>
+<body>
+  <main><h1>Opening your scheduled email batch</h1><p id="status">Checking your sign-in…</p></main>
+  <script>
+    (async function () {
+      const id = new URLSearchParams(location.search).get("emailBatch") || "";
+      const valid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id);
+      if (!valid) {
+        document.getElementById("status").textContent = "This review link is not valid.";
+        return;
+      }
+      const target = "/?emailBatch=" + encodeURIComponent(id);
+      try {
+        const response = await fetch("/.auth/me", { credentials: "include", cache: "no-store" });
+        const body = await response.json();
+        if (body && body.clientPrincipal) return location.replace(target);
+      } catch (_) {}
+      location.replace("/.auth/login/aad?post_login_redirect_uri=" + encodeURIComponent(target));
+    }());
+  </script>
+</body>
+</html>
