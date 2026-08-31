@@ -1776,7 +1776,7 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
           ? `<span class="email-sendoff" title="${esc(sendBlocked)}">Cannot send directly &#9432;</span>`
           : `<button type="button" class="ask-btn primary" data-email="approve-send">${sendTiming === "later" ? "Approve &amp; Schedule" : "Approve &amp; Send"}</button>`}
           <details class="email-other">
-            <summary class="ask-btn ghost" aria-label="Other sending options" title="Other sending options">Other</summary>
+            <summary class="ask-btn email-other-trigger" aria-label="Other sending options" title="Other sending options">Other</summary>
             <div class="email-other-menu">
               <button type="button" class="ask-btn" data-email="approve-drafts">Create Outlook drafts</button>
               <p>Nothing is sent. You send the drafts manually from Outlook.</p>
@@ -2774,6 +2774,12 @@ They stay on your call list and keep their history — this only takes them out 
   }, true);
 
   document.addEventListener("click", async (event) => {
+    // Native <details> disclosures do not close when their user clicks away.
+    // This menu behaves like the rest of the app's popovers: a click anywhere
+    // outside it dismisses it before the clicked control performs its action.
+    const openOther = document.querySelector(".email-other[open]");
+    if (openOther && !openOther.contains(event.target)) openOther.open = false;
+
     const direct = event.target.closest("[data-email]");
     if (direct) {
       /* preventDefault CANCELS A CHECKBOX.

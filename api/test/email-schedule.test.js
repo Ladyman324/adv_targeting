@@ -30,6 +30,18 @@ test("direct send is primary and Outlook drafts live under Other", () => {
     < footer.indexOf('data-email="approve-drafts"'));
 });
 
+test("Other is visibly actionable, dismisses outside, and the footer reserves its height", () => {
+  const source = fs.readFileSync(path.join(__dirname, "..", "..", "webapp", "email.js"), "utf8");
+  const styles = fs.readFileSync(path.join(__dirname, "..", "..", "webapp", "email.css"), "utf8");
+
+  assert.match(source, /<summary class="ask-btn email-other-trigger"/);
+  assert.match(source, /const openOther = document\.querySelector\("\.email-other\[open\]"\);/);
+  assert.match(source, /openOther && !openOther\.contains\(event\.target\)\) openOther\.open = false/);
+  assert.match(styles, /\.email-footer\{position:sticky;left:auto;bottom:0;z-index:3;width:100%;flex:0 0 auto/);
+  assert.match(styles, /summary\.email-other-trigger\{display:flex;align-items:center;justify-content:center;/);
+  assert.match(styles, /summary\.email-other-trigger[\s\S]*box-shadow:inset 0 0 0 1px var\(--hair\)/);
+});
+
 test("scheduled instants are strict, leave cancellation time, and stop at seven days", () => {
   assert.equal(schedule.scheduledInstant("2026-08-29T12:01:00Z", NOW, 60),
     "2026-08-29T12:01:00.000Z");
