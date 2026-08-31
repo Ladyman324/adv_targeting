@@ -157,15 +157,17 @@ def main() -> None:
     # Pin rows are read positionally by the webapp's rehydrate(); a field
     # inserted mid-array rather than appended silently shifts everything after
     # it, which has happened once already.
-    PIN_WIDTH = 22
+    PIN_WIDTH = 18
     for path in sorted(WEB.glob("pins_??.json")):
         layer = json.loads(path.read_text(encoding="utf-8"))
+        assert layer.get("schema") == 2, f"{path.name}: unsupported pin schema"
         bad = [p for p in layer["pins"] if len(p) != PIN_WIDTH]
         assert not bad, f"{path.name}: {len(bad):,} pins are not {PIN_WIDTH} fields wide"
         # location type must be one of the three codes, and an uncertain pin
         # must agree with the older boolean it superseded
-        assert all(p[21] in (0, 1, 2) for p in layer["pins"]),             f"{path.name}: invalid location-type code"
-        assert all((p[19] == 1) == (p[21] == 2) for p in layer["pins"]),             f"{path.name}: uncertain flag disagrees with location type"
+        assert all(p[16] in (0, 1, 2) for p in layer["pins"]),             f"{path.name}: invalid location-type code"
+        assert all((p[14] == 1) == (p[16] == 2) for p in layer["pins"]),             f"{path.name}: uncertain flag disagrees with location type"
+        assert all(p[17] is None or isinstance(p[17], int) for p in layer["pins"]),             f"{path.name}: joined-firm day must be an integer or null"
     assert state_firm_crds == set(firm_crds), "state/national legal-firm sets differ"
     assert set(profiles["profiles"]) == set(firm_crds), "firm-profile/national legal-firm sets differ"
     assert len(profiles["client_labels"]) == 14

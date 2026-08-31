@@ -11,6 +11,8 @@ per-advisor-branch:
     exporting rather than the bare count already in the pins: each prior firm
     links straight into the firm overview the webapp already has, so "left a
     competitor for a wirehouse" becomes visible instead of being the number 7.
+  * slower-changing experience and state-registration detail. These remain
+    available on the advisor profile without inflating every hot map pin.
 
 Sharded by the last two digits of the advisor CRD into 100 files. As one
 artifact this is 31 MB, which is far too much to fetch when a salesperson opens
@@ -19,7 +21,8 @@ shards a rep touches in a session stay cached. The bucket is derivable from the
 CRD alone, so the webapp needs no index to find the right file.
 
 Compact format, per shard:
-  {advisor_crd: [joined_iso, [[firm_crd, firm_name, begin, end], ...]]}
+  {advisor_crd: [joined_iso, prior_rows, years_experience, current_rows]}
+  current_rows are [[firm_crd, joined_iso, n_registrations, reg_states], ...].
   joined_iso may be null; the prior list may be empty. Firm names are repeated
   rather than interned -- interning saves little once the data is split, and
   per-shard dictionaries would have to be duplicated across all 100 files.
@@ -33,6 +36,7 @@ import pandas as pd
 
 ROOT = pathlib.Path(__file__).parents[1]
 INTERIM = ROOT / "data" / "interim"
+OUTPUT = ROOT / "data" / "output"
 WEB = ROOT / "webapp" / "data"
 
 # An advisor with 40 prior registrations is a data artefact more than a career;
@@ -76,7 +80,8 @@ def main() -> None:
 
     employments = pd.read_parquet(
         INTERIM / "advisor_employments.parquet",
-        columns=["advisor_crd", "firm_crd", "reg_earliest_date"],
+        columns=["advisor_crd", "firm_crd", "reg_earliest_date",
+                 "n_registrations", "reg_states"],
     )
     employments["advisor_crd"] = employments["advisor_crd"].astype(str)
     employments = employments[employments["advisor_crd"].isin(mapped)]
@@ -89,6 +94,26 @@ def main() -> None:
         .groupby("advisor_crd")["d"]
         .min()
     )
+    current: dict[str, list] = {}
+    for advisor_crd, group in employments.groupby("advisor_crd", sort=False):
+        current[advisor_crd] = [
+            [str(row.firm_crd), _iso(row.reg_earliest_date),
+             None if pd.isna(row.n_registrations) else int(row.n_registrations),
+             None if pd.isna(row.reg_states) else str(row.reg_states)]
+            for row in group.itertuples(index=False)
+        ]
+
+    experience_frame = pd.read_parquet(
+        OUTPUT / "advisor_experience.parquet",
+        columns=["advisor_crd", "years_experience"],
+    )
+    experience_frame["advisor_crd"] = experience_frame["advisor_crd"].astype(str)
+    experience = {
+        row.advisor_crd: (None if pd.isna(row.years_experience)
+                          else round(float(row.years_experience), 1))
+        for row in experience_frame.itertuples(index=False)
+        if row.advisor_crd in mapped
+    }
 
     prior = pd.read_parquet(
         INTERIM / "advisor_prior_registrations.parquet",
@@ -108,11 +133,13 @@ def main() -> None:
             [str(row.firm_crd), _title(row.firm_name_on_record), row.begin, row.end]
             for row in group.head(MAX_PRIOR).itertuples(index=False)
         ]
-        records[advisor_crd] = [joined.get(advisor_crd), rows]
+        records[advisor_crd] = [joined.get(advisor_crd), rows,
+                                experience.get(advisor_crd), current.get(advisor_crd, [])]
 
     # advisors with a join date but no prior registrations still get an entry
     for advisor_crd, date in joined.items():
-        records.setdefault(advisor_crd, [date, []])
+        records.setdefault(advisor_crd, [date, [], experience.get(advisor_crd),
+                                         current.get(advisor_crd, [])])
 
     out_dir = WEB / "history"
     out_dir.mkdir(parents=True, exist_ok=True)

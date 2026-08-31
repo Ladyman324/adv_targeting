@@ -278,7 +278,14 @@ class GzipHandler(http.server.SimpleHTTPRequestHandler):
                         "messages": messages, "counts": counts, "valid": not errors,
                         "errors": errors, "warnings": warnings}
 
-            if method == "GET" and op == "catalog":
+            if method == "GET" and op == "activity_filter_summary":
+                # Local development can never send through Graph, so there is
+                # no honest outbound email activity to report. An empty,
+                # successful overlay keeps the filter usable for its
+                # "Not observed" case without inventing a send.
+                self._json(200, {"generatedUtc": time.strftime(
+                    "%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "entries": []})
+            elif method == "GET" and op == "catalog":
                 self._json(200, {"connection": {"connected": True, "needsReconnect": False,
                     "mailbox": "local.developer@example.test", "profile": {"id": uid,
                     "displayName": "Local Developer", "mail": "local.developer@example.test",

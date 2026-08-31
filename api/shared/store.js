@@ -491,6 +491,29 @@ async function listAudiences(who) {
   return out;
 }
 
+/* Latest recorded OUTBOUND call per advisor for one rep. `received` is inbound
+ * and `skipped` records no call; neither may reset a "Last called" relationship
+ * clock. Compare timestamps explicitly so a repaired/imported row cannot make
+ * storage-key order choose an older business event. */
+async function latestCallsForUser(who) {
+  const client = await table("log");
+  const latest = new Map();
+  const iter = client.listEntities({
+    queryOptions: {
+      filter: odata`PartitionKey eq ${who.id}`,
+      select: ["crd", "atUtc", "disposition"],
+    },
+  });
+  for await (const event of iter) {
+    const crd = String(event.crd || "");
+    const disposition = String(event.disposition || "");
+    const atUtc = String(event.atUtc || "");
+    if (!crd || !atUtc || !disposition || disposition === "received" || disposition === "skipped") continue;
+    if (!latest.has(crd) || atUtc > latest.get(crd)) latest.set(crd, atUtc);
+  }
+  return [...latest];
+}
+
 async function getAudience(who, id) {
   const client = await table("audience");
   try {
@@ -845,7 +868,7 @@ function fail(context, err) {
 }
 
 module.exports = {
-  configured, identity, appendEvent, setActStatus, eventsForCrd, recentForUser,
+  configured, identity, appendEvent, setActStatus, eventsForCrd, recentForUser, latestCallsForUser,
   getQueue, putQueue, listQueues, deleteQueue, mutateQueueMember, listDnc, addDnc,
   getAudience, putAudience, listAudiences, deleteAudience,
   listFlags, setFlag,

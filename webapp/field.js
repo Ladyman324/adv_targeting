@@ -19,7 +19,7 @@ const PAGE = 200;                  // rows added per "Show more"
 // Stamped by src/web_assets.py from metadata time plus every deployed JSON
 // byte. Field data still revalidates, but the shared build ID prevents stale
 // same-day rebuilds and keeps every first-party data request explicit.
-const DATA_VERSION = "20260830T123258Z-ca4fdfc91d633455";
+const DATA_VERSION = "20260831T110925Z-0d6794880eb0eb5d";
 const dataUrl = file => {
   const path = file.startsWith("data/") ? file : `data/${file}`;
   return `${path}${path.includes("?") ? "&" : "?"}v=${encodeURIComponent(DATA_VERSION)}`;

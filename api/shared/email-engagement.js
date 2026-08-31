@@ -361,6 +361,23 @@ async function queue(userId, deps = {}) {
   return { entries: out, count: out.length, counts, reasons: REASONS };
 }
 
+/* A compact, per-rep overlay for map filters. Raw activity belongs in the
+ * event log; the map needs only the most recent observed outbound timestamp
+ * for each CRD. Returning projection rows rather than reading messages keeps
+ * this bounded, mailbox-free, and cheap enough to load after first paint. */
+async function activitySummary(userId, deps = {}) {
+  const st = deps.store || store;
+  const rows = await st.listEngagement(userId);
+  return {
+    generatedUtc: new Date().toISOString(),
+    entries: rows
+      .filter((row) => String(row.lastOutboundAt || ""))
+      .map((row) => [String(row.advisorCrd || row.rowKey || ""),
+                     String(row.lastOutboundAt)])
+      .filter((row) => row[0]),
+  };
+}
+
 /* Throw a rep's whole projection away and regenerate it from the log.
  *
  * The repair path, and the proof that this really is a cache. Anything the log
@@ -465,6 +482,6 @@ async function completeOutbound(userId, advisorCrd, deps = {}) {
   });
 }
 
-module.exports = { fold, reason, rank, refresh, refreshDirty, rebuild, queue, setReplyState,
+module.exports = { fold, reason, rank, refresh, refreshDirty, rebuild, queue, activitySummary, setReplyState,
                    snooze, dismissBounce, completeOutbound,
                    REPLY_STATES, REASONS, ACTIONS_BY_REASON, stateIndex };

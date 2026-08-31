@@ -7,6 +7,8 @@ import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 APP = ROOT / "webapp" / "app.js"
+INDEX = ROOT / "webapp" / "index.html"
+SERVE = ROOT / "serve.py"
 
 
 def source_without_comments() -> str:
@@ -36,6 +38,31 @@ class DesktopPerformanceContractTests(unittest.TestCase):
         self.assertIn("loadNationalDetail", background)
         self.assertIn("loadContacts", background)
         self.assertNotIn("loadAdvisorIndex", background)
+
+    def test_private_activity_overlays_load_after_static_contacts(self):
+        source = source_without_comments()
+        background = function_body(source, "runBackgroundLoads", "function scheduleBackgroundLoads")
+        self.assertLess(background.index("loadContacts"),
+                        background.index("loadActivityFilters"))
+        loader = function_body(source, "loadActivityFilters", "function preferredDisplayName")
+        self.assertIn("activity_filter_summary", loader)
+        self.assertIn("/api/log?summary=1", loader)
+
+    def test_sales_filters_replace_retired_per_pin_controls(self):
+        html = INDEX.read_text(encoding="utf-8")
+        for control in ("lastEmailed", "lastCalled", "joinedFirm"):
+            self.assertIn(f'id="{control}"', html)
+        for retired in ("expToggle", "reachToggle", "geoToggle"):
+            self.assertNotIn(f'id="{retired}"', html)
+        self.assertIn('<option value="d360">181&ndash;360d</option>', html)
+
+    def test_local_non_sending_server_exposes_empty_email_activity(self):
+        source = SERVE.read_text(encoding="utf-8")
+        start = source.index('op == "activity_filter_summary"')
+        block = source[start:source.index('op == "catalog"', start)]
+        self.assertIn('"entries": []', block)
+        self.assertNotIn("_read_json", block)
+        self.assertNotIn("_dev_save", block)
 
     def test_first_regional_batch_clears_busy_state_before_async_paint(self):
         source = source_without_comments()

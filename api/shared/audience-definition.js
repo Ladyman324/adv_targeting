@@ -15,18 +15,19 @@ const TERRITORIES = {
   Northeast: ["CT", "MA", "ME", "NH", "NY", "RI", "VT"],
   "Florida/PR": ["FL", "PR", "VI"],
 };
-const ARRAY_FILTERS = new Set(
-  ["selectedFirms", "aum", "exp", "reach", "geo", "excluded"]);
+const ARRAY_FILTERS = new Set(["selectedFirms", "aum", "excluded"]);
 const BOOLEAN_FILTERS = new Set([
   "selectsOnly", "ownerOnly", "rankedOnly", "continentalOnly",
   "contactableOnly", "assetsOnly",
 ]);
-const FILTER_KEYS = new Set([...ARRAY_FILTERS, ...BOOLEAN_FILTERS, "reg"]);
+const STRING_FILTERS = new Set(["reg", "lastEmailed", "lastCalled", "joinedFirm"]);
+const FILTER_KEYS = new Set([...ARRAY_FILTERS, ...BOOLEAN_FILTERS, ...STRING_FILTERS]);
 const ENUMS = {
   aum: new Set(["lt100m", "100m1b", "1b10b", "10b100b", "gt100b"]),
-  exp: new Set(["lt10", "10to20", "gt20"]),
-  reach: new Set(["one", "few", "many"]),
-  geo: new Set(["rooftop", "approximate", "neighbour", "city"]),
+  reg: new Set(["all", "dual", "ria"]),
+  lastEmailed: new Set(["", "d30", "d90", "d180", "older", "none"]),
+  lastCalled: new Set(["", "d30", "d90", "d180", "older", "none"]),
+  joinedFirm: new Set(["", "d90", "d180", "d360"]),
 };
 
 function bad(message, statusCode = 400) {
@@ -94,9 +95,11 @@ function normalizeFilters(value) {
     filters[key] = ENUMS[key] ? enumArray(input[key], key)
       : array(input[key], `filters.${key}`);
   for (const key of BOOLEAN_FILTERS) filters[key] = input[key] === true;
-  filters.reg = text(input.reg || "all", 16, "filters.reg").toLowerCase();
-  if (!["all", "dual", "ria"].includes(filters.reg))
-    throw bad("filters.reg is invalid.");
+  for (const key of STRING_FILTERS) {
+    const fallback = key === "reg" ? "all" : "";
+    filters[key] = text(input[key] === undefined ? fallback : input[key], 16, `filters.${key}`);
+    if (!ENUMS[key].has(filters[key])) throw bad(`filters.${key} is invalid.`);
+  }
   return filters;
 }
 function normalizeDefinition(value) {

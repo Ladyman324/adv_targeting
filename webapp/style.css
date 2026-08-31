@@ -229,6 +229,15 @@ body.scope-pending #map{cursor:progress}
 .switch.compact{flex:1 1 auto;justify-content:flex-start;gap:8px}
 .switch.compact .switch-lbl{font-size:11.5px;font-weight:550}
 .filter-row>.info-wrap{margin-left:auto}
+.filter-switch-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:4px 8px;margin:2px 0 4px}
+.filter-switch-cell{min-width:0;min-height:36px;display:flex;align-items:center;gap:3px;padding:1px 0}
+.filter-switch-cell .switch.compact{min-width:0;gap:6px}
+.filter-switch-cell .switch.compact .switch-lbl{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.filter-switch-cell>.info-wrap{margin-left:auto;flex:0 0 auto}
+.filter-select{flex:0 0 var(--filter-control-w);width:var(--filter-control-w);min-width:0;
+  border:1px solid var(--hair);border-radius:8px;background:var(--panel);color:var(--ink);
+  padding:6px 28px 6px 9px;font:inherit;font-size:11px}
+.filter-select:disabled{opacity:.55;cursor:wait}
 .advisor-filter-head{margin-top:var(--space-section);padding-top:var(--space-control);
   border-top:1px solid var(--hair);align-items:baseline;gap:8px;flex-wrap:wrap}
 

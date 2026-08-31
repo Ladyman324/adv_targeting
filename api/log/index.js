@@ -43,6 +43,12 @@ module.exports = async function (context, req) {
 
     if (req.method === "GET") {
       const crd = (req.query && req.query.crd) || "";
+      if (!crd && String((req.query && req.query.summary) || "") === "1") {
+        return store.ok(context, {
+          generatedUtc: new Date().toISOString(),
+          entries: await store.latestCallsForUser(who),
+        });
+      }
       // `since` powers cycle progress: which of this list have I already
       // handled on this pass. Higher ceiling than the default, because a
       // 250-person list worked twice is 500 rows and the answer has to be

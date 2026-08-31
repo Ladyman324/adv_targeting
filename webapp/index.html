@@ -28,8 +28,8 @@
   <link rel="stylesheet" href="vendor/leaflet.css">
   <link rel="stylesheet" href="vendor/MarkerCluster.css">
   <link rel="stylesheet" href="vendor/MarkerCluster.Default.css">
-  <link rel="stylesheet" href="style.css?v=619b34325c">
-  <link rel="stylesheet" href="email.css?v=619b34325c">
+  <link rel="stylesheet" href="style.css?v=9a5d729455">
+  <link rel="stylesheet" href="email.css?v=9a5d729455">
 </head>
 <body>
   <div id="app">
@@ -121,62 +121,51 @@
           <!-- Switch rows lead with the control, segmented rows lead with the
                label, and every segmented control is the same width so the
                right edge lines up down the column. -->
-          <div class="filter-row">
+          <div class="filter-switch-grid">
+          <div class="filter-switch-cell">
             <label class="switch compact">
               <input type="checkbox" id="rankedOnly">
               <span class="switch-ui"></span>
-              <span class="switch-lbl">Ranked advisors only</span>
+              <span class="switch-lbl">Ranked</span>
             </label>
             <span class="info-wrap">
               <button type="button" class="info-button" aria-label="About the ranking filter">i</button>
               <span class="info-popover" role="tooltip">Advisors named on a Barron's or Forbes ranking &mdash; about 9,000 people, or 2.3% of the universe. Both sources are pooled because what matters for prospecting is that an advisor is sizable and recognised, not who ranked them. Ranks are only comparable within the same list, and each badge names its own. Barron's is joined on CRD via BrokerCheck; Forbes publishes no CRD, so most of those are matched on name, firm and location and are marked &#8776; on the map.</span>
             </span>
           </div>
-          <div class="filter-row">
+          <div class="filter-switch-cell">
             <label class="switch compact">
               <input type="checkbox" id="contactableOnly">
               <span class="switch-ui"></span>
-              <span class="switch-lbl">Has contact data</span>
+              <span class="switch-lbl">Email/phone</span>
             </label>
             <span class="info-wrap">
               <button type="button" class="info-button" aria-label="About the contact filter">i</button>
               <span class="info-popover" role="tooltip">Advisors with an email address or a phone number on file &mdash; from the CRM export and 26 scraped firm rosters, matched to SEC CRDs by name within the firm. A record carrying neither is only a name and does not pass. About a third of matches are unconfirmed and marked &#9888; on the card; they still count as reachable, because the contact detail is real even where the identity is inferred.</span>
             </span>
           </div>
-          <div class="filter-row">
+          <div class="filter-switch-cell">
             <label class="switch compact">
               <input type="checkbox" id="assetsOnly">
               <span class="switch-ui"></span>
-              <span class="switch-lbl">Has assets on file</span>
+              <span class="switch-lbl">EIC assets</span>
             </label>
             <span class="info-wrap">
               <button type="button" class="info-button" aria-label="About the assets filter">i</button>
               <span class="info-popover" role="tooltip">Advisors carrying an asset figure from the CRM &mdash; either a team total or their own book. Coverage is thin and uneven: the CRM populates this for under 8% of contacts, so switching it on shows where EIC has recorded a number, NOT where the money is. Team amounts are stored once on the team and shown as the whole team's book, never as one person's.</span>
             </span>
           </div>
-          <div class="filter-row">
+          <div class="filter-switch-cell">
             <label class="switch compact">
               <input type="checkbox" id="ownerOnly">
               <span class="switch-ui"></span>
-              <span class="switch-lbl">Owners and officers only</span>
+              <span class="switch-lbl">Owners/officers</span>
             </label>
             <span class="info-wrap">
               <button type="button" class="info-button" aria-label="About the owner and officer filter">i</button>
               <span class="info-popover" role="tooltip">From Form ADV Schedule A, collected for the full firm roster, so this covers every mapped firm rather than only those reporting Item 5.G(7). A holding below 5% is an officer rather than an owner and is tagged as such.</span>
             </span>
           </div>
-          <div class="filter-row">
-            <span class="label">Experience
-              <span class="info-wrap">
-                <button type="button" class="info-button" aria-label="About the experience filter">i</button>
-                <span class="info-popover" role="tooltip">Years since first registration. Ctrl or Shift click to select more than one band.</span>
-              </span>
-            </span>
-            <div id="expToggle" class="seg">
-              <button data-exp="lt10" aria-pressed="false">&lt;10 yr</button>
-              <button data-exp="10to20" aria-pressed="false">10&ndash;20</button>
-              <button data-exp="gt20" aria-pressed="false">20+</button>
-            </div>
           </div>
           <div class="filter-row">
             <span class="label">Registration</span>
@@ -187,27 +176,50 @@
             </div>
           </div>
           <div class="filter-row">
-            <span class="label">States registered</span>
-            <div id="reachToggle" class="seg">
-              <button data-reach="one" aria-pressed="false">1</button>
-              <button data-reach="few" aria-pressed="false">2&ndash;4</button>
-              <button data-reach="many" aria-pressed="false">5+</button>
-            </div>
+            <label class="label" for="lastEmailed">Last emailed
+              <span class="info-wrap">
+                <button type="button" class="info-button" aria-label="About the last emailed filter">i</button>
+                <span class="info-popover" role="tooltip">Email observed from your connected mailbox. Not observed is honest about the available mailbox history; it does not claim nobody has ever emailed this advisor.</span>
+              </span>
+            </label>
+            <select id="lastEmailed" class="filter-select">
+              <option value="">Any</option>
+              <option value="d30">Within 30d</option>
+              <option value="d90">31&ndash;90d</option>
+              <option value="d180">91&ndash;180d</option>
+              <option value="older">181d+</option>
+              <option value="none">Not observed</option>
+            </select>
           </div>
           <div class="filter-row">
-            <span class="label">Map position
+            <label class="label" for="lastCalled">Last called
               <span class="info-wrap">
-                <button type="button" class="info-button" aria-label="What the map-position options mean">i</button>
-                <span class="info-popover" role="tooltip"><b>Rooftop</b>: exact Census match. <b>Approx.</b>: Census match was non-exact. <b>Nearest</b>: the closest validated address on the same block. <b>City</b>: the firm filed a city and state but no street, so the pin sits at the centre of the town &mdash; common for advisors working from a home office. The filed address is unchanged in every popup.</span>
+                <button type="button" class="info-button" aria-label="About the last called filter">i</button>
+                <span class="info-popover" role="tooltip">Your recorded outbound call outcomes. Incoming calls and skipped queue entries do not reset this clock. Calls made outside the application may not be observed.</span>
               </span>
-            </span>
-            <div id="geoToggle" class="seg">
-              <button data-geo="all" aria-pressed="true">All</button>
-              <button data-geo="rooftop" aria-pressed="false">Roof</button>
-              <button data-geo="approximate" aria-pressed="false">Approx</button>
-              <button data-geo="neighbour" aria-pressed="false">Near</button>
-              <button data-geo="city" aria-pressed="false">City</button>
-            </div>
+            </label>
+            <select id="lastCalled" class="filter-select">
+              <option value="">Any</option>
+              <option value="d30">Within 30d</option>
+              <option value="d90">31&ndash;90d</option>
+              <option value="d180">91&ndash;180d</option>
+              <option value="older">181d+</option>
+              <option value="none">Not observed</option>
+            </select>
+          </div>
+          <div class="filter-row">
+            <label class="label" for="joinedFirm">Joined firm
+              <span class="info-wrap">
+                <button type="button" class="info-button" aria-label="About the joined firm filter">i</button>
+                <span class="info-popover" role="tooltip">When the advisor's current registration at this firm began, as reported in SEC registration data. A new affiliation can be additional rather than a complete move.</span>
+              </span>
+            </label>
+            <select id="joinedFirm" class="filter-select">
+              <option value="">Any</option>
+              <option value="d90">Within 90d</option>
+              <option value="d180">91&ndash;180d</option>
+              <option value="d360">181&ndash;360d</option>
+            </select>
           </div>
         </div>
       </details>
@@ -348,8 +360,8 @@
   <script src="vendor/leaflet-heat.js"></script>
   <!-- Shared with the field view: one definition of what a call outcome is,
        one queue, one do-not-call list. Loaded before app.js, which uses it. -->
-  <script src="dial.js?v=619b34325c"></script>
-  <script src="app.js?v=619b34325c"></script>
-  <script src="email.js?v=619b34325c"></script>
+  <script src="dial.js?v=9a5d729455"></script>
+  <script src="app.js?v=9a5d729455"></script>
+  <script src="email.js?v=9a5d729455"></script>
 </body>
 </html>

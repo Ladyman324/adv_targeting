@@ -150,6 +150,21 @@ function queueStore(rows) {
   return { store: { listEngagement: async () => rows } };
 }
 
+test("activity summary exposes only compact last-outbound rows", async () => {
+  const summary = await engagement.activitySummary("u1", queueStore([
+    { advisorCrd: "111", lastOutboundAt: "2026-08-01T12:00:00Z", advisorEmail: "private@example.com" },
+    { advisorCrd: "222", lastReplyAt: "2026-08-02T12:00:00Z" },
+    { rowKey: "333", lastOutboundAt: "2026-08-03T12:00:00Z" },
+  ]));
+  assert.deepEqual(summary.entries, [
+    ["111", "2026-08-01T12:00:00Z"],
+    ["333", "2026-08-03T12:00:00Z"],
+  ]);
+  assert.ok(summary.generatedUtc);
+  assert.equal(JSON.stringify(summary).includes("private@example.com"), false,
+    "the map overlay must not become another contact-data payload");
+});
+
 test("replies sort above quiet contacts however old the quiet one is", async () => {
   const q = await engagement.queue("u1", queueStore([
     { advisorCrd: "quiet", everReplied: true, lastActivityAt: ago(300), replyState: "reviewed" },

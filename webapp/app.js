@@ -39,7 +39,7 @@ const COMPARE = ["#12b39c", "#e0a53a", "#8079e0", "#e8615d", "#4aa3e0", "#9fc93c
 // of every deployed JSON path and byte. It changes for standalone shard
 // rebuilds too, and its leading date keeps the stale-build warning readable.
 // Do not edit it by hand.
-const DATA_VERSION = "20260830T123258Z-ca4fdfc91d633455";
+const DATA_VERSION = "20260831T110925Z-0d6794880eb0eb5d";
 const dataUrl = file => `data/${file}?v=${DATA_VERSION}`;
 Dial.setContactRouteVersion(DATA_VERSION);
 // ONE scale for every mark on the map. There used to be two, and they were not
@@ -152,9 +152,14 @@ let FIRM_PROFILE_PROMISE = null;
 let openFirmCrd = null;
 let ALL = [];
 let reg = "all";                    // all | dual | ria
-let expSel = new Set();             // empty = all; else subset of lt10|10to20|gt20
-let reachSel = new Set();           // empty = all; else subset of one|few|many
-let geoSel = new Set();             // empty = all; else rooftop|approximate|neighbour
+let lastEmailed = "";               // d30 | d90 | d180 | older | none
+let lastCalled = "";                // d30 | d90 | d180 | older | none
+let joinedFirm = "";                // d90 | d180 | d360
+const EMAIL_ACTIVITY = new Map();    // advisor CRD -> my latest outbound email
+const CALL_ACTIVITY = new Map();     // advisor CRD -> my latest recorded outbound call
+let emailActivityState = "idle";    // idle | loading | ready | failed
+let callActivityState = "idle";
+let activityFilterPromise = null;
 let advQuery = "";                  // advisor name or CRD substring
 let focusedAdvisorId = null;        // explicit advisor-result map focus
 let focusedAdvisorLabel = "";
@@ -940,6 +945,51 @@ function loadContacts(signal=null){
 
 function contactFor(advisorId){
   return (CONTACTS && CONTACTS.advisors[String(advisorId)]) || null;
+}
+
+/* Per-user activity is deliberately a late, compact overlay. It changes far
+ * more often than SEC geography, is private to the signed-in rep, and must not
+ * make the national map wait. Each endpoint returns one CRD/timestamp pair,
+ * never message text, call notes, or raw event history. */
+function fillActivityMap(target, payload){
+  target.clear();
+  for (const row of (payload && payload.entries) || []) {
+    const crd = String(row && row[0] || "");
+    const at = Date.parse(String(row && row[1] || ""));
+    if (crd && Number.isFinite(at)) target.set(crd, at);
+  }
+}
+
+function loadActivityFilters(signal=null){
+  if (emailActivityState === "ready" && callActivityState === "ready")
+    return Promise.resolve();
+  if (activityFilterPromise) return activityFilterPromise;
+  if (emailActivityState !== "ready") emailActivityState = "loading";
+  if (callActivityState !== "ready") callActivityState = "loading";
+  syncActivityFilterUI();
+  const loadOne = (url, target, setState) => fetch(url, { signal, cache:"no-store" })
+    .then(response => {
+      if (!response.ok) throw new Error(`${response.status}`);
+      return response.json();
+    })
+    .then(payload => { fillActivityMap(target, payload); setState("ready"); })
+    .catch(error => {
+      if (error && error.name === "AbortError") throw error;
+      setState("failed");
+    });
+  activityFilterPromise = Promise.all([
+    emailActivityState === "ready" ? Promise.resolve() : loadOne(
+      "/api/email?op=activity_filter_summary", EMAIL_ACTIVITY,
+      value => { emailActivityState = value; }),
+    callActivityState === "ready" ? Promise.resolve() : loadOne(
+      "/api/log?summary=1", CALL_ACTIVITY,
+      value => { callActivityState = value; }),
+  ]).finally(() => {
+    activityFilterPromise = null;
+    syncActivityFilterUI();
+    if (lastEmailed || lastCalled) redraw();
+  });
+  return activityFilterPromise;
 }
 
 function preferredDisplayName(formalName, preferredFirst){
@@ -2048,9 +2098,8 @@ function dialSnapshot(id){
     city: (p && p.c) || "",
     /* The OFFICE state, not the first state they are registered in.
      *
-     * This read p.rs.split("|")[0]. `rs` is the pipe-delimited list of states an
-     * advisor is licensed in -- "GA|LA|TX" -- which has nothing to do with where
-     * they sit. Pairing its first entry with p.c, the office city, produced
+     * The old implementation paired the first licensed state with p.c, the
+     * office city, and produced
      * combinations that do not exist: Mitchell Gentry, whose filed address is
      * 1776 Peachtree Street NW, showed as "Atlanta, TX" because Texas is the
      * only state he is registered in.
@@ -2622,7 +2671,7 @@ function audienceScopeDefinition(){
 function captureAudienceDefinition(){
   return { version:1, scope:audienceScopeDefinition(), filters:{
     selectedFirms:[...selectedFirms], selectsOnly, aum:[...aumSel], reg,
-    exp:[...expSel], reach:[...reachSel], geo:[...geoSel], ownerOnly,
+    lastEmailed, lastCalled, joinedFirm, ownerOnly,
     rankedOnly, excluded:[...excludedFirms], continentalOnly,
     contactableOnly, assetsOnly,
   }};
@@ -2656,7 +2705,14 @@ async function applyAudienceDefinition(audience){
   selectsBox.checked = selectsOnly;
   selectsBox.closest(".switch").classList.toggle("on", selectsOnly);
   refill(aumSel, f.aum); reg = f.reg || "all";
-  refill(expSel, f.exp); refill(reachSel, f.reach); refill(geoSel, f.geo);
+  if (f.lastEmailed || f.lastCalled) await loadActivityFilters();
+  if (f.lastEmailed && emailActivityState !== "ready")
+    throw new Error("Email activity is unavailable for this saved audience.");
+  if (f.lastCalled && callActivityState !== "ready")
+    throw new Error("Call activity is unavailable for this saved audience.");
+  lastEmailed = f.lastEmailed || "";
+  lastCalled = f.lastCalled || "";
+  joinedFirm = f.joinedFirm || "";
   ownerOnly = !!f.ownerOnly; rankedOnly = !!f.rankedOnly;
   excludedFirms = new Set((f.excluded || []).map(String));
   setContinentalOnly(f.continentalOnly !== false, false);
@@ -2695,7 +2751,8 @@ async function prepareAudiencePreviewData(audience){
   const support = f.ownerOnly || f.rankedOnly
     ? loadRegionalSupport()
     : (SUPPORT.territories === "ready" ? Promise.resolve() : loadTerritories());
-  await Promise.all([loadContacts(), ensureAudienceIdentity(), support]);
+  await Promise.all([loadContacts(), ensureAudienceIdentity(), support,
+    (f.lastEmailed || f.lastCalled) ? loadActivityFilters() : Promise.resolve()]);
   if (!CONTACTS_READY)
     throw new Error("Contact eligibility is unavailable, so this audience cannot be previewed safely. Try again after contact data loads.");
   if (SUPPORT.territories !== "ready")
@@ -2704,6 +2761,10 @@ async function prepareAudiencePreviewData(audience){
     throw new Error("Owner and officer data is unavailable for this saved audience.");
   if (f.rankedOnly && (SUPPORT.barrons !== "ready" || SUPPORT.forbes !== "ready"))
     throw new Error("Advisor ranking data is unavailable for this saved audience.");
+  if (f.lastEmailed && emailActivityState !== "ready")
+    throw new Error("Email activity is unavailable for this saved audience.");
+  if (f.lastCalled && callActivityState !== "ready")
+    throw new Error("Call activity is unavailable for this saved audience.");
 }
 function audienceTerritoryPolicy(preview){
   const email = String(ME && ME.userDetails || "").trim().toLowerCase();
@@ -4365,7 +4426,8 @@ function outsideManagerLabel(p){
 }
 
 function rehydrate(c, sourceState=""){
-  const { iapd, firms, motions, addrs, cities, desig, regs, gp, xb, pins } = c;
+  if (c.schema !== 2) throw new Error(`unsupported advisor pin schema ${c.schema || "missing"}`);
+  const { iapd, firms, motions, addrs, cities, desig, pins } = c;
   const out = new Array(pins.length);
   for (let k = 0; k < pins.length; k++){
     const p = pins[k], fm = firms[p[2]];
@@ -4379,19 +4441,18 @@ function rehydrate(c, sourceState=""){
         sgWhy: fm[8] || "", wrapM: fm[9] == null ? null : fm[9],
         fc: String(fm[7]), _lon: p[0], _lat: p[1], _state: sourceState,
         a: addrs[p[3]], c: cities[p[4]], z: p[5],
-        x: p[8], xb: p[9] < 0 ? "" : xb[p[9]],
-        ns: p[10], rs: p[11] < 0 ? "" : regs[p[11]],
-        gp: gp[p[12]], d: p[13],
-        g: p[14] < 0 ? "" : desig[p[14]],
-        pf: p[15], od: p[16],
-        // placement: 19 = the filed address is not corroborated by the
-        // advisor's employment record, 20 = where that record says they are
-        unc: p[19] === 1, home: p[20] || "",
-        // 21 = how the location is known. 0 office (street address), 1 remote
+        d: p[8],
+        g: p[9] < 0 ? "" : desig[p[9]],
+        pf: p[10], od: p[11],
+        // placement: 14 = the filed address is not corroborated by the
+        // advisor's employment record, 15 = where that record says they are
+        unc: p[14] === 1, home: p[15] || "",
+        // 16 = how the location is known. 0 office (street address), 1 remote
         // (the firm filed a city and state but no street), 2 uncertain.
-        lt: p[21] == null ? 0 : p[21],
-        dr: p[17] ? DRP_LABELS.filter((_, i) => p[17] & (1 << i)) : [],
-        u: p[18] ? iapd + p[6] : "",
+        lt: p[16] == null ? 0 : p[16],
+        jd: p[17] == null ? null : Number(p[17]),
+        dr: p[12] ? DRP_LABELS.filter((_, i) => p[12] & (1 << i)) : [],
+        u: p[13] ? iapd + p[6] : "",
       },
     };
   }
@@ -4586,7 +4647,9 @@ let backgroundRunning = false;
 // opens a card. Treating it as background work made every desktop session pay
 // for 6.9 MB even when the user never needed the filed-name/office expansion.
 const backgroundComplete = () =>
-  (NAT_DETAIL_READY || NAT_DETAIL_ERROR) && (CONTACTS_READY || CONTACTS_ERROR);
+  (NAT_DETAIL_READY || NAT_DETAIL_ERROR) && (CONTACTS_READY || CONTACTS_ERROR)
+  && ["ready", "failed"].includes(emailActivityState)
+  && ["ready", "failed"].includes(callActivityState);
 
 function cancelScheduledBackground(){
   if (supportTimer != null){
@@ -4622,6 +4685,11 @@ function runBackgroundLoads(){
         throw new DOMException("Superseded", "AbortError");
       return (CONTACTS_READY || CONTACTS_ERROR)
         ? CONTACTS : PERF.time("data:contacts", () => loadContacts(signal));
+    })
+    .then(() => {
+      if (signal.aborted || pendingScope)
+        throw new DOMException("Superseded", "AbortError");
+      return PERF.time("data:activityFilters", () => loadActivityFilters(signal));
     })
     .catch(err => { if (!err || err.name !== "AbortError") console.error(err); })
     .finally(() => {
@@ -4729,9 +4797,8 @@ function profileWebsite(value){
 
 // ---- advisor employment history ----
 // Sharded by the last two digits of the advisor CRD, matching
-// export_advisor_history.py. The whole history is 31 MB; a shard is ~455 KB, so
-// opening an advisor costs one small fetch and the shards a rep touches during
-// a session stay in the cache.
+// export_advisor_history.py. Opening an advisor costs one small fetch and the
+// shards a rep touches during a session stay in the cache.
 const HISTORY_SHARDS = new Map();          // bucket -> Promise of its records
 function historyShard(advisorCrd){
   const bucket = String(advisorCrd).trim().slice(-2).padStart(2, "0");
@@ -4765,11 +4832,19 @@ function tenureFrom(iso){
 function renderAdvisorHistory(p, record){
   const slot = document.getElementById("advisorHistory");
   if (!slot || slot.dataset.for !== String(p.id)) return;
-  const [joined, prior] = record || [null, []];
-  const tenure = tenureFrom(joined);
-  const joinedLine = joined
-    ? `<p class="history-joined">Joined <b>${esc(p.f)}</b> ${fmtMonth(joined)}${tenure ? ` · ${tenure}` : ""}</p>`
+  const [joined, prior, yearsExperience, currentRows] = record || [null, [], null, []];
+  const current = (currentRows || []).find(row => String(row[0]) === String(p.fc));
+  const effectiveJoined = (current && current[1]) || joined;
+  const tenure = tenureFrom(effectiveJoined);
+  const joinedLine = effectiveJoined
+    ? `<p class="history-joined">Joined <b>${esc(p.f)}</b> ${fmtMonth(effectiveJoined)}${tenure ? ` · ${tenure}` : ""}</p>`
     : "";
+  const states = current && current[3] ? String(current[3]).split("|").filter(Boolean) : [];
+  const facts = [
+    yearsExperience == null ? "" : `${Math.round(yearsExperience)} years experience`,
+    states.length ? `Registered in ${states.length} state${states.length === 1 ? "" : "s"}: ${states.join(", ")}` : "",
+  ].filter(Boolean);
+  const factsLine = facts.length ? `<p class="history-facts">${esc(facts.join(" · "))}</p>` : "";
   const rows = (prior || []).map(row => {
     const [firmCrd, name, begin, end] = row;
     const span = [fmtMonth(begin), fmtMonth(end)].filter(Boolean).join(" – ") || "dates not reported";
@@ -4777,9 +4852,9 @@ function renderAdvisorHistory(p, record){
       `<span class="detail-row-main"><b>${esc(name)}</b><small>${esc(span)} · CRD ${esc(firmCrd)}</small></span>` +
       `<span class="detail-chevron">›</span></button>`;
   }).join("");
-  slot.innerHTML = joinedLine + (rows
+  slot.innerHTML = joinedLine + factsLine + (rows
     ? `<p class="history-label">Previously registered with</p><div class="detail-list">${rows}</div>`
-    : (joined ? "" : `<p class="profile-empty">No employment history reported.</p>`));
+    : (effectiveJoined || facts.length ? "" : `<p class="profile-empty">No employment history reported.</p>`));
 }
 
 function loadFirmProfiles(){
@@ -5350,7 +5425,7 @@ function applyScopeUI(){
   // they cannot work nationally is stated instead of implied.
   document.querySelectorAll("[data-needs-state]").forEach(el => {
     el.classList.toggle("filters-disabled", national);
-    el.querySelectorAll("input,button").forEach(c => { c.disabled = national; });
+    el.querySelectorAll("input,button,select").forEach(c => { c.disabled = national; });
   });
   const advNote = document.getElementById("advisorFilterNote");
   if (advNote) advNote.hidden = !national;
@@ -5360,6 +5435,7 @@ function applyScopeUI(){
   syncOwnerUI();
   syncRankedUI();
   syncContactSwitches();
+  syncActivityFilterUI();
   syncTargetingUI();
   document.title = `Advisor Map — ${scopeLabel(scope)}`;
 }
@@ -5404,19 +5480,12 @@ function resetForScopeChange(){
   focusedAdvisorId = null; focusedAdvisorLabel = "";
   document.getElementById("clearFirms").hidden = true;
   clearSearch();                       // clears the visible box, not just its state
-  expSel.clear(); reachSel.clear(); geoSel.clear();
-  document.querySelectorAll("#expToggle button, #reachToggle button").forEach(b =>
-    b.setAttribute("aria-pressed", b.dataset.exp === "all" || b.dataset.reach === "all"));
-  document.querySelectorAll("#geoToggle button").forEach(b =>
-    b.setAttribute("aria-pressed", b.dataset.geo === "all"));
   highlightLocation(null);
   clearSpokes();
   clearLasso(false);
   // Deliberately NOT reset, so they carry from one state or territory to the
-  // next: targeting (5.G(7) + AUM), role at firm, and Barron's ranking. The
-  // line is exploration vs. standing strategy -- experience and reach are
-  // things you fiddle with inside one territory, whereas "only decision-makers"
-  // and "only ranked advisors" are how a rep works every territory, and having
+  // next: targeting (5.G(7) + AUM), role at firm, rankings, activity age and
+  // recent firm joins. These are standing strategies, and having
   // to re-apply them at each switch is pure friction. Density is uniform enough
   // that neither empties a territory: 121-293 ranked advisors and 1,264-4,146
   // owners in each of the seven. These two move together on purpose -- filters
@@ -5963,20 +6032,39 @@ function esc(s){
 }
 
 // ---- predicates ----
-function bandOf(x){ return x < 10 ? "lt10" : x < 20 ? "10to20" : "gt20"; }
-function passesExp(p){
-  if (!expSel.size) return true;             // nothing selected = no constraint
-  if (p.x == null) return false;             // unknown tenure drops out when filtering
-  return expSel.has(bandOf(p.x));
+const FILTER_DAY_MS = 24 * 60 * 60 * 1000;
+function activityAgeBand(timestamp){
+  const days = Math.max(0, Math.floor((Date.now() - timestamp) / FILTER_DAY_MS));
+  if (days <= 30) return "d30";
+  if (days <= 90) return "d90";
+  if (days <= 180) return "d180";
+  return "older";
 }
-function reachOf(n){ return n <= 1 ? "one" : n <= 4 ? "few" : "many"; }
-function passesReach(p){
-  if (!reachSel.size) return true;
-  if (p.ns == null) return false;
-  return reachSel.has(reachOf(p.ns));
+function passesActivityAge(p, selected, rows, state){
+  if (!selected) return true;
+  // Controls stay disabled until their own source is ready. Passing rather
+  // than hiding everyone is the fail-safe if stale UI state somehow survives.
+  if (state !== "ready") return true;
+  const timestamp = rows.get(String(p.id));
+  if (selected === "none") return timestamp == null;
+  return timestamp != null && activityAgeBand(timestamp) === selected;
 }
-function passesQuality(p){
-  return !geoSel.size || geoSel.has(p.gp);
+function passesLastEmailed(p){
+  return passesActivityAge(p, lastEmailed, EMAIL_ACTIVITY, emailActivityState);
+}
+function passesLastCalled(p){
+  return passesActivityAge(p, lastCalled, CALL_ACTIVITY, callActivityState);
+}
+function joinedAgeBand(day){
+  if (!Number.isFinite(day)) return "";
+  const age = Math.max(0, Math.floor(Date.now() / FILTER_DAY_MS) - day);
+  if (age <= 90) return "d90";
+  if (age <= 180) return "d180";
+  if (age <= 360) return "d360";
+  return "";
+}
+function passesJoinedFirm(p){
+  return !joinedFirm || joinedAgeBand(p.jd) === joinedFirm;
 }
 // Owner or officer of the firm they are filed at. Schedule A was collected only
 // for firms reporting 5.G(7), so this narrows rather than answers: an owner at a
@@ -6044,7 +6132,8 @@ function passesBase(p){
   if (excludedFirms.has(String(p.fc))) return false;
   if (reg === "dual" && p.d !== 1) return false;
   if (reg === "ria"  && p.d !== 0) return false;
-  return passesContinental(p) && passesTargeting(p) && passesExp(p) && passesReach(p) && passesQuality(p) &&
+  return passesContinental(p) && passesTargeting(p) && passesLastEmailed(p)
+    && passesLastCalled(p) && passesJoinedFirm(p) &&
     passesOwner(p) && passesRanked(p) && passesGeography(p) &&
     passesContactable(p) && passesHasAssets(p);
 }
@@ -6883,21 +6972,16 @@ function refreshPanel(){
     const p = f.properties;
     const a = (agg[p.fc] ||= { firm: p.f, crd: p.fc, ids: new Set(), dualIds: new Set(),
                               score: p.s, fit: p.sf, size: p.sz, raum: p.ra,
-                              offices: new Set(), exp: [], states: new Set(), reg: [] });
+                              offices: new Set() });
     a.ids.add(p.id);
     if (p.d === 1) a.dualIds.add(p.id);
     a.offices.add(p.a + "|" + p.c);
-    if (p.x != null) a.exp.push(p.x);
-    if (p.ns != null) a.reg.push(p.ns);
-    if (p.rs) p.rs.split("|").forEach(s => a.states.add(s));
   });
-  const med = arr => arr.length ? arr.slice().sort((x, y) => x - y)[Math.floor(arr.length / 2)] : null;
   FIRMS = sortFirms(Object.values(agg).map(a => ({
     firm: a.firm, crd: a.crd, advisors: a.ids.size, dual: a.dualIds.size,
     offices: a.offices.size, score: a.score,
     fit: a.fit, size: a.size, raum: a.raum,
     relevantAum: relevantAumForFirm(a.crd, a.ids.size),
-    medExp: med(a.exp), medStates: med(a.reg), reachStates: a.states.size,
   })));
   renderFirms(document.getElementById("search").value.toLowerCase());
   refreshActiveFilters();
@@ -6988,7 +7072,7 @@ function refreshPanelNational(){
   });
   FIRMS = sortFirms(Object.values(agg).map(a => ({
     firm: a.firm, crd: a.crd, advisors: a.advisors, offices: a.offices.size,
-    medExp: null, medStates: null, reachStates: a.states.size, dual: 0,
+    reachStates: a.states.size, dual: 0,
     score: a.score, fit: null, size: null, raum: a.raum,
     // national rows count placements, so allocate on the placement denominator
     relevantAum: relevantAumForFirm(a.crd, a.advisors, true),
@@ -7034,7 +7118,7 @@ function renderFirms(q){
     const col = on ? firmColor[f.crd] : cssVar("--accent");
     if (on) row.style.setProperty("--firm-col", col);
     row.innerHTML = `
-      <span class="fn" title="${esc(f.firm)} · CRD ${esc(f.crd)}${f.medExp != null ? ` · ${f.medExp.toFixed(0)}y median experience` : ""} · ${scope === "US" ? `in ${f.reachStates} state${f.reachStates > 1 ? "s" : ""}` : `${f.reachStates} registration states`}">${on ? `<span class="swatch" style="background:${col}"></span>` : ""}${esc(f.firm)}</span>
+      <span class="fn" title="${esc(f.firm)} · CRD ${esc(f.crd)} · ${scope === "US" ? `in ${f.reachStates} state${f.reachStates > 1 ? "s" : ""}` : `${f.offices} office${f.offices === 1 ? "" : "s"} in the current view`}">${on ? `<span class="swatch" style="background:${col}"></span>` : ""}${esc(f.firm)}</span>
       <span class="fdetails" role="button" tabindex="0" data-firm-profile="${esc(f.crd)}">Details</span>
       <span class="fmetrics"><span><b class="mono">${f.advisors.toLocaleString()}</b> advisor${f.advisors === 1 ? "" : "s"}</span><span><b class="mono">${f.offices.toLocaleString()}</b> office${f.offices === 1 ? "" : "s"}</span><span title="Equities plus Funds/ETFs"><b>${f.relevantAum == null ? "—" : fmtMoney(f.relevantAum)}</b> relevant AUM</span><span class="fexclude" role="button" tabindex="0" data-exclude-firm="${esc(f.crd)}" title="Remove ${esc(f.firm)} from the map">Exclude</span></span>
       <span class="fb"><i style="width:${Math.max(3, f.advisors / max * 100)}%;background:${col}"></i></span>`;
@@ -7095,33 +7179,52 @@ document.getElementById("clearFirms").addEventListener("click", () => {
   redraw();
 });
 
-// ---- registration + experience toggles ----
+// ---- registration + sales-activity filters ----
 document.getElementById("regToggle").addEventListener("click", e => {
   const b = e.target.closest("button"); if (!b) return;
   reg = b.dataset.reg;
   [...e.currentTarget.children].forEach(x => x.setAttribute("aria-pressed", x === b));
   redraw();
 });
-// plain click = that band only (click again to clear) · ctrl/cmd/shift = add
-function multiSelect(id, attr, set){
-  document.getElementById(id).addEventListener("click", e => {
-    const b = e.target.closest("button"); if (!b) return;
-    const additive = e.ctrlKey || e.metaKey || e.shiftKey;
-    const band = b.dataset[attr];
-
-    if (band === "all") set.clear();
-    else if (!additive){
-      if (set.size === 1 && set.has(band)) set.clear();
-      else { set.clear(); set.add(band); }
-    } else {
-      set.has(band) ? set.delete(band) : set.add(band);
-    }
-
-    [...e.currentTarget.children].forEach(x => x.setAttribute("aria-pressed",
-      x.dataset[attr] === "all" ? set.size === 0 : set.has(x.dataset[attr])));
+const lastEmailedSelect = document.getElementById("lastEmailed");
+const lastCalledSelect = document.getElementById("lastCalled");
+const joinedFirmSelect = document.getElementById("joinedFirm");
+function syncActivityFilterUI(){
+  if (!lastEmailedSelect || !lastCalledSelect || !joinedFirmSelect) return;
+  lastEmailedSelect.value = lastEmailed;
+  lastCalledSelect.value = lastCalled;
+  joinedFirmSelect.value = joinedFirm;
+  const national = scope === "US";
+  lastEmailedSelect.disabled = national || emailActivityState !== "ready";
+  lastCalledSelect.disabled = national || callActivityState !== "ready";
+  joinedFirmSelect.disabled = national;
+  lastEmailedSelect.title = emailActivityState === "failed"
+    ? "Email activity is unavailable."
+    : emailActivityState === "ready" ? "" : "Loading your email activity…";
+  lastCalledSelect.title = callActivityState === "failed"
+    ? "Call activity is unavailable."
+    : callActivityState === "ready" ? "" : "Loading your recorded calls…";
+}
+function wireActivitySelect(element, ready, getValue, setValue, label){
+  element.addEventListener("focus", () => loadActivityFilters().catch(() => {}));
+  element.addEventListener("change", () => {
+    if (!ready()) { element.value = getValue(); return; }
+    setValue(element.value);
     redraw();
+    if (element.value) reportFilterReach(
+      `No advisors match the ${label.toLowerCase()} filter.`, label.toLowerCase());
   });
 }
+wireActivitySelect(lastEmailedSelect, () => emailActivityState === "ready",
+  () => lastEmailed, value => { lastEmailed = value; }, "Last emailed");
+wireActivitySelect(lastCalledSelect, () => callActivityState === "ready",
+  () => lastCalled, value => { lastCalled = value; }, "Last called");
+joinedFirmSelect.addEventListener("change", () => {
+  joinedFirm = joinedFirmSelect.value;
+  redraw();
+  if (joinedFirm) reportFilterReach(
+    "No advisors match the joined-firm range.", "recent firm joins");
+});
 // Both contact filters can empty the view -- "has assets" especially, since
 // the CRM populates it for under 8% of contacts. An empty map reads as broken
 // rather than as a result, so each fits to what survives and says so when
@@ -7219,10 +7322,6 @@ rankedBox.addEventListener("change", () => {
   if (!rankedOnly) return;
   reportFilterReach("No ranked advisors match the current filters.", "ranked advisors");
 });
-
-multiSelect("expToggle", "exp", expSel);
-multiSelect("reachToggle", "reach", reachSel);
-multiSelect("geoToggle", "geo", geoSel);
 
 // ---- targeting: 5.G(7) toggle + AUM presets ----
 const selectsBox = document.getElementById("selectsOnly");
@@ -7431,6 +7530,14 @@ async function navigateToFirm(crd){
   return focusFirmNational(crd, false);
 }
 
+const ACTIVITY_FILTER_LABELS = {
+  d30:"within 30 days", d90:"31–90 days", d180:"91–180 days",
+  older:"181+ days", none:"not observed",
+};
+const JOINED_FILTER_LABELS = {
+  d90:"within 90 days", d180:"91–180 days", d360:"181–360 days",
+};
+
 function refreshActiveFilters(){
   const items = [];
   const add = (label, key) => items.push({ label, key });
@@ -7443,10 +7550,10 @@ function refreshActiveFilters(){
   if (selectsOnly) add("Reports selecting outside managers", "selects");
   if (scope !== "US"){
     if (reg !== "all") add(reg === "dual" ? "Dually registered" : "RIA-only", "reg");
-    if (expSel.size) add(`Experience ${[...expSel].join(", ")}`, "exp");
-    if (reachSel.size) add(`Registration reach ${[...reachSel].join(", ")}`, "reach");
-    if (geoSel.size) add(`Map quality ${[...geoSel].join(", ")}`, "geo");
-    if (ownerOnly) add("Owners and officers only", "owner");
+    if (lastEmailed) add(`Last emailed: ${ACTIVITY_FILTER_LABELS[lastEmailed]}`, "lastEmailed");
+    if (lastCalled) add(`Last called: ${ACTIVITY_FILTER_LABELS[lastCalled]}`, "lastCalled");
+    if (joinedFirm) add(`Joined firm: ${JOINED_FILTER_LABELS[joinedFirm]}`, "joinedFirm");
+    if (ownerOnly) add("Owners/officers", "owner");
     // Distinct advisors, not pins -- an advisor filed at two offices is two
     // pins, and two numbers labelled the same thing must not disagree.
     const distinct = () => {
@@ -7454,15 +7561,15 @@ function refreshActiveFilters(){
       for (const f of ALL) if (passesFilters(f.properties)) ids.add(f.properties.id);
       return ids.size.toLocaleString();
     };
-    if (contactableOnly) add(`Has contact data · ${distinct()}`, "contactable");
-    if (assetsOnly) add(`Has assets on file · ${distinct()}`, "assets");
+    if (contactableOnly) add(`Email/phone · ${distinct()}`, "contactable");
+    if (assetsOnly) add(`EIC assets · ${distinct()}`, "assets");
     if (rankedOnly){
       // Distinct advisors, not pins. Counting rows here reported 35 against an
       // Advisors KPI of 33, because an advisor filed at two offices is two
       // pins; two numbers labelled the same thing must not disagree.
       const ids = new Set();
       for (const f of ALL) if (passesFilters(f.properties)) ids.add(f.properties.id);
-      add(`Ranked advisors · ${ids.size.toLocaleString()}`, "ranked");
+      add(`Ranked · ${ids.size.toLocaleString()}`, "ranked");
     }
   }
   if (excludedFirms.size)
@@ -7477,10 +7584,7 @@ function refreshActiveFilters(){
 
 function syncFilterButtons(){
   document.querySelectorAll("#regToggle button").forEach(b => b.setAttribute("aria-pressed", b.dataset.reg === reg));
-  for (const [id, attr, set] of [["expToggle","exp",expSel],["reachToggle","reach",reachSel],["geoToggle","geo",geoSel]]){
-    document.querySelectorAll(`#${id} button`).forEach(b =>
-      b.setAttribute("aria-pressed", b.dataset[attr] === "all" ? !set.size : set.has(b.dataset[attr])));
-  }
+  syncActivityFilterUI();
   syncTargetingUI();
   syncOwnerUI();
   syncRankedUI();
@@ -7490,7 +7594,7 @@ function syncFilterButtons(){
 }
 
 function resetAllFilters(){
-  reg = "all"; expSel.clear(); reachSel.clear(); geoSel.clear();
+  reg = "all"; lastEmailed = ""; lastCalled = ""; joinedFirm = "";
   ownerOnly = false;
   rankedOnly = false;
   contactableOnly = false; assetsOnly = false;
@@ -7518,9 +7622,9 @@ document.getElementById("activeFilters").addEventListener("click", e => {
   if (key === "selects"){ selectsOnly = false; selectsBox.checked = false; selectsBox.closest(".switch").classList.remove("on"); }
   if (key === "raum"){ aumSel.clear(); syncTargetingUI(); }
   if (key === "reg") reg = "all";
-  if (key === "exp") expSel.clear();
-  if (key === "reach") reachSel.clear();
-  if (key === "geo") geoSel.clear();
+  if (key === "lastEmailed") lastEmailed = "";
+  if (key === "lastCalled") lastCalled = "";
+  if (key === "joinedFirm") joinedFirm = "";
   if (key === "owner") ownerOnly = false;
   if (key === "ranked") rankedOnly = false;
   if (key === "contactable") contactableOnly = false;
@@ -7542,7 +7646,8 @@ function joinLabels(labels){
 function captureAdvisorFilters(){
   return {
     selectedFirms:[...selectedFirms], selectsOnly,
-    aum:[...aumSel], reg, exp:[...expSel], reach:[...reachSel], geo:[...geoSel], ownerOnly, rankedOnly, excluded:[...excludedFirms],
+    aum:[...aumSel], reg, lastEmailed, lastCalled, joinedFirm,
+    ownerOnly, rankedOnly, excluded:[...excludedFirms],
   };
 }
 
@@ -7553,15 +7658,11 @@ function restoreAdvisorFilters(saved){
   selectsOnly = saved.selectsOnly;
   selectsBox.checked = selectsOnly;
   selectsBox.closest(".switch").classList.toggle("on", selectsOnly);
-  // These Sets must be MUTATED, never reassigned. multiSelect() closes over the
-  // Set object it was wired to at startup, so swapping in a fresh Set left the
-  // toggle handlers writing to an orphan while the predicates read the
-  // replacement: experience, registration-reach and map-quality silently
-  // stopped filtering after any advisor navigation or Back. `reg` survived only
-  // because it is a string read by name rather than a captured object.
   refill(aumSel, saved.aum);
   reg = saved.reg;
-  refill(expSel, saved.exp); refill(reachSel, saved.reach); refill(geoSel, saved.geo);
+  lastEmailed = saved.lastEmailed || "";
+  lastCalled = saved.lastCalled || "";
+  joinedFirm = saved.joinedFirm || "";
   ownerOnly = !!saved.ownerOnly;
   rankedOnly = !!saved.rankedOnly;
   excludedFirms = new Set(saved.excluded || []);
@@ -7596,9 +7697,9 @@ function relaxFiltersForAdvisor(features, advisorName, announce=true){
   }
   const passesReg = p => reg === "all" || (reg === "dual" ? p.d === 1 : p.d === 0);
   if (reg !== "all" && !props.some(passesReg)){ reg = "all"; add("the registration filter"); }
-  if (expSel.size && !props.some(passesExp)){ expSel.clear(); add("the experience filter"); }
-  if (reachSel.size && !props.some(passesReach)){ reachSel.clear(); add("the registration-reach filter"); }
-  if (geoSel.size && !props.some(passesQuality)){ geoSel.clear(); add("the map-quality filter"); }
+  if (lastEmailed && !props.some(passesLastEmailed)){ lastEmailed = ""; add("the last-emailed filter"); }
+  if (lastCalled && !props.some(passesLastCalled)){ lastCalled = ""; add("the last-called filter"); }
+  if (joinedFirm && !props.some(passesJoinedFirm)){ joinedFirm = ""; add("the joined-firm filter"); }
   if (ownerOnly && !props.some(passesOwner)){ ownerOnly = false; add("the owners-and-officers filter"); }
   if (rankedOnly && !props.some(passesRanked)){ rankedOnly = false; add("the ranked-advisor filter"); }
   if (contactableOnly && !props.some(passesContactable)){ contactableOnly = false; add("the contact-data filter"); }
@@ -7610,7 +7711,7 @@ function relaxFiltersForAdvisor(features, advisorName, announce=true){
   // remaining view filters rather than navigating to another invisible pin.
   if (!props.some(passesFilters)){
     reg = "all";
-    expSel.clear(); reachSel.clear(); geoSel.clear(); resetTargeting();
+    lastEmailed = ""; lastCalled = ""; joinedFirm = ""; resetTargeting();
     selectedFirms = []; firmColor = {}; document.getElementById("clearFirms").hidden = true;
     if (lassoPolygon) clearLasso(false);
     add("the remaining conflicting filters");
@@ -8234,9 +8335,7 @@ function openRoster(a, detailPush=true, onlyFirm=null){
         const p = f.properties;
         const dim = passesFilters(p) ? "" : " dim";
         const bits = [
-          p.x != null ? `${p.x.toFixed(0)} yrs` : null,
           p.d ? "Dually registered" : "RIA-only",
-          p.ns != null ? `${p.ns} state${p.ns === 1 ? "" : "s"}` : null,
           p.g ? esc(p.g.split("|").join(", ")) : null,
         ].filter(Boolean).join(" · ");
         // disclosures are the one thing a rep must not have to click to discover
@@ -8389,11 +8488,9 @@ function openAdvisorDetails(f, detailPush=true){
   // the prior-firm COUNT is gone from the badges: the History section below
   // names the firms and their dates, which is what the count was standing in for
   const bits = [
-    p.x != null ? `${p.x.toFixed(0)} years experience` : "",
     p.d ? "Dually registered" : "RIA-only",
   ].filter(Boolean);
   const bl = bldgForAddr(at, p.a);
-  const states = p.rs ? p.rs.split("|") : [];
   // Schedule A role at THIS firm, plus any held at another firm -- an advisor
   // who also owns a second RIA is worth surfacing, not hiding.
   const roles = ownerRolesFor(p.id);
@@ -8478,10 +8575,10 @@ function openAdvisorDetails(f, detailPush=true){
       ${bl ? `<button type="button" class="detail-row" data-a="${bl.i}" data-bldg="1"><span class="detail-row-main"><b>Whole building</b>
         <small>${bl.ids.size.toLocaleString()} advisors across ${bl.lines.size} filed address line${bl.lines.size === 1 ? "" : "s"}</small></span><span class="detail-chevron">›</span></button>` : ""}
       ${otherOfficeRows(p)}
-    </div><div id="advisorElsewhere" data-for="${esc(p.id)}"></div>${remoteNote(p)}${uncertainNote(p)}${placementNote(p)}</section>` : ""}
+    </div><div id="advisorElsewhere" data-for="${esc(p.id)}"></div>${remoteNote(p)}${uncertainNote(p)}</section>` : ""}
     <div class="profile-badges">${bits.map(bit => `<span class="profile-badge">${esc(bit)}</span>`).join("")}</div>
     <section class="profile-section"><h3>History${infoBox(
-      "Registration history as filed with the SEC. Dates are registration begin and end dates, which can differ by days from the advisor's actual start and finish.")}</h3>
+      "Current registration facts and registration history as filed with the SEC. Dates can differ by days from the advisor's actual start and finish.")}</h3>
       <div id="advisorHistory" data-for="${esc(p.id)}"><p class="profile-empty">Loading history…</p></div></section>
     <section class="profile-section"><h3>Email activity${infoBox(
       "Email observed between this firm and this advisor — sent from the emailer or from Outlook, and anything they sent back. "
@@ -8498,7 +8595,6 @@ function openAdvisorDetails(f, detailPush=true){
       ${p.dr && p.dr.length
         ? `<p class="profile-warn">⚠ ${esc(p.dr.join(", "))}</p>`
         : `<p class="profile-empty">None reported.</p>`}</section>
-    ${states.length ? `<section class="profile-section"><h3>Registrations (${states.length})</h3><p>${esc(states.join(", "))}</p></section>` : ""}
     <div class="profile-actions">
       ${p.u ? `<a href="${esc(p.u)}" target="_blank" rel="noopener">Individual IAPD ↗</a>` : ""}
       <a href="${firmIapdUrl(p.fc)}" target="_blank" rel="noopener">Firm IAPD ↗</a>
@@ -8609,17 +8705,6 @@ function uncertainNote(p){
   return `<p class="uncertain-note"><b>Address uncertain.</b> Filed at this office, but the ` +
     `employment record on file says ${p.home ? esc(p.home) : "somewhere else"}. ` +
     `Treat the street address as a registration, not a confirmed workplace.</p>`;
-}
-
-// How the pin was placed. The filed address is always exact; only the map
-// position can be approximate, and the Advanced "Map-position quality" filter
-// acts on this value -- so it has to be visible somewhere.
-function placementNote(p){
-  if (!p.gp || p.gp === "rooftop") return "";
-  const how = p.gp === "neighbour"
-    ? "Pin placed at the nearest validated address on this block."
-    : "Approximate map position.";
-  return `<p class="profile-note">◎ ${how} The filed address above is unchanged.</p>`;
 }
 
 document.getElementById("firmOverviewBody").addEventListener("click", e => {
@@ -8740,6 +8825,10 @@ function activeFilterSummary(){
 // The provenance header warns instead; importing as text is the reliable fix.
 function csvZip(zip){ return zip || ""; }
 
+function epochDayIso(day){
+  return Number.isInteger(day) ? new Date(day * FILTER_DAY_MS).toISOString().slice(0, 10) : "";
+}
+
 function exportAdvisors(){
   const bounds = map.getBounds();
   const seen = new Set();
@@ -8762,14 +8851,12 @@ function exportAdvisors(){
       role && role.ctrl ? "Y" : "",
       p.a, p.c, p._state, csvZip(p.z),
       p.unc ? "Y" : "", p.unc ? p.home : "",
-      p.x == null ? "" : p.x.toFixed(1),
       p.d ? "Dual" : "RIA-only",
-      p.ns == null ? "" : p.ns, p.rs ? p.rs.split("|").join(" ") : "",
+      epochDayIso(p.jd),
       p.g ? p.g.split("|").join("; ") : "",
       p.dr && p.dr.length ? p.dr.join("; ") : "",
       p.pf || 0,
       STATE_TO_TERRITORY[p._state] || "",
-      p.gp || "",
       p.u || "",
       // appended, never inserted: the sort below reads this array positionally
       bar.length ? bar.map(h => `${barronsRankText(h)} (${h.year})`).join("; ") : "",
@@ -8788,8 +8875,8 @@ function exportAdvisors(){
     "Role at firm","Ownership","Control person",
     "Street","City","State","ZIP",
     "Address uncertain","Employment record says",
-    "Years experience","Registration","States registered","Registered states",
-    "Designations","Disclosures","Prior firms","Territory","Map position","IAPD",
+    "Registration","Joined firm",
+    "Designations","Disclosures","Prior firms","Territory","IAPD",
     "Barron's ranking","Barron's profile",
     "Forbes ranking","Forbes team assets ($)",
   ], rows, `${people.toLocaleString()} distinct advisors, one row per advisor-firm relationship`);

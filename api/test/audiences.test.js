@@ -3,14 +3,14 @@ const test=require("node:test"),assert=require("node:assert/strict"),Module=requ
 const {FakeTableService}=require("./helpers/fake-table"),defs=require("../shared/audience-definition");
 const WHO={id:"rep-one",name:"rep@example.com"};
 const raw=()=>({version:1,scope:{kind:"territory",value:"T:Northeast",states:["CT","MA","ME","NH","NY","RI","VT"],label:"Northeast"},filters:{selectedFirms:["123"],assetsOnly:true}});
-function env(){const service=new FakeTableService(),p=require.resolve("../shared/store.js");delete require.cache[p];const real=Module._load;Module._load=function(r,parent){if(parent&&parent.filename===p&&r==="@azure/data-tables")return{TableClient:{fromConnectionString:(_c,n)=>service.table(n)},odata:(s,...v)=>s.reduce((o,x,i)=>o+x+(i<v.length?"'"+v[i]+"'":""),"")};return real.apply(this,arguments)};process.env.AZURE_STORAGE_CONNECTION_STRING="x";try{return require(p)}finally{Module._load=real}}
+function env(){const service=new FakeTableService(),p=require.resolve("../shared/store.js");delete require.cache[p];const real=Module._load;Module._load=function(r,parent){if(parent&&parent.filename===p&&r==="@azure/data-tables")return{TableClient:{fromConnectionString:(_c,n)=>service.table(n)},odata:(s,...v)=>s.reduce((o,x,i)=>o+x+(i<v.length?"'"+v[i]+"'":""),"")};return real.apply(this,arguments)};process.env.AZURE_STORAGE_CONNECTION_STRING="x";try{const store=require(p);store.__testService=service;return store}finally{Module._load=real}}
 test("definition v1 canonicalizes and rejects unsupported or national criteria",()=>{const n=defs.normalizeDefinition(raw()).definition;assert.equal(n.filters.assetsOnly,true);assert.deepEqual(n.filters.excluded,[]);assert.throws(()=>defs.normalizeDefinition({...raw(),mystery:true}),/not supported/);assert.throws(()=>defs.normalizeDefinition({version:1,scope:{kind:"state",value:"US",states:["NY"]},filters:{}}),/national/);assert.throws(()=>defs.normalizeDefinition({...raw(),filters:{query:"x"}}),/not supported/)});
 
 test("definition rejects invalid filter enums and noncanonical territories", () => {
-  for (const [key, value] of [["aum", "bogus"], ["exp", "senior"],
-    ["reach", "all"], ["geo", "zip"]])
+  for (const [key, value] of [["aum", ["bogus"]], ["lastEmailed", "weekly"],
+    ["lastCalled", "recent"], ["joinedFirm", "d30"]])
     assert.throws(() => defs.normalizeDefinition({
-      ...raw(), filters: { [key]: [value] },
+      ...raw(), filters: { [key]: value },
     }), new RegExp("filters." + key));
   assert.throws(() => defs.normalizeDefinition({
     ...raw(), scope: { ...raw().scope, value: "Northeast" },
@@ -29,6 +29,21 @@ test("a corrupt saved definition is returned safely as invalid", async () => {
   assert.equal(loaded.definition, null);
   assert.equal(loaded.invalidDefinition, true);
   assert.equal(loaded.name, "Old");
+});
+
+test("last-called summary is per rep, outbound-only, and uses the latest event time", async () => {
+  const store = env();
+  const log = store.__testService.table("CallLog");
+  const add = (partitionKey, rowKey, crd, atUtc, disposition) =>
+    log.createEntity({ partitionKey, rowKey, crd, atUtc, disposition });
+  await add(WHO.id, "001", "111", "2026-08-01T12:00:00Z", "connected");
+  await add(WHO.id, "002", "111", "2026-08-12T12:00:00Z", "voicemail");
+  await add(WHO.id, "003", "222", "2026-08-20T12:00:00Z", "received");
+  await add(WHO.id, "004", "333", "2026-08-21T12:00:00Z", "skipped");
+  await add("other-rep", "001", "444", "2026-08-30T12:00:00Z", "connected");
+  assert.deepEqual(await store.latestCallsForUser(WHO), [
+    ["111", "2026-08-12T12:00:00Z"],
+  ]);
 });
 
 test("audience HTTP endpoint authenticates and routes GET, PUT, and DELETE", async () => {

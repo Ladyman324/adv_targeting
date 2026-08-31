@@ -134,6 +134,9 @@ module.exports = async function (context, req) {
       if (op === "queue_work") {
         return ok(context, await engagement.queue(who.id));
       }
+      if (op === "activity_filter_summary") {
+        return ok(context, await engagement.activitySummary(who.id));
+      }
       /* Exactly who a Reply All would reach, so the rep can see it.
        *
        * Reply-all pulls in the original's To and Cc, which are not necessarily

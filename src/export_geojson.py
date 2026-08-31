@@ -210,19 +210,19 @@ def export(state: str) -> None:
     # count also includes broker-dealer agent + SRO registrations, which live
     # in BrokerCheck, not this feed -- so this number is legitimately smaller.
     emp = pd.read_parquet(ROOT / "data" / "output" / "advisor_employments.parquet")
-    emp = emp[["advisor_crd", "firm_crd", "n_registrations", "reg_states"]].copy()
+    emp = emp[["advisor_crd", "firm_crd", "reg_earliest_date"]].copy()
     emp["advisor_crd"] = emp["advisor_crd"].astype(str)
     emp["firm_crd"] = emp["firm_crd"].astype(str)
     p["firm_crd"] = p["firm_crd"].astype(str)
     p = p.merge(emp, on=["advisor_crd", "firm_crd"], how="left")
-
-    exp_path = ROOT / "data" / "output" / "advisor_experience.parquet"
-    if exp_path.exists():
-        ex = pd.read_parquet(exp_path)[["advisor_crd", "years_experience", "experience_band"]]
-        ex["advisor_crd"] = ex["advisor_crd"].astype(str)
-        p = p.merge(ex, on="advisor_crd", how="left")
-    else:
-        p["years_experience"], p["experience_band"] = pd.NA, pd.NA
+    # One compact integer powers the sales-relevant "Joined firm" filter.
+    # Days since the Unix epoch compare without parsing a date for every pin on
+    # every redraw. Experience, registration reach and geocoder diagnostics no
+    # longer belong in the hot map payload; profile-only employment detail is
+    # exported by export_advisor_history.py and fetched when a profile opens.
+    joined = pd.to_datetime(p["reg_earliest_date"], errors="coerce")
+    p["joined_day"] = ((joined - pd.Timestamp("1970-01-01"))
+                       .dt.days.astype("Int64"))
 
     # Firm-level targeting attributes for the AUM range + 5.G(7) filter and the
     # fit/size split shown in each firm row. Sourced from firms.parquet (the score
@@ -274,7 +274,7 @@ def export(state: str) -> None:
     # GeoJSON repeats every property NAME on every pin and re-states firm-level
     # facts (motion, score, RAUM, 5.G(7), fit/size) once per advisor. This drops
     # both: positional arrays instead of named objects, string dictionaries for
-    # the heavy repeaters (firm, address, city, designations, reg-states), and
+    # the heavy repeaters (firm, address, city, designations), and
     # firm-level fields moved into the firm dictionary. The loader rehydrates it
     # into the exact same {geometry, properties} shape, so nothing downstream
     # changes. Measured ~5x smaller and much faster to parse than GeoJSON.
@@ -291,9 +291,6 @@ def export(state: str) -> None:
     addr_add, addrs = interner()
     city_add, cities = interner()
     des_add, desig = interner()
-    reg_add, regs = interner()
-    gp_add, gps = interner()
-    xb_add, xbs = interner()
     drp_cols = list(DRP)                      # bit order for the disclosure mask
 
     # CRD, not display name, is the identity key. Same-named legal entities can
@@ -335,8 +332,6 @@ def export(state: str) -> None:
         for bi, col in enumerate(drp_cols):
             if r.get(col) is True or str(r.get(col)).upper() == "Y":
                 bits |= (1 << bi)
-        band = r["experience_band"] if isinstance(r.get("experience_band"), str) else ""
-        rs   = r["reg_states"] if isinstance(r.get("reg_states"), str) else ""
         gval = r["designations"] if isinstance(r.get("designations"), str) and r["designations"] else ""
         city = r["branch_city"].title() if isinstance(r["branch_city"], str) else ""
         pins.append([
@@ -347,37 +342,31 @@ def export(state: str) -> None:
             str(r["branch_postal"]) if pd.notna(r["branch_postal"]) else "",  # 5
             r["advisor_crd"],                               # 6
             r["name"],                                       # 7
-            None if pd.isna(r.get("years_experience")) else round(float(r["years_experience"]), 1),  # 8
-            xb_add(band) if band else -1,                    # 9
-            None if pd.isna(r.get("n_registrations")) else int(r["n_registrations"]),  # 10
-            reg_add(rs) if rs else -1,                       # 11
-            gp_add(r["geocode_precision"] if isinstance(r.get("geocode_precision"), str) else ""),  # 12
-            1 if str(r.get("active_ag_reg")) == "Y" else 0,  # 13 dually
-            des_add(gval) if gval else -1,                   # 14
-            None if pd.isna(r.get("n_prior_firms")) else int(r["n_prior_firms"]),  # 15
-            int(r["office_adv"]),                            # 16
-            bits,                                            # 17 disclosure mask
-            1 if isinstance(r.get("iapd_url"), str) and r["iapd_url"] else 0,      # 18 has IAPD url
-            # APPEND new fields here. The indices above are read positionally by
-            # the webapp's rehydrate() and by the summary below, so inserting
-            # mid-array silently shifts every field after it.
-            1 if r.get("uncertain") else 0,                  # 19 address not corroborated
-            str(r.get("home_label") or ""),                  # 20 where employment says they are
-            LOCATION_CODE.get(r.get("location_type"), 0),    # 21 how the location is known
+            1 if str(r.get("active_ag_reg")) == "Y" else 0,  # 8 dually
+            des_add(gval) if gval else -1,                   # 9
+            None if pd.isna(r.get("n_prior_firms")) else int(r["n_prior_firms"]),  # 10
+            int(r["office_adv"]),                            # 11
+            bits,                                            # 12 disclosure mask
+            1 if isinstance(r.get("iapd_url"), str) and r["iapd_url"] else 0,      # 13 has IAPD url
+            1 if r.get("uncertain") else 0,                  # 14 address not corroborated
+            str(r.get("home_label") or ""),                  # 15 where employment says they are
+            LOCATION_CODE.get(r.get("location_type"), 0),    # 16 how the location is known
+            None if pd.isna(r.get("joined_day")) else int(r["joined_day"]),       # 17 joined firm
         ])
 
     out_obj = {
+        "schema": 2,
         "iapd": "https://adviserinfo.sec.gov/individual/summary/",
         "firms": firms, "motions": motions, "addrs": addrs, "cities": cities,
-        "desig": desig, "regs": regs, "gp": gps, "xb": xbs, "pins": pins,
+        "desig": desig, "pins": pins,
     }
     WEBAPP.mkdir(parents=True, exist_ok=True)
     out = WEBAPP / f"pins_{state}.json"
     with open(out, "w", encoding="utf-8") as fh:
         json.dump(out_obj, fh, separators=(",", ":"))
 
-    dual = sum(1 for pn in pins if pn[13])
-    withu = sum(1 for pn in pins if pn[18])
+    dual = sum(1 for pn in pins if pn[8])
+    withu = sum(1 for pn in pins if pn[13])
     ids = {pn[6] for pn in pins}
     mb = out.stat().st_size / 1e6
     print(f"{state}: {len(pins):,} pins -> {out.name}  {mb:.1f} MB "
