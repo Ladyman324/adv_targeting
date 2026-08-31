@@ -25,6 +25,13 @@ const clients = new Map();
 const ensured = new Set();
 
 function clean(v, max = 1024) { return v == null ? "" : String(v).slice(0, max); }
+// Batches created by the affected release stored an em dash after its UTF-8
+// bytes had been decoded as Windows-1252 ("a-circumflex, euro, quote").
+// Normalize on read so existing activity titles recover immediately, and on
+// write so the broken sequence can never be persisted by an older caller.
+function repairLegacyText(v) {
+  return String(v == null ? "" : v).replace(/\u00e2\u20ac\u201d/g, "\u2014");
+}
 function json(v) { return JSON.stringify(v == null ? null : v); }
 // Returns the fallback for anything that is not usable JSON, INCLUDING a parse
 // that legitimately yields null.
@@ -121,7 +128,7 @@ async function consumeAuthState(state, userId = null) {
 function batchFromEntity(e) {
   if (!e) return null;
   return { id: e.rowKey, userId: e.partitionKey, userName: e.userName,
-    status: e.status, mode: e.mode || "", name: e.name || "",
+    status: e.status, mode: e.mode || "", name: repairLegacyText(e.name),
     templateId: e.templateId, templateName: e.templateName, templateVersion: Number(e.templateVersion) || 1,
     commonSubject: e.commonSubject || "", commonBodyText: e.commonBodyText || "",
     commonRevision: Number(e.commonRevision) || 1,
@@ -176,7 +183,7 @@ function batchFromEntity(e) {
 async function createBatch(who, batch) {
   const at = now();
   const entity = { partitionKey: who.id, rowKey: batch.id, userName: clean(who.name, 256),
-    status: batch.status || "editing", mode: "", name: clean(batch.name, 120),
+    status: batch.status || "editing", mode: "", name: clean(repairLegacyText(batch.name), 120),
     templateId: clean(batch.templateId, 80), templateName: clean(batch.templateName, 120), templateVersion: Number(batch.templateVersion) || 1,
     commonSubject: clean(batch.commonSubject, 500), commonBodyText: clean(batch.commonBodyText, 50000),
     commonRevision: 1, attachmentIdsJson: json(batch.attachmentIds || []),

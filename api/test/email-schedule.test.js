@@ -42,6 +42,18 @@ test("Other is visibly actionable, dismisses outside, and the footer reserves it
   assert.match(styles, /summary\.email-other-trigger[\s\S]*box-shadow:inset 0 0 0 1px var\(--hair\)/);
 });
 
+test("editing schedule fields validates in place without replacing the active inputs", () => {
+  const source = fs.readFileSync(path.join(__dirname, "..", "..", "webapp", "email.js"), "utf8");
+  const listener = source.indexOf('document.addEventListener("change"');
+  const start = source.indexOf('if (["emailScheduleDate", "emailScheduleTime"]', listener);
+  const end = source.indexOf('if (event.target.id === "docFiles")', start);
+  const branch = source.slice(start, end);
+
+  assert.match(branch, /syncScheduleInputs\(\)/);
+  assert.doesNotMatch(branch, /composerView\(\)/);
+  assert.match(source, /document\.addEventListener\("input"[\s\S]*?emailScheduleDate[\s\S]*?syncScheduleInputs\(\)/);
+});
+
 test("scheduled instants are strict, leave cancellation time, and stop at seven days", () => {
   assert.equal(schedule.scheduledInstant("2026-08-29T12:01:00Z", NOW, 60),
     "2026-08-29T12:01:00.000Z");

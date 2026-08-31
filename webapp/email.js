@@ -94,6 +94,21 @@
     }
     return { date, error: "", quarter: "" };
   }
+  function syncScheduleInputs() {
+    const dateInput = document.getElementById("emailScheduleDate");
+    const timeInput = document.getElementById("emailScheduleTime");
+    if (dateInput) scheduleDate = dateInput.value || "";
+    if (timeInput) scheduleTime = timeInput.value || "";
+    const result = scheduleCheck((detail && detail.batch) || { attachmentIds: [] });
+    const problem = result.error || result.quarter || "";
+    const status = document.getElementById("emailScheduleError");
+    if (status) {
+      status.textContent = problem || (result.date ? `Starts ${easternLabel(result.date)}` : "");
+      status.classList.toggle("bad", !!problem);
+      status.classList.toggle("good", !problem);
+    }
+    return result;
+  }
 
   async function api(op, body, method = "POST") {
     const [operation, extraQuery = ""] = String(op).split("&", 2);
@@ -2706,9 +2721,11 @@ They stay on your call list and keep their history — this only takes them out 
       return;
     }
     if (["emailScheduleDate", "emailScheduleTime"].includes(event.target.id)) {
-      scheduleDate = (document.getElementById("emailScheduleDate") || {}).value || "";
-      scheduleTime = (document.getElementById("emailScheduleTime") || {}).value || "";
-      composerView(); return;
+      // Do not rebuild the composer here. Native date/time controls emit
+      // change while their segmented editor is still active; replacing their
+      // DOM at that moment discards focus and whichever segment the rep was
+      // typing. Update state and the validation sentence in place instead.
+      syncScheduleInputs(); return;
     }
     if (event.target.id === "docFiles") {
       const existingNames = new Set(((catalog && catalog.documents) || []).map((d) => String(d.fileName || "").toLowerCase()));
@@ -2757,7 +2774,9 @@ They stay on your call list and keep their history — this only takes them out 
   }, true);
 
   document.addEventListener("input", (event) => {
-    if (event.target.id === "materialSearch") {
+    if (["emailScheduleDate", "emailScheduleTime"].includes(event.target.id)) {
+      syncScheduleInputs();
+    } else if (event.target.id === "materialSearch") {
       materialSearch = event.target.value;
       const slot = document.querySelector(".email-material-library");
       if (slot) slot.innerHTML = libraryHtml((catalog && catalog.documents) || []);

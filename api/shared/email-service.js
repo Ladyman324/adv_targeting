@@ -589,7 +589,7 @@ async function createFollowUp(who, input, deps = {}) {
   // at the review screen for an hour while somebody replied.
   const fresh = await followUpCandidates(who, parentId, deps);
   if (!fresh.remaining.length)
-    throw httpError(409, "Everybody has replied, bounced or opted out â€” there is nobody to follow up.", "nobody_to_follow_up");
+    throw httpError(409, "Everybody has replied, bounced or opted out \u2014 there is nobody to follow up.", "nobody_to_follow_up");
 
   await registry.load({ force: true });
   const verifiedRemaining = [];
@@ -608,7 +608,7 @@ async function createFollowUp(who, input, deps = {}) {
 
   const batchId = st.id();
   await st.createBatch(who, { id: batchId, status: "editing",
-    name: `Follow-up â€” ${parent.name || "campaign"}`,
+    name: `Follow-up \u2014 ${parent.name || "campaign"}`,
     templateId: parent.templateId, templateName: parent.templateName,
     commonSubject: "", commonBodyText: note, commonRevision: 1,
     attachmentIds: documents.map((d) => d.id),
@@ -764,7 +764,7 @@ async function createBatch(who, input) {
   const batchDocuments = [...unionDocuments.values()];
   const batchAttachmentIds = batchDocuments.map((doc) => doc.id);
   const batch = await store.createBatch(who, { id: batchId,
-    name: input.name || `${template.name} â€” ${new Date().toLocaleDateString("en-US")}`,
+    name: input.name || `${template.name} \u2014 ${new Date().toLocaleDateString("en-US")}`,
     templateId: template.id, templateName: template.name, templateVersion: template.version, commonSubject: template.subject,
     commonBodyText: template.bodyText, attachmentIds: batchAttachmentIds,
     attachmentSummary: batchDocuments.map(({ id, name, size, contentType, version }) => ({ id, name, size, contentType, version })),

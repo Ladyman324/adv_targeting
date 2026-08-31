@@ -698,3 +698,24 @@ test("material route provenance and seed version survive store round-trip", asyn
     assert.equal(reread.rules.find(r => r.domain === "newfirm.com").status, "disabled");
   } finally { restore(); }
 });
+
+test("legacy mojibake batch titles read correctly and new writes are clean", async () => {
+  const { store, service, restore } = loadStore();
+  const broken = "Case for Value Touch \u00e2\u20ac\u201d 8/31/2026";
+  const repaired = "Case for Value Touch \u2014 8/31/2026";
+  try {
+    const saved = await store.createBatch({ id: "u1", name: "Rep" }, {
+      id: "new-batch", name: broken, attachmentIds: [], attachmentSummary: [],
+      recipientCount: 1, externalCount: 1,
+    });
+    assert.equal(saved.name, repaired);
+    assert.equal((await service.table("EmailBatches").getEntity("u1", "new-batch")).name, repaired,
+      "the malformed sequence must not be persisted again");
+
+    await service.table("EmailBatches").createEntity({
+      partitionKey: "u1", rowKey: "legacy-batch", status: "editing", name: broken,
+    });
+    assert.equal((await store.getBatch("u1", "legacy-batch")).name, repaired,
+      "an already-stored title should repair as soon as the batch is read");
+  } finally { restore(); }
+});
