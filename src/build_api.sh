@@ -70,11 +70,13 @@ const descriptorCore = { schemaVersion: descriptor.schemaVersion,
   registryContentHash: descriptor.registryContentHash,
   recipientCount: descriptor.recipientCount,
   ineligibleCount: descriptor.ineligibleCount,
-  provenance: descriptor.provenance || {} };
+  provenance: descriptor.provenance || {},
+  shardManifestHash: descriptor.shardManifestHash };
 const descriptorHash = crypto.createHash("sha256")
   .update(canonical(descriptorCore), "utf8").digest("hex");
 if (Number(descriptor.schemaVersion) !== 1
     || Number(descriptor.registrySchemaVersion) !== Number(payload.schemaVersion)
+    || !/^[a-f0-9]{64}$/.test(String(descriptor.shardManifestHash || ""))
     || descriptorHash !== descriptor.descriptorHash)
   throw new Error("registry release descriptor is invalid");
 if (String(descriptor.registryContentHash || "") !== hash)
@@ -203,7 +205,8 @@ const descriptorCore = { schemaVersion: descriptor.schemaVersion,
   registryContentHash: descriptor.registryContentHash,
   recipientCount: descriptor.recipientCount,
   ineligibleCount: descriptor.ineligibleCount,
-  provenance: descriptor.provenance || {} };
+  provenance: descriptor.provenance || {},
+  shardManifestHash: descriptor.shardManifestHash };
 const crypto = require("node:crypto");
 const canonical = (value) => Array.isArray(value)
   ? `[${value.map(canonical).join(",")}]`
@@ -216,6 +219,7 @@ const descriptorHash = crypto.createHash("sha256")
 if (Number(descriptor.schemaVersion) !== 1
     || Number(descriptor.registrySchemaVersion) !== 1
     || !/^[a-f0-9]{64}$/.test(String(descriptor.registryContentHash || ""))
+    || !/^[a-f0-9]{64}$/.test(String(descriptor.shardManifestHash || ""))
     || descriptorHash !== descriptor.descriptorHash)
   fail("approved-recipient-release.json is invalid");
 for (const key of ["identityManifestHash", "identityLinksSha256",
