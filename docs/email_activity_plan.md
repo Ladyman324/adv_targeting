@@ -938,7 +938,7 @@ Replies and individual follow-ups now use a separate `EmailDirectSendOps`
 state machine and `email-direct-work` queue. The HTTP request performs only the
 reversible work needed to build a complete Outlook draft, stamps the operation
 identifier last, records the immutable draft ID, and returns `202`. The worker
-rechecks the kill switch, canary, suppression, rolling limit, and mailbox pacing
+rechecks the kill switch, canary, suppression, Eastern daily capacity, and mailbox pacing
 immediately before it conditionally enters `submitting` and calls Graph once.
 
 `submitting` is the irreversible boundary. A timeout, network failure, Graph

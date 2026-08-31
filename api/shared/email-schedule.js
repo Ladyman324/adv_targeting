@@ -1,5 +1,7 @@
 "use strict";
 
+const capacity = require("./email-limit-guard");
+
 const MAX_AHEAD_MS = 7 * 86400000;
 const ISO_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/;
 
@@ -19,7 +21,11 @@ function scheduledInstant(value, nowMs, cancellationSeconds) {
     const error = new Error("The scheduled time must leave the full cancellation window.");
     error.statusCode = 400; error.code = "schedule_time_too_soon"; throw error;
   }
-  if (when > now + MAX_AHEAD_MS) {
+  // "One week" is a calendar promise to the salesperson, not 168 elapsed
+  // hours.  Comparing Eastern dates avoids moving the boundary by an hour at
+  // either daylight-saving transition.
+  const lastDay = capacity.addDays(capacity.easternDay(now), 7);
+  if (capacity.easternDay(when) > lastDay) {
     const error = new Error("Scheduled sends can start no more than 7 days from now.");
     error.statusCode = 400; error.code = "schedule_time_too_late"; throw error;
   }
@@ -32,6 +38,8 @@ function due(batch, nowMs = Date.now()) {
 }
 
 function messageDueUtc(batch, message, cfg) {
+  const planned = Date.parse(String(message && message.plannedSendUtc || ""));
+  if (Number.isFinite(planned)) return new Date(planned).toISOString();
   const base = Date.parse(String(batch && batch.sendNotBeforeUtc || ""));
   if (!Number.isFinite(base)) return "";
   const position = Number(message && message.sendPosition) >= 0

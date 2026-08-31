@@ -1301,6 +1301,9 @@ def _patch_whitelists_complete():
             allowed |= set(re.findall(r'"(\w+)"', block))
         for block in re.findall(r"const \w+ = \[(.*?)\];", body, re.S):
             allowed |= set(re.findall(r'"(\w+)"', block))
+        # Transformed fields (for example capacityPlan -> capacityPlanJson)
+        # are deliberately handled outside the string/number loops.
+        allowed |= set(re.findall(r'if \("(\w+)" in patch\)', body))
         return allowed
 
     targets = {"patchMessage": r"patchMessage\([^)]*?,\s*\{([^}]*)\}",
@@ -1316,7 +1319,9 @@ def _patch_whitelists_complete():
             if allowed is None:
                 continue
             for call in re.findall(pattern, body, re.S):
-                for field in re.findall(r"(\w+)\s*:", call):
+                # A ternary such as `plan.firstSendUtc : scheduledForUtc` is an
+                # expression, not an object field declaration.
+                for field in re.findall(r"(?<!\.)\b(\w+)\s*:", call):
                     if field not in allowed:
                         missing.append(f"{source} -> {fn}({field})")
 

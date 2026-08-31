@@ -13,6 +13,7 @@ const suppress = require("../shared/email-suppress");
 const recipientRegistry = require("../shared/recipient-registry");
 const materials = require("../shared/email-materials");
 const schedule = require("../shared/email-schedule");
+const capacity = require("../shared/email-limit-guard");
 
 function releaseMetadata() {
   try {
@@ -212,7 +213,8 @@ function safeHold(err) {
   if (original === "recipient_registry_unavailable")
     return { code: "schedule_preflight_unavailable",
       message: "Recipient safety data could not be refreshed. Review and reschedule this batch." };
-  if (original === "rolling_limit")
+  if (["rolling_limit", "daily_limit", "capacity_plan_changed",
+    "capacity_reservation_missing"].includes(original))
     return { code: "schedule_capacity_changed",
       message: "The current sending allowance cannot accommodate this batch." };
   const allowed = new Set(["schedule_template_changed", "schedule_mailbox_changed",
@@ -233,6 +235,37 @@ function safeHold(err) {
   return { code, message: messages[code] };
 }
 
+/* Calendar-capacity work carries an absolute, DST-safe send instant and an
+ * Eastern date. Queue visibility is only a hint: repair jobs, retries and
+ * duplicate deliveries can all wake work early or after its reserved day.
+ * Check the durable assignment before touching Graph. */
+async function waitForPlannedTime(work, batch, message, deps) {
+  if (!message || !message.plannedSendUtc) return false;
+  const due = Date.parse(message.plannedSendUtc);
+  if (Number.isFinite(due) && due > Date.now()) {
+    await deps.enqueue(work, Math.max(1, Math.ceil((due - Date.now()) / 1000)));
+    return true;
+  }
+  if (message.capacityDay && deps.capacity.easternDay(Date.now()) !== message.capacityDay) {
+    const claimed = await deps.store.claimMessage(work.userId, work.batchId, work.messageId,
+      [message.state], message.state, 30);
+    if (claimed) {
+      await deps.store.patchMessage(work.userId, work.batchId, work.messageId, {
+        state: "failed", failureCode: "capacity_day_expired",
+        failureMessage: "This email did not start on its reserved Eastern business day. Review it in a new batch before sending.",
+        leaseUntilUtc: "",
+      }, claimed.etag);
+      await deps.store.audit(work.userId, work.batchId, "capacity_day_expired",
+        { messageId: work.messageId, capacityDay: message.capacityDay });
+      await refreshBatch(work.userId, work.batchId, deps);
+    }
+    return true;
+  }
+  if (batch.capacityPlanHash && message.capacityPlanHash
+      && batch.capacityPlanHash !== message.capacityPlanHash) return true;
+  return false;
+}
+
 const PREFLIGHT_ATTEMPTS = 3;
 function preflightFailure(err) {
   const code = String(err && (err.code || err.errorCode || err.graphCode) || "unexpected_error").slice(0, 80);
@@ -240,7 +273,8 @@ function preflightFailure(err) {
   const statusCode = Math.max(0, Number(err && err.statusCode) || 0);
   const permanent = new Set(["recipient_registry_release_invalid",
     "recipient_registry_release_mismatch", "recipient_registry_incompatible",
-    "rolling_limit", "idempotency_conflict"]);
+    "rolling_limit", "daily_limit", "capacity_plan_changed",
+    "capacity_reservation_missing", "idempotency_conflict"]);
   const network = new Set(["ECONNRESET", "ETIMEDOUT", "EAI_AGAIN", "ENOTFOUND",
     "UND_ERR_CONNECT_TIMEOUT", "UND_ERR_HEADERS_TIMEOUT"]);
   const retryable = !permanent.has(code) && (err && err.safeToRetry === true
@@ -254,7 +288,17 @@ async function preflight(work, deps) {
   let currentStage = "batch_read";
   let batch = await deps.store.getBatch(work.userId, work.batchId);
   if (!batch || batch.status !== "scheduled" || batch.scheduleState !== "pending"
-      || !schedule.currentRevision(batch, work) || !schedule.due(batch)) return;
+      || !schedule.currentRevision(batch, work)) return;
+  if (!schedule.due(batch)) {
+    // Azure Queue caps initial visibility at seven elapsed days, while the UI
+    // promises seven Eastern calendar dates. Around DST—or simply later in the
+    // day—the capped hint can wake early. Keep the normal queue path durable
+    // instead of depending on the five-minute repair timer to notice it later.
+    const dueAt = Date.parse(batch.scheduledForUtc || "");
+    if (Number.isFinite(dueAt))
+      await deps.enqueue(work, Math.max(1, Math.ceil((dueAt - Date.now()) / 1000)));
+    return;
+  }
   const retryAfter = Date.parse(batch.scheduleRetryAfterUtc || "") || 0;
   if (retryAfter > Date.now()) {
     await deps.enqueue(work, Math.max(1, Math.ceil((retryAfter - Date.now()) / 1000)));
@@ -295,7 +339,9 @@ async function preflight(work, deps) {
       currentStage = "message_enqueue";
       await deps.enqueue({ kind: "draft", userId: work.userId, batchId: work.batchId,
         messageId: message.id, scheduleRevision: Number(work.scheduleRevision) },
-      Math.max(0, Number(message.sendPosition) || 0) * interval);
+      message.plannedSendUtc
+        ? Math.max(0, Math.ceil((Date.parse(message.plannedSendUtc) - Date.now()) / 1000))
+        : Math.max(0, Number(message.sendPosition) || 0) * interval);
     }
     currentStage = "pass_audit";
     await deps.store.audit(work.userId, work.batchId, "scheduled_preflight_passed",
@@ -470,7 +516,10 @@ async function notifyScheduleHold(work, deps) {
 async function draft(work, deps) {
   const batch = await deps.store.getBatch(work.userId, work.batchId);
   if (!batch || ["canceled"].includes(batch.status)) return;
+  if (batch.status === "paused") { await deps.enqueue(work, 30); return; }
   if (Number(work.scheduleRevision) > 0 && (!schedule.currentRevision(batch, work) || batch.scheduleState !== "passed")) return;
+  const pending = await deps.store.getMessage(work.userId, work.batchId, work.messageId);
+  if (await waitForPlannedTime(work, batch, pending, deps)) return;
   const claimed = await deps.store.claimMessage(work.userId, work.batchId, work.messageId,
     ["draft_pending", "draft_ambiguous", "draft_creating"], "draft_creating", 300, "draft");
   if (!claimed) return;
@@ -581,7 +630,9 @@ async function send(work, deps) {
   if (!batch || batch.status === "paused") { if (batch) await deps.enqueue(work, 30); return; }
   if (batch.status === "canceled") return;
   if (Number(work.scheduleRevision) > 0 && (!schedule.currentRevision(batch, work) || batch.scheduleState !== "passed")) return;
-  const due = Date.parse(schedule.messageDueUtc(batch, await deps.store.getMessage(work.userId, work.batchId, work.messageId), deps.core.config()));
+  const pending = await deps.store.getMessage(work.userId, work.batchId, work.messageId);
+  if (await waitForPlannedTime(work, batch, pending, deps)) return;
+  const due = Date.parse(schedule.messageDueUtc(batch, pending, deps.core.config()));
   if (due > Date.now()) { await deps.enqueue(work, Math.ceil((due - Date.now()) / 1000)); return; }
   const claimed = await deps.store.claimMessage(work.userId, work.batchId, work.messageId,
     ["send_scheduled", "send_ambiguous", "sending"], "sending", 180, "send");
@@ -751,7 +802,7 @@ async function reconcile(work, deps) {
 
 async function processWork(raw, overrides = {}) {
   const work = parseWork(raw);
-  const deps = { auth, store, graph, enqueue: service.enqueue, core, mailboxGate, suppress,
+  const deps = { auth, store, graph, enqueue: service.enqueue, core, mailboxGate, suppress, capacity,
     recipientRegistry, service, ...overrides };
   if (!work.userId || !work.batchId || (!work.messageId && !["preflight", "schedule_notify"].includes(work.kind)))
     throw new Error("Incomplete email queue message.");

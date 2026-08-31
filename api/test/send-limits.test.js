@@ -31,21 +31,20 @@ test("the per-send limit is a hard edge, not a soft one", () => {
   assert.equal(core.guardrail(26, "send", cfg).blocked, true, "26 is not");
 });
 
-test("the client's blocking reason matches what the server would do", () => {
-  // The composer disables Approve & Send using its own copy of the rule. If the
-  // two drift, a rep is either blocked from something legal or walked into a
-  // failure again.
+test("the client blocks from the server plan rather than reimplementing capacity", () => {
+  // A daily allowance can produce a valid multi-day batch, so recipient count
+  // and firm-domain arithmetic belong to the server-authored plan. The client
+  // keeps only the global kill switch and the plan's fit decision.
   const src = require("fs").readFileSync(
     require.resolve("../../webapp/email.js"), "utf8");
   const fn = src.split("function sendBlockedReason")[1].split(String.fromCharCode(10) + "  }")[0];
-  assert.match(fn, /lim\.directBatchMax && n > lim\.directBatchMax/,
-    "same comparison as guardrail: strictly greater than");
-  assert.match(fn, /externalCount/,
-    "the rolling window counts EXTERNAL recipients, not all of them");
-  assert.match(fn, /directSendAvailable/, "and respects the kill switch");
+  assert.match(fn, /planRemediation\(deliveryPlan\)/, "uses the server plan's fit decision");
+  assert.match(fn, /directSendAvailable/, "respects the kill switch");
+  assert.doesNotMatch(fn, /directBatchMax|rolling|externalCount|INTERNAL/,
+    "does not duplicate batch, calendar, or domain policy in the browser");
 });
 
-test("internal recipients do not consume the rolling window", () => {
+test("internal recipients do not consume daily capacity", () => {
   const cfg = cfgWith({ EMAIL_INTERNAL_DOMAINS: "eicatlanta.com" });
   assert.equal(core.isExternal("colleague@eicatlanta.com", cfg), false);
   assert.equal(core.isExternal("advisor@morganstanley.com", cfg), true);

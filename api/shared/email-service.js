@@ -141,15 +141,22 @@ function recipientEvidenceSummary(records) {
 }
 
 async function catalog(who, opts) {
-  const [connection, templates, documents, policy, rollingUsed, materialRoutes] = await Promise.all([
+  const cfg = core.config();
+  const capacityPromise = cfg.calendarCapacityEnabled
+    ? limitGuard.capacitySnapshot(who.id, { limit: cfg.dailyExternalLimit, horizonDays: 7 })
+        .catch(() => ({ available: false, timeZone: cfg.capacityTimeZone,
+          dailyLimit: cfg.dailyExternalLimit, notice: "Daily email capacity could not be checked." }))
+    : Promise.resolve({ available: false, timeZone: cfg.capacityTimeZone,
+        dailyLimit: cfg.dailyExternalLimit,
+        notice: "Daily calendar capacity is not enabled for this release." });
+  const [connection, templates, documents, policy, capacity, materialRoutes] = await Promise.all([
     auth.status(who.id), store.listTemplates(), store.listDocuments(), store.policy(),
-    // What this rep has already spent of their 24-hour allowance. Sent to the
-    // client so the composer can say what is possible BEFORE a batch is built,
-    // rather than only at the moment approval is refused.
-    store.rollingExternalCount(who.id).catch(() => 0),
+    // Fail closed for direct sending. Treating a ledger outage as zero usage
+    // would advertise a full allowance precisely when the server cannot prove
+    // that capacity is available. Draft creation remains available.
+    capacityPromise,
     typeof store.materialRoutes === "function" ? store.materialRoutes() : Promise.resolve({ rules: [] }),
   ]);
-  const cfg = core.config();
   return { connection,
     templates: visibleTemplates(templates, !!(opts && opts.isAdmin)), documents, materialRoutes,
     // Addresses a rep may copy, straight from the App Setting. Sent with the
@@ -158,10 +165,14 @@ async function catalog(who, opts) {
     internalRecipients: cfg.internalRecipients,
     recipientEligibility: recipientRegistry.policy(),
     signatureHtml: connection.profile ? core.corporateSignature(connection.profile) : "",
+    capacity,
     policy: { directSendAvailable: cfg.directSendEnvironmentEnabled && !policy.killed,
       killed: policy.killed, reason: policy.reason,
       directSendBlockedBy: core.directSendBlockedBy(cfg, policy.killed, policy.reason) }, limits: {
-      directBatchMax: cfg.directBatchMax, rollingExternalLimit: cfg.rollingExternalLimit,
+      directBatchMax: cfg.directBatchMax, dailyExternalLimit: cfg.dailyExternalLimit,
+      // Cached pre-calendar clients still read these names. They receive the
+      // same conservative calendar-day values during the transition.
+      rollingExternalLimit: cfg.dailyExternalLimit,
       cancellationSeconds: cfg.cancellationSeconds, mailboxIntervalSeconds: cfg.mailboxIntervalSeconds,
       maxMessageBytes: cfg.maxMessageBytes, maxAttachmentBytes: cfg.maxAttachmentBytes,
       absoluteBatchStop: core.ABSOLUTE_BATCH_STOP,
@@ -170,8 +181,71 @@ async function catalog(who, opts) {
       // The threshold only, never the code itself. The client needs to know
       // when to show the field; it has no business knowing what goes in it.
       passcodeOver: cfg.passcode ? cfg.passcodeOver : null,
-      rollingUsed, rollingRemaining: Math.max(0, cfg.rollingExternalLimit - rollingUsed),
+      capacity,
+      rollingUsed: Number(capacity.committedToday) || 0,
+      rollingRemaining: capacity.available === false ? 0 : Math.max(0, Number(capacity.remainingToday) || 0),
     } };
+}
+
+function capacityEntries(messages, cfg) {
+  return core.interleaveByDomain(messages).map((message) => {
+    // The individualized To address and explicitly selected advisor teammates
+    // are the external audience governed by this allowance. Internal colleague
+    // and compliance copies remain policy routing, not additional sales sends.
+    const addresses = [...new Set([message.recipientEmail, ...(message.teammateCc || [])]
+      .map((value) => String(value || "").trim().toLowerCase()).filter(Boolean))];
+    return { key: message.id,
+      units: addresses.filter((address) => core.isExternal(address, cfg)).length };
+  });
+}
+
+function planOptions(scheduledForUtc, cfg, nowMs = Date.now()) {
+  const scheduled = String(scheduledForUtc || "").trim();
+  const startUtc = scheduled
+    ? schedule.scheduledInstant(scheduled, nowMs, cfg.cancellationSeconds)
+    : new Date(nowMs + cfg.cancellationSeconds * 1000).toISOString();
+  return { limit: cfg.dailyExternalLimit, nowMs, startUtc,
+    bindStart: !!scheduled, horizonDays: 7,
+    mailboxIntervalSeconds: cfg.mailboxIntervalSeconds };
+}
+
+async function capacityPlan(who, input, deps = {}) {
+  const st = deps.store || store, guard = deps.limitGuard || limitGuard;
+  const cfg = (deps.core || core).config();
+  if (!cfg.calendarCapacityEnabled)
+    throw httpError(503, "Daily calendar capacity is not enabled for this release.",
+      "capacity_not_enabled");
+  let batch = await st.getBatch(who.id, String(input.batchId || ""));
+  if (!batch) throw httpError(404, "Email batch not found.");
+  if (!["editing", "invalid"].includes(batch.status))
+    throw httpError(409, "This batch already has a delivery plan.", "capacity_batch_locked");
+  // A review transition is already safely complete before its old reservation
+  // is released. If that final storage call was temporarily unavailable, keep
+  // the identifiers on the editing batch and finish the release here before
+  // authoring a new plan.
+  if (batch.capacityReservationId) {
+    try {
+      const frozen = await guard.assertReservation(who.id,
+        batch.capacityReservationId, batch.capacityPlanHash);
+      await guard.releaseAllocations(who.id, batch.capacityReservationId,
+        (frozen.assignments || []).map((assignment) => assignment.key));
+    } catch (error) {
+      if (error.code !== "capacity_reservation_missing") throw error;
+    }
+    batch = await st.patchBatch(who.id, batch.id, {
+      capacityReservationId: "", capacityPlanHash: "", capacityTimeZone: "",
+      capacityExternalCount: 0, capacityPlan: null,
+    }, batch.etag);
+  }
+  const messages = await st.listMessages(who.id, batch.id);
+  const snapshot = await guard.capacitySnapshot(who.id,
+    { limit: cfg.dailyExternalLimit, horizonDays: 7, excludeReservationId: batch.id });
+  const usage = Object.fromEntries((snapshot.days || []).map((day) => [day.day, day.committed]));
+  const plan = guard.previewPlan(capacityEntries(messages, cfg), {
+    ...planOptions(input.scheduledForUtc, cfg), usage,
+  });
+  return { deliveryPlan: { ...plan, hash: plan.planHash, available: true,
+    notice: plan.fit ? "" : `${plan.scheduledCount} of ${plan.recipientCount} emails fit within seven days. Remove at least ${plan.excessCount}, schedule a smaller batch, or use Outlook drafts.` } };
 }
 
 // The advisor's practice, as the CLIENT sees it: the teammate list lives in
@@ -715,7 +789,7 @@ async function createBatch(who, input) {
   const notBlocked = recipients.filter((r) => !blocked.has(r.email));
   /* Resolved BEFORE the batch is created, not after.
    *
-   * Everything the batch records -- recipientCount, externalCount, the rolling
+   * Everything the batch records -- recipientCount, externalCount, the daily
    * external allowance -- is computed from this list, so somebody removed here
    * has to be gone before any of that is counted. Doing it afterwards would
    * have the batch claim more recipients than it has messages.
@@ -1054,7 +1128,7 @@ async function approve(who, input) {
   // reconcile the application property before any Graph create call.
   if (!["editing", "invalid"].includes(existingBatch.status)) {
     if (existingBatch.mode !== mode) throw httpError(409, "This batch was already approved in a different mode.");
-    if (["drafting", "sending", "paused"].includes(existingBatch.status)) {
+    if (["drafting", "sending", "paused", "scheduled"].includes(existingBatch.status)) {
       // Re-approving an in-flight batch re-queues whatever has not drafted yet,
       // and it has to be paced for the same reason the first approval is: this
       // is the path a rep takes after a throttled batch, so queueing the
@@ -1066,14 +1140,41 @@ async function approve(who, input) {
       // here is a temporal dead zone -- a ReferenceError at runtime that
       // node --check cannot see.
       const paceSeconds = core.config().mailboxIntervalSeconds;
+      const recoveryPlan = existingBatch.capacityReservationId
+        ? await limitGuard.assertReservation(who.id, existingBatch.capacityReservationId,
+            existingBatch.capacityPlanHash) : null;
+      const assignments = new Map((recoveryPlan && recoveryPlan.assignments || [])
+        .map((assignment) => [assignment.key, assignment]));
       let slot = 0;
       for (const message of await store.listMessages(who.id, existingBatch.id)) {
-        if (!["editing", "draft_pending", "draft_ambiguous", "draft_creating"].includes(message.state)) continue;
-        if (message.state === "editing") await store.patchMessage(who.id, existingBatch.id, message.id,
-          { state: "draft_pending", queuedUtc: message.queuedUtc || new Date().toISOString() }, message.etag);
+        const assignment = assignments.get(message.id);
+        if (message.state === "editing") {
+          if (existingBatch.capacityPlanHash && !assignment) continue;
+          await store.patchMessage(who.id, existingBatch.id, message.id, {
+            state: existingBatch.status === "scheduled" ? "scheduled_pending" : "draft_pending",
+            queuedUtc: message.queuedUtc || new Date().toISOString(),
+            ...(existingBatch.status === "scheduled"
+              ? { scheduleRevision: Number(existingBatch.scheduleRevision) }
+              : {}),
+            ...(assignment ? { sendPosition: assignment.tranchePosition,
+              capacityDay: assignment.day, capacityUnits: assignment.units,
+              plannedSendUtc: assignment.plannedSendUtc,
+              capacityPlanHash: existingBatch.capacityPlanHash,
+              trancheIndex: assignment.trancheIndex,
+              tranchePosition: assignment.tranchePosition } : {}),
+          }, message.etag);
+        }
+        if (existingBatch.status === "scheduled"
+            || !["editing", "draft_pending", "draft_ambiguous", "draft_creating"].includes(message.state)) continue;
         await enqueue({ kind: "draft", userId: who.id, batchId: existingBatch.id, messageId: message.id },
-          slot * paceSeconds);
+          assignment ? Math.max(0, Math.ceil((Date.parse(assignment.plannedSendUtc) - Date.now()) / 1000))
+            : slot * paceSeconds);
         slot += 1;
+      }
+      if (existingBatch.status === "scheduled") {
+        await enqueue({ kind: "preflight", userId: who.id, batchId: existingBatch.id,
+          scheduleRevision: Number(existingBatch.scheduleRevision) },
+        Math.max(0, Math.ceil((Date.parse(existingBatch.scheduledForUtc) - Date.now()) / 1000)));
       }
     }
     return getBatchDetail(who, existingBatch.id);
@@ -1094,6 +1195,12 @@ async function approve(who, input) {
     const confirmedSchedule = schedule.scheduledInstant(input.confirmation.scheduledForUtc, approvalNow, cfg.cancellationSeconds);
     if (confirmedSchedule !== scheduledForUtc)
       throw httpError(400, "Confirm the exact scheduled send time before approval.", "schedule_confirmation_mismatch");
+  }
+  if (mode === "send" && cfg.calendarCapacityEnabled) {
+    const suppliedHash = String(input.capacityPlanHash || "");
+    if (!suppliedHash || suppliedHash !== String(input.confirmation.capacityPlanHash || ""))
+      throw httpError(409, "Review the current daily delivery plan before approving.",
+        "capacity_plan_required");
   }
   if (validation.errors.length) throw httpError(400, `The batch has ${validation.errors.length} validation problem(s).`);
   if (validation.messages.some((m) => !m.reviewed)) throw httpError(400, "Approve the final previews before continuing.");
@@ -1137,19 +1244,37 @@ async function approve(who, input) {
       + `Remove them from the batch and approve again.`, "recipient_opted_out");
   }
   const currentPolicy = await store.policy();
+  let reservedPlan = null;
+  const nextCapacityPlanVersion = (Number(batch.capacityPlanVersion) || 0) + 1;
+  const capacityReservationId = `${batch.id}-p${nextCapacityPlanVersion}`;
   if (mode === "send") {
     if (!cfg.directSendEnvironmentEnabled || currentPolicy.killed) throw httpError(403,
       currentPolicy.reason || "Direct sending is disabled by environment policy or the administrator kill switch.");
     if (cfg.testAllowlist.size && validation.messages.some((m) => !cfg.testAllowlist.has(m.recipientEmail)))
       throw httpError(403, "At least one recipient is outside the configured production test allowlist.");
-    if (!scheduledForUtc) await limitGuard.reserve(who.id, batch.id, batch.externalCount, cfg.rollingExternalLimit);
+    if (cfg.calendarCapacityEnabled) {
+      const entries = capacityEntries(validation.messages, cfg);
+      reservedPlan = await limitGuard.reservePlan(who.id, capacityReservationId, entries, {
+        ...planOptions(scheduledForUtc, cfg, approvalNow),
+        expectedPlanHash: String(input.capacityPlanHash || ""), kind: "campaign",
+      });
+    } else if (!scheduledForUtc) {
+      await limitGuard.reserve(who.id, batch.id, batch.externalCount, cfg.rollingExternalLimit);
+    }
   }
   const approvedUtc = new Date().toISOString();
-  const sendNotBeforeUtc = mode === "send" ? (scheduledForUtc
+  const sendNotBeforeUtc = mode === "send" ? (reservedPlan && reservedPlan.firstSendUtc || scheduledForUtc
     || new Date(Date.now() + cfg.cancellationSeconds * 1000).toISOString()) : "";
   const scheduleRevision = scheduledForUtc ? (Number(batch.scheduleRevision) || 0) + 1 : 0;
+  const publicPlan = reservedPlan ? { ...reservedPlan, assignments: undefined,
+    hash: reservedPlan.planHash, available: true } : null;
   await store.patchBatch(who.id, batch.id, { status: scheduledForUtc ? "scheduled" : "drafting", mode, approvedUtc,
-    reviewedUtc: approvedUtc, sendNotBeforeUtc, scheduledForUtc,
+    reviewedUtc: approvedUtc, sendNotBeforeUtc,
+    scheduledForUtc: scheduledForUtc && reservedPlan ? reservedPlan.firstSendUtc : scheduledForUtc,
+    ...(reservedPlan ? { capacityReservationId,
+      capacityPlanHash: reservedPlan.planHash, capacityTimeZone: reservedPlan.timeZone,
+      capacityPlanVersion: nextCapacityPlanVersion, capacityExternalCount: reservedPlan.externalUnits,
+      capacityPlan: publicPlan, externalCount: reservedPlan.externalUnits } : {}),
     scheduleState: scheduledForUtc ? "pending" : "", scheduleRevision,
     schedulePreflightAttempts: 0, scheduleRetryAfterUtc: "",
     scheduleLastErrorCode: "", scheduleLastErrorStage: "", scheduleLastErrorId: "",
@@ -1161,18 +1286,29 @@ async function approve(who, input) {
     warningLevel: warning.level, warningMessage: warning.message }, batch.etag);
   if (scheduledForUtc) {
     const order = new Map(core.interleaveByDomain(validation.messages).map((m, i) => [m.id, i]));
+    const assignments = new Map((reservedPlan && reservedPlan.assignments || [])
+      .map((assignment) => [assignment.key, assignment]));
     for (const m of validation.messages) await store.patchMessage(who.id, batch.id, m.id, {
-      state: "scheduled_pending", queuedUtc: approvedUtc, sendPosition: order.get(m.id),
+      state: "scheduled_pending", queuedUtc: approvedUtc,
+      sendPosition: assignments.has(m.id) ? assignments.get(m.id).tranchePosition : order.get(m.id),
       scheduleRevision, leaseUntilUtc: "",
+      ...(assignments.has(m.id) ? { capacityDay: assignments.get(m.id).day,
+        capacityUnits: assignments.get(m.id).units,
+        plannedSendUtc: assignments.get(m.id).plannedSendUtc,
+        capacityPlanHash: reservedPlan.planHash,
+        trancheIndex: assignments.get(m.id).trancheIndex,
+        tranchePosition: assignments.get(m.id).tranchePosition } : {}),
     }, m.etag);
     await store.audit(who.id, batch.id, "direct_send_scheduled", {
       recipientCount: batch.recipientCount, attachmentIds: batch.attachmentIds,
-      scheduledForUtc, scheduleRevision,
+      scheduledForUtc: reservedPlan && reservedPlan.firstSendUtc || scheduledForUtc,
+      scheduleRevision, capacityPlanHash: reservedPlan && reservedPlan.planHash || "",
     });
     // Publish the normal path now, with Azure Queue holding it until the exact
     // scheduled instant. The five-minute repair timer remains the durable
     // fallback if this independent queue write is interrupted.
-    const delay = Math.max(0, Math.ceil((Date.parse(scheduledForUtc) - Date.now()) / 1000));
+    const delay = Math.max(0, Math.ceil((Date.parse(reservedPlan && reservedPlan.firstSendUtc
+      || scheduledForUtc) - Date.now()) / 1000));
     try {
       await enqueue({ kind: "preflight", userId: who.id, batchId: batch.id,
         scheduleRevision }, delay);
@@ -1187,10 +1323,16 @@ async function approve(who, input) {
   // would need global knowledge of the batch on every message, and a retry could
   // reshuffle the queue underneath a send already scheduled.
   const order = new Map(core.interleaveByDomain(validation.messages).map((m, i) => [m.id, i]));
+  const assignments = new Map((reservedPlan && reservedPlan.assignments || [])
+    .map((assignment) => [assignment.key, assignment]));
   for (const m of validation.messages) {
-    const slot = order.get(m.id);
+    const assignment = assignments.get(m.id);
+    const slot = assignment ? assignment.tranchePosition : order.get(m.id);
     await store.patchMessage(who.id, batch.id, m.id, { state: "draft_pending", queuedUtc: approvedUtc,
-      sendPosition: slot, leaseUntilUtc: "" }, m.etag);
+      sendPosition: slot, leaseUntilUtc: "",
+      ...(assignment ? { capacityDay: assignment.day, capacityUnits: assignment.units,
+        plannedSendUtc: assignment.plannedSendUtc, capacityPlanHash: reservedPlan.planHash,
+        trancheIndex: assignment.trancheIndex, tranchePosition: assignment.tranchePosition } : {}) }, m.etag);
     /* PACED, on the same clock as the send that follows it.
      *
      * Every draft used to be enqueued with no delay, so a batch fanned out to
@@ -1207,11 +1349,16 @@ async function approve(who, input) {
      * absolute (sendNotBeforeUtc + slot * interval), so a batch whose drafting
      * ran long had every send slot fall due at once.
      */
-    await enqueue({ kind: "draft", userId: who.id, batchId: batch.id, messageId: m.id },
-      slot * cfg.mailboxIntervalSeconds);
+    const delay = assignment
+      ? Math.max(0, Math.ceil((Date.parse(assignment.plannedSendUtc) - Date.now()) / 1000))
+      : slot * cfg.mailboxIntervalSeconds;
+    await enqueue({ kind: "draft", userId: who.id, batchId: batch.id, messageId: m.id }, delay);
   }
   await store.audit(who.id, batch.id, mode === "send" ? "direct_send_approved" : "draft_creation_approved",
-    { recipientCount: batch.recipientCount, attachmentIds: batch.attachmentIds, sendNotBeforeUtc });
+    { recipientCount: batch.recipientCount, attachmentIds: batch.attachmentIds, sendNotBeforeUtc,
+      capacityPlanHash: reservedPlan && reservedPlan.planHash || "",
+      deliveryDays: reservedPlan ? reservedPlan.days.map((day) => ({ day: day.day,
+        messageCount: day.messageCount, units: day.units })) : [] });
   return getBatchDetail(who, batch.id);
 }
 
@@ -1280,8 +1427,11 @@ async function preflightScheduled(userId, batchId, revision, deps = {}) {
   // validateBatch already forced the registry and every selected CRD through
   // the release-bound identity check. A second forced blob refresh added a
   // dependency without adding a safety property.
-  await stage("capacity", () => (deps.limitGuard || limitGuard)
-    .reserve(userId, batch.id, batch.externalCount, cfg.rollingExternalLimit));
+  await stage("capacity", () => batch.capacityReservationId
+    ? (deps.limitGuard || limitGuard).assertReservation(userId,
+        batch.capacityReservationId, batch.capacityPlanHash)
+    : (deps.limitGuard || limitGuard)
+        .reserve(userId, batch.id, batch.externalCount, cfg.rollingExternalLimit));
   return { batch: validation.batch, messages: validation.messages, connection };
   } catch (error) {
     if (!error.preflightStage) error.preflightStage = currentStage;
@@ -1312,6 +1462,19 @@ async function getBatchDetail(who, batchId) {
   return { batch, messages: withCopies, counts };
 }
 
+async function releaseCapacity(batch, messages, all = false) {
+  if (!batch.capacityReservationId) return { released: 0 };
+  const today = limitGuard.easternDay();
+  const consumed = new Set(["sending", "submitted", "sent", "send_ambiguous"]);
+  const now = Date.now();
+  const keys = (messages || []).filter((message) => message.capacityPlanHash === batch.capacityPlanHash
+      && !consumed.has(message.state)
+      && (!message.leaseUntilUtc || Date.parse(message.leaseUntilUtc) <= now)
+      && (all || message.capacityDay > today))
+    .map((message) => message.id);
+  return limitGuard.releaseAllocations(batch.userId, batch.capacityReservationId, keys);
+}
+
 async function control(who, input) {
   const batch = await store.getBatch(who.id, input.batchId);
   if (!batch) throw httpError(404, "Email batch not found.");
@@ -1326,7 +1489,7 @@ async function control(who, input) {
     if (messages.some((message) => message.graphMessageId || ["submitted", "sent"].includes(message.state)))
       throw httpError(409, "A scheduled batch with Outlook activity cannot return to editing.");
     const revision = (Number(batch.scheduleRevision) || 0) + 1;
-    await store.patchBatch(who.id, batch.id, { status: "editing", mode: "", scheduledForUtc: "",
+    let editingBatch = await store.patchBatch(who.id, batch.id, { status: "editing", mode: "", scheduledForUtc: "",
       sendNotBeforeUtc: "", scheduleState: "", scheduleRevision: revision,
       schedulePreflightAttempts: 0, scheduleRetryAfterUtc: "",
       scheduleLastErrorCode: "", scheduleLastErrorStage: "", scheduleLastErrorId: "",
@@ -1335,13 +1498,30 @@ async function control(who, input) {
     for (const message of messages) await store.patchMessage(who.id, batch.id, message.id, {
       state: "editing", scheduleRevision: revision, leaseUntilUtc: "",
       failureCode: "", failureMessage: "",
+      capacityDay: "", capacityUnits: 0, plannedSendUtc: "", capacityPlanHash: "",
+      trancheIndex: 0, tranchePosition: 0,
     }, message.etag);
+    try {
+      await releaseCapacity(batch, messages, true);
+      editingBatch = await store.patchBatch(who.id, batch.id, {
+        capacityReservationId: "", capacityPlanHash: "", capacityTimeZone: "",
+        capacityExternalCount: 0, capacityPlan: null,
+      }, editingBatch.etag);
+    } catch (error) {
+      await store.audit(who.id, batch.id, "capacity_release_deferred", {
+        code: String(error && error.code || "capacity_store_unavailable").slice(0, 80),
+      });
+    }
     await store.audit(who.id, batch.id, "scheduled_batch_returned_to_review", { scheduleRevision: revision });
   } else if (input.action === "cancel") {
     await store.patchBatch(who.id, batch.id, { status: "canceled", canceledUtc: new Date().toISOString() }, batch.etag);
     const messages = await store.listMessages(who.id, batch.id);
     for (const m of messages.filter((x) => !["sent", "submitted"].includes(x.state)))
       await store.patchMessage(who.id, batch.id, m.id, { state: "canceled", leaseUntilUtc: "" }, m.etag);
+    // Future untouched days are safe to return immediately. Today's allocation
+    // stays conservative because a worker may already have crossed the final
+    // pre-send boundary when cancellation won the batch ETag race.
+    await releaseCapacity(batch, messages, false).catch(() => ({ released: 0 }));
     await store.audit(who.id, batch.id, "remaining_canceled", {});
   } else if (input.action === "retry") {
     const connection = await auth.status(who.id);
@@ -1404,7 +1584,7 @@ async function control(who, input) {
 const attachmentLimit = () => core.config().maxAttachmentBytes;
 
 module.exports = {
-  senderHealth, catalog, createBatch, updateCommon, updateMessage, updateMessageCc,
+  senderHealth, catalog, capacityPlan, createBatch, updateCommon, updateMessage, updateMessageCc,
   validateBatch, removeRecipient,
   approve, preflightScheduled, getBatchDetail, control, enqueue, httpError, attachmentLimit,
   followUpCandidates, createFollowUp, identityPresentationRefresh };

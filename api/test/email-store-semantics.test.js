@@ -719,3 +719,37 @@ test("legacy mojibake batch titles read correctly and new writes are clean", asy
       "an already-stored title should repair as soon as the batch is read");
   } finally { restore(); }
 });
+
+test("calendar capacity plan fields survive batch and message round trips", async () => {
+  const { store, restore } = loadStore();
+  try {
+    await store.createBatch({ id: "u1", name: "Rep" }, {
+      id: "capacity-batch", name: "Capacity", attachmentIds: [], attachmentSummary: [],
+      recipientCount: 1, externalCount: 1,
+    });
+    await store.createMessage("u1", "capacity-batch", {
+      id: "m1", ordinal: 0, recipientName: "Advisor", recipientEmail: "advisor@ubs.com",
+    });
+    await store.patchBatch("u1", "capacity-batch", {
+      capacityReservationId: "capacity-batch-p1", capacityPlanHash: "hash-1",
+      capacityTimeZone: "America/New_York", capacityPlanVersion: 1,
+      capacityExternalCount: 2,
+      capacityPlan: { schemaVersion: 2, hash: "hash-1", days: [{ day: "2026-09-01" }] },
+    });
+    await store.patchMessage("u1", "capacity-batch", "m1", {
+      capacityDay: "2026-09-01", capacityUnits: 2,
+      plannedSendUtc: "2026-09-01T13:00:00.000Z", capacityPlanHash: "hash-1",
+      trancheIndex: 1, tranchePosition: 3,
+    });
+    const batch = await store.getBatch("u1", "capacity-batch");
+    const message = await store.getMessage("u1", "capacity-batch", "m1");
+    assert.equal(batch.capacityReservationId, "capacity-batch-p1");
+    assert.equal(batch.capacityPlan.days[0].day, "2026-09-01");
+    assert.equal(batch.capacityExternalCount, 2);
+    assert.equal(message.capacityDay, "2026-09-01");
+    assert.equal(message.capacityUnits, 2);
+    assert.equal(message.plannedSendUtc, "2026-09-01T13:00:00.000Z");
+    assert.equal(message.trancheIndex, 1);
+    assert.equal(message.tranchePosition, 3);
+  } finally { restore(); }
+});

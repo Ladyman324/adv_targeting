@@ -2995,7 +2995,9 @@ function paintListManager(){
   const ls = (Dial.state.lists || []).filter((list) => !standingKindOf(list.id));
   listsBack.innerHTML =
     `<div class="ask lists lists-workspace" role="dialog" aria-modal="true" aria-label="Lists and saved audiences">`
-    + `<div class="lists-title"><div><h3>Lists</h3><p>Save reusable rules, then create a frozen call list or prepare an email from reviewed contacts.</p></div><button type="button" class="ask-btn ghost" data-lists="close">Close</button></div>`
+    + `<div class="lists-title"><div><h3>Lists</h3><p>Save reusable rules, then create a frozen call list or prepare an email from reviewed contacts.</p>`
+    + `<p class="lists-email-capacity" data-email-capacity-status>Checking daily email capacity…</p></div>`
+    + `<button type="button" class="ask-btn ghost" data-lists="close">Close</button></div>`
     + `<section class="lists-section"><h4>Smart views</h4><p class="lists-section-note">Live views from labels you applied. Membership updates automatically.</p>`
     /* The two standing lists.
      *
@@ -3016,6 +3018,7 @@ function paintListManager(){
     + `value="${esc(defaultListName())}" aria-label="Name for a new list">`
     + `<button type="button" class="ask-btn" data-lists="new">Create</button></div>`
     + `<p class="dial-menu-note">Your call history is kept whatever you do here.</p></section></div>`;
+  window.dispatchEvent(new CustomEvent("emailcapacityrequest"));
   focusListDialog();
 }
 

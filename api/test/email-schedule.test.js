@@ -54,14 +54,16 @@ test("editing schedule fields validates in place without replacing the active in
   assert.match(source, /document\.addEventListener\("input"[\s\S]*?emailScheduleDate[\s\S]*?syncScheduleInputs\(\)/);
 });
 
-test("scheduled instants are strict, leave cancellation time, and stop at seven days", () => {
+test("scheduled instants are strict, leave cancellation time, and stop after seven Eastern dates", () => {
   assert.equal(schedule.scheduledInstant("2026-08-29T12:01:00Z", NOW, 60),
     "2026-08-29T12:01:00.000Z");
   assert.throws(() => schedule.scheduledInstant("2026-08-29 13:00", NOW, 60),
     (error) => error.code === "schedule_time_invalid");
   assert.throws(() => schedule.scheduledInstant("2026-08-29T12:00:59Z", NOW, 60),
     (error) => error.code === "schedule_time_too_soon");
-  assert.throws(() => schedule.scheduledInstant("2026-09-05T12:00:01Z", NOW, 60),
+  assert.equal(schedule.scheduledInstant("2026-09-05T12:00:01Z", NOW, 60),
+    "2026-09-05T12:00:01.000Z");
+  assert.throws(() => schedule.scheduledInstant("2026-09-06T12:00:01Z", NOW, 60),
     (error) => error.code === "schedule_time_too_late");
 });
 
@@ -94,6 +96,20 @@ test("repair publishes one batch preflight only when a schedule is due", async (
     if (old === undefined) delete process.env.EMAIL_CAMPAIGN_REPAIR_ENABLED;
     else process.env.EMAIL_CAMPAIGN_REPAIR_ENABLED = old;
   }
+});
+
+test("an early seventh-day queue wakeup requeues preflight for the remaining delay", async () => {
+  const due = new Date(Date.now() + 3600000).toISOString();
+  const queued = [];
+  await worker.processWork({ kind: "preflight", userId: "u1", batchId: "b1",
+    scheduleRevision: 3 }, {
+    store: { getBatch: async () => ({ id: "b1", status: "scheduled",
+      scheduleState: "pending", scheduleRevision: 3, scheduledForUtc: due }) },
+    enqueue: async (work, delay) => queued.push({ work, delay }),
+  });
+  assert.equal(queued.length, 1);
+  assert.equal(queued[0].work.kind, "preflight");
+  assert.ok(queued[0].delay >= 3598 && queued[0].delay <= 3600, String(queued[0].delay));
 });
 
 function scheduledFixture() {

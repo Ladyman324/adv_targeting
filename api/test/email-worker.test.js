@@ -377,3 +377,33 @@ test("a document replaced after approval is refused before the worker attaches i
   assert.equal(f.message.state, "failed");
   assert.match(f.message.failureMessage, /currently approved/);
 });
+
+test("future calendar-plan draft work requeues without touching Graph", async () => {
+  const f = fixture("send", "draft_pending");
+  f.message.plannedSendUtc = new Date(Date.now() + 60000).toISOString();
+  f.message.capacityDay = "2026-09-01";
+  let graphReads = 0;
+  await worker.processWork(
+    { kind: "draft", userId: "user-1", batchId: "batch-1", messageId: "message-1" },
+    { ...f, capacity: { easternDay: () => "2026-09-01" },
+      graph: new Proxy({}, { get() { graphReads++; throw new Error("Graph touched early"); } }) });
+  assert.equal(graphReads, 0);
+  assert.equal(f.message.state, "draft_pending");
+  assert.equal(f.enqueued.length, 1);
+  assert.ok(f.enqueued[0].delay >= 59 && f.enqueued[0].delay <= 60);
+});
+
+test("work that missed its reserved Eastern day fails closed before Graph", async () => {
+  const f = fixture("send", "send_scheduled");
+  f.message.plannedSendUtc = "2026-08-31T13:00:00.000Z";
+  f.message.capacityDay = "2026-08-31";
+  let graphReads = 0;
+  await worker.processWork(
+    { kind: "send", userId: "user-1", batchId: "batch-1", messageId: "message-1" },
+    { ...f, capacity: { easternDay: () => "2026-09-01" },
+      graph: new Proxy({}, { get() { graphReads++; throw new Error("Graph touched after expiry"); } }) });
+  assert.equal(graphReads, 0);
+  assert.equal(f.message.state, "failed");
+  assert.equal(f.message.failureCode, "capacity_day_expired");
+  assert.ok(f.audits.some((entry) => entry[2] === "capacity_day_expired"));
+});

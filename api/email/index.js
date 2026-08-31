@@ -344,6 +344,7 @@ module.exports = async function (context, req) {
       return ok(context, await directSend.start(who, body, "follow_up"), 202);
     }
     if (op === "connect") return ok(context, await auth.begin(who, body.returnTo));
+    if (op === "capacity_plan") return ok(context, await service.capacityPlan(who, body));
     if (op === "create_batch") return ok(context, await service.createBatch(who, body), 201);
     /* The bulk follow-up: a new batch derived from a campaign, holding only the
      * people who never answered it. 201 like any other batch creation, because

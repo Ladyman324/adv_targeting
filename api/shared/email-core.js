@@ -6,7 +6,7 @@ const sanitizeHtml = require("sanitize-html");
 const ABSOLUTE_BATCH_STOP = 15000;
 const DEFAULTS = {
   directBatchMax: 250,
-  rollingExternalLimit: 5000,
+  dailyExternalLimit: 25,
   cancellationSeconds: 30,
   mailboxIntervalSeconds: 5,
   maxMessageBytes: 20 * 1024 * 1024,
@@ -88,9 +88,17 @@ function internalRecipientAllowed(email, cfg) {
 }
 
 function config() {
+  // EMAIL_EXTERNAL_24H_LIMIT remains a compatibility alias during the staged
+  // migration. Once calendar capacity is enabled it is a daily Eastern limit,
+  // not a rolling-window definition.
+  const dailyExternalLimit = numberSetting("EMAIL_EXTERNAL_DAILY_LIMIT",
+    numberSetting("EMAIL_EXTERNAL_24H_LIMIT", DEFAULTS.dailyExternalLimit));
   return {
     directBatchMax: numberSetting("EMAIL_DIRECT_BATCH_MAX", DEFAULTS.directBatchMax),
-    rollingExternalLimit: numberSetting("EMAIL_EXTERNAL_24H_LIMIT", DEFAULTS.rollingExternalLimit),
+    dailyExternalLimit,
+    rollingExternalLimit: dailyExternalLimit,
+    calendarCapacityEnabled: process.env.EMAIL_CALENDAR_CAPACITY_ENABLED === "1",
+    capacityTimeZone: "America/New_York",
     cancellationSeconds: numberSetting("EMAIL_CANCELLATION_SECONDS", DEFAULTS.cancellationSeconds),
     mailboxIntervalSeconds: numberSetting("EMAIL_MAILBOX_INTERVAL_SECONDS", DEFAULTS.mailboxIntervalSeconds),
     maxMessageBytes: numberSetting("EMAIL_MAX_MESSAGE_BYTES", DEFAULTS.maxMessageBytes),

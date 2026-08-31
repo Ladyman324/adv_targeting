@@ -92,6 +92,46 @@ test("an approved batch promotes stale editing rows before paced dispatch", asyn
   }
 });
 
+test("repair reconstructs a missing calendar assignment without a browser retry", async () => {
+  const savedEnabled = process.env.EMAIL_CAMPAIGN_REPAIR_ENABLED;
+  process.env.EMAIL_CAMPAIGN_REPAIR_ENABLED = "1";
+  const row = message("editing", { etag: "v1" });
+  const enqueued = [], patches = [];
+  const assignment = { key: "m1", units: 2, day: "2026-08-28",
+    plannedSendUtc: "2026-08-28T10:01:00.000Z", trancheIndex: 0, tranchePosition: 0 };
+  try {
+    const result = await repair.run({ log() {} }, {
+      now: () => NOW,
+      core: { config: () => ({ mailboxIntervalSeconds: 7 }) },
+      capacity: { assertReservation: async (userId, reservationId, hash) => {
+        assert.deepEqual([userId, reservationId, hash], ["u1", "b1-p1", "plan-1"]);
+        return { assignments: [assignment] };
+      } },
+      store: {
+        listConnections: async () => [{ userId: "u1" }],
+        listBatches: async () => [batch({ status: "drafting",
+          capacityReservationId: "b1-p1", capacityPlanHash: "plan-1" })],
+        listMessages: async () => [row],
+        patchMessage: async (_u, _b, _m, patch, etag) => {
+          assert.equal(etag, "v1"); patches.push(patch);
+          return { ...row, ...patch, updatedUtc: new Date(NOW).toISOString(), etag: "v2" };
+        },
+      },
+      enqueue: async (work, delay) => enqueued.push({ work, delay }),
+    });
+    assert.equal(result.promoted, 1);
+    assert.equal(patches[0].plannedSendUtc, assignment.plannedSendUtc);
+    assert.equal(patches[0].capacityDay, assignment.day);
+    assert.equal(patches[0].capacityUnits, 2);
+    assert.equal(patches[0].state, "draft_pending");
+    assert.equal(enqueued.length, 1);
+    assert.equal(enqueued[0].work.kind, "draft");
+  } finally {
+    if (savedEnabled === undefined) delete process.env.EMAIL_CAMPAIGN_REPAIR_ENABLED;
+    else process.env.EMAIL_CAMPAIGN_REPAIR_ENABLED = savedEnabled;
+  }
+});
+
 test("one user's backlog is capped so another user gets a turn", async () => {
   const savedEnabled = process.env.EMAIL_CAMPAIGN_REPAIR_ENABLED;
   const savedUsers = process.env.EMAIL_CAMPAIGN_REPAIR_USER_IDS;

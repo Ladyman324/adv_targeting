@@ -40,8 +40,10 @@ safely — but treat it as set-once.
 
 | Setting | Default | What it does |
 |---|---|---|
-| `EMAIL_DIRECT_BATCH_MAX` | `250` | Most recipients allowed in one **direct send**. Above this, drafts only. |
-| `EMAIL_EXTERNAL_24H_LIMIT` | `5000` | External recipients one user may send to in a rolling 24 hours. |
+| `EMAIL_DIRECT_BATCH_MAX` | `250` | Most primary recipients allowed in one **direct-send batch**. This is a batch-safety ceiling, not the daily allowance; a valid batch may be delivered over several business days. Above this, drafts only. |
+| `EMAIL_EXTERNAL_DAILY_LIMIT` | `25` | External To/advisor-Cc recipients one user may send to in an Eastern calendar day. Capacity resets at midnight Eastern. Internal and compliance copies do not consume it. |
+| `EMAIL_EXTERNAL_24H_LIMIT` | — | Legacy compatibility alias used only when `EMAIL_EXTERNAL_DAILY_LIMIT` is absent. Treat its value as the Eastern daily limit after calendar capacity is enabled. |
+| `EMAIL_CALENDAR_CAPACITY_ENABLED` | `0` | Set to `1` only after the matching API and static client are deployed. Approval then reserves an exact, server-authored delivery plan across weekdays, up to seven Eastern calendar dates from approval. |
 | `EMAIL_REVIEW_SUMMARY_OVER` | `25` | Above this, the batch summary must be reviewed. |
 | `EMAIL_REVIEW_LARGE_OVER` | `50` | Above this, "review every message" warning. |
 | `EMAIL_REVIEW_ELEVATED_OVER` | `100` | Above this, "elevated send" warning. |
@@ -93,7 +95,7 @@ that size is a marketing campaign and belongs in a platform built for it.
 | `EMAIL_CAMPAIGN_REPAIR_ENABLED` | `1` enables identifier-only recovery for approved campaign messages stranded by an interrupted queue handoff or expired worker lease. The timer does not call Graph or send mail; it republishes bounded, paced work for the normal guarded worker. |
 | `EMAIL_CAMPAIGN_REPAIR_USER_IDS` | Optional comma/semicolon/space-separated Static Web Apps user IDs. Set a canary user first; clear it after validation to recover all connected users. |
 | `EMAIL_TEST_ADDRESS_ALLOWLIST` | Comma-separated external addresses. When set, a direct send fails if **any external recipient** is not on it; internal compliance BCC does not need duplication here. Leave unset in normal operation. |
-| `EMAIL_INTERNAL_DOMAINS` | Defaults to `eicatlanta.com`. Decides what counts as external for the 24-hour limit. |
+| `EMAIL_INTERNAL_DOMAINS` | Defaults to `eicatlanta.com`. Decides what counts as external for daily capacity. |
 | `EMAIL_REPLY_SWEEP_ENABLED` | `1` permits the reply timer to run. Leave disabled until the advisor-email lookup blob and canary list are ready. |
 | `EMAIL_REPLY_SWEEP_USER_IDS` | Optional comma/semicolon/space-separated Static Web Apps user IDs. When set, only matching connected mailboxes are swept. Use this for canary rollout before clearing it for all users. |
 | `EMAIL_ENGAGEMENT_REPAIR_ENABLED` | `1` permits the projection-repair timer to consume durable activity markers. Marker creation is always on; leave the timer disabled until the API is deployed and a canary user is selected. |

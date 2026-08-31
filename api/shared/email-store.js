@@ -127,6 +127,10 @@ async function consumeAuthState(state, userId = null) {
 
 function batchFromEntity(e) {
   if (!e) return null;
+  const parsedCapacityPlan = parse(e.capacityPlanJson, {});
+  const capacityPlan = parsedCapacityPlan && typeof parsedCapacityPlan === "object"
+    && !Array.isArray(parsedCapacityPlan) && Object.keys(parsedCapacityPlan).length
+    ? parsedCapacityPlan : null;
   return { id: e.rowKey, userId: e.partitionKey, userName: e.userName,
     status: e.status, mode: e.mode || "", name: repairLegacyText(e.name),
     templateId: e.templateId, templateName: e.templateName, templateVersion: Number(e.templateVersion) || 1,
@@ -159,6 +163,12 @@ function batchFromEntity(e) {
     followUpSentUtc: e.followUpSentUtc || "",
     copyInternalTo: e.copyInternalTo || "", senderMail: e.senderMail || "",
     recipientRegistryHash: e.recipientRegistryHash || "",
+    capacityReservationId: e.capacityReservationId || "",
+    capacityPlanHash: e.capacityPlanHash || "",
+    capacityTimeZone: e.capacityTimeZone || "",
+    capacityPlanVersion: Number(e.capacityPlanVersion) || 0,
+    capacityExternalCount: Number(e.capacityExternalCount) || 0,
+    capacityPlan,
     approvedUtc: e.approvedUtc || "", sendNotBeforeUtc: e.sendNotBeforeUtc || "",
     scheduledForUtc: e.scheduledForUtc || "", scheduleState: e.scheduleState || "",
     scheduleRevision: Number(e.scheduleRevision) || 0, scheduleLeaseUntilUtc: e.scheduleLeaseUntilUtc || "",
@@ -223,13 +233,16 @@ async function patchBatch(userId, batchId, patch, etag) {
     "scheduleNotificationSubmittedUtc", "scheduleNotificationReconcileUntilUtc",
     "scheduleNotificationCompletedUtc",
     "scheduleNotificationSentUtc", "pausedUtc", "canceledUtc",
-    "parentBatchId", "followUpSentUtc", "recipientRegistryHash"];
+    "parentBatchId", "followUpSentUtc", "recipientRegistryHash",
+    "capacityReservationId", "capacityPlanHash", "capacityTimeZone"];
   for (const k of strings) if (k in patch) entity[k] = clean(patch[k], k.includes("Body") ? 50000 : 500);
   for (const k of ["commonRevision", "recipientCount", "externalCount", "sentCount",
                    "hardBounceCount", "followUpDays", "scheduleRevision",
-                   "schedulePreflightAttempts", "templateVersion"]) if (k in patch) entity[k] = Number(patch[k]) || 0;
+                   "schedulePreflightAttempts", "templateVersion", "capacityPlanVersion",
+                   "capacityExternalCount"]) if (k in patch) entity[k] = Number(patch[k]) || 0;
   for (const [key, field] of [["attachmentIds", "attachmentIdsJson"], ["attachmentSummary", "attachmentSummaryJson"]])
     if (key in patch) entity[field] = json(patch[key]);
+  if ("capacityPlan" in patch) entity.capacityPlanJson = json(patch.capacityPlan);
   await (await table("batches")).updateEntity(entity, "Merge", etag ? { etag } : undefined);
   return getBatch(userId, batchId);
 }
@@ -285,6 +298,10 @@ function messageFromEntity(e) {
     sendAttempts: Number(e.sendAttempts) || 0,
     reconcileAttempts: Number(e.reconcileAttempts) || 0,
     scheduleRevision: Number(e.scheduleRevision) || 0,
+    capacityDay: e.capacityDay || "", capacityUnits: Number(e.capacityUnits) || 0,
+    plannedSendUtc: e.plannedSendUtc || "", capacityPlanHash: e.capacityPlanHash || "",
+    trancheIndex: Number(e.trancheIndex) || 0,
+    tranchePosition: Number(e.tranchePosition) || 0,
     leaseUntilUtc: e.leaseUntilUtc || "", createdUtc: e.createdUtc, updatedUtc: e.updatedUtc, etag: e.etag };
 }
 
@@ -352,11 +369,13 @@ async function patchMessage(userId, batchId, messageId, patch, etag) {
     "teammateCcJson", "teammateCcCrdsJson", "teammatesAvailableJson",
     "greetingName", "recipientLastName",
     "recipientRegistryHash", "recipientRoutingHash",
-    "recipientTier", "recipientSource", "recipientPolicyVersion"];
+    "recipientTier", "recipientSource", "recipientPolicyVersion",
+    "capacityDay", "plannedSendUtc", "capacityPlanHash"];
   for (const k of strings) if (k in patch) entity[k] = clean(patch[k], ["bodyText", "bodyHtml"].includes(k) ? 50000 : 2000);
   for (const k of ["subjectOverridden", "bodyOverridden", "reviewed"]) if (k in patch) entity[k] = !!patch[k];
   for (const k of ["baseRevision", "attemptCount", "draftAttempts", "sendAttempts",
-                   "reconcileAttempts", "sendPosition", "hardBounceCount", "scheduleRevision"])
+                   "reconcileAttempts", "sendPosition", "hardBounceCount", "scheduleRevision",
+                   "capacityUnits", "trancheIndex", "tranchePosition"])
     if (k in patch) entity[k] = Number(patch[k]) || 0;
   for (const k of ["recipientMatchScore", "recipientMatchGap"]) {
     if (!(k in patch)) continue;

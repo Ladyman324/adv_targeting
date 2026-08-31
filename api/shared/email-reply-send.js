@@ -189,7 +189,7 @@ function uniqueAddresses(values) {
 /* The addresses Graph will actually put on the message.
  *
  * Reply All is the important case: checking only the advisor who wrote to us
- * leaves every To/Cc participant outside the production allowlist and rolling
+ * leaves every To/Cc participant outside the production allowlist and daily
  * limit. Graph omits the caller's own mailbox from the effective audience, so
  * we do the same before applying those gates.
  */

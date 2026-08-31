@@ -30,8 +30,8 @@ function pending(n) {
   }));
 }
 
-function load(messages, batchOverrides) {
-  const sent = [];
+function load(messages, batchOverrides, options = {}) {
+  const sent = [], audits = [];
   const servicePath = require.resolve("../shared/email-service.js");
   const batch = { id: "b1", userId: "u1", status: "drafting", mode: "drafts",
                   etag: "be", recipientCount: messages.length, attachmentIds: [],
@@ -53,7 +53,7 @@ function load(messages, batchOverrides) {
     getTemplate: async () => null,
     getSuppression: async () => null,
     policy: async () => ({ killed: false, reason: "" }),
-    audit: async () => {},
+    audit: async (...args) => audits.push(args),
   };
   // retry refuses to run on a disconnected mailbox, which is correct and is not
   // what these tests are about.
@@ -76,11 +76,12 @@ function load(messages, batchOverrides) {
       if (request === "./email-auth") return authStub;
       if (request === "./recipient-registry") return registryStub;
       if (request === "./email-suppress") return suppressStub;
+      if (request === "./email-limit-guard" && options.limitGuard) return options.limitGuard;
       if (request === "@azure/storage-queue") return { QueueClient: QueueClientStub };
     }
     return realLoad.call(this, request, parent, isMain);
   };
-  try { return { service: require(servicePath), sent }; }
+  try { return { service: require(servicePath), sent, audits, batch, messages }; }
   finally { Module._load = realLoad; delete require.cache[servicePath]; }
 }
 
@@ -148,6 +149,83 @@ test("scheduled approval publishes its preflight for the exact scheduled instant
       if (value === undefined) delete process.env[key]; else process.env[key] = value;
     }
   }
+});
+
+test("calendar approval durably binds the reservation and every message before queueing", async () => {
+  const prior = {
+    NODE_ENV: process.env.NODE_ENV,
+    EMAIL_DIRECT_SEND_ENABLED: process.env.EMAIL_DIRECT_SEND_ENABLED,
+    EMAIL_DIRECT_SEND_KILL_SWITCH: process.env.EMAIL_DIRECT_SEND_KILL_SWITCH,
+    EMAIL_CALENDAR_CAPACITY_ENABLED: process.env.EMAIL_CALENDAR_CAPACITY_ENABLED,
+  };
+  process.env.NODE_ENV = "production";
+  process.env.EMAIL_DIRECT_SEND_ENABLED = "1";
+  process.env.EMAIL_CALENDAR_CAPACITY_ENABLED = "1";
+  delete process.env.EMAIL_DIRECT_SEND_KILL_SWITCH;
+  const plannedSendUtc = new Date(Date.now() + 30000).toISOString();
+  const reservations = [];
+  try {
+    const message = pending(1)[0];
+    Object.assign(message, { recipientEmail: "rep@eicatlanta.com", reviewed: true,
+      bodyText: "b", bodyHtml: "<p>b</p>", attachments: [], contactId: "", teammateCc: [],
+      teammateCcCrds: [] });
+    const plan = { schemaVersion: 2, planHash: "plan-hash", timeZone: "America/New_York",
+      dailyLimit: 25, recipientCount: 1, externalUnits: 0, scheduledCount: 1,
+      excessCount: 0, fit: true, multiDay: false, firstSendUtc: plannedSendUtc,
+      lastSendUtc: plannedSendUtc,
+      days: [{ day: "2026-08-31", startUtc: plannedSendUtc, messageCount: 1, units: 0 }],
+      assignments: [{ key: "m0", units: 0, day: "2026-08-31", plannedSendUtc,
+        trancheIndex: 0, tranchePosition: 0 }] };
+    const limitGuard = {
+      reservePlan: async (...args) => { reservations.push(args); return plan; },
+      easternDay: () => "2026-08-31",
+    };
+    const h = load([message], { status: "editing", mode: "",
+      graphMailbox: "rep@eicatlanta.com", graphMailboxId: "mailbox-1",
+      externalCount: 0, templateId: "", commonRevision: 0, capacityPlanVersion: 0 },
+    { limitGuard });
+    await h.service.approve({ id: "u1", name: "Rep" }, { batchId: "b1", mode: "send",
+      reviewed: true, capacityPlanHash: "plan-hash",
+      confirmation: { recipientCount: 1, attachmentIds: [], capacityPlanHash: "plan-hash" } });
+    assert.equal(reservations.length, 1);
+    assert.equal(reservations[0][1], "b1-p1");
+    assert.deepEqual(reservations[0][2], [{ key: "m0", units: 0 }]);
+    assert.equal(h.batch.capacityReservationId, "b1-p1");
+    assert.equal(h.batch.capacityPlanHash, "plan-hash");
+    assert.equal(message.plannedSendUtc, plannedSendUtc);
+    assert.equal(message.capacityPlanHash, "plan-hash");
+    assert.equal(message.state, "draft_pending");
+    assert.equal(h.sent.length, 1);
+    assert.equal(h.sent[0].work.kind, "draft");
+  } finally {
+    for (const [key, value] of Object.entries(prior)) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+  }
+});
+
+test("returning a schedule to review succeeds and defers a failed capacity release", async () => {
+  const row = pending(1)[0];
+  Object.assign(row, { state: "scheduled_pending", capacityPlanHash: "plan-hash",
+    capacityDay: "2026-09-01", plannedSendUtc: "2026-09-01T13:00:00.000Z",
+    capacityUnits: 1, etag: "m1" });
+  const limitGuard = {
+    easternDay: () => "2026-08-31",
+    releaseAllocations: async () => {
+      throw Object.assign(new Error("storage unavailable"), { code: "storage_unavailable" });
+    },
+  };
+  const h = load([row], { status: "schedule_held", mode: "send", scheduleRevision: 2,
+    capacityReservationId: "b1-p1", capacityPlanHash: "plan-hash",
+    capacityTimeZone: "America/New_York", capacityExternalCount: 1 }, { limitGuard });
+  const result = await h.service.control({ id: "u1", name: "Rep" },
+    { batchId: "b1", action: "review_schedule" });
+  assert.equal(result.batch.status, "editing");
+  assert.equal(row.state, "editing");
+  assert.equal(result.batch.capacityReservationId, "b1-p1",
+    "the durable id remains available for the next plan request to finish cleanup");
+  assert.ok(h.audits.some((args) => args[2] === "capacity_release_deferred"));
+  assert.ok(h.audits.some((args) => args[2] === "scheduled_batch_returned_to_review"));
 });
 
 test("retry re-queues genuinely failed messages, paced, but never an unknown send", async () => {

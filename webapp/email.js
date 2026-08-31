@@ -27,6 +27,13 @@
   let sendTiming = "now";
   let scheduleDate = "";
   let scheduleTime = "09:00";
+  let deliveryPlan = null;
+  let deliveryPlanKey = "";
+  let deliveryPlanError = "";
+  let deliveryPlanLoading = false;
+  let deliveryPlanTimer = null;
+  let deliveryPlanSequence = 0;
+  let catalogLoadedAt = 0;
   global.addEventListener("beforeunload", (event) => {
     if (!approvalPending) return;
     event.preventDefault();
@@ -103,11 +110,263 @@
     const problem = result.error || result.quarter || "";
     const status = document.getElementById("emailScheduleError");
     if (status) {
-      status.textContent = problem || (result.date ? `Starts ${easternLabel(result.date)}` : "");
+      status.textContent = problem || scheduleDisplayText(result, false);
       status.classList.toggle("bad", !!problem);
       status.classList.toggle("good", !problem);
     }
+    scheduleCapacityPlanRefresh(300, true);
     return result;
+  }
+
+  function parsedObject(value) {
+    if (!value) return null;
+    if (typeof value === "object") return value;
+    try {
+      const parsed = JSON.parse(value);
+      return parsed && typeof parsed === "object" ? parsed : null;
+    } catch { return null; }
+  }
+
+  function storedCapacityPlan(batch) {
+    return parsedObject(batch && (batch.capacityPlan || batch.deliveryPlan || batch.capacityPlanJson));
+  }
+
+  function capacitySnapshot() {
+    return (catalog && (catalog.capacity || (catalog.limits && catalog.limits.capacity))) || null;
+  }
+
+  function capacityAvailable(capacity = capacitySnapshot()) {
+    const fallback = catalog && catalog.limits && catalog.limits.dailyExternalLimit;
+    return !!(capacity && capacity.available !== false
+      && Number.isFinite(Number(capacity.dailyLimit != null ? capacity.dailyLimit : fallback)));
+  }
+
+  function capacityNumbers(capacity = capacitySnapshot()) {
+    const fallback = catalog && catalog.limits && catalog.limits.dailyExternalLimit;
+    const limit = Number(capacity && capacity.dailyLimit != null ? capacity.dailyLimit : fallback);
+    const remaining = Number(capacity && capacity.remainingToday);
+    return { limit: Number.isFinite(limit) ? limit : 0,
+      remaining: Number.isFinite(remaining) ? Math.max(0, remaining) : 0 };
+  }
+
+  function capacityStatusText() {
+    const capacity = capacitySnapshot();
+    if (!capacityAvailable(capacity)) return "Daily email capacity is temporarily unavailable.";
+    const { limit, remaining } = capacityNumbers(capacity);
+    return `${remaining} of ${limit} available today`;
+  }
+
+  function setupCapacityHtml() {
+    const ok = capacityAvailable();
+    return `<section class="email-capacity${ok ? "" : " unavailable"}" aria-label="Daily email capacity">
+      <div><b>Daily email capacity</b><strong>${esc(capacityStatusText())}</strong></div>
+      <p>${ok
+        ? "Resets at midnight Eastern. Approved and scheduled emails reserve capacity. Outlook drafts do not."
+        : "You can still prepare emails or create Outlook drafts, but direct sending waits until capacity can be checked."}</p>
+    </section>`;
+  }
+
+  function paintCapacityStatuses() {
+    const text = capacityStatusText();
+    for (const el of document.querySelectorAll("[data-email-capacity-status]")) {
+      el.textContent = capacityAvailable()
+        ? `Email capacity: ${text} · Resets at midnight Eastern.`
+        : `${text} Direct sending waits until it can be checked.`;
+      el.classList.toggle("bad", !capacityAvailable());
+    }
+  }
+
+  async function refreshCapacityStatus(force = false) {
+    try {
+      if (force || !catalog || Date.now() - catalogLoadedAt > 30000) await loadCatalog();
+      else paintCapacityStatuses();
+    } catch { paintCapacityStatuses(); }
+  }
+
+  function dateFromPlanDay(day) {
+    if (!day) return null;
+    const raw = day.startUtc || (day.day ? `${day.day}T14:00:00Z` : "");
+    const date = raw && new Date(raw);
+    return date && !Number.isNaN(date.getTime()) ? date : null;
+  }
+
+  function shortEasternDate(date) {
+    return new Intl.DateTimeFormat("en-US", { timeZone: EASTERN, weekday: "short",
+      month: "short", day: "numeric" }).format(date);
+  }
+
+  function shortEasternDateTime(date) {
+    return new Intl.DateTimeFormat("en-US", { timeZone: EASTERN, weekday: "short",
+      month: "short", day: "numeric", hour: "numeric", minute: "2-digit",
+      timeZoneName: "short" }).format(date);
+  }
+
+  function planDayLabel(day) {
+    const capacity = capacitySnapshot();
+    const date = dateFromPlanDay(day);
+    const label = capacity && day.day && day.day === capacity.today ? "Today"
+      : date ? shortEasternDate(date) : String(day.day || "Planned day");
+    if (!day.startUtc || !date || label === "Today") return label;
+    const time = new Intl.DateTimeFormat("en-US", { timeZone: EASTERN, hour: "numeric",
+      minute: "2-digit", timeZoneName: "short" }).format(date);
+    return `${label} at ${time}`;
+  }
+
+  function selectedDateIsWeekend() {
+    if (sendTiming !== "later" || !/^\d{4}-\d{2}-\d{2}$/.test(scheduleDate)) return false;
+    const day = new Date(`${scheduleDate}T12:00:00Z`).getUTCDay();
+    return day === 0 || day === 6;
+  }
+
+  function scheduleDisplayText(result, usePlan = true) {
+    if (selectedDateIsWeekend()) {
+      const first = usePlan && deliveryPlan && (deliveryPlan.days || [])[0];
+      return first ? `Weekend start moves to ${planDayLabel(first)}.`
+        : "Weekend delivery moves to the next business day; checking the plan…";
+    }
+    return result && result.date ? `Starts ${easternLabel(result.date)}` : "";
+  }
+
+  function planRemediation(plan) {
+    if (!plan) return "Daily email capacity has not been checked. Outlook drafts are still available.";
+    if (plan.available === false) return plan.notice
+      || "Daily email capacity could not be checked. Outlook drafts are still available.";
+    if (plan.fit !== false) return "";
+    const total = Number(plan.recipientCount)
+      || Number(detail && detail.batch && detail.batch.recipientCount) || 0;
+    const scheduled = Number(plan.scheduledCount) || 0;
+    const excess = Number(plan.excessCount) || Math.max(0, total - scheduled);
+    const last = plan.lastSendUtc && new Date(plan.lastSendUtc);
+    const through = last && !Number.isNaN(last.getTime())
+      ? ` through ${shortEasternDate(last)}` : " within 7 days";
+    return plan.notice || `${scheduled} of ${total} can fit${through}. Remove at least ${excess} recipient${
+      excess === 1 ? "" : "s"}, schedule a smaller batch, or use Outlook drafts.`;
+  }
+
+  function capacityPlanCardHtml(plan, batch, locked = false) {
+    const title = locked ? "Delivery progress" : "Proposed delivery";
+    if (deliveryPlanLoading && !plan) return `<div class="email-plan-head"><b>${title}</b></div>
+      <p class="email-plan-wait">Checking daily email capacity…</p>`;
+    if (!plan) return `<div class="email-plan-head"><b>${title}</b></div>
+      <p class="email-plan-error">${esc(deliveryPlanError || "Daily email capacity has not been checked.")}</p>`;
+    const total = Number(plan.recipientCount) || Number(batch && batch.recipientCount) || 0;
+    const units = Number(plan.externalUnits) || 0;
+    const sent = Number(batch && batch.sentCount) || 0;
+    const scheduled = Math.max(0, (Number(plan.scheduledCount) || total) - sent);
+    const problem = planRemediation(plan);
+    const todayEmpty = capacityAvailable() && capacityNumbers().remaining === 0;
+    const firstDay = (plan.days || [])[0];
+    const weekend = selectedDateIsWeekend() && plan.days && plan.days.length
+      ? `Your weekend start moves to ${planDayLabel(plan.days[0])}; weekends are skipped.` : "";
+    return `<div class="email-plan-head"><b>${title}</b><span>${esc(capacityStatusText())}</span></div>
+      <p class="email-plan-summary">${locked
+        ? `${sent} of ${total} sent · ${scheduled} scheduled`
+        : `${total} recipient${total === 1 ? "" : "s"} · ${units} count toward daily capacity`}</p>
+      ${(plan.days || []).length ? `<ol class="email-plan-days">${plan.days.map((day) => {
+        const messages = Number(day.messageCount) || 0, units = Number(day.units) || 0;
+        return `<li><span>${esc(planDayLabel(day))}</span><b>${messages} email${messages === 1 ? "" : "s"} · ${units} capacity</b></li>`;
+      }).join("")}</ol>` : ""}
+      ${todayEmpty && firstDay ? `<p class="email-plan-note">No capacity remains today. This batch begins ${esc(planDayLabel(firstDay))}.</p>` : ""}
+      ${weekend ? `<p class="email-plan-note">${esc(weekend)}</p>` : ""}
+      <p class="email-plan-note">Weekends are skipped. Future delivery days begin at 9:00 AM Eastern.</p>
+      ${problem ? `<p class="email-plan-error">${esc(problem)}</p>` : ""}`;
+  }
+
+  function compactCapacityPlan(plan) {
+    if (deliveryPlanLoading && !plan) return "Checking daily email capacity…";
+    if (!plan || plan.available === false) return "Daily capacity unavailable";
+    if (plan.fit === false) return `${Number(plan.excessCount) || 0} recipients exceed the 7-day plan`;
+    const days = (plan.days || []).length;
+    return `${capacityStatusText()}${days > 1 ? ` · ${days}-day plan` : ""}`;
+  }
+
+  function approvalButtonLabel(plan) {
+    if (plan && plan.multiDay) return "Approve multi-day send";
+    return sendTiming === "later" ? "Approve &amp; Schedule" : "Approve &amp; Send";
+  }
+
+  function paintCapacityPlanNodes() {
+    const locked = !!(detail && detail.batch
+      && !["editing", "invalid"].includes(detail.batch.status));
+    const card = document.getElementById("emailDeliveryPlan");
+    if (card && detail) {
+      card.innerHTML = capacityPlanCardHtml(deliveryPlan, detail.batch, locked);
+      card.classList.toggle("cannot-fit", !!(deliveryPlan && deliveryPlan.fit === false));
+    }
+    const compact = document.getElementById("emailCapacityCompact");
+    if (compact) compact.textContent = compactCapacityPlan(deliveryPlan);
+    const button = document.querySelector('[data-email="approve-send"]');
+    const reason = detail && !locked ? sendBlockedReason(detail.batch) : "";
+    if (button) {
+      button.innerHTML = approvalButtonLabel(deliveryPlan);
+      button.disabled = !!reason;
+      button.title = reason;
+    }
+    const off = document.getElementById("emailSendoff");
+    if (off) { off.textContent = reason; off.hidden = !reason; }
+    const scheduleStatus = document.getElementById("emailScheduleError");
+    if (scheduleStatus && selectedDateIsWeekend()) {
+      const result = scheduleCheck((detail && detail.batch) || { attachmentIds: [] });
+      if (!result.error && !result.quarter) {
+        scheduleStatus.textContent = scheduleDisplayText(result, true);
+        scheduleStatus.classList.remove("bad");
+        scheduleStatus.classList.add("good");
+      }
+    }
+  }
+
+  async function requestCapacityPlan({ force = false, repaint = false } = {}) {
+    if (!detail || !detail.batch
+        || !["editing", "invalid"].includes(detail.batch.status)) return deliveryPlan;
+    const timing = sendTiming === "later" ? scheduleCheck(detail.batch)
+      : { date: null, error: "", quarter: "" };
+    if (timing.error || timing.quarter) {
+      deliveryPlan = null;
+      deliveryPlanError = timing.error || timing.quarter;
+      deliveryPlanKey = "";
+      paintCapacityPlanNodes();
+      return null;
+    }
+    const scheduledForUtc = timing.date ? timing.date.toISOString() : "";
+    const key = `${detail.batch.id}|${scheduledForUtc}|${detail.batch.recipientCount}|${detail.batch.externalCount}`;
+    if (!force && deliveryPlan && key === deliveryPlanKey) return deliveryPlan;
+    const sequence = ++deliveryPlanSequence;
+    deliveryPlanLoading = true;
+    deliveryPlanError = "";
+    if (key !== deliveryPlanKey) deliveryPlan = null;
+    paintCapacityPlanNodes();
+    try {
+      const result = await api("capacity_plan", { batchId: detail.batch.id, scheduledForUtc });
+      if (sequence !== deliveryPlanSequence) return deliveryPlan;
+      deliveryPlan = result.deliveryPlan || null;
+      deliveryPlanKey = key;
+      if (!deliveryPlan) deliveryPlanError = "The daily delivery plan was not returned.";
+    } catch (error) {
+      if (sequence !== deliveryPlanSequence) return deliveryPlan;
+      deliveryPlan = null;
+      deliveryPlanKey = "";
+      deliveryPlanError = error.message || "Daily email capacity could not be checked.";
+    } finally {
+      if (sequence === deliveryPlanSequence) {
+        deliveryPlanLoading = false;
+        if (repaint) composerView();
+        else paintCapacityPlanNodes();
+      }
+    }
+    return deliveryPlan;
+  }
+
+  function scheduleCapacityPlanRefresh(delay = 300, invalidate = false) {
+    clearTimeout(deliveryPlanTimer);
+    if (!detail || !detail.batch
+        || !["editing", "invalid"].includes(detail.batch.status)) return;
+    if (invalidate) {
+      deliveryPlanSequence += 1;
+      deliveryPlan = null; deliveryPlanKey = ""; deliveryPlanError = "";
+      deliveryPlanLoading = false;
+      paintCapacityPlanNodes();
+    }
+    deliveryPlanTimer = setTimeout(() => requestCapacityPlan(), delay);
   }
 
   async function api(op, body, method = "POST") {
@@ -118,7 +377,12 @@
     });
     let data = {};
     try { data = await response.json(); } catch {}
-    if (!response.ok) throw new Error(data.error || `Email service returned ${response.status}.`);
+    if (!response.ok) {
+      const error = new Error(data.error || `Email service returned ${response.status}.`);
+      error.code = data.code || data.errorCode || "";
+      error.status = response.status;
+      throw error;
+    }
     return data;
   }
 
@@ -270,6 +534,8 @@
 
   async function loadCatalog() {
     catalog = await api("catalog", null, "GET");
+    catalogLoadedAt = Date.now();
+    paintCapacityStatuses();
     if (global.Dial && catalog && catalog.recipientEligibility)
       global.Dial.setEmailPolicy(catalog.recipientEligibility);
     return catalog;
@@ -369,39 +635,6 @@
       box.indeterminate = true;
   }
 
-
-  /* Say it before the work, not after it.
-   *
-   * A rep who selects forty-eight people and presses on will build the batch,
-   * review forty-eight messages, press Approve & Send, confirm a dialog, and
-   * only then be told the send was never possible. The count is known right
-   * here, on the screen where the list can still cheaply be made smaller.
-   */
-  function setupSendWarning() {
-    const lim = (catalog && catalog.limits) || {};
-    const kept = keptRecipients();
-    const n = kept.length;
-    if (!n) return "";
-    const bits = [];
-    if (lim.directBatchMax && n > lim.directBatchMax) {
-      bits.push(`${n} recipients is over the ${lim.directBatchMax}-recipient limit for a single `
-        + `send. You can still create Outlook drafts for all of them, or reduce the list to `
-        + `${lim.directBatchMax} to send from the app.`);
-    } else if (lim.rollingRemaining != null && lim.rollingExternalLimit) {
-      const ext = kept.filter((r) => !INTERNAL.test(String(r.email || ""))).length;
-      if (ext > lim.rollingRemaining) {
-        bits.push(`${ext} external recipients, and you have ${lim.rollingRemaining} of `
-          + `${lim.rollingExternalLimit} left in the last 24 hours. Drafts are unaffected.`);
-      }
-    }
-    return bits.length
-      ? `<p class="email-error email-setup-warn">&#9888; ${esc(bits[0])}</p>` : "";
-  }
-
-  // Mirrors EMAIL_INTERNAL_DOMAINS on the server. Only used to estimate what
-  // counts against the rolling window before the batch exists; the server does
-  // the real arithmetic.
-  const INTERNAL = /@eicatlanta\.com$/i;
 
   /* Who else goes on THIS batch.
    *
@@ -595,6 +828,7 @@
       + '<p>Choose the material once; the approved client-group version is selected per recipient.</p></fieldset>' + preflight : '';
     document.getElementById("emailBody").innerHTML = `<div class="email-setup">
       <p class="email-summary"><b id="emailKeptCount">${keptRecipients().length}</b> recipient${keptRecipients().length === 1 ? "" : "s"} · From <b>${esc(catalog.connection.mailbox)}</b></p>
+      ${setupCapacityHtml()}
       ${templates.length ? `<label class="email-label">Template<select id="emailTemplate">${templates.map((t) =>
         `<option value="${esc(t.id)}">${esc(t.name)}</option>`).join("")}</select></label>`
         : `<p class="email-error">There are no approved templates yet.${catalog.isAdmin
@@ -611,7 +845,6 @@
       ${copyPicker()}
       ${followUpPicker()}
       ${domainPicker()}
-      ${setupSendWarning()}
       <p id="emailNotice" class="email-notice"></p>
       <button type="button" class="ask-btn primary" data-email="create"${
         templates.length ? "" : " disabled"}>Generate personalized emails</button></div>`;
@@ -1513,36 +1746,24 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
   }
 
 
-  /* Why "Approve & Send" cannot work for this batch, if it cannot.
+  /* Direct send is decided by a server-authored delivery plan.
    *
-   * The server refuses over-sized batches at approval, which is correct but
-   * arrives far too late: a rep reviews forty-eight messages, presses the
-   * button, confirms a dialog, and only then learns the send was never possible.
-   * Everything needed to say so is known the moment the batch is built.
-   *
-   * Returns "" when direct sending is available for this batch. The server
-   * still enforces all of it; this only stops the rep wasting the work.
+   * A daily allowance is not a batch-size ceiling: a forty-person batch can be
+   * a perfectly valid two-day plan. The browser therefore never reimplements
+   * firm-domain policy or capacity arithmetic. It blocks only when the plan is
+   * unavailable or cannot fit inside the seven-day approval horizon.
    */
   function sendBlockedReason(batch) {
-    const lim = (catalog && catalog.limits) || {};
-    const n = Number(batch.recipientCount) || 0;
     if (!catalog.policy.directSendAvailable) {
       return catalog.policy.directSendBlockedBy
         || "Direct sending is switched off for this application.";
     }
-    if (lim.directBatchMax && n > lim.directBatchMax) {
-      return `${n} recipients is over the ${lim.directBatchMax}-recipient limit for a single `
-        + `send. You can create Outlook drafts, or split this into batches of `
-        + `${lim.directBatchMax} or fewer to send from the app.`;
-    }
-    // externalCount rather than recipientCount: internal addresses do not count
-    // against the rolling window, so neither should they here.
-    const ext = Number(batch.externalCount) || 0;
-    if (lim.rollingRemaining != null && ext > lim.rollingRemaining) {
-      return `This batch has ${ext} external recipients and you have `
-        + `${lim.rollingRemaining} of ${lim.rollingExternalLimit} left in the last 24 hours. `
-        + `Outlook drafts are unaffected.`;
-    }
+    if (deliveryPlanLoading && !deliveryPlan) return "Checking daily email capacity…";
+    if (deliveryPlanError && !deliveryPlan) return `${deliveryPlanError} Outlook drafts are unaffected.`;
+    if (!deliveryPlan) return "Daily email capacity has not been checked. Outlook drafts are unaffected.";
+    const planProblem = planRemediation(deliveryPlan);
+    if (planProblem) return planProblem;
+    if (!deliveryPlan.hash) return "The daily delivery plan is incomplete. Refresh it before sending; Outlook drafts are unaffected.";
     return "";
   }
 
@@ -1657,13 +1878,17 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
     }
     cursor = Math.max(0, Math.min(cursor, detail.messages.length - 1));
     const b = detail.batch, m = detail.messages[cursor], locked = !["editing", "invalid"].includes(b.status);
+    const persistedPlan = storedCapacityPlan(b);
+    if (locked && persistedPlan) deliveryPlan = persistedPlan;
     const errors = m.validation && m.validation.errors || [], warnings = m.validation && m.validation.warnings || [];
     const attachments = m.attachments || [];
     ensureScheduleDefaults();
     const schedule = scheduleCheck(b);
-    const minParts = easternParts(new Date()), maxParts = easternParts(new Date(Date.now() + 7 * 86400000));
+    const minParts = easternParts(new Date());
+    const maxDate = new Date(Date.UTC(Number(minParts.year), Number(minParts.month) - 1,
+      Number(minParts.day) + 7, 12));
     const scheduleMin = `${minParts.year}-${minParts.month}-${minParts.day}`;
-    const scheduleMax = `${maxParts.year}-${maxParts.month}-${maxParts.day}`;
+    const scheduleMax = maxDate.toISOString().slice(0, 10);
     const scheduleHtml = locked ? "" : `<fieldset class="email-schedule"><legend>When should sending begin?</legend>
       <label><input type="radio" name="emailTiming" value="now" ${sendTiming === "now" ? "checked" : ""}> Send now</label>
       <label><input type="radio" name="emailTiming" value="later" ${sendTiming === "later" ? "checked" : ""}> Schedule for later</label>
@@ -1671,7 +1896,7 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
         <label>Date <input id="emailScheduleDate" type="date" min="${scheduleMin}" max="${scheduleMax}" aria-describedby="emailScheduleHelp emailScheduleError" value="${esc(scheduleDate)}"></label>
         <label>Time <input id="emailScheduleTime" type="time" step="900" aria-describedby="emailScheduleHelp emailScheduleError" value="${esc(scheduleTime)}"></label>
         <small id="emailScheduleHelp">Eastern Time. Sending may continue after this start time.</small>
-        <p id="emailScheduleError" class="${schedule.error || schedule.quarter ? "bad" : "good"}" role="alert">${esc(schedule.error || schedule.quarter || (schedule.date ? `Starts ${easternLabel(schedule.date)}` : ""))}</p>
+        <p id="emailScheduleError" class="${schedule.error || schedule.quarter ? "bad" : "good"}" role="alert">${esc(schedule.error || schedule.quarter || scheduleDisplayText(schedule, true))}</p>
       </div></fieldset>`;
     // The poll below re-renders every three seconds while a batch is working.
     // Replacing innerHTML resets scroll, which threw the rep back to the top of
@@ -1777,19 +2002,22 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
                 esc(bccReason(a, b))}</span>`).join(", ")}</p>` : ""}
           <p><b>Subject:</b> ${esc(m.subject)}</p><p><b>Attachments:</b> ${attachments.length ? attachments.map((a) => `${esc(a.name)} (${bytes(a.size)})`).join(", ") : "None"}</p></div>
           <div class="email-rendered">${previewWithImages(m.bodyHtml, m.inlineImages, b.templateId)}${m.signatureHtml || ""}</div></section>
+        <aside id="emailDeliveryPlan" class="email-plan${deliveryPlan && deliveryPlan.fit === false ? " cannot-fit" : ""}">
+          ${capacityPlanCardHtml(deliveryPlan, b, locked)}</aside>
       </main></div>
-      <footer class="email-footer">${scheduleHtml}<p id="emailNotice" class="email-notice${
-        sendBlocked ? " bad" : ""}">${esc(((!locked && sendBlocked) ? sendBlocked
-          : (b.warningMessage || (locked ? lockedNotice : ""))) + supportReference)}</p><div>
+      <footer class="email-footer">${scheduleHtml}<p class="email-footer-status">
+        <span id="emailCapacityCompact">${esc(compactCapacityPlan(deliveryPlan))}</span>
+        <span id="emailNotice" class="email-notice${sendBlocked ? " bad" : ""}">${esc(((!locked && sendBlocked) ? sendBlocked
+          : (b.warningMessage || (locked ? lockedNotice : ""))) + supportReference)}</span></p><div>
         ${b.status === "completed" && b.mode === "send" && !b.parentBatchId && !b.followUpSentUtc
           ? `<button type="button" class="ask-btn" data-email="follow-up-open" data-id="${esc(b.id)}">Follow up on no reply</button>` : ""}
         ${b.status === "action_required" ? `<button type="button" class="ask-btn" data-email="connect">Reconnect Microsoft 365</button><button type="button" class="ask-btn" data-email="retry">Retry remaining</button>` : ""}
         ${["held", "needs_review", "schedule_held"].includes(b.status) ? `<button type="button" class="ask-btn primary" data-email="review-reschedule">Review &amp; reschedule</button>` : ""}
         ${locked && b.mode === "send" && !["completed", "canceled", "action_required", "held", "needs_review", "schedule_held"].includes(b.status) ? `<button type="button" class="ask-btn" data-email="pause">${b.status === "paused" ? "Resume remaining" : "Pause remaining"}</button>` : ""}
         ${locked && !["completed", "canceled", "drafts_ready"].includes(b.status) ? `<button type="button" class="ask-btn ghost" data-email="cancel">Cancel remaining</button>` : ""}
-        ${locked ? "" : `${sendBlocked
-          ? `<span class="email-sendoff" title="${esc(sendBlocked)}">Cannot send directly &#9432;</span>`
-          : `<button type="button" class="ask-btn primary" data-email="approve-send">${sendTiming === "later" ? "Approve &amp; Schedule" : "Approve &amp; Send"}</button>`}
+        ${locked ? "" : `<button type="button" class="ask-btn primary" data-email="approve-send"
+            ${sendBlocked ? "disabled" : ""} title="${esc(sendBlocked)}">${approvalButtonLabel(deliveryPlan)}</button>
+          <span id="emailSendoff" class="email-sendoff" ${sendBlocked ? "" : "hidden"}>${esc(sendBlocked)}</span>
           <details class="email-other">
             <summary class="ask-btn email-other-trigger" aria-label="Other sending options" title="Other sending options">Other</summary>
             <div class="email-other-menu">
@@ -1816,6 +2044,7 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
     announceSwipe();
     startCountdown();
     schedulePoll();
+    if (!locked && !deliveryPlanLoading) scheduleCapacityPlanRefresh(0);
   }
 
   // Which side the last swipe came from, consumed once by announceSwipe(). Null
@@ -1894,6 +2123,9 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
 
   async function open(selected) {
     excluded = new Set(); openDomain = null;
+    clearTimeout(deliveryPlanTimer);
+    deliveryPlanSequence += 1;
+    deliveryPlan = null; deliveryPlanKey = ""; deliveryPlanError = ""; deliveryPlanLoading = false;
     /* A WHITELIST, and it silently ate a feature.
      *
      * This rebuilds each recipient into a known shape rather than forwarding
@@ -2001,6 +2233,19 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
   const FOLLOW_UP_DEFAULT = "Just following up on the note below in case it reached you at a busy moment.";
 
   function batchScheduleText(batch) {
+    const plan = storedCapacityPlan(batch);
+    if (plan && (plan.days || []).length) {
+      const sent = Number(batch.sentCount) || 0;
+      const total = Number(plan.recipientCount) || Number(batch.recipientCount) || 0;
+      const scheduled = Math.max(0, (Number(plan.scheduledCount) || total) - sent);
+      if (["held", "needs_review", "schedule_held"].includes(batch.status))
+        return `${scheduled} unsent · held for review`;
+      if (batch.status === "completed") return `${sent || total} sent`;
+      const next = (plan.days || []).map(dateFromPlanDay)
+        .find((date) => date && date.getTime() >= Date.now() - 60000);
+      const progress = `${sent} of ${total} sent · ${scheduled} scheduled`;
+      return next ? `${progress} · Next: ${shortEasternDateTime(next)}` : progress;
+    }
     const raw = batch.scheduledForUtc || (["held", "needs_review"].includes(batch.status) ? batch.sendNotBeforeUtc : "");
     const date = raw && new Date(raw);
     return date && !Number.isNaN(date.getTime()) ? `Scheduled for ${easternLabel(date)}` : "";
@@ -2028,6 +2273,9 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
     document.getElementById("emailBody").innerHTML = "";
     try {
       await loadCatalog(); detail = await api(`batch&id=${encodeURIComponent(id)}`, null, "GET");
+      deliveryPlan = storedCapacityPlan(detail.batch);
+      deliveryPlanKey = ""; deliveryPlanError = "";
+      if (["editing", "invalid"].includes(detail.batch.status)) await requestCapacityPlan();
       cursor = 0; forceDetail = false;
       if (pushUrl && new URL(location.href).searchParams.get("emailBatch") !== id)
         history.pushState({ emailBatch: id }, "", emailUrl(id, false));
@@ -2050,7 +2298,11 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
 
   async function act(button) {
     const action = button.dataset.email;
-    if (action === "close") { shell().hidden = true; clearTimeout(pollTimer); clearInterval(tickTimer); forceDetail = false; cleanEmailUrl(); return; }
+    if (action === "close") {
+      shell().hidden = true;
+      clearTimeout(pollTimer); clearInterval(tickTimer); clearTimeout(deliveryPlanTimer);
+      forceDetail = false; cleanEmailUrl(); return;
+    }
     if (action === "details") { forceDetail = true; composerView(); return; }
     // ---- recipient domain grouping ----
     // Every one of these re-renders the setup screen, which would otherwise
@@ -2122,6 +2374,12 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
         const r = await api("update_message_cc",
           { batchId: detail.batch.id, messageId: m.id, teammates: [...on] });
         detail = r;
+        // An advisor teammate is part of the external delivery envelope and
+        // can consume another daily unit. Never leave the old plan visible
+        // after that decision, even when the batch's primary-recipient count
+        // did not change.
+        deliveryPlan = null; deliveryPlanKey = ""; deliveryPlanError = "";
+        await requestCapacityPlan();
         composerView();
         if (r.ccRemovedRecipients && r.ccRemovedRecipients.length)
           notice(`${r.ccRemovedRecipients.join(", ")} ${
@@ -2487,6 +2745,8 @@ Generate emails for all of them?`)) return;
         detail = await api("create_batch", { recipients: kept,
           templateId: (document.getElementById("emailTemplate") || {}).value || "",
           attachmentIds, materialFamilyIds, ccColleague, followUpDays });
+        deliveryPlan = null; deliveryPlanKey = ""; deliveryPlanError = "";
+        await requestCapacityPlan();
         composerView();
       } catch (e) { button.disabled = false; notice(e.message, true); }
       return;
@@ -2509,6 +2769,8 @@ They stay on your call list and keep their history — this only takes them out 
       if (!await saveOne()) return;
       try {
         detail = await api("remove_recipient", { batchId: detail.batch.id, messageId: button.dataset.id });
+        deliveryPlan = null; deliveryPlanKey = ""; deliveryPlanError = "";
+        await requestCapacityPlan();
         cursor = Math.min(cursor, detail.messages.length - 1);
         composerView();
       } catch (e) { notice(e.message, true); }
@@ -2647,12 +2909,27 @@ They stay on your call list and keep their history — this only takes them out 
           + "Press Apply first, or restore the approved wording.", true);
       }
       const mode = action === "approve-send" ? "send" : "drafts", b = detail.batch;
+      if (mode === "send") {
+        button.disabled = true;
+        notice("Refreshing the daily delivery plan…");
+        await requestCapacityPlan({ force: true });
+        const capacityProblem = sendBlockedReason(b);
+        if (capacityProblem) {
+          button.disabled = false;
+          return notice(capacityProblem, true);
+        }
+        notice("");
+      }
       const timing = mode === "send" ? scheduleCheck(b) : { date: null, error: "", quarter: "" };
       if (timing.error || timing.quarter) return notice(timing.error || timing.quarter, true);
       const attachmentText = b.attachmentSummary.length ? b.attachmentSummary.map((a) => `${a.name} (${bytes(a.size)})`).join("\n") : "No attachments";
-      const verb = mode === "send" ? (timing.date
-        ? `approve and schedule ${b.recipientCount} emails to begin ${easternLabel(timing.date)}`
-        : `approve ${b.recipientCount} emails for sending after the ${catalog.limits.cancellationSeconds}-second cancellation window`)
+      const planLines = mode === "send" ? (deliveryPlan.days || []).map((day) =>
+        `${planDayLabel(day)} — ${Number(day.messageCount) || 0} emails · ${Number(day.units) || 0} capacity`).join("\n") : "";
+      const verb = mode === "send" ? (deliveryPlan.multiDay
+        ? `approve this ${(deliveryPlan.days || []).length}-day send`
+        : timing.date
+          ? `approve and schedule ${b.recipientCount} emails to begin ${easternLabel(timing.date)}`
+          : `approve ${b.recipientCount} emails for sending after the ${catalog.limits.cancellationSeconds}-second cancellation window`)
         : `create ${b.recipientCount} Outlook drafts`;
       // The unreviewed count belongs in this dialog, not only in the tally row
       // above it. This is the last moment anyone can stop the send, and "8 not
@@ -2660,7 +2937,11 @@ They stay on your call list and keep their history — this only takes them out 
       const c = tally();
       if (!confirm(`Review confirmation\n\n${b.recipientCount} recipients\n`
         + `${c.unopened ? `${c.unopened} never opened by you\n` : ""}`
-        + `${attachmentText}\n\n${verb}?`)) return;
+        + `${mode === "send" ? `${Number(deliveryPlan.externalUnits) || 0} count toward daily capacity\n${planLines}\n\n` : ""}`
+        + `${attachmentText}\n\n${verb}?`)) {
+        button.disabled = false;
+        return;
+      }
 
       // Server-enforced too; this only decides whether to ask. A rep who
       // dismisses the prompt gets told the approval stopped rather than
@@ -2671,15 +2952,25 @@ They stay on your call list and keep their history — this only takes them out 
       if (needsCode) {
         passcode = prompt(`This batch has ${b.recipientCount} recipients.\n\n`
           + `Enter the approval passcode to continue.`) || "";
-        if (!passcode) return notice("Approval cancelled — no passcode entered.", true);
+        if (!passcode) {
+          button.disabled = false;
+          return notice("Approval cancelled — no passcode entered.", true);
+        }
       }
       button.disabled = true;
       approvalPending = true;
       try { detail = await api("approve", { batchId: b.id, mode, reviewed: true, passcode,
+        capacityPlanHash: mode === "send" ? deliveryPlan.hash : "",
         scheduledForUtc: timing.date ? timing.date.toISOString() : "",
         confirmation: { recipientCount: b.recipientCount, attachmentIds: b.attachmentIds,
+          capacityPlanHash: mode === "send" ? deliveryPlan.hash : "",
           scheduledForUtc: timing.date ? timing.date.toISOString() : "" } }); composerView(); }
-      catch (e) { button.disabled = false; notice(e.message, true); }
+      catch (e) {
+        button.disabled = false;
+        if (mode === "send") await requestCapacityPlan({ force: true });
+        notice(/capacity|plan/i.test(`${e.code} ${e.message}`)
+          ? `${e.message} The delivery plan was refreshed; review it and approve again.` : e.message, true);
+      }
       finally { approvalPending = false; }
       return;
     }
@@ -2687,6 +2978,7 @@ They stay on your call list and keep their history — this only takes them out 
       try {
         const previousTime = detail.batch.scheduledForUtc || detail.batch.sendNotBeforeUtc;
         detail = await api("review_schedule", { batchId: detail.batch.id });
+        deliveryPlan = null; deliveryPlanKey = ""; deliveryPlanError = "";
         sendTiming = "later";
         if (previousTime) {
           const p = easternParts(new Date(previousTime));
@@ -2715,6 +3007,9 @@ They stay on your call list and keep their history — this only takes them out 
   document.addEventListener("change", (event) => {
     if (event.target.name === "emailTiming") {
       sendTiming = event.target.value === "later" ? "later" : "now";
+      deliveryPlanSequence += 1;
+      deliveryPlan = null; deliveryPlanKey = ""; deliveryPlanError = "";
+      deliveryPlanLoading = false;
       composerView();
       const first = document.getElementById("emailScheduleDate");
       if (sendTiming === "later" && first) first.focus();
@@ -2904,8 +3199,9 @@ They stay on your call list and keep their history — this only takes them out 
    * harmless -- the file picker beside it still works, and the server validates
    * every document id regardless of what the client offered. */
   const documents = () => (catalog && catalog.documents) || [];
+  global.addEventListener("emailcapacityrequest", () => refreshCapacityStatus());
   global.EmailComposer = { open, openHistory, openAdmin, isAdmin,
-                           internalRecipients, documents };
+                           internalRecipients, documents, refreshCapacityStatus };
   global.DirectSendOps = { accept: acceptDirect, watch: watchDirect,
                            pending: pendingDirect, resume: resumeDirect };
   setTimeout(resumeDirect, 0);

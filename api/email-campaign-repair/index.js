@@ -16,6 +16,7 @@ const store = require("../shared/email-store");
 const service = require("../shared/email-service");
 const core = require("../shared/email-core");
 const schedule = require("../shared/email-schedule");
+const capacity = require("../shared/email-limit-guard");
 
 const ACTIVE_BATCHES = new Set(["drafting", "sending", "scheduled", "schedule_held"]);
 const TERMINAL_MESSAGES = new Set(["draft_ready", "sent", "failed", "canceled", "auth_required"]);
@@ -46,7 +47,8 @@ function workFor(message, batch, nowMs, intervalSeconds) {
   const position = Number(message.sendPosition) >= 0
     ? Number(message.sendPosition) : Number(message.ordinal) || 0;
   if (["draft_pending", "draft_ambiguous", "draft_creating"].includes(message.state)) {
-    const due = approvedAt + position * intervalSeconds * 1000;
+    const due = timestamp(message.plannedSendUtc)
+      || approvedAt + position * intervalSeconds * 1000;
     return due && due > nowMs ? null : "draft";
   }
   if (batch.mode !== "send") return null;
@@ -65,7 +67,8 @@ function logger(context, message) {
 }
 
 async function run(context = {}, overrides = {}) {
-  const deps = { store, enqueue: service.enqueue, core, now: () => Date.now(), ...overrides };
+  const deps = { store, enqueue: service.enqueue, core, capacity,
+    now: () => Date.now(), ...overrides };
   const summary = { enabled: false, users: 0, batches: 0, messages: 0,
     eligible: 0, promoted: 0, conflicts: 0, attempted: 0, enqueued: 0, failed: 0 };
   if (process.env.EMAIL_CAMPAIGN_REPAIR_ENABLED !== "1") {
@@ -93,6 +96,57 @@ async function run(context = {}, overrides = {}) {
     for (const batch of batches) {
       if (!ACTIVE_BATCHES.has(batch.status)) continue;
       summary.batches++;
+      let batchMessages = null;
+      const capacityRepaired = new Set();
+      if (batch.capacityPlanHash && batch.capacityReservationId) {
+        batchMessages = await deps.store.listMessages(userId, batch.id);
+        const missing = batchMessages.filter((message) => !message.plannedSendUtc
+          && ["editing", "scheduled_pending"].includes(message.state));
+        let assignments = new Map();
+        let incomplete = false;
+        if (missing.length) {
+          try {
+            const plan = await deps.capacity.assertReservation(userId,
+              batch.capacityReservationId, batch.capacityPlanHash);
+            assignments = new Map((plan.assignments || [])
+              .map((assignment) => [assignment.key, assignment]));
+          } catch {
+            // Without the frozen assignment, inventing a day or an instant
+            // would spend unreserved capacity. Scheduled preflight still runs
+            // and turns this into its normal user-visible hold.
+            summary.failed++;
+            incomplete = true;
+          }
+        }
+        for (let index = 0; !incomplete && index < batchMessages.length; index++) {
+          const message = batchMessages[index];
+          if (message.plannedSendUtc || !["editing", "scheduled_pending"].includes(message.state)) continue;
+          const assignment = assignments.get(message.id);
+          if (!assignment) { incomplete = true; continue; }
+          try {
+            const repaired = await deps.store.patchMessage(userId, batch.id, message.id, {
+              state: batch.status === "scheduled" ? "scheduled_pending" : "draft_pending",
+              queuedUtc: message.queuedUtc || batch.approvedUtc,
+              sendPosition: assignment.tranchePosition,
+              capacityDay: assignment.day, capacityUnits: assignment.units,
+              plannedSendUtc: assignment.plannedSendUtc,
+              capacityPlanHash: batch.capacityPlanHash,
+              trancheIndex: assignment.trancheIndex,
+              tranchePosition: assignment.tranchePosition,
+              ...(batch.status === "scheduled"
+                ? { scheduleRevision: Number(batch.scheduleRevision) } : {}),
+              leaseUntilUtc: "",
+            }, message.etag);
+            batchMessages[index] = repaired;
+            capacityRepaired.add(message.id);
+            summary.promoted++;
+          } catch (err) {
+            if ([404, 412].includes(Number(err && err.statusCode))) summary.conflicts++;
+            else summary.failed++;
+            incomplete = true;
+          }
+        }
+      }
       if (batch.status === "scheduled") {
         const due = timestamp(batch.scheduledForUtc);
         const retryAfter = timestamp(batch.scheduleRetryAfterUtc);
@@ -127,15 +181,17 @@ async function run(context = {}, overrides = {}) {
         if (userEnqueued >= MAX_ENQUEUED_PER_USER || summary.attempted >= MAX_ATTEMPTS) break;
         continue;
       }
-      for (let message of await deps.store.listMessages(userId, batch.id)) {
+      for (let message of batchMessages || await deps.store.listMessages(userId, batch.id)) {
         summary.messages++;
-        let promoted = false;
+        let promoted = capacityRepaired.has(message.id);
+        if (batch.capacityPlanHash && !message.plannedSendUtc
+            && ["editing", "scheduled_pending"].includes(message.state)) continue;
         // Approval marks the batch first, then each message. If the HTTP host
         // dies between those writes, an approved batch can retain editing rows
         // that no ordinary worker is allowed to claim. Promote them
         // conditionally; an approval worker that got there first wins the ETag.
         const approvedAt = timestamp(batch.approvedUtc);
-        if ((message.state === "editing" || (message.state === "scheduled_pending" && batch.scheduleState === "passed")) && approvedAt
+        if (!promoted && (message.state === "editing" || (message.state === "scheduled_pending" && batch.scheduleState === "passed")) && approvedAt
             && approvedAt <= nowMs - GRACE_MS) {
           try {
             message = await deps.store.patchMessage(userId, batch.id, message.id, {

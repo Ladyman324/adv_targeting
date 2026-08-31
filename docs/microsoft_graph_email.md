@@ -124,15 +124,18 @@ Vault references, never source control):
 | `EMAIL_SIGNATURE_*` | Company name, address, website, and disclosure used by the modular signature generator |
 
 Configurable policy defaults are 30 seconds cancellation, one submission every
-5 seconds per mailbox across batches, 250 direct recipients per batch, 5,000
-external recipients in a rolling 24 hours, 15 MB per approved attachment, and
+5 seconds per mailbox across batches, 250 primary recipients per direct-send
+batch, 25 external To/advisor-Cc recipients per Eastern calendar day, 15 MB per approved attachment, and
 20 MB estimated total message size. The 15,000-recipient campaign hard stop is
 not configurable downward in code and cannot be bypassed by slowing a batch.
 
 The Function host is configured for one queue item per batch. A separate
 optimistic Table-storage mailbox gate enforces pacing across scale-out workers,
-and the 24-hour reservation uses a short database mutex so concurrent approvals
-cannot race past the limit.
+and a per-user capacity ledger uses a short database mutex so concurrent
+approvals cannot reserve the same daily capacity. Approval freezes each
+message's Eastern business day and exact send instant. Overflow advances to
+9:00 AM on the next weekday and must fit within seven Eastern calendar dates;
+Outlook drafts do not reserve capacity.
 
 ## Approved templates and documents
 

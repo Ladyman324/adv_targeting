@@ -3,7 +3,7 @@
 /* Durable ownership for one-to-one sends.
  *
  * This table is deliberately separate from EmailSendLedger. The ledger counts
- * rolling external recipients; this records whether one irreversible Graph
+ * external-recipient capacity; this records whether one irreversible Graph
  * operation may run. Message bodies, recipients and attachment bytes stay in
  * Outlook and never enter this table or its queue markers.
  */
