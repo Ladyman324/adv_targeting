@@ -24,7 +24,10 @@ STAGE_DIR=""
 #   38: audiences.test.js -- personal dynamic definitions, validation, and ETags
 #   39: email-materials.test.js -- material routing, lifecycle, provenance, and freshness
 #   40: email-schedule.test.js -- durable scheduling, preflight, holds, and notification
-EXPECTED_API_TEST_FILE_COUNT=40
+#   41: email-calendar-capacity.test.js -- Eastern/DST planning, locking, and release
+#   42: email-capacity-service.test.js -- final envelope counting and deferred cleanup
+#   43: email-capacity-ui.test.js -- visible, server-authored multi-day plan contract
+EXPECTED_API_TEST_FILE_COUNT=43
 
 cleanup() {
   test -z "$TEMP_ROOT" && return
