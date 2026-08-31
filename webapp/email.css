@@ -351,12 +351,9 @@
 .email-back .ask-btn.primary:hover{color:var(--accent-ink); filter:brightness(1.06)}
 .email-back .ask-btn.ghost{background:transparent; box-shadow:none; color:var(--muted)}
 
-/* Approve & Send. There was NO .ask-btn.grave rule anywhere in the codebase --
-   every .grave rule is scoped under some other parent -- so the one irreversible
-   control in the application looked exactly like a neutral button. Outlined
-   rather than filled: the filled accent belongs to Create Outlook drafts, the
-   safe default, and two solid buttons side by side would compete instead of
-   ranking. It fills on hover, at the moment of commitment. */
+/* Legacy irreversible-action treatment retained for older markup. The active
+   composer now makes Approve & Send the single filled primary action and puts
+   draft creation in the clearly labelled Other menu below. */
 .email-back .ask-btn.grave{background:transparent; color:var(--warn,#d08b00); font-weight:650;
   box-shadow:inset 0 0 0 1.5px var(--warn,#d08b00)}
 .email-back .ask-btn.grave:hover{background:var(--warn,#d08b00); color:var(--accent-ink,#0b0b0b)}
@@ -385,6 +382,15 @@
  * Scoped to the footer and to .email-back, so it outranks both.
  */
 .email-back .email-footer .ask-btn{width:auto; margin:0; flex:1 1 auto; min-width:0}
+.email-other{position:relative; flex:0 0 auto}
+.email-other>summary{list-style:none; display:flex; align-items:center; justify-content:center}
+.email-other>summary::-webkit-details-marker{display:none}
+.email-other-menu{position:absolute; right:0; bottom:calc(100% + 8px); z-index:4;
+  width:min(280px,calc(100vw - 24px)); box-sizing:border-box; padding:10px;
+  border:1px solid var(--hair); border-radius:10px; background:var(--panel);
+  box-shadow:0 10px 30px rgba(0,0,0,.22)}
+.email-back .email-other-menu .ask-btn{width:100%; margin:0}
+.email-other-menu p{margin:7px 2px 1px; color:var(--muted); font-size:11.5px; line-height:1.35}
 
 @media(max-width:760px){
   /* Equal halves, never a scroller. A control that has to be scrolled into view
@@ -395,6 +401,8 @@
   .email-back .email-footer>div{display:flex; flex-wrap:wrap; gap:8px; overflow-x:visible}
   .email-back .email-footer .ask-btn{flex:1 1 45%; min-width:0; padding:0 8px;
     white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+  .email-back .email-footer .email-other{flex:1 1 45%; min-width:0}
+  .email-back .email-footer .email-other>summary{width:100%}
 }
 
 /* ---------- sender health ------------------------------------------------

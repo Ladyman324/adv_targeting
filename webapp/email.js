@@ -1772,10 +1772,16 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
         ${["held", "needs_review", "schedule_held"].includes(b.status) ? `<button type="button" class="ask-btn primary" data-email="review-reschedule">Review &amp; reschedule</button>` : ""}
         ${locked && b.mode === "send" && !["completed", "canceled", "action_required", "held", "needs_review", "schedule_held"].includes(b.status) ? `<button type="button" class="ask-btn" data-email="pause">${b.status === "paused" ? "Resume remaining" : "Pause remaining"}</button>` : ""}
         ${locked && !["completed", "canceled", "drafts_ready"].includes(b.status) ? `<button type="button" class="ask-btn ghost" data-email="cancel">Cancel remaining</button>` : ""}
-        ${locked ? "" : `<button type="button" class="ask-btn primary" data-email="approve-drafts">Create drafts</button>
-          ${sendBlocked
-            ? `<span class="email-sendoff" title="${esc(sendBlocked)}">Cannot send directly &#9432;</span>`
-            : `<button type="button" class="ask-btn grave" data-email="approve-send">${sendTiming === "later" ? "Approve &amp; Schedule" : "Approve &amp; Send"}</button>`}`}
+        ${locked ? "" : `${sendBlocked
+          ? `<span class="email-sendoff" title="${esc(sendBlocked)}">Cannot send directly &#9432;</span>`
+          : `<button type="button" class="ask-btn primary" data-email="approve-send">${sendTiming === "later" ? "Approve &amp; Schedule" : "Approve &amp; Send"}</button>`}
+          <details class="email-other">
+            <summary class="ask-btn ghost" aria-label="Other sending options" title="Other sending options">Other</summary>
+            <div class="email-other-menu">
+              <button type="button" class="ask-btn" data-email="approve-drafts">Create Outlook drafts</button>
+              <p>Nothing is sent. You send the drafts manually from Outlook.</p>
+            </div>
+          </details>`}
       </div></footer>`;
     // requestAnimationFrame, not a straight assignment: immediately after
     // innerHTML the new content has no layout yet, so scrollTop is clamped to

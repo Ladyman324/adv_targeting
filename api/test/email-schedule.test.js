@@ -1,5 +1,7 @@
 "use strict";
 
+const fs = require("node:fs");
+const path = require("node:path");
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const schedule = require("../shared/email-schedule");
@@ -11,6 +13,21 @@ const NOW = Date.parse("2026-08-29T12:00:00.000Z");
 
 test("the production email service exports scheduled preflight", () => {
   assert.equal(typeof emailService.preflightScheduled, "function");
+});
+
+test("direct send is primary and Outlook drafts live under Other", () => {
+  const source = fs.readFileSync(path.join(__dirname, "..", "..", "webapp", "email.js"), "utf8");
+  const start = source.indexOf('<footer class="email-footer"');
+  const end = source.indexOf("// requestAnimationFrame", start);
+  const footer = source.slice(start, end);
+
+  assert.match(footer, /class="ask-btn primary" data-email="approve-send"/);
+  assert.match(footer, /<details class="email-other">/);
+  assert.match(footer, /aria-label="Other sending options"[\s\S]*>Other<\/summary>/);
+  assert.match(footer, /data-email="approve-drafts">Create Outlook drafts<\/button>/);
+  assert.match(footer, /Nothing is sent\. You send the drafts manually from Outlook\./);
+  assert.ok(footer.indexOf('data-email="approve-send"')
+    < footer.indexOf('data-email="approve-drafts"'));
 });
 
 test("scheduled instants are strict, leave cancellation time, and stop at seven days", () => {
