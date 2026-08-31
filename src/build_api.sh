@@ -38,14 +38,18 @@ die() { echo "[!] $*" >&2; exit 1; }
 
 validate_recipient_registry_source() {
   local registry="$ROOT/data/identity/approved_recipients.json.gz"
+  local shard_manifest="$ROOT/data/identity/approved_recipients_manifest.json"
   local descriptor="$API/shared/approved-recipient-release.json"
   local act_lookup="$API/shared/act_contacts.json"
   test -s "$registry" || die \
     "approved recipient registry is missing; run python src/export_approved_recipients.py"
+  test -s "$shard_manifest" || die \
+    "approved recipient shard manifest is missing; run python src/export_approved_recipients.py"
   test -s "$act_lookup" || die "approved Act lookup is missing"
   test -s "$descriptor" || die \
     "approved recipient release descriptor is missing; run python src/export_approved_recipients.py"
-  APPROVED_REGISTRY_PATH="$registry" REGISTRY_DESCRIPTOR_PATH="$descriptor" \
+  APPROVED_REGISTRY_PATH="$registry" APPROVED_SHARD_MANIFEST_PATH="$shard_manifest" \
+    REGISTRY_DESCRIPTOR_PATH="$descriptor" \
     ACT_LOOKUP_PATH="$act_lookup" node <<'NODE'
 const fs = require("node:fs");
 const zlib = require("node:zlib");
@@ -65,6 +69,21 @@ const hash = crypto.createHash("sha256").update(canonical(core), "utf8").digest(
 if (hash !== payload.contentHash) throw new Error("registry content hash is invalid");
 const descriptor = JSON.parse(fs.readFileSync(
   process.env.REGISTRY_DESCRIPTOR_PATH, "utf8"));
+const manifest = JSON.parse(fs.readFileSync(
+  process.env.APPROVED_SHARD_MANIFEST_PATH, "utf8"));
+const manifestCore = { schemaVersion: manifest.schemaVersion,
+  registrySchemaVersion: manifest.registrySchemaVersion,
+  registryContentHash: manifest.registryContentHash,
+  recipientCount: manifest.recipientCount,
+  ineligibleCount: manifest.ineligibleCount,
+  provenance: manifest.provenance || {}, shards: manifest.shards || {} };
+const manifestHash = crypto.createHash("sha256")
+  .update(canonical(manifestCore), "utf8").digest("hex");
+if (Number(manifest.schemaVersion) !== 1
+    || manifestHash !== manifest.contentHash
+    || manifestHash !== descriptor.shardManifestHash
+    || manifest.registryContentHash !== hash)
+  throw new Error("recipient shard manifest is invalid or belongs to another release");
 const descriptorCore = { schemaVersion: descriptor.schemaVersion,
   registrySchemaVersion: descriptor.registrySchemaVersion,
   registryContentHash: descriptor.registryContentHash,
@@ -394,18 +413,18 @@ cp -f "$ARCHIVE" "$DIST/api.tgz"
 printf '%s  api.tgz\n' "$HASH" > "$DIST/api.tgz.sha256"
 verify_archive "$ARCHIVE" "$HASH"
 echo "[*] release $RELEASE_ID  commit $COMMIT  dirty=$DIRTY"
-REGISTRY="$ROOT/data/identity/approved_recipients.json.gz"
-REGISTRY_SHA=$(sha256sum "$REGISTRY" | awk '{print $1}')
+SHARD_MANIFEST="$ROOT/data/identity/approved_recipients_manifest.json"
+REGISTRY_HASH=$(node -p "require(process.argv[1]).registryContentHash" "$SHARD_MANIFEST")
+SHARD_COUNT=$(node -p "Object.keys(require(process.argv[1]).shards || {}).length" "$SHARD_MANIFEST")
 echo "[*] upload $DIST/api.tgz and retain $HASH before publishing"
 echo
-echo "[!] THIS PACKAGE IS HALF A RELEASE. It pins an approved-recipient registry"
+echo "[!] THIS PACKAGE IS HALF A RELEASE. It pins an approved-recipient shard set"
 echo "    that is NOT inside the archive, and the emailer refuses to address mail"
-echo "    until the matching blob is in storage:"
+echo "    until every matching immutable blob is in storage:"
 echo
-echo "      file    ${REGISTRY#"$ROOT"/}"
-echo "      sha256  $REGISTRY_SHA"
-echo "      blob    lookups/approved_recipients.json.gz"
+echo "      manifest  ${SHARD_MANIFEST#"$ROOT"/}"
+echo "      shards    $SHARD_COUNT"
+echo "      prefix    lookups/approved_recipients/releases/$REGISTRY_HASH/"
 echo
-echo "    az storage blob upload --account-name eicadvisorlog \\"
-echo "      --container-name lookups --name approved_recipients.json.gz \\"
-echo "      --file <path>/approved_recipients.json.gz --overwrite --auth-mode key"
+echo "    Upload the shards first and manifest last, deploy static assets, then"
+echo "    publish this Function artifact. The legacy monolith stays untouched."
