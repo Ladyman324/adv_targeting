@@ -1406,5 +1406,5 @@ const attachmentLimit = () => core.config().maxAttachmentBytes;
 module.exports = {
   senderHealth, catalog, createBatch, updateCommon, updateMessage, updateMessageCc,
   validateBatch, removeRecipient,
-  approve, getBatchDetail, control, enqueue, httpError, attachmentLimit,
+  approve, preflightScheduled, getBatchDetail, control, enqueue, httpError, attachmentLimit,
   followUpCandidates, createFollowUp, identityPresentationRefresh };

@@ -3,10 +3,15 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const schedule = require("../shared/email-schedule");
+const emailService = require("../shared/email-service");
 const worker = require("../email-worker/index");
 const repair = require("../email-campaign-repair/index");
 
 const NOW = Date.parse("2026-08-29T12:00:00.000Z");
+
+test("the production email service exports scheduled preflight", () => {
+  assert.equal(typeof emailService.preflightScheduled, "function");
+});
 
 test("scheduled instants are strict, leave cancellation time, and stop at seven days", () => {
   assert.equal(schedule.scheduledInstant("2026-08-29T12:01:00Z", NOW, 60),
