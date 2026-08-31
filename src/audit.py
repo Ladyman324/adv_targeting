@@ -54,7 +54,6 @@ API = ROOT / "api"
 
 sys.path.insert(0, str(SRC))
 
-from preferred_names import preferred_display_name
 
 RESULTS: list[tuple[str, bool, str]] = []
 VERBOSE = False
@@ -529,9 +528,11 @@ def _one_display_name():
     app = (WEB / "app.js").read_text(encoding="utf-8")
     runtime_ok = (
         "function advisorDisplayName(" in app
+        and 'return (c && c.pn) || fallback || (c && c.n) || "";' in app
         and "p.n = advisorDisplayName(p.id, p.n)" in app
         and "id: p[6], n: advisorDisplayName(p[6], p[7])" in app
         and "const shownName = advisorDisplayName(row[0], row[1])" in app
+        and "const label = advisorDisplayName(entry.advisorCrd, fallback)" in app
     )
 
     tiles, bad = 0, []
@@ -541,8 +542,7 @@ def _one_display_name():
         for row in tile["rows"]:
             crd = str(row[C["crd"]])
             formal = index.get(crd)
-            want = preferred_display_name(
-                formal, (contacts.get(crd) or {}).get("sal", ""))
+            want = (contacts.get(crd) or {}).get("pn") or formal
             tiles += 1
             if want and row[C["name"]] != want:
                 bad.append(f"{crd} desk {want!r} phone {row[C['name']]!r}")
@@ -2370,9 +2370,12 @@ def _act_lookup():
 def _approved_recipient_registry():
     """Confirmed and high are authorized by decision; review remains blocked."""
     import gzip                                           # noqa: PLC0415
+    import csv                                            # noqa: PLC0415
     from collections import Counter                        # noqa: PLC0415
     import math                                           # noqa: PLC0415
     from contact_provenance import sha256_file             # noqa: PLC0415
+    from contact_normalization import SUFFIXES              # noqa: PLC0415
+    from roster_greetings import valid_greeting             # noqa: PLC0415
     from identity_schema import (IDENTITY_DIRNAME, LINKS_FILENAME,
                                  MANIFEST_FILENAME, content_hash, runtime_content_hash)  # noqa: PLC0415
 
@@ -2400,6 +2403,41 @@ def _approved_recipient_registry():
                   if str(row.get("tier") or "").lower() not in addressable]
     if unresolved:
         problems.append(f"{len(unresolved):,} recipients carry an unresolved tier")
+    # These values are inserted directly into outbound merge fields. A route
+    # with a valid email is still unsafe to ship when its greeting is "Dr.",
+    # "J.", "III" or "CFP", or its last name is actually a suffix/designation.
+    def name_token(value):
+        token = re.sub(r"[^a-z]", "", str(value or "").casefold())
+        return re.sub(r"(?:tm|sm|r)$", "", token)
+
+    suffix_tokens = {name_token(value) for value in (*SUFFIXES, "vi", "esq")}
+    credential_tokens = {name_token(value) for value in """
+        cfa cfp cpa cima chfc clu aif aifa cdfa cpfa cpwa crpc crps crpsi
+        aams accredited citp qka qpa qpfc cebs cfs cltc cmfc cpc crc csa
+        caia cbe cfe chsnc ea jd llm ll m mba ms msa msf mst phd ricp wmcp
+        bfa afc shrmscp shrmcp sphr phr cpm clf fpqp iaccp cippus cipp
+        cams frm abv pfs cva cexp cep ctfa cwsi cws aep rma awma wms apma
+        planner
+    """.split()}
+    invalid_greetings, invalid_last_names = [], []
+    for crd, row in recipients.items():
+        greeting = str(row.get("greetingName") or "").strip()
+        # Keep real short names (Vi, Ea) and the SEC-filed used name JD. A
+        # vocabulary-only check misclassified them as suffixes/credentials.
+        if not valid_greeting(greeting):
+            invalid_greetings.append((crd, greeting))
+        last_name = str(row.get("lastName") or "").strip()
+        last_token = name_token(last_name)
+        if last_token and last_token in suffix_tokens | credential_tokens:
+            invalid_last_names.append((crd, last_name))
+    if invalid_greetings:
+        problems.append(
+            f"{len(invalid_greetings):,} routes have unusable greetingName, "
+            f"e.g. {invalid_greetings[:3]}")
+    if invalid_last_names:
+        problems.append(
+            f"{len(invalid_last_names):,} routes have suffix/credential lastName, "
+            f"e.g. {invalid_last_names[:3]}")
     # A high route must retain the source and exact bounded score that justified
     # the contact build. The score is model evidence in [0, 1.18], not a
     # probability; a missing value cannot silently inherit aggregate accuracy.
@@ -2424,6 +2462,43 @@ def _approved_recipient_registry():
     if high_without_evidence:
         problems.append(
             f"{len(high_without_evidence):,} high routes lack source/matchScore evidence")
+    # A residual match is authorized only because one independently decisive
+    # identity closed a strict 2x2 block. Keep that exceptional method visible
+    # and mutually consistent in the build report, contacts and email registry.
+    residual_contacts = {
+        crd: row for crd, row in contact_rows.items()
+        if row.get("im") == "firm_location_residual_2x2_v1"}
+    residual_path = identity / "anchor_residual_matches.csv"
+    with residual_path.open("r", encoding="utf-8", newline="") as handle:
+        residual_report = {
+            str(row.get("advisor_crd") or ""): row
+            for row in csv.DictReader(handle)}
+    if set(residual_contacts) != set(residual_report):
+        problems.append(
+            "residual report and contacts disagree on promoted CRDs")
+    for crd, contact in residual_contacts.items():
+        anchors = sorted(str(value) for value in contact.get("xa", []))
+        recipient = recipients.get(crd) or {}
+        report_anchors = sorted(filter(None, str(
+            (residual_report.get(crd) or {}).get("anchor_crds") or
+            "").split("|")))
+        if (contact.get("t") != "high" or len(anchors) != 1
+                or anchors != report_anchors
+                or recipient.get("identityMethod")
+                != "firm_location_residual_2x2_v1"
+                or sorted(recipient.get("identityAnchors") or []) != anchors
+                or anchors[0] not in recipients):
+            problems.append(
+                f"residual route {crd} lacks one consistent approved anchor")
+    if ("5281870" in contact_rows
+            and str((contact_rows.get("5281870") or {}).get("e", "")).lower()
+            == "lynn.shawii@raymondjames.com"):
+        lynn = residual_contacts.get("856092") or {}
+        if (str(lynn.get("e") or "").lower()
+                != "lynn.shaw@raymondjames.com"
+                or lynn.get("xa") != ["5281870"]):
+            problems.append(
+                "Lynn Shaw 856092 is not bound to the distinct 5281870 anchor")
     # Internal colleagues may be present, but only flagged: the runtime refuses
     # them unless the address or domain is on
     # EMAIL_INTERNAL_RECIPIENT_ALLOWLIST; an unflagged internal record would

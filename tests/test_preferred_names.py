@@ -10,6 +10,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from preferred_names import build_greeting_overlays, preferred_display_name
+from roster_greetings import valid_greeting
 
 
 def source(**updates):
@@ -126,19 +127,47 @@ class PreferredNameTests(unittest.TestCase):
         self.assertEqual("Christopher Tolman",
                          preferred_display_name("Christopher Tolman", "Hi Chris"))
 
-    def test_desktop_and_field_builds_use_the_same_presentation_rule(self):
+    def test_desktop_and_field_builds_use_prepared_presentation_name(self):
         desktop = (ROOT / "webapp" / "app.js").read_text(encoding="utf-8")
         field_build = (ROOT / "src" / "build_field_tiles.py").read_text(
             encoding="utf-8")
         self.assertIn("function advisorDisplayName(", desktop)
+        self.assertIn(
+            'return (c && c.pn) || fallback || (c && c.n) || "";',
+            desktop)
         self.assertIn("name: advisorDisplayName(id, p && p.n)", desktop)
         self.assertIn("const shownName = advisorDisplayName(row[0], row[1])",
                       desktop)
         self.assertIn("out.push({ crd: String(id), name: advisorDisplayName(id)",
                       desktop)
-        self.assertIn("shown_name = preferred_display_name(formal_name",
-                      field_build)
+        self.assertIn(
+            "const label = advisorDisplayName(entry.advisorCrd, fallback)",
+            desktop)
+        self.assertIn('shown_name = c.get("pn") or formal_name', field_build)
+        self.assertIn('return contact.get("pn") or formal', field_build)
+        self.assertNotIn("preferred_display_name(", field_build)
         self.assertIn("shown_member_name(crd)", field_build)
+        contact_build = (ROOT / "src" / "build_contacts.py").read_text(
+            encoding="utf-8")
+        self.assertIn("presented and presented != canonical", contact_build)
+        self.assertIn(
+            'authoritative_domain=bool(row.get("authoritative_domain", False))',
+            contact_build)
+        self.assertNotIn("authoritative_domain=True", contact_build)
+        self.assertNotIn(
+            'entry["pih"] = roster_decision.evidence_hash', contact_build)
+
+    def test_registry_audit_rejects_unusable_merge_names(self):
+        audit = (ROOT / "src" / "audit.py").read_text(encoding="utf-8")
+        self.assertIn('row.get("greetingName")', audit)
+        self.assertIn("invalid_greetings", audit)
+        self.assertIn("if not valid_greeting(greeting)", audit)
+        self.assertIn('row.get("lastName")', audit)
+        self.assertIn("invalid_last_names", audit)
+        for real_name in ("JD", "Vi", "Ea"):
+            self.assertTrue(valid_greeting(real_name))
+        for unsafe in ("J", "III", "CFP", "Dr."):
+            self.assertFalse(valid_greeting(unsafe))
 
 
 if __name__ == "__main__":

@@ -192,10 +192,13 @@ function splitName(value) {
  */
 function mergeValues(recipient, sender) {
   const names = splitName(recipient && recipient.name);
+  const allowNameFallback = !recipient || recipient.nameFallback !== false;
   const s = sender || {};
   return {
-    first_name: String((recipient && recipient.firstName) || names.first_name || ""),
-    last_name: String((recipient && recipient.lastName) || names.last_name || ""),
+    first_name: String((recipient && recipient.firstName)
+      || (allowNameFallback ? names.first_name : "") || ""),
+    last_name: String((recipient && recipient.lastName)
+      || (allowNameFallback ? names.last_name : "") || ""),
     company_name: String((recipient && (recipient.companyName || recipient.firm)) || ""),
     sender_name: String(s.displayName || ""),
     sender_title: String(s.jobTitle || ""),

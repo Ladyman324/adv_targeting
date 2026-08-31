@@ -9,6 +9,7 @@ import json
 import math
 import os
 import pathlib
+import re
 import sys
 from collections import Counter
 
@@ -17,6 +18,7 @@ import pandas as pd
 ROOT = pathlib.Path(__file__).parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 from identity_normalize import clean_text, normalize_crd, normalize_email
+from roster_greetings import valid_greeting
 from identity_schema import (
     APPROVED_REGISTRY_FILENAME, APPROVED_REGISTRY_GZIP_FILENAME,
     IDENTITY_DIRNAME, LINKS_FILENAME, MANIFEST_FILENAME, content_hash, runtime_content_hash,
@@ -152,6 +154,7 @@ def _contacts_from_links(links: pd.DataFrame) -> dict:
             "e": normalize_email(row.get("email")),
             "n": clean_text(row.get("display_name") or row.get("legal_name")),
             "sal": clean_text(row.get("email_greeting")),
+            "ln": clean_text(row.get("act_last_name")),
             "cn": clean_text(row.get("firm")),
             "src": "CRM", "t": "confirmed", "ms": 1.0,
         }
@@ -243,9 +246,25 @@ def build_registry(links: pd.DataFrame, contacts_payload: dict | None = None,
                           (exact_act or {}).get("display_name"))
         greeting = clean_text(contact.get("sal") or
                               (exact_act or {}).get("email_greeting"))
-        last_name = clean_text((exact_act or {}).get("act_last_name"))
-        if not last_name and name:
-            last_name = name.split()[-1]
+        # A display-name tail may be a suffix or credential (Lynn Shaw II,
+        # Brad Dickens, C(k)P).  The contact build carries the resolved SEC
+        # surname explicitly; never reinterpret presentation text as identity.
+        last_name = clean_text(contact.get("ln")
+                               or (exact_act or {}).get("act_last_name"))
+        # Names are outbound merge data, not cosmetic metadata. If neither an
+        # approved ACT greeting nor the post-identity roster resolver can
+        # produce both fields, keep the person visible/callable but fail the
+        # controlled email route closed instead of splitting a dirty display
+        # name at send time.
+        last_token = re.sub(r"[^a-z]", "", last_name.casefold())
+        unsafe_last = last_token in {
+            "jr", "sr", "ii", "iii", "iv", "v", "vi", "esq",
+            "cfa", "cfp", "cpa", "cima", "chfc", "clu",
+            "mba", "phd", "ricp", "crpc", "cpwa", "planner",
+        }
+        if not valid_greeting(greeting) or not last_name or unsafe_last:
+            ineligible[crd] = "contact_presentation_not_approved"
+            continue
         recipient = {
             "eligible": True, "email": email,
             "name": name, "greetingName": greeting,
@@ -261,6 +280,11 @@ def build_registry(links: pd.DataFrame, contacts_payload: dict | None = None,
             recipient["greetingSource"] = clean_text(contact.get("ps"))
         if clean_text(contact.get("pih")):
             recipient["greetingEvidenceHash"] = clean_text(contact.get("pih"))
+        if clean_text(contact.get("im")):
+            recipient["identityMethod"] = clean_text(contact.get("im"))
+            recipient["identityAnchors"] = sorted({
+                normalize_crd(value) for value in contact.get("xa", [])
+                if normalize_crd(value)})
         if match_score is not None:
             recipient["matchScore"] = match_score
         recipients[crd] = recipient

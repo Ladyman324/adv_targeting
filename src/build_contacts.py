@@ -73,11 +73,13 @@ from nicknames import same_person
 
 from contact_normalization import normalize_act_contact
 from contact_provenance import sha256_file, validate_owner_artifact
+from display_name import display_name
 from firm_rosters import FIRMS, allowed_crds
 from identity_schema import (IDENTITY_DIRNAME, LINKS_FILENAME,
                              MANIFEST_FILENAME, content_hash)
 from identity_normalize import is_generic_email, normalize_email
-from preferred_names import load_greeting_overlays, preferred_display_name
+from preferred_names import load_greeting_overlays
+from roster_greetings import resolve_roster_greeting, valid_greeting
 from roster_firm_policy import (authoritative_families, build_domain_policy,
                                 crd_tuple)
 from web_assets import write_json_gz
@@ -119,6 +121,7 @@ W_NAME, W_FIRM, W_CITY, W_STATE = 0.45, 0.30, 0.10, 0.15
 # Kept as a finite number rather than removed, so a surname with hundreds of
 # holders still has to clear something, and so the gate stays visible.
 CONTACT_NAMESAKE_CAP = 25
+ANCHOR_RESIDUAL_REASON = "firm_location_residual_2x2_v1"
 
 # Only firms whose scrape produced NO email column, so the derived map cannot
 # see them. Each CRD was looked up in firms_scored.parquet, not recalled.
@@ -1414,6 +1417,256 @@ def score_contacts(people: pd.DataFrame, index) -> pd.DataFrame:
     return people
 
 
+def _row_text(row: pd.Series, key: str) -> str:
+    value = row.get(key, "")
+    return "" if value is None or pd.isna(value) else str(value).strip()
+
+
+def _strict_residual_context(row: pd.Series, index) -> dict | None:
+    """Strict candidate edges for the one-shot anchor residual pass.
+
+    This deliberately does not reuse the email-name fallback from the ordinary
+    scorer.  Every edge must independently agree on a substantive SEC name,
+    current firm family, city and state.  CRM rows and roster-stated CRDs stay
+    under their existing identity-ledger/direct-identifier rules.
+    """
+    source_slug = _row_text(row, "source_slug")
+    if (source_slug not in FIRMS
+            or _row_text(row, "source") in {"CRM", "EIC"}
+            or _row_text(row, "given_crd")):
+        return None
+    if not bool(row.get("authoritative_domain", False)):
+        return None
+    email = normalize_email(_row_text(row, "email"))
+    city = norm(_row_text(row, "city"))
+    state = _row_text(row, "state").upper()
+    if not email or is_generic_email(email) or not city or not state:
+        return None
+    given, last = resolve_surname(_row_text(row, "name"), index)
+    published_first = next(
+        (norm(token) for token in given if len(norm(token)) > 1), "")
+    allowed = set(crd_tuple(_row_text(row, "allowed_firm_crds"))) or {
+        _row_text(row, "firm_crd")}
+    allowed.discard("")
+    if len(published_first) < 2 or not last or not allowed:
+        return None
+
+    scores = {}
+    roster_suffix = suffix_of(_row_text(row, "name"))
+    for crd, forms, entry in index.get(last, []):
+        firms = set(entry.get("firms") or [])
+        if not (allowed & firms):
+            continue
+        name_agreement = name_score(given, forms)
+        if name_agreement < 0.8:
+            continue
+        if city not in set(entry.get("cities") or []):
+            continue
+        if state not in set(entry.get("states") or []):
+            continue
+        suffix_score = suffix_agreement(
+            roster_suffix, entry.get("suffix", ""))
+        if suffix_score < 0:
+            continue
+        total = (W_NAME * name_agreement + W_FIRM
+                 + W_CITY + W_STATE + W_SUFFIX * suffix_score)
+        if total >= ACCEPT:
+            scores[str(crd)] = round(total, 3)
+    if not scores:
+        return None
+    return {
+        "block": (tuple(sorted(allowed)), published_first, last, city, state),
+        "email": email,
+        "scores": scores,
+    }
+
+
+def apply_anchor_residual_pass(people: pd.DataFrame, index) -> pd.DataFrame:
+    """Resolve mutually unique leftovers after immutable first-pass anchors.
+
+    Duplicate official-roster witnesses collapse by personal email.  Within a
+    name/firm/city/state block, a balanced candidate component may use only
+    original high-confidence rows with a real first-pass margin as anchors.
+    Residual promotions are computed simultaneously and never become anchors
+    for another contact, so one bad inference cannot cascade through a family.
+    """
+    out = people.copy()
+    if "match_anchors" not in out:
+        out["match_anchors"] = ""
+
+    contexts = {}
+    email_blocks = collections.defaultdict(set)
+    signal_owners = collections.defaultdict(set)
+    for position, (_, row) in enumerate(out.iterrows()):
+        context = _strict_residual_context(row, index)
+        if context:
+            contexts[position] = context
+            email_blocks[context["email"]].add(context["block"])
+            profile = _row_text(row, "profile_url").casefold().rstrip("/")
+            if profile:
+                signal_owners[("profile", profile)].add(context["email"])
+            if _row_text(row, "phone_kind") in REACHES_PERSON:
+                digits = re.sub(r"\D", "", _row_text(row, "phone"))
+                if len(digits) >= 10:
+                    signal_owners[
+                        ("phone", _row_text(row, "source_slug"), digits)
+                    ].add(context["email"])
+
+    personal_signals = collections.defaultdict(set)
+    for signal, owners in signal_owners.items():
+        if len(owners) == 1:
+            personal_signals[next(iter(owners))].add(signal)
+
+    blocks = collections.defaultdict(
+        lambda: collections.defaultdict(list))
+    for position, context in contexts.items():
+        # One personal address claiming identities in different strict blocks
+        # is contradictory evidence, not a key with which to merge them.
+        if len(email_blocks[context["email"]]) == 1:
+            blocks[context["block"]][context["email"]].append(position)
+
+    promoted_entities = promoted_rows = 0
+    report = []
+    for entities in blocks.values():
+        entity_candidates = {}
+        for email, positions in entities.items():
+            # Distinct firm-issued addresses are necessary but not sufficient:
+            # require an advisor-specific profile URL or a direct number unique
+            # inside that roster source as independent evidence these are two
+            # people rather than duplicate/stale accounts.
+            if not personal_signals[email]:
+                continue
+            candidate_sets = [
+                set(contexts[position]["scores"]) for position in positions]
+            common = set.intersection(*candidate_sets) if candidate_sets else set()
+            if common:
+                entity_candidates[email] = common
+        if len(entity_candidates) < 2:
+            continue
+
+        reverse = collections.defaultdict(set)
+        for email, candidates in entity_candidates.items():
+            for crd in candidates:
+                reverse[crd].add(email)
+
+        unseen = set(entity_candidates)
+        while unseen:
+            seed = unseen.pop()
+            component_entities, component_crds = {seed}, set()
+            frontier = [seed]
+            while frontier:
+                email = frontier.pop()
+                for crd in entity_candidates[email]:
+                    if crd in component_crds:
+                        continue
+                    component_crds.add(crd)
+                    for neighbour in reverse[crd]:
+                        if neighbour not in component_entities:
+                            component_entities.add(neighbour)
+                            unseen.discard(neighbour)
+                            frontier.append(neighbour)
+
+            # A missing roster person (1:2) or an extra/unregistered person
+            # (2:1) must not manufacture certainty by elimination.
+            if (len(component_entities) != 2
+                    or len(component_entities) != len(component_crds)):
+                continue
+
+            anchors = {}
+            conflicting = False
+            for email in component_entities:
+                positions = entities[email]
+                rows = [out.iloc[position] for position in positions]
+                if not all(
+                        _row_text(row, "tier") == "high"
+                        and _row_text(row, "match_reason")
+                        == "firm_constrained_high"
+                        and float(row.get("match_gap", 0) or 0) >= MARGIN
+                        for row in rows):
+                    continue
+                assigned = {_row_text(row, "advisor_crd") for row in rows}
+                assigned.discard("")
+                if len(assigned) != 1:
+                    conflicting = True
+                    break
+                crd = next(iter(assigned))
+                if crd not in entity_candidates[email]:
+                    conflicting = True
+                    break
+                anchors[email] = crd
+            if conflicting or not anchors:
+                continue
+            anchor_crds = set(anchors.values())
+            # Two distinct personal addresses cannot both eliminate the same
+            # CRD.  Quarantine the entire component rather than choosing one.
+            if len(anchor_crds) != len(anchors):
+                continue
+
+            unresolved = component_entities - set(anchors)
+            remaining_crds = component_crds - anchor_crds
+            if not unresolved or len(unresolved) != len(remaining_crds):
+                continue
+            residuals = {
+                email: entity_candidates[email] - anchor_crds
+                for email in unresolved
+            }
+            ownership = collections.Counter(
+                crd for candidates in residuals.values()
+                for crd in candidates)
+            proposals = {
+                email: next(iter(candidates))
+                for email, candidates in residuals.items()
+                if len(candidates) == 1
+                and ownership[next(iter(candidates))] == 1
+            }
+            # All decisions use the same frozen anchor set.  An unresolved
+            # entity that remains ambiguous is not resolved by a newly
+            # promoted neighbour in this or any later pass.
+            for email, target in proposals.items():
+                positions = entities[email]
+                rows = [out.iloc[position] for position in positions]
+                if not all(
+                        _row_text(row, "tier") == "review"
+                        and _row_text(row, "match_reason")
+                        == "firm_constrained_review"
+                        for row in rows):
+                    continue
+                for position in positions:
+                    score = contexts[position]["scores"].get(target)
+                    if score is None:
+                        break
+                else:
+                    block = contexts[positions[0]]["block"]
+                    report.append({
+                        "email": email,
+                        "published_name": _row_text(rows[0], "name"),
+                        "advisor_crd": target,
+                        "anchor_crds": "|".join(sorted(anchor_crds)),
+                        "firm_crds": "|".join(block[0]),
+                        "published_first": block[1],
+                        "surname": block[2],
+                        "city": block[3],
+                        "state": block[4],
+                        "source_rows": len(positions),
+                    })
+                    for position in positions:
+                        idx = out.index[position]
+                        out.at[idx, "advisor_crd"] = target
+                        out.at[idx, "tier"] = "high"
+                        out.at[idx, "match_score"] = contexts[position][
+                            "scores"][target]
+                        out.at[idx, "match_reason"] = ANCHOR_RESIDUAL_REASON
+                        out.at[idx, "match_anchors"] = "|".join(
+                            sorted(anchor_crds))
+                        promoted_rows += 1
+                    promoted_entities += 1
+
+    out.attrs["anchor_residual_report"] = report
+    print(f"[*] anchor residual pass: {promoted_entities:,} roster identities "
+          f"({promoted_rows:,} source rows) promoted without cascading")
+    return out
+
+
 def infer_phone_kind(people: pd.DataFrame) -> pd.Series:
     """Fill in phone_kind where the source did not say.
 
@@ -1648,6 +1901,40 @@ def filed_given_names() -> dict:
     return out
 
 
+def sec_greeting_evidence() -> dict[str, dict[str, str]]:
+    """CRD-keyed SEC names used only after a contact identity is resolved."""
+    try:
+        frame = pd.read_parquet(
+            ROOT / "data" / "interim" / "advisors.parquet",
+            columns=["advisor_crd", "first_name", "middle_name",
+                     "used_first_name", "last_name", "suffix"],
+        ).fillna("")
+    except FileNotFoundError:
+        return {}
+    frame["advisor_crd"] = frame["advisor_crd"].astype(str)
+    aliases: dict[str, list[str]] = collections.defaultdict(list)
+    alias_path = ROOT / "data" / "interim" / "advisor_other_names.parquet"
+    if alias_path.exists():
+        alias_frame = pd.read_parquet(
+            alias_path, columns=["advisor_crd", "last_name"]).fillna("")
+        for alias in alias_frame.to_dict("records"):
+            crd = str(alias["advisor_crd"])
+            last = str(alias["last_name"]).strip()
+            if last and last not in aliases[crd]:
+                aliases[crd].append(last)
+    return {
+        str(row["advisor_crd"]): {
+            "first": str(row["first_name"]),
+            "middle": str(row["middle_name"]),
+            "used": str(row["used_first_name"]),
+            "last": str(row["last_name"]),
+            "suffix": str(row["suffix"]),
+            "aliases": aliases.get(str(row["advisor_crd"]), []),
+        }
+        for row in frame.drop_duplicates("advisor_crd").to_dict("records")
+    }
+
+
 def salutation_of(group: pd.DataFrame) -> str:
     """The Dear field from whichever row in this CRD's group carries one.
 
@@ -1767,6 +2054,13 @@ def load_people(limit: int | None = None) -> pd.DataFrame:
     crm = load_crm(domains)
     eic = load_eic()
     people = pd.concat([f for f in (crm, rosters, eic) if len(f)], ignore_index=True)
+    # Greeting refinement may use an email local-part only when its domain is
+    # backed by the same multi-witness roster policy used by identity matching.
+    # Carry that verdict with the row; do not reconstruct or assume it later.
+    people["authoritative_domain"] = people["email"].map(
+        lambda value: bool(
+            clean_email(value)
+            and clean_email(value).rsplit("@", 1)[1] in domains))
     # A WHITELIST. A column produced upstream and not named here is dropped
     # silently -- which is exactly what happened to team_url: the roster loader
     # populated it on 39,167 rows, the frame kept it, and this line removed it
@@ -1776,6 +2070,7 @@ def load_people(limit: int | None = None) -> pd.DataFrame:
             "phone", "phone_ext", "mobile", "city", "state",
             "office", "company", "owner", "assets", "team_key", "firm_crd",
             "allowed_firm_crds", "given_crd", "phone_kind", "source",
+            "authoritative_domain",
             "source_slug", "source_file",
             "act_id", "identity_crd", "identity_status", "identity_can_call",
             "identity_can_email", "identity_evidence_hash",
@@ -1890,6 +2185,14 @@ def main() -> None:
     people = load_people(args.limit)
     index = load_index()
     people = score_contacts(people, index)
+    people = apply_anchor_residual_pass(people, index)
+    residual_report = IDENTITY / "anchor_residual_matches.csv"
+    pd.DataFrame(people.attrs.get("anchor_residual_report", []), columns=[
+        "email", "published_name", "advisor_crd", "anchor_crds",
+        "firm_crds", "published_first", "surname", "city", "state",
+        "source_rows",
+    ]).to_csv(residual_report, index=False)
+    print(f"[*] anchor residual report: {residual_report}")
     act_path = newest_act_pull()
     preferred_overlays = (
         load_greeting_overlays(IDENTITY, act_path) if act_path else {})
@@ -1920,6 +2223,13 @@ def main() -> None:
 
     usable = people[(people["tier"].isin(["confirmed", "high", "review"]))
                     & (people["advisor_crd"] != "")].copy()
+    sec_names = sec_greeting_evidence()
+    authorized_email_crds: dict[str, set[str]] = collections.defaultdict(set)
+    for candidate in usable[usable["tier"].isin(["confirmed", "high"])].itertuples():
+        candidate_email = normalize_email(getattr(candidate, "email", ""))
+        if candidate_email and not is_generic_email(candidate_email):
+            authorized_email_crds[candidate_email].add(
+                str(getattr(candidate, "advisor_crd", "")))
     contacts = {}
     overlays_applied = 0
     member_state: dict = {}
@@ -1961,6 +2271,9 @@ def main() -> None:
             "t": row["tier"],
             "ms": float(row["match_score"]),
         }
+        if str(row.get("match_reason", "")) == ANCHOR_RESIDUAL_REASON:
+            entry["im"] = ANCHOR_RESIDUAL_REASON
+            entry["xa"] = list(crd_tuple(row.get("match_anchors", "")))
         if row["tier"] == "confirmed" and str(row.get("act_id", "") or ""):
             entry["aid"] = str(row["act_id"])
             entry["ih"] = str(row.get("identity_evidence_hash", "") or "")
@@ -1991,6 +2304,11 @@ def main() -> None:
         # almost certainly right and is refused, because nothing distinguishes
         # it from Deborah except knowing the person.
         sal = salutation_of(group)
+        if sal and not valid_greeting(sal):
+            # Identity approval does not make a legacy ACT value speakable.
+            # Values such as "(III)", "J" and "CFP" fall through to the
+            # already-resolved SEC/roster presentation rule below.
+            sal = ""
         overlay = preferred_overlays.get(str(crd))
         if (not sal and overlay
                 and str(row["tier"]) in {"confirmed", "high"}
@@ -2000,15 +2318,52 @@ def main() -> None:
             entry["ps"] = overlay["source"]
             entry["pih"] = overlay["evidenceHash"]
             overlays_applied += 1
+        sec = sec_names.get(str(crd), {})
+        roster_decision = None
+        if str(row["tier"]) in {"confirmed", "high"} and sec:
+            normalized_email = normalize_email(entry["e"])
+            roster_decision = resolve_roster_greeting(
+                roster_name=entry["n"],
+                email=normalized_email,
+                sec_first=sec.get("first", ""),
+                sec_middle=sec.get("middle", ""),
+                sec_used=sec.get("used", ""),
+                sec_last=sec.get("last", ""),
+                email_unique=(
+                    authorized_email_crds.get(normalized_email, set()) == {str(crd)}
+                ),
+                authoritative_domain=bool(row.get("authoritative_domain", False)),
+                sec_aliases=tuple(sec.get("aliases", [])),
+                approved_greeting=sal,
+            )
+            if roster_decision.last_name:
+                entry["ln"] = roster_decision.last_name
+            if not sal and roster_decision.greeting:
+                sal = roster_decision.greeting
+                entry["ps"] = roster_decision.reason
         if sal:
             # load_crm exposes only the ledger's email_greeting. That value is
             # either a deterministic SEC/strict-nickname fallback or a
             # hash-bound reviewed preference such as Bo. Re-running the old
             # nickname gate here would erase exactly those reviewed exceptions.
             entry["sal"] = sal
-            presented = preferred_display_name(entry["n"], sal)
-            if presented != entry["n"]:
+            presented = (roster_decision.presentation_name
+                         if roster_decision else entry["n"])
+            canonical = (display_name(
+                sec.get("first", ""), sec.get("last", ""),
+                sec.get("used", ""), sec.get("middle", ""))
+                if sec else entry["n"])
+            if presented and presented != canonical:
                 entry["pn"] = presented
+        elif roster_decision and roster_decision.last_name and sec:
+            # Even when no safe spoken greeting can be derived, do not leave a
+            # credential or suffix in the registry's name-parser path.
+            canonical = display_name(
+                sec.get("first", ""), sec.get("last", ""),
+                sec.get("used", ""), sec.get("middle", ""))
+            if (roster_decision.presentation_name
+                    and roster_decision.presentation_name != canonical):
+                entry["pn"] = roster_decision.presentation_name
         cs = str(row.get("state", "") or "").strip().upper()[:2]
         if cs:
             entry["cs"] = cs

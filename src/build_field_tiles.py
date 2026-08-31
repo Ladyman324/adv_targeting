@@ -56,7 +56,6 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
 import pandas as pd
 
-from preferred_names import preferred_display_name
 from web_assets import write_json_gz
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -193,7 +192,7 @@ def main() -> None:
         if not money and c.get("tm") in teams:
             money = float(teams[c["tm"]].get("a", 0) or 0)
         formal_name = str(index_names.get(str(crd)) or c.get("n", ""))
-        shown_name = preferred_display_name(formal_name, c.get("sal", ""))
+        shown_name = c.get("pn") or formal_name
         buckets[cell_of(lat, lon)].append([
             crd,
             # THE DESKTOP'S NAME, not the contact record's.
@@ -300,7 +299,7 @@ def main() -> None:
     def shown_member_name(crd):
         contact = advisors.get(str(crd), {})
         formal = index_names.get(str(crd)) or contact.get("n", "")
-        return preferred_display_name(formal, contact.get("sal", ""))
+        return contact.get("pn") or formal
 
     for key, rec in practices.items():
         entry = {"n": rec.get("n", ""),

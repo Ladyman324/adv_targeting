@@ -109,3 +109,23 @@ test("an identity correction blocks individually edited stale wording", () => {
   assert.equal(refresh.blocked, true);
   assert.deepEqual(refresh.patch, {});
 });
+
+test("an advisor greeting never falls back to splitting a dirty display name", () => {
+  const refresh = identityPresentationRefresh({
+    recipientName: "Old Person", greetingName: "Old",
+    recipientLastName: "Person", companyName: "Old Firm",
+    subjectOverridden: false, bodyOverridden: false,
+  }, {
+    name: "Mr Christopher Engle, CFP", greetingName: "",
+    lastName: "Engle", firm: "LPL Financial",
+  }, {
+    commonSubject: "Hello {{first_name}}",
+    commonBodyText: "Hi {{first_name}},",
+  }, null, []);
+  assert.equal(refresh.patch.greetingName, "");
+  assert.equal(refresh.patch.recipientLastName, "Engle");
+  assert.doesNotMatch(refresh.patch.subject, /Mr|Christopher|CFP/);
+  const src = require("fs").readFileSync(
+    require.resolve("../shared/email-service.js"), "utf8");
+  assert.doesNotMatch(src, /approved\.greetingName\s*\|\|\s*split\.first/);
+});

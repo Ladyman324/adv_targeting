@@ -107,9 +107,11 @@ class RegistryTests(unittest.TestCase):
     def test_confirmed_and_high_are_authorized_but_review_is_blocked(self):
         contacts = {"advisors": {
             "900": {"e": "roster@example.com", "n": "Roster Person",
+                    "sal": "Roster", "ln": "Person",
                     "cn": "Roster Firm", "src": "UBS", "t": "high",
                     "ms": 0.82},
             "901": {"e": "direct@example.com", "n": "Direct Person",
+                    "sal": "Direct", "ln": "Person",
                     "cn": "Roster Firm", "src": "Cetera",
                     "t": "confirmed", "ms": 1.0},
             "902": {"e": "review@example.com", "n": "Review Person",
@@ -130,6 +132,21 @@ class RegistryTests(unittest.TestCase):
                          payload["ineligible"]["902"])
         self.assertEqual("high_match_evidence_missing",
                          payload["ineligible"]["903"])
+
+    def test_anchor_residual_provenance_survives_registry_export(self):
+        contacts = {"advisors": {"856092": {
+            "e": "lynn.shaw@raymondjames.com", "n": "Lynn Shaw",
+            "sal": "Lynn", "ln": "Shaw", "cn": "Raymond James",
+            "src": "Raymond James", "t": "high", "ms": 1.0,
+            "im": "firm_location_residual_2x2_v1", "xa": ["5281870"],
+        }}, "teams": {}, "practices": {}}
+        payload = build_registry(pd.DataFrame(columns=[
+            "advisor_crd", "identity_status", "can_email", "email"]),
+            contacts)
+        recipient = payload["recipients"]["856092"]
+        self.assertEqual("firm_location_residual_2x2_v1",
+                         recipient["identityMethod"])
+        self.assertEqual(["5281870"], recipient["identityAnchors"])
 
     def test_match_score_is_bounded_model_evidence_not_probability(self):
         self.assertEqual(0.72, bounded_match_score("0.72"))
@@ -154,6 +171,7 @@ class RegistryTests(unittest.TestCase):
     def test_direct_crd_roster_contact_remains_eligible(self):
         contacts = {"advisors": {"901": {
             "e": "direct@example.com", "n": "Direct Person",
+            "sal": "Direct", "ln": "Person",
             "cn": "Roster Firm", "src": "Cetera", "t": "confirmed",
         }}, "teams": {}, "practices": {}}
         payload = build_registry(pd.DataFrame(columns=[
@@ -167,6 +185,7 @@ class RegistryTests(unittest.TestCase):
         contacts = {"advisors": {"901": {
             "e": "c.tolman@ubs.com", "n": "Christopher Tolman",
             "pn": "Christopher (Chris) Tolman", "sal": "Chris",
+            "ln": "Tolman",
             "ps": "act_primary_email_overlay_v1", "pih": "evidence-hash",
             "cn": "UBS", "src": "UBS", "t": "high", "ms": 1.0,
         }}, "teams": {}, "practices": {}}
@@ -176,14 +195,56 @@ class RegistryTests(unittest.TestCase):
         recipient = payload["recipients"]["901"]
         self.assertEqual("Christopher (Chris) Tolman", recipient["name"])
         self.assertEqual("Chris", recipient["greetingName"])
+        self.assertEqual("Tolman", recipient["lastName"])
         self.assertEqual("act_primary_email_overlay_v1",
                          recipient["greetingSource"])
         self.assertEqual("evidence-hash", recipient["greetingEvidenceHash"])
         self.assertEqual("", recipient["actContactId"])
 
+    def test_structured_surname_never_becomes_a_suffix_or_credential(self):
+        contacts = {"advisors": {"5281870": {
+            "e": "lynn.shawii@raymondjames.com", "n": "Lynn Shaw II",
+            "pn": "Lynn Shaw II", "sal": "Lynn", "ln": "Shaw",
+            "ps": "roster_published_first_v1", "pih": "evidence-hash",
+            "cn": "Raymond James", "src": "Raymond James",
+            "t": "high", "ms": 1.18,
+        }}, "teams": {}, "practices": {}}
+        payload = build_registry(pd.DataFrame(columns=[
+            "advisor_crd", "identity_status", "can_email", "email"]),
+            contacts)
+        recipient = payload["recipients"]["5281870"]
+        self.assertEqual("Lynn", recipient["greetingName"])
+        self.assertEqual("Shaw", recipient["lastName"])
+        self.assertNotEqual("II", recipient["lastName"])
+
+    def test_route_without_approved_merge_names_fails_closed(self):
+        contacts = {"advisors": {"901": {
+            "e": "j.person@example.com", "n": "J. Person",
+            "cn": "Example", "src": "Example", "t": "high", "ms": 1.0,
+        }}, "teams": {}, "practices": {}}
+        payload = build_registry(pd.DataFrame(columns=[
+            "advisor_crd", "identity_status", "can_email", "email"]),
+            contacts)
+        self.assertNotIn("901", payload["recipients"])
+        self.assertEqual("contact_presentation_not_approved",
+                         payload["ineligible"]["901"])
+
+    def test_unusable_legacy_act_merge_names_fail_closed(self):
+        contacts = {"advisors": {"901": {
+            "e": "j.person@example.com", "n": "J. Person",
+            "sal": "(III)", "ln": "CFP", "cn": "Example",
+            "src": "Example", "t": "high", "ms": 1.0,
+        }}, "teams": {}, "practices": {}}
+        payload = build_registry(pd.DataFrame(columns=[
+            "advisor_crd", "identity_status", "can_email", "email"]),
+            contacts)
+        self.assertEqual("contact_presentation_not_approved",
+                         payload["ineligible"]["901"])
+
     def test_roster_route_requires_current_sec_firm_family_in_production(self):
         contacts = {"advisors": {"901": {
             "e": "person@ubs.com", "n": "Person", "cn": "UBS",
+            "sal": "Person", "ln": "Person",
             "src": "UBS", "t": "high", "ms": 0.9, "rf": ["8174"],
         }}, "teams": {}, "practices": {}}
         links = pd.DataFrame(columns=[

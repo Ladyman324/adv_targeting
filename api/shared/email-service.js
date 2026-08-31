@@ -215,9 +215,9 @@ async function canonicalRecipient(raw, connection) {
   }
   const approved = await recipientRegistry.resolve(crd);
   const mates = await recipientRegistry.allowedTeammates(crd);
-  const split = core.splitName(approved.name);
   return { contactId: crd, name: approved.name, email: approved.email, firm: approved.firm,
-    firstName: approved.greetingName || split.first, lastName: approved.lastName || split.last,
+    firstName: approved.greetingName, lastName: approved.lastName,
+    nameFallback: false,
     teammates: mates.map((m) => m.email),
     teammatesFull: mates.map((m) => ({ crd: m.crd, name: m.name, email: m.email })),
     registryHash: approved.registryHash, routingHash: approved.routingHash,
@@ -347,11 +347,10 @@ async function validateMessage(message, duplicateEmails, cfg, currentDocsById, c
 }
 
 function identityPresentationRefresh(message, approved, batch, sender, images) {
-  const split = core.splitName(approved.name);
   const presentation = {
     recipientName: approved.name,
-    greetingName: approved.greetingName || split.first,
-    recipientLastName: approved.lastName || split.last,
+    greetingName: approved.greetingName,
+    recipientLastName: approved.lastName,
     companyName: approved.firm,
   };
   const changed = Object.entries(presentation)
@@ -364,6 +363,7 @@ function identityPresentationRefresh(message, approved, batch, sender, images) {
     firstName: presentation.greetingName,
     lastName: presentation.recipientLastName,
     firm: presentation.companyName,
+    nameFallback: false,
   };
   const subject = core.renderTemplate(batch.commonSubject, recipient, sender).rendered;
   const bodyText = core.renderTemplate(batch.commonBodyText, recipient, sender).rendered;
@@ -615,7 +615,6 @@ async function createFollowUp(who, input, deps = {}) {
 
   for (let i = 0; i < verifiedRemaining.length; i++) {
     const { row: r, approved } = verifiedRemaining[i];
-    const split = core.splitName(approved.name);
     // "RE:" and the threading both come from Graph's createReply in the worker.
     // The subject here is what the REVIEW SCREEN shows, so it has to read the
     // way the advisor will see it.
@@ -623,8 +622,8 @@ async function createFollowUp(who, input, deps = {}) {
     await st.createMessage(who.id, batchId, { id: st.id(), ordinal: i,
       contactId: r.crd, recipientName: approved.name, recipientEmail: approved.email,
       companyName: approved.firm,
-      greetingName: approved.greetingName || split.first,
-      recipientLastName: approved.lastName || split.last,
+      greetingName: approved.greetingName,
+      recipientLastName: approved.lastName,
       recipientRegistryHash: approved.registryHash,
       recipientRoutingHash: approved.routingHash,
       teammateCcJson: "[]", teammateCcCrdsJson: "[]",
@@ -889,7 +888,7 @@ ${bodyTemplate}`.matchAll(core.IMAGE_TOKEN)) {
   const behind = [];
   for (const m of await store.listMessages(who.id, batch.id)) {
     const recipient = { name: m.recipientName, firstName: m.greetingName,
-      lastName: m.recipientLastName, firm: m.companyName };
+      lastName: m.recipientLastName, firm: m.companyName, nameFallback: false };
     /* `overwriteAll` replaces individually edited messages too.
      *
      * Normally an override is sacred -- a rep wrote those words on purpose and
@@ -943,7 +942,8 @@ async function updateMessage(who, input) {
   if ("bodyText" in input) { patch.bodyText = String(input.bodyText || "").slice(0, core.config().maxBodyChars);
     patch.bodyHtml = core.plainTextToSafeHtml(patch.bodyText, tplImages); patch.bodyOverridden = true; }
   const mergeRecipient = { name: message.recipientName, firstName: message.greetingName,
-    lastName: message.recipientLastName, firm: message.companyName };
+    lastName: message.recipientLastName, firm: message.companyName,
+    nameFallback: false };
   if (input.resetSubject) { patch.subject = core.renderTemplate(batch.commonSubject, mergeRecipient, sender).rendered; patch.subjectOverridden = false; }
   if (input.resetBody) { patch.bodyText = core.renderTemplate(batch.commonBodyText, mergeRecipient, sender).rendered;
     patch.bodyHtml = core.plainTextToSafeHtml(patch.bodyText, tplImages); patch.bodyOverridden = false; }

@@ -39,7 +39,7 @@ const COMPARE = ["#12b39c", "#e0a53a", "#8079e0", "#e8615d", "#4aa3e0", "#9fc93c
 // of every deployed JSON path and byte. It changes for standalone shard
 // rebuilds too, and its leading date keeps the stale-build warning readable.
 // Do not edit it by hand.
-const DATA_VERSION = "20260830T123258Z-21ddbb8031c2bde3";
+const DATA_VERSION = "20260830T123258Z-ca4fdfc91d633455";
 const dataUrl = file => `data/${file}?v=${DATA_VERSION}`;
 Dial.setContactRouteVersion(DATA_VERSION);
 // ONE scale for every mark on the map. There used to be two, and they were not
@@ -957,13 +957,9 @@ function preferredDisplayName(formalName, preferredFirst){
 
 function advisorDisplayName(advisorId, fallback=""){
   const c = contactFor(advisorId);
-  const formal = fallback || (c && c.n) || "";
-  // Preserve the map/search/field view's canonical formal name when supplied;
-  // contacts.json contributes a preference only when the producer explicitly
-  // emitted a preferred presentation. This prevents Chris (Christopher).
-  const preferred = c && c.pn ? c.sal : "";
-  return preferredDisplayName(formal, preferred || "")
-    || (c && c.pn) || formal;
+  // The contacts build validates and formats this once. Consumers must not
+  // recompute it against a different map/search fallback.
+  return (c && c.pn) || fallback || (c && c.n) || "";
 }
 
 // ---- EIC's book, split by product ----
@@ -3230,7 +3226,8 @@ function queueActionHtml(action, entry, label){
 function queueRowHtml(entry){
   const when = entry.lastReplyAt || entry.lastActivityAt;
   const name = advisorRow(entry.advisorCrd);
-  const label = name && name[1] ? name[1] : (entry.advisorEmail || entry.advisorCrd);
+  const fallback = name && name[1] ? name[1] : (entry.advisorEmail || entry.advisorCrd);
+  const label = advisorDisplayName(entry.advisorCrd, fallback) || fallback;
   return `<li class="wq-row" data-wq-crd="${esc(entry.advisorCrd)}">
       <button type="button" class="wq-name" data-wq-action="open"
         data-wq-crd="${esc(entry.advisorCrd)}" aria-label="Open ${esc(label)}">${esc(label)}</button>
