@@ -401,7 +401,8 @@ cp -R "$API/test/." "$TEST_API/test/"
 # UI contract tests inspect both clients. Keep the isolated test workspace
 # explicit so a missing production dependency fails here, before packaging.
 cp "$ROOT/webapp/app.js" "$ROOT/webapp/dial.js" "$ROOT/webapp/email.js" \
-  "$ROOT/webapp/email.css" "$ROOT/webapp/field.js" "$TEST_ROOT/webapp/"
+  "$ROOT/webapp/email.css" "$ROOT/webapp/field.js" "$ROOT/webapp/field.html" \
+  "$TEST_ROOT/webapp/"
 API_PACKAGE_SOURCE_ROOT="$ROOT" NODE_PATH="$API/node_modules" \
   run_api_tests "$TEST_API" "$EXPECTED_API_TEST_FILE_COUNT"
 diff -r -q --exclude=test "$STAGE_DIR" "$TEST_API" >/dev/null \
