@@ -923,8 +923,8 @@ body{
   background:none; border:0; color:inherit; font:inherit; min-height:var(--tap)}
 .work-main b{display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
 .work-why{display:block; margin-top:2px; font-size:11.5px; color:var(--muted)}
-/* A reply outranks everything, so it is the only one that gets the accent.
-   Colouring all five would make none of them mean anything. */
+/* Keep reasons quiet: the action button, not a rainbow of severity colours,
+   should pull the rep's eye. */
 .work-reply_new,.work-reply_followup{color:var(--accent)}
 .work-acts{display:flex; gap:6px; align-items:center; justify-content:flex-end;
   flex:none; flex-wrap:wrap; max-width:58%}

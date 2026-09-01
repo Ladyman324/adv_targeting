@@ -574,12 +574,14 @@ async function followUpCandidates(who, batchId, deps = {}) {
   if (!batch) throw httpError(404, "Email batch not found.");
   if (batch.parentBatchId)
     throw httpError(409, "This batch is already a follow-up. Follow up on the original instead.", "already_follow_up");
+  if (batch.status !== "completed" || batch.mode !== "send")
+    throw httpError(409, "Follow-up is available after the original batch has finished sending.", "batch_not_completed");
 
   const messages = await st.listMessages(who.id, batchId);
   const sent = messages.filter((m) => ["sent", "submitted"].includes(m.state));
   const notSent = messages.length - sent.length;
 
-  const replied = [], bounced = [], pending = [];
+  const replied = [], bounced = [], unthreadable = [], pending = [];
   for (const m of sent) {
     if (m.bounceKind === "hard") { bounced.push(m); continue; }
     // A reply is an INBOUND row on the conversation this message started.
@@ -598,7 +600,9 @@ async function followUpCandidates(who, batchId, deps = {}) {
         && ((m.graphConversationId && String(a.conversationId || "") === m.graphConversationId)
             || String(a.batchId || "") === batchId));
     }
-    (answered ? replied : pending).push(m);
+    if (answered) replied.push(m);
+    else if (!m.graphMessageId) unthreadable.push(m);
+    else pending.push(m);
   }
 
   // Opt-outs since the send. Checked by address AND contact id, as everywhere.
@@ -616,9 +620,11 @@ async function followUpCandidates(who, batchId, deps = {}) {
     batchId, batchName: batch.name || "", followUpDays: batch.followUpDays || 0,
     followUpSentUtc: batch.followUpSentUtc || "",
     counts: { sent: sent.length, replied: replied.length, bounced: bounced.length,
-              suppressed: suppressed.length, notSent, remaining: remaining.length },
+              suppressed: suppressed.length, unthreadable: unthreadable.length,
+              notSent, remaining: remaining.length },
     replied: replied.map(brief), bounced: bounced.map(brief),
-    suppressed: suppressed.map(brief), remaining: remaining.map(brief),
+    suppressed: suppressed.map(brief), unthreadable: unthreadable.map(brief),
+    remaining: remaining.map(brief),
   };
 }
 
@@ -648,12 +654,29 @@ async function createFollowUp(who, input, deps = {}) {
   const emailAuth = deps.auth || auth;
   const cfg = core.config();
   const parentId = String(input.batchId || "").trim();
-  const parent = await st.getBatch(who.id, parentId);
+  let parent = await st.getBatch(who.id, parentId);
   if (!parent) throw httpError(404, "Email batch not found.");
   // One follow-up per campaign. Without this, running it twice puts a THIRD
   // touch on people who have now had two and answered neither.
-  if (parent.followUpSentUtc)
-    throw httpError(409, "A follow-up has already been created for this batch.", "follow_up_exists");
+  if (parent.followUpSentUtc) {
+    const claimedAt = Date.parse(String(parent.followUpSentUtc || ""));
+    const stale = Number.isFinite(claimedAt) && Date.now() - claimedAt > 15 * 60 * 1000;
+    const claimedChild = parent.followUpBatchId
+      ? await st.getBatch(who.id, parent.followUpBatchId) : null;
+    if (stale && parent.followUpBatchId
+        && (!claimedChild || claimedChild.status === "building")) {
+      // Recovery for a Function host stopping between the parent claim and the
+      // final child transition. Only a stale, never-sendable `building` child
+      // is retired; an editing/sent child is evidence of a real follow-up.
+      if (claimedChild) await st.patchBatch(who.id, claimedChild.id, {
+        status: "canceled", canceledUtc: new Date().toISOString(),
+        warningMessage: "Incomplete follow-up preparation was retired." }, claimedChild.etag);
+      parent = await st.patchBatch(who.id, parentId,
+        { followUpSentUtc: "", followUpBatchId: "" }, parent.etag);
+    } else {
+      throw httpError(409, "A follow-up has already been created for this batch.", "follow_up_exists");
+    }
+  }
 
   const connection = await emailAuth.status(who.id);
   if (!connection.connected || !connection.profile)
@@ -682,7 +705,23 @@ async function createFollowUp(who, input, deps = {}) {
     `${unavailableDocuments[0].name || "An attachment"} is not current approved material.`, "attachment_unavailable");
 
   const batchId = st.id();
-  await st.createBatch(who, { id: batchId, status: "editing",
+  const claimedUtc = new Date().toISOString();
+  let claimedParent;
+  try {
+    // Claim the parent BEFORE exposing a sendable child.  The ETag makes two
+    // tabs racing to prepare a follow-up choose one winner instead of creating
+    // two campaigns.  Unlike the previous best-effort write, failure is never
+    // swallowed: duplicate follow-ups are a recipient-safety issue.
+    claimedParent = await st.patchBatch(who.id, parentId,
+      { followUpSentUtc: claimedUtc, followUpBatchId: batchId }, parent.etag);
+  } catch (err) {
+    if ([409, 412].includes(Number(err && err.statusCode)))
+      throw httpError(409, "A follow-up was already prepared in another tab. Open Email activity to review it.", "follow_up_exists");
+    throw err;
+  }
+
+  try {
+  await st.createBatch(who, { id: batchId, status: "building",
     name: `Follow-up \u2014 ${parent.name || "campaign"}`,
     templateId: parent.templateId, templateName: parent.templateName,
     commonSubject: "", commonBodyText: note, commonRevision: 1,
@@ -732,14 +771,22 @@ async function createFollowUp(who, input, deps = {}) {
         warnings: [] } });
   }
 
-  await st.patchBatch(who.id, parentId, { followUpSentUtc: new Date().toISOString() },
-    parent.etag).catch(() => {});
+  await st.patchBatch(who.id, batchId, { status: "editing" });
+  } catch (err) {
+    // A partially-built child must never be approvable. Release only the claim
+    // made by this request (using its ETag), so a later retry can start cleanly.
+    await st.patchBatch(who.id, batchId, { status: "canceled", canceledUtc: new Date().toISOString(),
+      warningMessage: "Follow-up preparation did not complete." }).catch(() => {});
+    await st.patchBatch(who.id, parentId, { followUpSentUtc: "", followUpBatchId: "" },
+      claimedParent && claimedParent.etag).catch(() => {});
+    throw err;
+  }
   await st.audit(who.id, batchId, "follow_up_created",
     { parentBatchId: parentId, recipients: fresh.remaining.length,
       replied: fresh.counts.replied, bounced: fresh.counts.bounced,
       suppressed: fresh.counts.suppressed, attachments: documents.length,
       recipientIdentity: recipientEvidenceSummary(verifiedRemaining.map(({ approved }) => approved)) });
-  return getBatchDetail(who, batchId);
+  return getBatchDetail(who, batchId, { store: st });
 }
 
 async function createBatch(who, input) {
@@ -877,6 +924,8 @@ async function createBatch(who, input) {
     copyInternal: String(prefs.copyInternal || ""),
     copyInternalTo: String(prefs.copyInternalTo || ""),
     senderMail: String(profile.mail || profile.userPrincipalName || ""),
+    followUpDays: [0, 3, 7, 14].includes(Number(input.followUpDays))
+      ? Number(input.followUpDays) : 0,
     recipientRegistryHash: (kept.find((r) => r.registryHash) || {}).registryHash || "" });
   for (let i = 0; i < kept.length; i++) {
     const r = kept[i], subject = core.renderTemplate(template.subject, r, profile),
@@ -1448,10 +1497,11 @@ async function preflightScheduled(userId, batchId, revision, deps = {}) {
     throw error;
   }
 }
-async function getBatchDetail(who, batchId) {
-  const batch = await store.getBatch(who.id, batchId);
+async function getBatchDetail(who, batchId, deps = {}) {
+  const st = deps.store || store;
+  const batch = await st.getBatch(who.id, batchId);
   if (!batch) throw httpError(404, "Email batch not found.");
-  const messages = await store.listMessages(who.id, batchId), counts = {};
+  const messages = await st.listMessages(who.id, batchId), counts = {};
   for (const m of messages) counts[m.state] = (counts[m.state] || 0) + 1;
   /* The envelope, on EVERY read of a batch -- not only after a review pass.
    *

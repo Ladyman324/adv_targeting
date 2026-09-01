@@ -1570,6 +1570,7 @@ body.scope-pending #map{cursor:progress}
 .wq-name{font:inherit; font-weight:600; text-align:left; padding:0; cursor:pointer;
   background:none; border:0; color:inherit; text-decoration:underline;
   text-decoration-color:var(--hair); text-underline-offset:3px}
+.wq-batch .wq-name{cursor:default; text-decoration:none}
 .wq-when{color:var(--muted); white-space:nowrap}
 /* The reason is the whole point of the row, so it is legible before the name.
    A reply outranks everything and is coloured accordingly; the rest read as

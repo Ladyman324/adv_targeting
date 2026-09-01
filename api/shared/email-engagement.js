@@ -20,14 +20,13 @@
  * Not volume. "117 emails sent this week" is the number that makes a dashboard
  * look busy and makes a rep behave worse -- it rewards sending, which is the
  * behaviour the 25/day limits already exist to restrain. The queue is built
- * from things that indicate a RELATIONSHIP moved: somebody replied, somebody
- * has gone quiet, a follow-up is due.
+ * from explicit commitments and operational exceptions. Ordinary replies stay
+ * in Outlook and on the advisor timeline; promoting each one here duplicates
+ * the inbox and turns useful notices into noise.
  *
- * A REPLY IS WORK, NOT A TROPHY
- * -----------------------------
- * A reply enters the queue as `new` and leaves when a rep has dealt with it.
- * Without that, six months in, a rep has a list of eight hundred people who
- * once replied and no way to see the five that need them today.
+ * Reply state is still projected because it drives campaign follow-up
+ * exclusions and the relationship timeline. It simply is not, by itself, a
+ * notification.
  */
 
 const store = require("./email-store");
@@ -38,15 +37,13 @@ const store = require("./email-store");
 const REPLY_STATES = ["none", "new", "reviewed", "follow_up", "scheduled", "done"];
 const stateIndex = (value) => Math.max(0, REPLY_STATES.indexOf(String(value || "none")));
 
-/* Why somebody is in the queue, most urgent first. The ORDER is the product
- * decision: a person who answered us outranks a person we have merely not
- * spoken to in a while, every time. */
+/* What is allowed to become an in-app notification, most urgent first. */
 const REASONS = [
-  { key: "reply_new",     label: "Replied — needs attention" },
+  { key: "batch_held",    label: "Email batch held — review required" },
+  { key: "batch_followup_due", label: "Campaign follow-up due" },
   { key: "reply_followup", label: "Follow-up needed" },
   { key: "due",           label: "Follow-up due" },
   { key: "bounced",       label: "Email bounced — address needs fixing" },
-  { key: "quiet_warm",    label: "Warm, no contact in a while" },
 ];
 const REASON_RANK = new Map(REASONS.map((r, i) => [r.key, i]));
 
@@ -56,11 +53,11 @@ const REASON_RANK = new Map(REASONS.map((r, i) => [r.key, i]));
  * resolve a time-derived due/quiet row, and a bounced address must not offer a
  * follow-up that suppression will refuse. */
 const ACTIONS_BY_REASON = Object.freeze({
-  reply_new: ["mark_reviewed", "snooze"],
+  batch_held: ["open_batch"],
+  batch_followup_due: ["review_follow_up"],
   reply_followup: ["follow_up", "done", "snooze"],
   due: ["follow_up", "snooze"],
   bounced: ["dismiss_bounce", "snooze"],
-  quiet_warm: ["follow_up", "snooze"],
 });
 
 const DAY = 24 * 3600 * 1000;
@@ -332,15 +329,63 @@ async function refreshDirty(marker, deps = {}) {
   return { projection, acknowledged };
 }
 
-/* The queue: who this rep should work now, and why. */
+async function batchAttention(userId, deps = {}) {
+  const st = deps.store || store;
+  const now = deps.now || Date.now();
+  if (typeof st.listBatches !== "function") return [];
+  const batches = await st.listBatches(userId, 200, true);
+  const out = [];
+
+  for (const batch of batches) {
+    const status = String(batch.status || "");
+    if (["held", "needs_review", "schedule_held", "action_required"].includes(status)) {
+      out.push({ kind: "batch", batchId: batch.id, batchName: batch.name || "Email batch",
+        reason: "batch_held", reasonLabel: status === "action_required"
+          ? "Email batch stopped — reconnect required" : "Email batch held — review required",
+        actions: [...ACTIONS_BY_REASON.batch_held],
+        lastActivityAt: batch.scheduleHeldUtc || batch.updatedUtc || batch.createdUtc || "" });
+      continue;
+    }
+
+    const days = Number(batch.followUpDays) || 0;
+    if (status !== "completed" || batch.mode !== "send" || batch.parentBatchId
+        || batch.followUpSentUtc || days < 1) continue;
+
+    let messages;
+    try { messages = await st.listMessages(userId, batch.id); } catch (_) { continue; }
+    const sentTimes = messages
+      .filter((message) => ["sent", "submitted"].includes(String(message.state || "")))
+      .map((message) => Date.parse(String(message.submittedUtc || "")))
+      .filter(Number.isFinite);
+    if (!sentTimes.length) continue;
+    // A multi-day campaign becomes due after its LAST delivery, not its first.
+    // Otherwise the reminder can appear while the tail of the original batch
+    // is still reaching advisors.
+    const dueMs = Math.max(...sentTimes) + days * DAY;
+    if (dueMs > now) continue;
+    out.push({ kind: "batch", batchId: batch.id, batchName: batch.name || "Email batch",
+      reason: "batch_followup_due", reasonLabel: "Campaign follow-up due",
+      actions: [...ACTIONS_BY_REASON.batch_followup_due],
+      dueAt: new Date(dueMs).toISOString(), lastActivityAt: new Date(dueMs).toISOString() });
+  }
+  return out;
+}
+
+/* The attention queue: explicit follow-ups, delivery problems and campaign
+ * commitments. Ordinary replies and automatically inferred quiet contacts are
+ * intentionally absent; Outlook and relationship filters own those jobs. */
 async function queue(userId, deps = {}) {
   const st = deps.store || store;
   const now = deps.now || Date.now();
   const rows = await st.listEngagement(userId);
   const out = [];
   for (const row of rows) {
-    const why = reason(row, now);
-    if (!why) continue;
+    let why = reason(row, now);
+    // Snooze is an explicit promise to revisit.  Once its date arrives it is a
+    // due follow-up even if the underlying reply remains unread in Outlook.
+    if (why === "reply_new" && row.nextActionAt
+        && new Date(row.nextActionAt).getTime() <= now) why = "due";
+    if (!why || ["reply_new", "quiet_warm"].includes(why)) continue;
     out.push({
       advisorCrd: row.advisorCrd || row.rowKey,
       advisorEmail: row.advisorEmail || "",
@@ -354,6 +399,7 @@ async function queue(userId, deps = {}) {
       nextActionAt: row.nextActionAt || "",
     });
   }
+  out.push(...await batchAttention(userId, { ...deps, store: st, now }));
   out.sort((a, b) => rank(a, now) - rank(b, now));
 
   const counts = {};
@@ -483,5 +529,5 @@ async function completeOutbound(userId, advisorCrd, deps = {}) {
 }
 
 module.exports = { fold, reason, rank, refresh, refreshDirty, rebuild, queue, activitySummary, setReplyState,
-                   snooze, dismissBounce, completeOutbound,
+                   snooze, dismissBounce, completeOutbound, batchAttention,
                    REPLY_STATES, REASONS, ACTIONS_BY_REASON, stateIndex };

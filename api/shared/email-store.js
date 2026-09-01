@@ -161,6 +161,7 @@ function batchFromEntity(e) {
     followUpDays: Number(e.followUpDays) || 0,
     parentBatchId: e.parentBatchId || "",
     followUpSentUtc: e.followUpSentUtc || "",
+    followUpBatchId: e.followUpBatchId || "",
     copyInternalTo: e.copyInternalTo || "", senderMail: e.senderMail || "",
     recipientRegistryHash: e.recipientRegistryHash || "",
     capacityReservationId: e.capacityReservationId || "",
@@ -213,6 +214,14 @@ async function createBatch(who, batch) {
     copySelf: clean(batch.copySelf, 8), copyInternal: clean(batch.copyInternal, 8),
     ccTeammates: clean(batch.ccTeammates, 2), ccColleague: clean(batch.ccColleague, 254),
     copiedInsteadNote: clean(batch.copiedInsteadNote, 500),
+    // Follow-up fields must be present on CREATE as well as PATCH.  The UI has
+    // always sent followUpDays, and createFollowUp() has always supplied
+    // parentBatchId, but omitting them here silently turned every reminder off
+    // and made a derived follow-up look like another original campaign.
+    followUpDays: Number(batch.followUpDays) || 0,
+    parentBatchId: clean(batch.parentBatchId, 80),
+    followUpSentUtc: clean(batch.followUpSentUtc, 64),
+    followUpBatchId: clean(batch.followUpBatchId, 80),
     copyInternalTo: clean(batch.copyInternalTo, 254), senderMail: clean(batch.senderMail, 254),
     recipientRegistryHash: clean(batch.recipientRegistryHash, 128),
     createdUtc: at, updatedUtc: at };
@@ -233,7 +242,7 @@ async function patchBatch(userId, batchId, patch, etag) {
     "scheduleNotificationSubmittedUtc", "scheduleNotificationReconcileUntilUtc",
     "scheduleNotificationCompletedUtc",
     "scheduleNotificationSentUtc", "pausedUtc", "canceledUtc",
-    "parentBatchId", "followUpSentUtc", "recipientRegistryHash",
+    "parentBatchId", "followUpSentUtc", "followUpBatchId", "recipientRegistryHash",
     "capacityReservationId", "capacityPlanHash", "capacityTimeZone"];
   for (const k of strings) if (k in patch) entity[k] = clean(patch[k], k.includes("Body") ? 50000 : 500);
   for (const k of ["commonRevision", "recipientCount", "externalCount", "sentCount",

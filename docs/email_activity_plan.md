@@ -470,25 +470,33 @@ advisors it touched**. A cache, not a second source of truth: `fold()` is a pure
 function of the log and everything in it is regenerable, except the rep's own
 decisions (`replyState`, `actedAt`, `nextActionAt`) which are carried across.
 
-Five reasons to be in the queue, in this order:
+Five notification reasons, in this order:
 
-    reply_new        replied -- needs attention
+    batch_held       batch held/stopped -- review required
+    batch_followup_due  the rep's campaign reminder is due
     reply_followup   follow-up needed
     due              follow-up due
     bounced          address needs fixing
-    quiet_warm       warm, no contact in a while
 
-**Exactly one reason per person**, the most urgent. A queue that lists somebody
-three times is a queue a rep stops reading. Within a reason, longest-waiting
-first — that is the one most at risk of being forgotten.
+Ordinary advisor replies are deliberately **not notifications**. Outlook is the
+rep's inbox and response surface; repeating each message here makes the app a
+second, worse inbox. Replies remain in the durable activity log, relationship
+timeline and engagement projection, and still remove that advisor from a batch
+follow-up. Likewise, `quiet_warm` remains a useful relationship/filter signal
+but is not allowed to fill the notification badge automatically.
 
-Work has states, so a reply LEAVES the queue:
+**Exactly one reason per advisor**, plus one row for each actionable batch. A
+queue that lists somebody three times is a queue a rep stops reading. Within a
+reason, longest-waiting first — that is the one most at risk of being forgotten.
+
+Reply work still has states for explicit one-person follow-ups and durable
+projection semantics:
 
     none -> new -> reviewed -> follow_up -> scheduled -> done
 
-`actedAt` is what stops a reviewed conversation reappearing as new on the next
-sweep, while still letting a genuinely *newer* reply re-open it. Without that
-distinction the rep either loses new replies or re-reads old ones forever.
+`actedAt` distinguishes a reviewed conversation from a genuinely newer reply.
+That state is still important even though `new` alone no longer creates an app
+notification.
 
 **No volume metric anywhere**, and the audit enforces it — *the work queue is
 built from engagement, never from volume*. "117 emails sent this week" rewards
@@ -496,22 +504,26 @@ sending, which is the behaviour the 25-a-day limit exists to restrain, and a
 dashboard read every morning beats a limit met once a day. `outbound30d` is
 stored as profile context but `reason()` may not read it.
 
-Two judgements worth revisiting with real data:
-
-  * `quiet_warm` fires only for advisors who have **replied at some point**.
-    Cold outreach going unanswered is the ordinary case, not a lapse, and
-    queueing it would bury every real signal.
-  * `done` is deliberately NOT excluded from `quiet_warm`. A conversation
-    finished three months ago is exactly the relationship worth reviving —
-    excluding it would mean every advisor we ever successfully spoke to
-    silently left the queue forever. Any activity resets the clock.
-    `ENGAGEMENT_QUIET_DAYS` (default 30) tunes it.
+`quiet_warm` still fires only for advisors who have **replied at some point**,
+and `done` is deliberately not excluded from that signal. It belongs in
+relationship filters or a deliberate daily-work view, not a badge that can grow
+without a rep asking it to.
 
 UI on **both** clients: a flag button opens **Needs attention** — headline counts
-of things needing doing, then the rows, with `Mark reviewed` / `Done` inline. The
-list reloads after an action rather than hiding the row, because the advisor may
-still be in the queue for a *different* reason and hiding them would tell the
-rep they were finished when they are not.
+of things needing doing, then advisor and campaign rows. A due campaign opens a
+fresh recipient calculation and follow-up review; a held batch opens its review
+screen. The list reloads after an advisor action rather than hiding the row,
+because the advisor may still be in the queue for a different reason.
+
+Campaign reminders are measured from the **last actual delivery** in the batch,
+so a multi-day campaign cannot ask for follow-up while its final tranche is
+still going out. Candidate arithmetic is recomputed twice: when review opens and
+again when the derived batch is created. Human replies, hard bounces, later
+opt-outs, unsent rows and messages whose original is unavailable in Outlook all
+come off the list. The reminder choice and parent link are stored on initial
+create; the parent is ETag-claimed before the child becomes editable; duplicate
+tabs have one winner; partial writes are canceled and release the claim; and a
+stale interrupted build can be retired safely on retry.
 
 The field version carries a count on the flag itself, so a rep between meetings
 can see there IS something without opening it. It is **silent at zero and silent
@@ -521,6 +533,8 @@ the advisor's card, or says plainly that their area's tile is not loaded, which
 is the same rule the dialer already uses.
 
     GET  /api/email?op=queue_work
+    GET  /api/email?op=follow_up_candidates&id=BATCH_ID
+    POST /api/email  { op: "create_follow_up", batchId, text, includeAttachments }
     POST /api/email  { op: "reply_state", crd, state }
 
 ### Phase 6 — in-app reply — DONE
@@ -1017,15 +1031,14 @@ dispatches stranded identifiers and converts expired `submitting` leases to
   one makes real progress.
 - ~~The timeline is not in the FIELD app~~ Built.
 - ~~The work queue is desk-only~~ Built on both.
-- The field badge is loaded **once at startup** and on each open of the queue.
-  A rep who leaves the app open all morning sees a stale count until they tap
-  it. A refresh on `visibilitychange` — where the session check already lives —
-  is the obvious fix if it proves annoying.
+- The field badge is loaded at startup, on each open and when the app becomes
+  visible again. It is not a real-time inbox and deliberately does not count
+  individual replies.
 - ~~No Follow up, no attachments~~ Both built. Templates deliberately not.
-- A Cc now resets the quiet clock, by decision. If it turns out reps copy people
-  they are not really working, `quiet_warm` could be narrowed to `recipientRole
-  = "to"` — the tag is already stored, so that is a one-line change with no
-  migration.
+- A Cc now resets the quiet relationship signal, by decision. If it turns out
+  reps copy people they are not really working, `quiet_warm` could be narrowed
+  to `recipientRole = "to"` — the tag is already stored, so that is a one-line
+  change with no migration.
 - Uploaded attachment bytes travel as base64 in the JSON request body, which
   inflates them by a third. Fine for a fact sheet; if reps start sending large
   files this wants an upload session instead.

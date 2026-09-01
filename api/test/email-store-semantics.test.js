@@ -561,7 +561,8 @@ test("a snooze silences the row and then gives it back as due", async () => {
       classification: "reply", occurredAt: new Date(Date.now() - 86400000).toISOString(),
       graphMessageId: "g1", advisorEmail: "a@ml.com" });
     await engagement.refresh("u1", "111", { store });
-    assert.equal((await engagement.queue("u1", { store })).count, 1);
+    assert.equal((await engagement.queue("u1", { store })).count, 0,
+      "Outlook owns ordinary reply notifications");
 
     await engagement.snooze("u1", "111", 7, { store });
     assert.equal((await engagement.queue("u1", { store })).count, 0, "not now");
@@ -569,10 +570,7 @@ test("a snooze silences the row and then gives it back as due", async () => {
     const later = Date.now() + 8 * 86400000;
     const back = await engagement.queue("u1", { store, now: later });
     assert.equal(back.count, 1, "not now is not never");
-    // Back as reply_new, NOT as a generic "follow-up due": the reply still has
-    // not been dealt with, and saying so is more useful than saying a date
-    // passed. `due` is for the case where there is no stronger reason left.
-    assert.equal(back.entries[0].reason, "reply_new");
+    assert.equal(back.entries[0].reason, "due");
   } finally { restore(); }
 });
 
@@ -587,7 +585,8 @@ test("a snoozed quiet contact comes back as a follow-up due", async () => {
       graphMessageId: "old", advisorEmail: "a@ubs.com" });
     await engagement.refresh("u1", "222", { store });
     await engagement.setReplyState("u1", "222", "done", { store });
-    assert.equal((await engagement.queue("u1", { store })).entries[0].reason, "quiet_warm");
+    assert.equal((await engagement.queue("u1", { store })).count, 0,
+      "relationship-maintenance candidates belong in filters, not notifications");
 
     await engagement.snooze("u1", "222", 14, { store });
     assert.equal((await engagement.queue("u1", { store })).count, 0);
@@ -646,14 +645,14 @@ test("a backfill records history without queueing it as work", async () => {
 
     await engagement.refresh("u1", "111", { store });
     const q = await engagement.queue("u1", { store });
-    assert.equal(q.counts.reply_new, 0,
+    assert.equal(q.count, 0,
       "four hundred of these would destroy the queue on the first morning");
     // Still on the timeline, in full.
     assert.equal((await store.listActivity("111", 10)).length, 1);
   } finally { restore(); }
 });
 
-test("a reply arriving AFTER the backfill still surfaces", async () => {
+test("a reply arriving AFTER the backfill is current without becoming an app notification", async () => {
   const { store, restore } = loadStore();
   try {
     const engagement = require("../shared/email-engagement");
@@ -667,8 +666,10 @@ test("a reply arriving AFTER the backfill still surfaces", async () => {
       classification: "reply", occurredAt: new Date(Date.now() + 60000).toISOString(),
       graphMessageId: "new-reply", advisorEmail: "a@ml.com" });
     await engagement.refresh("u1", "111", { store });
-    assert.equal((await engagement.queue("u1", { store })).counts.reply_new, 1,
-      "seeding history must not deafen the queue to what happens next");
+    assert.equal((await store.getEngagement("u1", "111")).replyState, "new",
+      "the current reply must remain available to timeline and follow-up logic");
+    assert.equal((await engagement.queue("u1", { store })).count, 0,
+      "Outlook remains the notification surface for the individual reply");
   } finally { restore(); }
 });
 test("material route provenance and seed version survive store round-trip", async () => {
@@ -717,6 +718,30 @@ test("legacy mojibake batch titles read correctly and new writes are clean", asy
     });
     assert.equal((await store.getBatch("u1", "legacy-batch")).name, repaired,
       "an already-stored title should repair as soon as the batch is read");
+  } finally { restore(); }
+});
+
+test("follow-up reminder and parent linkage survive the initial batch write", async () => {
+  const { store, restore } = loadStore();
+  try {
+    const original = await store.createBatch({ id: "u1", name: "Rep" }, {
+      id: "original", name: "Original", attachmentIds: [], attachmentSummary: [],
+      recipientCount: 3, externalCount: 3, followUpDays: 7,
+    });
+    assert.equal(original.followUpDays, 7,
+      "the reminder picker is useless if createBatch silently drops the value");
+
+    const child = await store.createBatch({ id: "u1", name: "Rep" }, {
+      id: "follow-up", name: "Follow-up", attachmentIds: [], attachmentSummary: [],
+      recipientCount: 2, externalCount: 2, parentBatchId: "original",
+    });
+    assert.equal(child.parentBatchId, "original",
+      "a follow-up must never be mistaken for another original campaign");
+
+    const claimed = await store.patchBatch("u1", "original", {
+      followUpSentUtc: "2026-09-01T12:00:00Z", followUpBatchId: "follow-up",
+    });
+    assert.equal(claimed.followUpBatchId, "follow-up");
   } finally { restore(); }
 });
 

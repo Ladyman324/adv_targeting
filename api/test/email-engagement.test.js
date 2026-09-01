@@ -2,6 +2,8 @@
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
 const engagement = require("../shared/email-engagement");
 
 const DAY = 24 * 3600 * 1000;
@@ -165,19 +167,18 @@ test("activity summary exposes only compact last-outbound rows", async () => {
     "the map overlay must not become another contact-data payload");
 });
 
-test("replies sort above quiet contacts however old the quiet one is", async () => {
+test("ordinary replies and inferred quiet contacts do not become notifications", async () => {
   const q = await engagement.queue("u1", queueStore([
     { advisorCrd: "quiet", everReplied: true, lastActivityAt: ago(300), replyState: "reviewed" },
     { advisorCrd: "replied", replyState: "new", lastReplyAt: ago(1), lastActivityAt: ago(1) },
   ]));
-  assert.equal(q.entries[0].advisorCrd, "replied");
-  assert.equal(q.entries[1].advisorCrd, "quiet");
+  assert.equal(q.count, 0);
 });
 
-test("within one reason the longest-waiting comes first", async () => {
+test("within one actionable reason the longest-waiting comes first", async () => {
   const q = await engagement.queue("u1", queueStore([
-    { advisorCrd: "recent", replyState: "new", lastReplyAt: ago(1), lastActivityAt: ago(1) },
-    { advisorCrd: "older", replyState: "new", lastReplyAt: ago(9), lastActivityAt: ago(9) },
+    { advisorCrd: "recent", nextActionAt: ago(1), lastActivityAt: ago(1) },
+    { advisorCrd: "older", nextActionAt: ago(9), lastActivityAt: ago(9) },
   ]));
   assert.equal(q.entries[0].advisorCrd, "older",
     "the thing waiting longest is the thing most likely to be forgotten");
@@ -189,18 +190,18 @@ test("the queue counts by reason and excludes anyone with no reason", async () =
     { advisorCrd: "b", hasBounce: true, lastActivityAt: ago(1) },
     { advisorCrd: "c", replyState: "none", lastActivityAt: ago(1) },
   ]));
-  assert.equal(q.count, 2);
-  assert.equal(q.counts.reply_new, 1);
+  assert.equal(q.count, 1);
+  assert.equal(q.counts.reply_new, undefined);
   assert.equal(q.counts.bounced, 1);
 });
 
 test("queue actions match the reason and never offer an ineffective verb", async () => {
   assert.deepEqual(engagement.ACTIONS_BY_REASON, {
-    reply_new: ["mark_reviewed", "snooze"],
+    batch_held: ["open_batch"],
+    batch_followup_due: ["review_follow_up"],
     reply_followup: ["follow_up", "done", "snooze"],
     due: ["follow_up", "snooze"],
     bounced: ["dismiss_bounce", "snooze"],
-    quiet_warm: ["follow_up", "snooze"],
   });
   const q = await engagement.queue("u1", queueStore([
     { advisorCrd: "due", nextActionAt: ago(1), lastActivityAt: ago(2) },
@@ -227,11 +228,55 @@ test("a snoozed bounce returns as bounced, never as a follow-up due", async () =
 
 test("the queue reports no volume metric of any kind", async () => {
   const q = await engagement.queue("u1", queueStore([
-    { advisorCrd: "a", replyState: "new", lastReplyAt: ago(1), lastActivityAt: ago(1) }]));
+    { advisorCrd: "a", nextActionAt: ago(1), lastActivityAt: ago(1) }]));
   const keys = Object.keys(q).concat(Object.keys(q.entries[0]));
   for (const banned of ["sent", "sentCount", "emailsSent", "volume", "outbound30d"])
     assert.ok(!keys.includes(banned),
       `${banned} would make the dashboard reward sending, which the 25/day limits exist to restrain`);
+});
+
+test("campaign reminders become due after the final delivery and held batches surface immediately", async () => {
+  const now = Date.parse("2026-09-01T16:00:00Z");
+  const batches = [
+    { id: "held", name: "Held campaign", status: "schedule_held", updatedUtc: "2026-09-01T15:00:00Z" },
+    { id: "due", name: "Due campaign", status: "completed", mode: "send", followUpDays: 3,
+      parentBatchId: "", followUpSentUtc: "", recipientCount: 20 },
+    { id: "later", name: "Later campaign", status: "completed", mode: "send", followUpDays: 7,
+      parentBatchId: "", followUpSentUtc: "", recipientCount: 5 },
+  ];
+  const messages = {
+    due: [{ state: "sent", submittedUtc: "2026-08-28T12:00:00Z" },
+          { state: "sent", submittedUtc: "2026-08-29T12:00:00Z" }],
+    later: [{ state: "sent", submittedUtc: "2026-08-29T12:00:00Z" }],
+  };
+  const q = await engagement.queue("u1", { now, store: {
+    listEngagement: async () => [], listBatches: async () => batches,
+    listMessages: async (_u, id) => messages[id] || [],
+  } });
+  assert.deepEqual(q.entries.map((row) => row.batchId), ["held", "due"]);
+  assert.equal(q.counts.batch_held, 1);
+  assert.equal(q.counts.batch_followup_due, 1);
+});
+
+test("desktop and Field can open campaign notices without restoring reply noise", () => {
+  const web = path.resolve(__dirname, "..", "..", "webapp");
+  const desk = fs.readFileSync(path.join(web, "app.js"), "utf8");
+  const field = fs.readFileSync(path.join(web, "field.js"), "utf8");
+  const email = fs.readFileSync(path.join(web, "email.js"), "utf8");
+  for (const [name, source, marker] of [["desktop", desk, "QUEUE_ACTIONS"],
+                                        ["Field", field, "WORK_ACTIONS"]]) {
+    const start = source.indexOf(`const ${marker} = {`);
+    const end = source.indexOf("};", start);
+    const block = source.slice(start, end);
+    assert.ok(block.includes("batch_followup_due") && block.includes("batch_held"),
+      `${name} must understand both campaign notice types`);
+    assert.equal(block.includes("reply_new"), false,
+      `${name} must not turn ordinary Outlook replies back into app notifications`);
+    assert.ok(source.includes('EmailComposer.openFollowUp(batchId)'));
+    assert.ok(source.includes('EmailComposer.openBatch(batchId)'));
+  }
+  assert.match(email, /global\.EmailComposer\s*=\s*\{[^}]*openFollowUp/s);
+  assert.match(email, /openBatch:\s*\(id\)\s*=>\s*openBatchById\(id, true\)/);
 });
 
 /* ---- rep decisions ------------------------------------------------------- */

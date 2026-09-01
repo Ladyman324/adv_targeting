@@ -2400,6 +2400,7 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
       c.replied ? `${c.replied} replied` : "",
       c.bounced ? `${c.bounced} bounced` : "",
       c.suppressed ? `${c.suppressed} opted out since` : "",
+      c.unthreadable ? `${c.unthreadable} original${c.unthreadable === 1 ? "" : "s"} unavailable` : "",
       c.notSent ? `${c.notSent} never sent` : "",
     ].filter(Boolean);
     document.getElementById("emailBody").innerHTML = `<div class="email-setup">
@@ -2419,7 +2420,8 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
         the reason you are writing.</p>
       ${off.length ? `<details class="email-mates"><summary>Who came off the list</summary>
         <div class="email-mates-list">${
-          [["replied", "Replied"], ["bounced", "Bounced"], ["suppressed", "Opted out"]]
+          [["replied", "Replied"], ["bounced", "Bounced"], ["suppressed", "Opted out"],
+           ["unthreadable", "Original unavailable in Outlook"]]
             .map(([k, label]) => (f[k] || []).length
               ? `<p class="email-fine"><b>${label}:</b> ${(f[k] || []).map((x) => esc(x.name || x.email)).join(", ")}</p>`
               : "").join("")}</div></details>` : ""}
@@ -2493,7 +2495,7 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
     try {
       const data = await api("batches", null, "GET");
       document.getElementById("emailBody").innerHTML = `<div class="email-history">${data.batches.length ? data.batches.map((b) =>
-        `<button type="button" data-email="open-batch" data-id="${esc(b.id)}"><b>${esc(b.name)}</b><span>${b.recipientCount} recipients · ${esc(stateLabel(b.status))}</span><small>${esc(batchScheduleText(b) || b.createdUtc || "")}</small></button>`).join("") : "<p>No email batches yet.</p>"}</div>`;
+        `<button type="button" data-email="open-batch" data-id="${esc(b.id)}"><b>${esc(b.name)}</b><span>${b.recipientCount} recipients · ${esc(stateLabel(b.status))}</span><small>${esc(batchScheduleText(b) || b.createdUtc || "")}${b.followUpDays && !b.parentBatchId ? ` · Follow-up reminder ${b.followUpDays} days after the final send` : ""}</small></button>`).join("") : "<p>No email batches yet.</p>"}</div>`;
     } catch (e) { document.getElementById("emailBody").innerHTML = `<p class="email-error">${esc(e.message)}</p>`; }
   }
 
@@ -3372,7 +3374,8 @@ They stay on your call list and keep their history — this only takes them out 
    * every document id regardless of what the client offered. */
   const documents = () => (catalog && catalog.documents) || [];
   global.addEventListener("emailcapacityrequest", () => refreshCapacityStatus());
-  global.EmailComposer = { open, openHistory, openAdmin, isAdmin,
+  global.EmailComposer = { open, openHistory, openAdmin, openFollowUp,
+                           openBatch: (id) => openBatchById(id, true), isAdmin,
                            internalRecipients, documents, refreshCapacityStatus };
   global.DirectSendOps = { accept: acceptDirect, watch: watchDirect,
                            pending: pendingDirect, resume: resumeDirect };

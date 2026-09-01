@@ -811,9 +811,10 @@ def _queue_is_not_a_volume_counter():
     restrain. The two features would then be pulling against each other, and the
     dashboard would win, because it is the thing a rep looks at every morning.
 
-    So every reason an advisor can appear in the queue must describe the
-    RELATIONSHIP moving: they replied, they have gone quiet, a follow-up is due,
-    an address broke. None of them may be a count of what we sent.
+    So every reason must be an explicit commitment or operational exception: a
+    chosen follow-up is due, a batch is held, an address broke. None may be a
+    count of what we sent. Ordinary replies and inferred quiet contacts belong
+    in Outlook and relationship filters, not the app's notification badge.
 
     The counts ARE computed and stored -- outbound30d is useful context on a
     profile. This checks only that none of them can put somebody in the queue.
@@ -828,6 +829,7 @@ def _queue_is_not_a_volume_counter():
 
     banned = ("sent", "volume", "count", "emails", "activity_count", "quota", "target")
     offending = [k for k in keys if any(word in k.lower() for word in banned)]
+    noisy = [k for k in keys if k in {"reply_new", "quiet_warm"}]
 
     # The reason() function is the only thing that may put somebody in the
     # queue, so a volume field appearing inside it is the real failure.
@@ -846,9 +848,10 @@ def _queue_is_not_a_volume_counter():
                 volume_in_reason.append(field)
 
     problems = ([f"reason key {k!r}" for k in offending]
+                + [f"noisy notification reason {k!r}" for k in noisy]
                 + [f"reason() reads {f}" for f in volume_in_reason])
     return (not problems,
-            f"{len(keys)} queue reasons, all relationship signals: {', '.join(keys)}"
+            f"{len(keys)} queue reasons, all actionable signals: {', '.join(keys)}"
             if not problems else
             "QUEUE REWARDS VOLUME: " + "; ".join(problems))
 

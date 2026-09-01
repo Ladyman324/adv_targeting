@@ -3229,22 +3229,19 @@ let setBack = null;
  *
  * WHAT IS DELIBERATELY ABSENT
  * ---------------------------
- * Any count of what we sent. "117 emails this week" is the number that makes a
- * screen look busy and a rep behave worse -- it rewards sending, which is the
- * behaviour the 25-a-day limit exists to restrain, and a dashboard a rep reads
- * every morning will always beat a limit they meet once a day. Every row here
- * is a relationship that MOVED: somebody answered, somebody went quiet, a
- * follow-up came due, an address broke.
+ * Any count of what we sent, and any ordinary advisor reply. Outlook owns the
+ * inbox; this surface is for explicit follow-up commitments and operational
+ * exceptions such as a held batch or broken address.
  *
  * The reasons and their order come from the server, so the desk, the phone and
  * any later report cannot disagree about what matters.
  */
 const QUEUE_ACTIONS = {
-  reply_new: ["mark_reviewed", "snooze"],
+  batch_held: ["open_batch"],
+  batch_followup_due: ["review_follow_up"],
   reply_followup: ["follow_up", "done", "snooze"],
   due: ["follow_up", "snooze"],
   bounced: ["dismiss_bounce", "snooze"],
-  quiet_warm: ["follow_up", "snooze"],
 };
 
 function queueActionKey(value){
@@ -3266,6 +3263,12 @@ function queueActions(entry){
 }
 
 function queueActionHtml(action, entry, label){
+  if (action === "review_follow_up") return `<button type="button" class="wq-act"
+      data-wq-action="review_follow_up" data-wq-batch="${esc(entry.batchId)}"
+      aria-label="Review follow-up for ${esc(label)}">Review follow-up</button>`;
+  if (action === "open_batch") return `<button type="button" class="wq-act"
+      data-wq-action="open_batch" data-wq-batch="${esc(entry.batchId)}"
+      aria-label="Review ${esc(label)}">Review batch</button>`;
   const crd = esc(entry.advisorCrd);
   const who = esc(label);
   if (action === "follow_up") return `<button type="button" class="wq-act"
@@ -3288,6 +3291,16 @@ function queueActionHtml(action, entry, label){
 }
 
 function queueRowHtml(entry){
+  if (entry.kind === "batch") {
+    const label = entry.batchName || "Email batch";
+    const when = entry.dueAt || entry.lastActivityAt;
+    return `<li class="wq-row wq-batch" data-wq-batch="${esc(entry.batchId)}">
+      <span class="wq-name">${esc(label)}</span>
+      <span class="wq-why wq-${esc(entry.reason)}">${esc(entry.reasonLabel)}</span>
+      <span class="wq-when">${esc(when ? fmtDate(when) : "")}</span>
+      <span class="wq-acts">${queueActions(entry)
+        .map(action => queueActionHtml(action, entry, label)).join("")}</span></li>`;
+  }
   const when = entry.lastReplyAt || entry.lastActivityAt;
   const name = advisorRow(entry.advisorCrd);
   const fallback = name && name[1] ? name[1] : (entry.advisorEmail || entry.advisorCrd);
@@ -3437,6 +3450,14 @@ async function openWorkQueue(){
     const act = e.target.closest("[data-wq-action]");
     if (!act) return;
     const action = act.dataset.wqAction;
+    if (action === "review_follow_up" || action === "open_batch") {
+      const batchId = act.dataset.wqBatch;
+      close(false);
+      if (!window.EmailComposer) return;
+      if (action === "review_follow_up") EmailComposer.openFollowUp(batchId);
+      else EmailComposer.openBatch(batchId);
+      return;
+    }
     if (action === "open"){
       // Same rule the dialer uses: the map holds one scope at a time, and an
       // advisor outside it has no feature to open. Said plainly rather than

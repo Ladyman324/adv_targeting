@@ -1352,9 +1352,9 @@ async function fillFullHistory(crd, body){
 
 /* ---------- needs attention -----------------------------------------------
  * The desk's work queue on a phone, from the same endpoint. Who to pick up now
- * and why -- never a count of what has been sent, for the reason the server's
- * own module gives at length: a number that rewards sending pulls against the
- * 25-a-day limit, and the screen a rep reads every morning wins that argument.
+ * and why -- never a count of what has been sent and never a duplicate of each
+ * ordinary Outlook reply. It carries explicit follow-up commitments and email
+ * exceptions that need action.
  *
  * The reasons, their order and their wording all arrive from the server. This
  * file decides layout and nothing else.
@@ -1366,11 +1366,11 @@ let workReturnFocus = null;
 let workLoadGeneration = 0;
 
 const WORK_ACTIONS = {
-  reply_new: ["mark_reviewed", "snooze"],
+  batch_held: ["open_batch"],
+  batch_followup_due: ["review_follow_up"],
   reply_followup: ["follow_up", "done", "snooze"],
   due: ["follow_up", "snooze"],
   bounced: ["dismiss_bounce", "snooze"],
-  quiet_warm: ["follow_up", "snooze"],
 };
 
 function workActionKey(value){
@@ -1388,6 +1388,10 @@ function workActions(entry){
 }
 
 function workActionHtml(action, entry, label){
+  if (action === "review_follow_up") return `<button type="button" data-work-action="review_follow_up"
+      data-batch="${esc(entry.batchId)}" aria-label="Review follow-up for ${esc(label)}">Review follow-up</button>`;
+  if (action === "open_batch") return `<button type="button" data-work-action="open_batch"
+      data-batch="${esc(entry.batchId)}" aria-label="Review ${esc(label)}">Review batch</button>`;
   const crd = esc(entry.advisorCrd);
   const who = esc(label);
   if (action === "follow_up") return `<button type="button" data-work-action="follow_up"
@@ -1404,6 +1408,16 @@ function workActionHtml(action, entry, label){
 }
 
 function workRowHtml(entry){
+  if (entry.kind === "batch") {
+    const label = entry.batchName || "Email batch";
+    const when = entry.dueAt || entry.lastActivityAt;
+    return `<li class="work-row work-batch">
+      <span class="work-main"><b>${esc(label)}</b>
+        <small class="work-why work-${esc(entry.reason)}">${esc(entry.reasonLabel)}${
+          when ? ` &middot; ${esc(mailWhen(when))}` : ""}</small></span>
+      <span class="work-acts">${workActions(entry)
+        .map(action => workActionHtml(action, entry, label)).join("")}</span></li>`;
+  }
   const when = entry.lastReplyAt || entry.lastActivityAt;
   const label = entry.advisorEmail || entry.advisorCrd;
   return `<li class="work-row">
@@ -2831,9 +2845,17 @@ document.addEventListener("click", (e) => {
   if (workAct) {
     const crd = workAct.dataset.crd;
     const action = workAct.dataset.workAction;
+    if (action === "review_follow_up" || action === "open_batch") {
+      const batchId = workAct.dataset.batch;
+      closeWork();
+      if (!window.EmailComposer) return;
+      if (action === "review_follow_up") EmailComposer.openFollowUp(batchId);
+      else EmailComposer.openBatch(batchId);
+      return;
+    }
     if (action === "follow_up") {
-      // The action the queue is asking for. Without it a quiet_warm row
-      // tells a rep to re-engage somebody and gives them nowhere to do it.
+      // The action the queue is asking for on an explicitly scheduled advisor
+      // follow-up.
       // The bottom sheet and composer are both modal surfaces. Close the sheet
       // before opening the composer, then refresh the deferred badge/state only
       // after the server confirms the follow-up.
