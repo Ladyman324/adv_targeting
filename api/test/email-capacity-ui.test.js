@@ -53,6 +53,17 @@ test("final send approval and passcode use a persistent in-app review step", () 
   assert.match(css, /\.email-approval-back/);
 });
 
+test("final approval is above the composer and capacity preparation cannot hang forever", () => {
+  const composer = Number((css.match(/\.email-back\{[^}]*z-index:(\d+)/s) || [])[1]);
+  const approval = Number((css.match(/\.email-approval-back\{[^}]*z-index:(\d+)/s) || [])[1]);
+  assert.ok(approval > composer,
+    `the final review must be visible above the composer (${approval} <= ${composer})`);
+  assert.match(email, /new AbortController\(\)/);
+  assert.match(email, /setTimeout\(\(\) => controller\.abort\(\), 15000\)/);
+  assert.match(email, /The daily capacity check timed out\. Try again\./);
+  assert.match(email, /approvalPreparing = false;[\s\S]*?paintCapacityPlanNodes\(\)/);
+});
+
 test("schedule edits refresh capacity without replacing the active native inputs", () => {
   const sync = bodyOf("syncScheduleInputs");
   assert.match(sync, /scheduleCapacityPlanRefresh\(300, true\)/);

@@ -329,7 +329,7 @@
 /* Final send approval stays inside the application. Native confirm/prompt
    dialogs can be suppressed after an asynchronous capacity refresh, which
    made a real send look like a dead button and sometimes hid the passcode. */
-.email-approval-back{position:fixed;inset:0;z-index:1200;display:grid;place-items:center;
+.email-approval-back{position:fixed;inset:0;z-index:3200;display:grid;place-items:center;
   padding:18px;background:rgba(13,24,38,.62);backdrop-filter:blur(2px)}
 .email-approval-dialog{width:min(680px,100%);max-height:min(820px,calc(100vh - 36px));
   display:flex;flex-direction:column;overflow:hidden;border:1px solid var(--hair);

@@ -515,10 +515,12 @@
     deliveryPlanError = "";
     if (key !== deliveryPlanKey) deliveryPlan = null;
     paintCapacityPlanNodes();
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 15000);
     try {
       const result = await api("capacity_plan", {
         batchId: detail.batch.id, scheduledForUtc, dailyStartTime,
-      });
+      }, "POST", { signal: controller.signal });
       if (sequence !== deliveryPlanSequence) return deliveryPlan;
       deliveryPlan = result.deliveryPlan || null;
       deliveryPlanKey = key;
@@ -527,8 +529,11 @@
       if (sequence !== deliveryPlanSequence) return deliveryPlan;
       deliveryPlan = null;
       deliveryPlanKey = "";
-      deliveryPlanError = error.message || "Daily email capacity could not be checked.";
+      deliveryPlanError = error.name === "AbortError"
+        ? "The daily capacity check timed out. Try again."
+        : error.message || "Daily email capacity could not be checked.";
     } finally {
+      clearTimeout(timeout);
       if (sequence === deliveryPlanSequence) {
         deliveryPlanLoading = false;
         if (repaint) composerView();
@@ -551,11 +556,12 @@
     deliveryPlanTimer = setTimeout(() => requestCapacityPlan(), delay);
   }
 
-  async function api(op, body, method = "POST") {
+  async function api(op, body, method = "POST", options = {}) {
     const [operation, extraQuery = ""] = String(op).split("&", 2);
     const response = await fetch(`/api/email?op=${encodeURIComponent(operation)}${extraQuery ? `&${extraQuery}` : ""}`, {
       method, headers: body ? { "Content-Type": "application/json" } : {},
       body: body ? JSON.stringify({ ...body, op }) : undefined,
+      signal: options.signal,
     });
     let data = {};
     try { data = await response.json(); } catch {}
@@ -3153,7 +3159,13 @@ They stay on your call list and keep their history — this only takes them out 
         button.textContent = "Preparing approval…";
         notice("Refreshing the daily delivery plan…");
         try { await requestCapacityPlan({ force: true }); }
-        finally { approvalPreparing = false; }
+        finally {
+          approvalPreparing = false;
+          // requestCapacityPlan paints while this flag is still true. Paint
+          // once more after releasing it so a timeout/error/cancel can never
+          // leave the underlying button labelled "Preparing approval…".
+          paintCapacityPlanNodes();
+        }
         const capacityProblem = sendBlockedReason(b);
         if (capacityProblem) {
           button.disabled = false;
