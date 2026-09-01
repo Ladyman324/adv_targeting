@@ -184,34 +184,36 @@ test("within one actionable reason the longest-waiting comes first", async () =>
     "the thing waiting longest is the thing most likely to be forgotten");
 });
 
-test("the queue counts by reason and excludes anyone with no reason", async () => {
+test("the queue excludes ordinary replies and individual bounces", async () => {
   const q = await engagement.queue("u1", queueStore([
     { advisorCrd: "a", replyState: "new", lastReplyAt: ago(1), lastActivityAt: ago(1) },
     { advisorCrd: "b", hasBounce: true, lastActivityAt: ago(1) },
     { advisorCrd: "c", replyState: "none", lastActivityAt: ago(1) },
   ]));
-  assert.equal(q.count, 1);
+  assert.equal(q.count, 0);
   assert.equal(q.counts.reply_new, undefined);
-  assert.equal(q.counts.bounced, 1);
+  assert.equal(q.counts.bounced, undefined);
 });
 
 test("queue actions match the reason and never offer an ineffective verb", async () => {
   assert.deepEqual(engagement.ACTIONS_BY_REASON, {
+    mailbox_reconnect: ["reconnect_mailbox"],
+    mailbox_sync_failed: [],
+    batch_delivery_warning: ["open_batch"],
+    batch_schedule_changed: ["open_batch"],
     batch_held: ["open_batch"],
     batch_followup_due: ["review_follow_up"],
     reply_followup: ["follow_up", "done", "snooze"],
     due: ["follow_up", "snooze"],
-    bounced: ["dismiss_bounce", "snooze"],
   });
   const q = await engagement.queue("u1", queueStore([
     { advisorCrd: "due", nextActionAt: ago(1), lastActivityAt: ago(2) },
     { advisorCrd: "bounce", hasBounce: true, lastActivityAt: ago(1) },
   ]));
   const due = q.entries.find((row) => row.advisorCrd === "due");
-  const bounce = q.entries.find((row) => row.advisorCrd === "bounce");
   assert.deepEqual(due.actions, ["follow_up", "snooze"]);
-  assert.deepEqual(bounce.actions, ["dismiss_bounce", "snooze"]);
-  assert.ok(!bounce.actions.includes("follow_up"));
+  assert.equal(q.entries.some((row) => row.advisorCrd === "bounce"), false,
+    "address suppression remains durable without creating one notification per bounce");
   assert.ok(!due.actions.includes("done"));
 });
 
@@ -235,10 +237,17 @@ test("the queue reports no volume metric of any kind", async () => {
       `${banned} would make the dashboard reward sending, which the 25/day limits exist to restrain`);
 });
 
-test("campaign reminders become due after the final delivery and held batches surface immediately", async () => {
+test("campaign reminders, changed schedules and delivery brakes surface at batch level", async () => {
   const now = Date.parse("2026-09-01T16:00:00Z");
   const batches = [
-    { id: "held", name: "Held campaign", status: "schedule_held", updatedUtc: "2026-09-01T15:00:00Z" },
+    { id: "changed", name: "Changed campaign", status: "schedule_held",
+      scheduleHoldCode: "schedule_validation_changed",
+      scheduleHoldMessage: "A recipient, attachment, or rendered message changed.",
+      updatedUtc: "2026-09-01T15:00:00Z" },
+    { id: "delivery", name: "Stale-list campaign", status: "paused", mode: "send",
+      sentCount: 100, hardBounceCount: 4, warningLevel: "blocked",
+      warningMessage: "4 of the first 100 messages hard bounced (4.0%).",
+      updatedUtc: "2026-09-01T15:30:00Z" },
     { id: "due", name: "Due campaign", status: "completed", mode: "send", followUpDays: 3,
       parentBatchId: "", followUpSentUtc: "", recipientCount: 20 },
     { id: "later", name: "Later campaign", status: "completed", mode: "send", followUpDays: 7,
@@ -253,9 +262,46 @@ test("campaign reminders become due after the final delivery and held batches su
     listEngagement: async () => [], listBatches: async () => batches,
     listMessages: async (_u, id) => messages[id] || [],
   } });
-  assert.deepEqual(q.entries.map((row) => row.batchId), ["held", "due"]);
-  assert.equal(q.counts.batch_held, 1);
+  assert.deepEqual(q.entries.map((row) => row.batchId), ["delivery", "changed", "due"]);
+  assert.equal(q.counts.batch_delivery_warning, 1);
+  assert.equal(q.counts.batch_schedule_changed, 1);
+  assert.equal(q.entries.find((row) => row.batchId === "changed").detail,
+    "A recipient, attachment, or rendered message changed.");
   assert.equal(q.counts.batch_followup_due, 1);
+});
+
+test("mailbox failures are account alerts, while catch-up is not a false alarm", async () => {
+  const now = Date.parse("2026-09-01T16:00:00Z");
+  const base = {
+    listEngagement: async () => [], listBatches: async () => [],
+    listConnections: async () => [{ userId: "u1", mailbox: "rep@eicatlanta.com",
+      needsReconnect: true }],
+    getSweepState: async () => ({ watermarkUtc: "2026-09-01T15:50:00Z",
+      lastOkUtc: "2026-09-01T15:50:00Z" }),
+  };
+  const reconnect = await engagement.queue("u1", { now, store: base });
+  assert.equal(reconnect.entries[0].reason, "mailbox_reconnect");
+  assert.deepEqual(reconnect.entries[0].actions, ["reconnect_mailbox"]);
+
+  const caughtUp = await engagement.queue("u1", { now, store: {
+    ...base,
+    listConnections: async () => [{ userId: "u1", mailbox: "rep@eicatlanta.com",
+      needsReconnect: false }],
+    getSweepState: async () => ({ watermarkUtc: "2026-09-01T10:00:00Z",
+      lastOkUtc: "2026-09-01T15:55:00Z", truncatedRuns: 2 }),
+  } });
+  assert.equal(caughtUp.count, 0, "an explicitly progressing backlog is operational, not an alert");
+
+  const failed = await engagement.queue("u1", { now, store: {
+    ...base,
+    listConnections: async () => [{ userId: "u1", mailbox: "rep@eicatlanta.com",
+      needsReconnect: false }],
+    getSweepState: async () => ({ watermarkUtc: "2026-09-01T15:00:00Z",
+      lastOkUtc: "2026-09-01T15:00:00Z", consecutiveFailures: 2,
+      lastError: "Graph unavailable" }),
+  } });
+  assert.equal(failed.entries[0].reason, "mailbox_sync_failed");
+  assert.deepEqual(failed.entries[0].actions, []);
 });
 
 test("desktop and Field can open campaign notices without restoring reply noise", () => {
@@ -268,14 +314,18 @@ test("desktop and Field can open campaign notices without restoring reply noise"
     const start = source.indexOf(`const ${marker} = {`);
     const end = source.indexOf("};", start);
     const block = source.slice(start, end);
-    assert.ok(block.includes("batch_followup_due") && block.includes("batch_held"),
-      `${name} must understand both campaign notice types`);
+    for (const reason of ["mailbox_reconnect", "mailbox_sync_failed", "batch_delivery_warning",
+      "batch_schedule_changed", "batch_followup_due", "batch_held"])
+      assert.ok(block.includes(reason), `${name} must understand ${reason}`);
     assert.equal(block.includes("reply_new"), false,
       `${name} must not turn ordinary Outlook replies back into app notifications`);
+    assert.equal(block.includes("bounced"), false,
+      `${name} must not turn individual bounces into notification noise`);
     assert.ok(source.includes('EmailComposer.openFollowUp(batchId)'));
     assert.ok(source.includes('EmailComposer.openBatch(batchId)'));
+    assert.ok(source.includes('EmailComposer.openMailboxConnection()'));
   }
-  assert.match(email, /global\.EmailComposer\s*=\s*\{[^}]*openFollowUp/s);
+  assert.match(email, /global\.EmailComposer\s*=\s*\{[^}]*openMailboxConnection/s);
   assert.match(email, /openBatch:\s*\(id\)\s*=>\s*openBatchById\(id, true\)/);
 });
 

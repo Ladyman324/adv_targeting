@@ -3230,18 +3230,21 @@ let setBack = null;
  * WHAT IS DELIBERATELY ABSENT
  * ---------------------------
  * Any count of what we sent, and any ordinary advisor reply. Outlook owns the
- * inbox; this surface is for explicit follow-up commitments and operational
- * exceptions such as a held batch or broken address.
+ * inbox; this surface is for explicit follow-up commitments and scalable
+ * operational exceptions such as a stalled mailbox or a held/paused batch.
  *
  * The reasons and their order come from the server, so the desk, the phone and
  * any later report cannot disagree about what matters.
  */
 const QUEUE_ACTIONS = {
+  mailbox_reconnect: ["reconnect_mailbox"],
+  mailbox_sync_failed: [],
+  batch_delivery_warning: ["open_batch"],
+  batch_schedule_changed: ["open_batch"],
   batch_held: ["open_batch"],
   batch_followup_due: ["review_follow_up"],
   reply_followup: ["follow_up", "done", "snooze"],
   due: ["follow_up", "snooze"],
-  bounced: ["dismiss_bounce", "snooze"],
 };
 
 function queueActionKey(value){
@@ -3263,6 +3266,8 @@ function queueActions(entry){
 }
 
 function queueActionHtml(action, entry, label){
+  if (action === "reconnect_mailbox") return `<button type="button" class="wq-act"
+      data-wq-action="reconnect_mailbox" aria-label="Reconnect ${esc(label)}">Reconnect</button>`;
   if (action === "review_follow_up") return `<button type="button" class="wq-act"
       data-wq-action="review_follow_up" data-wq-batch="${esc(entry.batchId)}"
       aria-label="Review follow-up for ${esc(label)}">Review follow-up</button>`;
@@ -3291,12 +3296,14 @@ function queueActionHtml(action, entry, label){
 }
 
 function queueRowHtml(entry){
-  if (entry.kind === "batch") {
-    const label = entry.batchName || "Email batch";
+  if (entry.kind === "batch" || entry.kind === "account") {
+    const account = entry.kind === "account";
+    const label = account ? (entry.mailbox || "Microsoft 365") : (entry.batchName || "Email batch");
     const when = entry.dueAt || entry.lastActivityAt;
-    return `<li class="wq-row wq-batch" data-wq-batch="${esc(entry.batchId)}">
+    return `<li class="wq-row ${account ? "wq-account" : "wq-batch"}" data-wq-batch="${esc(entry.batchId)}">
       <span class="wq-name">${esc(label)}</span>
-      <span class="wq-why wq-${esc(entry.reason)}">${esc(entry.reasonLabel)}</span>
+      <span class="wq-why wq-${esc(entry.reason)}">${esc(entry.reasonLabel)}${entry.detail
+        ? `<small class="wq-detail">${esc(entry.detail)}</small>` : ""}</span>
       <span class="wq-when">${esc(when ? fmtDate(when) : "")}</span>
       <span class="wq-acts">${queueActions(entry)
         .map(action => queueActionHtml(action, entry, label)).join("")}</span></li>`;
@@ -3450,6 +3457,11 @@ async function openWorkQueue(){
     const act = e.target.closest("[data-wq-action]");
     if (!act) return;
     const action = act.dataset.wqAction;
+    if (action === "reconnect_mailbox") {
+      close(false);
+      if (window.EmailComposer) EmailComposer.openMailboxConnection();
+      return;
+    }
     if (action === "review_follow_up" || action === "open_batch") {
       const batchId = act.dataset.wqBatch;
       close(false);

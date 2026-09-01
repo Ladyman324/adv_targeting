@@ -812,7 +812,8 @@ def _queue_is_not_a_volume_counter():
     dashboard would win, because it is the thing a rep looks at every morning.
 
     So every reason must be an explicit commitment or operational exception: a
-    chosen follow-up is due, a batch is held, an address broke. None may be a
+    chosen follow-up is due, a batch is held, or a mailbox/campaign health brake
+    needs attention. None may be a
     count of what we sent. Ordinary replies and inferred quiet contacts belong
     in Outlook and relationship filters, not the app's notification badge.
 
@@ -829,7 +830,7 @@ def _queue_is_not_a_volume_counter():
 
     banned = ("sent", "volume", "count", "emails", "activity_count", "quota", "target")
     offending = [k for k in keys if any(word in k.lower() for word in banned)]
-    noisy = [k for k in keys if k in {"reply_new", "quiet_warm"}]
+    noisy = [k for k in keys if k in {"reply_new", "quiet_warm", "bounced"}]
 
     # The reason() function is the only thing that may put somebody in the
     # queue, so a volume field appearing inside it is the real failure.

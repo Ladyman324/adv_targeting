@@ -2499,6 +2499,25 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
     } catch (e) { document.getElementById("emailBody").innerHTML = `<p class="email-error">${esc(e.message)}</p>`; }
   }
 
+  /* The Needs attention queue can point directly at a broken Microsoft 365
+   * connection. Recheck before drawing: the timer may have recovered between
+   * the alert and the click, in which case opening normal activity is clearer
+   * than asking for an unnecessary second consent. */
+  async function openMailboxConnection() {
+    const back = shell(); back.hidden = false;
+    document.getElementById("emailTitle").textContent = "Microsoft 365";
+    document.getElementById("emailBody").innerHTML =
+      `<p class="email-loading">Checking your Microsoft 365 connection…</p>`;
+    try {
+      await loadCatalog();
+      const connection = catalog && catalog.connection || {};
+      if (connection.connected && !connection.needsReconnect) return openHistory();
+      connectView(connection.needsReconnect
+        ? "Microsoft 365 needs to be reconnected before mailbox activity tracking can continue."
+        : "Connect Microsoft 365 to enable email activity tracking.");
+    } catch (error) { connectView(error.message || "The connection status could not be checked."); }
+  }
+
   async function act(button) {
     const action = button.dataset.email;
     if (action === "approval-cancel") {
@@ -3374,7 +3393,7 @@ They stay on your call list and keep their history — this only takes them out 
    * every document id regardless of what the client offered. */
   const documents = () => (catalog && catalog.documents) || [];
   global.addEventListener("emailcapacityrequest", () => refreshCapacityStatus());
-  global.EmailComposer = { open, openHistory, openAdmin, openFollowUp,
+  global.EmailComposer = { open, openHistory, openAdmin, openFollowUp, openMailboxConnection,
                            openBatch: (id) => openBatchById(id, true), isAdmin,
                            internalRecipients, documents, refreshCapacityStatus };
   global.DirectSendOps = { accept: acceptDirect, watch: watchDirect,

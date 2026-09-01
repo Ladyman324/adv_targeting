@@ -1366,11 +1366,14 @@ let workReturnFocus = null;
 let workLoadGeneration = 0;
 
 const WORK_ACTIONS = {
+  mailbox_reconnect: ["reconnect_mailbox"],
+  mailbox_sync_failed: [],
+  batch_delivery_warning: ["open_batch"],
+  batch_schedule_changed: ["open_batch"],
   batch_held: ["open_batch"],
   batch_followup_due: ["review_follow_up"],
   reply_followup: ["follow_up", "done", "snooze"],
   due: ["follow_up", "snooze"],
-  bounced: ["dismiss_bounce", "snooze"],
 };
 
 function workActionKey(value){
@@ -1388,6 +1391,8 @@ function workActions(entry){
 }
 
 function workActionHtml(action, entry, label){
+  if (action === "reconnect_mailbox") return `<button type="button" data-work-action="reconnect_mailbox"
+      aria-label="Reconnect ${esc(label)}">Reconnect</button>`;
   if (action === "review_follow_up") return `<button type="button" data-work-action="review_follow_up"
       data-batch="${esc(entry.batchId)}" aria-label="Review follow-up for ${esc(label)}">Review follow-up</button>`;
   if (action === "open_batch") return `<button type="button" data-work-action="open_batch"
@@ -1408,13 +1413,15 @@ function workActionHtml(action, entry, label){
 }
 
 function workRowHtml(entry){
-  if (entry.kind === "batch") {
-    const label = entry.batchName || "Email batch";
+  if (entry.kind === "batch" || entry.kind === "account") {
+    const account = entry.kind === "account";
+    const label = account ? (entry.mailbox || "Microsoft 365") : (entry.batchName || "Email batch");
     const when = entry.dueAt || entry.lastActivityAt;
-    return `<li class="work-row work-batch">
+    return `<li class="work-row ${account ? "work-account" : "work-batch"}">
       <span class="work-main"><b>${esc(label)}</b>
         <small class="work-why work-${esc(entry.reason)}">${esc(entry.reasonLabel)}${
-          when ? ` &middot; ${esc(mailWhen(when))}` : ""}</small></span>
+          when ? ` &middot; ${esc(mailWhen(when))}` : ""}</small>${entry.detail
+          ? `<small class="work-detail">${esc(entry.detail)}</small>` : ""}</span>
       <span class="work-acts">${workActions(entry)
         .map(action => workActionHtml(action, entry, label)).join("")}</span></li>`;
   }
@@ -2845,6 +2852,11 @@ document.addEventListener("click", (e) => {
   if (workAct) {
     const crd = workAct.dataset.crd;
     const action = workAct.dataset.workAction;
+    if (action === "reconnect_mailbox") {
+      closeWork();
+      if (window.EmailComposer) EmailComposer.openMailboxConnection();
+      return;
+    }
     if (action === "review_follow_up" || action === "open_batch") {
       const batchId = workAct.dataset.batch;
       closeWork();

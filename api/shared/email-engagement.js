@@ -30,6 +30,7 @@
  */
 
 const store = require("./email-store");
+const core = require("./email-core");
 
 /* Ordered. `index` is what a caller compares -- a reply that has been reviewed
  * must never fall back to `new` because the sweep saw a later message on the
@@ -39,25 +40,31 @@ const stateIndex = (value) => Math.max(0, REPLY_STATES.indexOf(String(value || "
 
 /* What is allowed to become an in-app notification, most urgent first. */
 const REASONS = [
+  { key: "mailbox_reconnect", label: "Microsoft 365 reconnect required" },
+  { key: "mailbox_sync_failed", label: "Mailbox activity tracking needs attention" },
+  { key: "batch_delivery_warning", label: "Email batch paused — delivery problems" },
+  { key: "batch_schedule_changed", label: "Scheduled email content or recipients changed" },
   { key: "batch_held",    label: "Email batch held — review required" },
   { key: "batch_followup_due", label: "Campaign follow-up due" },
   { key: "reply_followup", label: "Follow-up needed" },
   { key: "due",           label: "Follow-up due" },
-  { key: "bounced",       label: "Email bounced — address needs fixing" },
 ];
 const REASON_RANK = new Map(REASONS.map((r, i) => [r.key, i]));
 
 /* The server owns the verbs as well as the reasons.  Clients keep a matching
  * fallback for a staggered static/API deployment, but once this field is
- * present they must render only these keys.  In particular, `done` cannot
- * resolve a time-derived due/quiet row, and a bounced address must not offer a
- * follow-up that suppression will refuse. */
+ * present they must render only these keys. In particular, `done` cannot
+ * resolve a time-derived due row, and operational exceptions cannot acquire an
+ * advisor action merely because an older client knows that verb. */
 const ACTIONS_BY_REASON = Object.freeze({
+  mailbox_reconnect: ["reconnect_mailbox"],
+  mailbox_sync_failed: [],
+  batch_delivery_warning: ["open_batch"],
+  batch_schedule_changed: ["open_batch"],
   batch_held: ["open_batch"],
   batch_followup_due: ["review_follow_up"],
   reply_followup: ["follow_up", "done", "snooze"],
   due: ["follow_up", "snooze"],
-  bounced: ["dismiss_bounce", "snooze"],
 });
 
 const DAY = 24 * 3600 * 1000;
@@ -329,8 +336,70 @@ async function refreshDirty(marker, deps = {}) {
   return { projection, acknowledged };
 }
 
+/* One definition of mailbox health for the status screen AND the badge.
+ * Keeping this on the server prevents the desk and Field clients from deciding
+ * differently whether a stalled watermark is important. A declared backfill
+ * may be hours behind and still healthy; a failed or stalled live sweep is an
+ * operational exception a rep needs to know about. */
+function replySweepHealth(connection = {}, state = {}, now = Date.now()) {
+  const st = state || {};
+  const lastError = String(st.lastError || "");
+  const legacyBacklog = lastError === "more waiting" || lastError === "window truncated";
+  const consecutiveFailures = Number(st.consecutiveFailures || 0);
+  const catchingUp = !!st.backfillUntilUtc || Number(st.truncatedRuns || 0) > 0 || legacyBacklog;
+  const needsReconnect = !!connection.needsReconnect;
+  const failed = !needsReconnect && (consecutiveFailures > 0 || (!!lastError && !legacyBacklog));
+  const lastOkMs = Date.parse(String(st.lastOkUtc || ""));
+  const watermarkMs = Date.parse(String(st.watermarkUtc || ""));
+  const neverRun = !Number.isFinite(lastOkMs) || !Number.isFinite(watermarkMs);
+  const stale = !neverRun && (now - lastOkMs > 60 * 60 * 1000
+    || now - watermarkMs >= 2 * 60 * 60 * 1000);
+
+  let ingestionStatus = "healthy";
+  if (needsReconnect) ingestionStatus = "reconnect_required";
+  else if (failed) ingestionStatus = "failed";
+  else if (neverRun) ingestionStatus = "never_run";
+  else if (catchingUp) ingestionStatus = "catching_up";
+  else if (stale) ingestionStatus = "stale";
+  return { ingestionStatus,
+    ingestionHealthy: !needsReconnect && !failed && !neverRun && (!stale || catchingUp),
+    catchingUp, hasError: needsReconnect || failed };
+}
+
+async function mailboxAttention(userId, deps = {}) {
+  const st = deps.store || store;
+  if ((typeof st.getConnection !== "function" && typeof st.listConnections !== "function")
+      || typeof st.getSweepState !== "function") return [];
+  try {
+    const connection = typeof st.getConnection === "function"
+      ? await st.getConnection(userId)
+      : (await st.listConnections()).find((row) => String(row.userId) === String(userId));
+    if (!connection) return [];
+    const state = await st.getSweepState(userId, "reply") || {};
+    const health = replySweepHealth(connection, state, deps.now || Date.now());
+    if (!["reconnect_required", "failed", "stale"].includes(health.ingestionStatus)) return [];
+    const reconnect = health.ingestionStatus === "reconnect_required";
+    return [{ kind: "account", mailbox: connection.mailbox || "Microsoft 365",
+      reason: reconnect ? "mailbox_reconnect" : "mailbox_sync_failed",
+      reasonLabel: reconnect ? "Microsoft 365 reconnect required"
+        : health.ingestionStatus === "stale" ? "Mailbox activity tracking is behind"
+          : "Mailbox activity tracking failed",
+      detail: reconnect
+        ? "Reconnect to restore reply tracking and scheduled email safety checks."
+        : "Reply tracking may be incomplete. Contact an email administrator if this persists.",
+      actions: [...ACTIONS_BY_REASON[reconnect ? "mailbox_reconnect" : "mailbox_sync_failed"]],
+      lastActivityAt: state.lastOkUtc || state.updatedUtc || "" }];
+  } catch (_) {
+    // The queue still contains durable campaign/follow-up work when this
+    // separate diagnostic read is unavailable. The status readout will say it
+    // is unavailable instead of turning the whole queue into a 500 response.
+    return [];
+  }
+}
+
 async function batchAttention(userId, deps = {}) {
   const st = deps.store || store;
+  const policy = deps.core || core;
   const now = deps.now || Date.now();
   if (typeof st.listBatches !== "function") return [];
   const batches = await st.listBatches(userId, 200, true);
@@ -338,11 +407,28 @@ async function batchAttention(userId, deps = {}) {
 
   for (const batch of batches) {
     const status = String(batch.status || "");
-    if (["held", "needs_review", "schedule_held", "action_required"].includes(status)) {
+    const health = policy.campaignHealth(Number(batch.sentCount) || 0,
+      Number(batch.hardBounceCount) || 0);
+    if (status === "paused" && health.pause && String(batch.warningLevel || "") === "blocked") {
       out.push({ kind: "batch", batchId: batch.id, batchName: batch.name || "Email batch",
-        reason: "batch_held", reasonLabel: status === "action_required"
-          ? "Email batch stopped — reconnect required" : "Email batch held — review required",
-        actions: [...ACTIONS_BY_REASON.batch_held],
+        reason: "batch_delivery_warning", reasonLabel: "Email batch paused — delivery problems",
+        detail: batch.warningMessage || health.reason,
+        actions: [...ACTIONS_BY_REASON.batch_delivery_warning],
+        lastActivityAt: batch.updatedUtc || batch.createdUtc || "" });
+      continue;
+    }
+    if (["held", "needs_review", "schedule_held", "action_required"].includes(status)) {
+      const scheduleChanged = status === "schedule_held" && ["schedule_template_changed",
+        "schedule_validation_changed", "schedule_recipient_suppressed",
+        "schedule_allowlist_changed"].includes(String(batch.scheduleHoldCode || ""));
+      const reasonKey = scheduleChanged ? "batch_schedule_changed" : "batch_held";
+      out.push({ kind: "batch", batchId: batch.id, batchName: batch.name || "Email batch",
+        reason: reasonKey, reasonLabel: scheduleChanged
+          ? "Scheduled email content or recipients changed — review required"
+          : status === "action_required" ? "Email batch stopped — reconnect required"
+            : "Email batch held — review required",
+        detail: batch.scheduleHoldMessage || batch.warningMessage || "",
+        actions: [...ACTIONS_BY_REASON[reasonKey]],
         lastActivityAt: batch.scheduleHeldUtc || batch.updatedUtc || batch.createdUtc || "" });
       continue;
     }
@@ -385,7 +471,7 @@ async function queue(userId, deps = {}) {
     // due follow-up even if the underlying reply remains unread in Outlook.
     if (why === "reply_new" && row.nextActionAt
         && new Date(row.nextActionAt).getTime() <= now) why = "due";
-    if (!why || ["reply_new", "quiet_warm"].includes(why)) continue;
+    if (!why || ["reply_new", "quiet_warm", "bounced"].includes(why)) continue;
     out.push({
       advisorCrd: row.advisorCrd || row.rowKey,
       advisorEmail: row.advisorEmail || "",
@@ -399,6 +485,7 @@ async function queue(userId, deps = {}) {
       nextActionAt: row.nextActionAt || "",
     });
   }
+  out.push(...await mailboxAttention(userId, { ...deps, store: st, now }));
   out.push(...await batchAttention(userId, { ...deps, store: st, now }));
   out.sort((a, b) => rank(a, now) - rank(b, now));
 
@@ -530,4 +617,5 @@ async function completeOutbound(userId, advisorCrd, deps = {}) {
 
 module.exports = { fold, reason, rank, refresh, refreshDirty, rebuild, queue, activitySummary, setReplyState,
                    snooze, dismissBounce, completeOutbound, batchAttention,
+                   mailboxAttention, replySweepHealth,
                    REPLY_STATES, REASONS, ACTIONS_BY_REASON, stateIndex };

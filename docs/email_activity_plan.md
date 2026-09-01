@@ -470,13 +470,16 @@ advisors it touched**. A cache, not a second source of truth: `fold()` is a pure
 function of the log and everything in it is regenerable, except the rep's own
 decisions (`replyState`, `actedAt`, `nextActionAt`) which are carried across.
 
-Five notification reasons, in this order:
+Eight notification reasons, in this order:
 
-    batch_held       batch held/stopped -- review required
+    mailbox_reconnect       Microsoft 365 consent needs renewal
+    mailbox_sync_failed     the live reply sweep failed or stopped advancing
+    batch_delivery_warning  hard-bounce rate paused an entire campaign
+    batch_schedule_changed  scheduled content/materials/recipients changed
+    batch_held              another batch hold/stoppage needs review
     batch_followup_due  the rep's campaign reminder is due
     reply_followup   follow-up needed
     due              follow-up due
-    bounced          address needs fixing
 
 Ordinary advisor replies are deliberately **not notifications**. Outlook is the
 rep's inbox and response surface; repeating each message here makes the app a
@@ -484,6 +487,13 @@ second, worse inbox. Replies remain in the durable activity log, relationship
 timeline and engagement projection, and still remove that advisor from a batch
 follow-up. Likewise, `quiet_warm` remains a useful relationship/filter signal
 but is not allowed to fill the notification badge automatically.
+
+Individual hard bounces are likewise retained in suppression, batch detail and
+the advisor timeline without creating one alert per address. The notification
+appears only when the server's delivery-health threshold pauses the batch, so a
+rep gets one scalable campaign-level exception with the actual reason. Mailbox
+reconnect and genuinely failed/stale reply ingestion are account-level rows and
+therefore count in the same badge; a progressing backfill does not.
 
 **Exactly one reason per advisor**, plus one row for each actionable batch. A
 queue that lists somebody three times is a queue a rep stops reading. Within a
@@ -774,10 +784,10 @@ Disclosure rather than refusal — which is what Outlook would have done.
     ignoring a fresh upload until the process recycled.
   * **In-app sends refresh the projection immediately**, so the queue stops
     saying "needs attention" about a reply just answered.
-  * **Queue actions now match queue reasons.** `Snooze` is the missing verb —
-    `Done` deliberately cannot clear a quiet contact or a bounce, so without it
-    a rep had no way to set either aside. A bounced row offers *Address is fine*
-    rather than a `Follow up` that suppression would reject.
+  * **Queue actions now match queue reasons.** Advisor due work can be snoozed;
+    campaign exceptions open the relevant batch; and a Microsoft 365 consent
+    failure opens the reconnect flow. Individual bounces remain visible where
+    the address is managed, without becoming one notification per recipient.
   * **`nextActionAt` / `scheduled` / "Follow-up due" now have an API and UI.**
     They existed in the model with no way to set them, so that reason could
     never fire — Phase 5 was not actually complete.
