@@ -179,6 +179,7 @@ test("calendar approval durably binds the reservation and every message before q
     const limitGuard = {
       reservePlan: async (...args) => { reservations.push(args); return plan; },
       easternDay: () => "2026-08-31",
+      normalizeDailyStartTime: (value) => String(value || "09:00"),
     };
     const h = load([message], { status: "editing", mode: "",
       graphMailbox: "rep@eicatlanta.com", graphMailboxId: "mailbox-1",

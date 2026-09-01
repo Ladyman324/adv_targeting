@@ -24,9 +24,13 @@
   // Approval is the only browser-bound portion of a send. Once its 202 response
   // arrives, Azure owns the work and this window may close.
   let approvalPending = false;
+  let approvalPreparing = false;
+  let approvalSubmitting = false;
+  let approvalIntent = null;
   let sendTiming = "now";
   let scheduleDate = "";
   let scheduleTime = "09:00";
+  let continuationTime = "09:00";
   let deliveryPlan = null;
   let deliveryPlanKey = "";
   let deliveryPlanError = "";
@@ -35,7 +39,7 @@
   let deliveryPlanSequence = 0;
   let catalogLoadedAt = 0;
   global.addEventListener("beforeunload", (event) => {
-    if (!approvalPending) return;
+    if (!approvalPending && !approvalPreparing && !approvalSubmitting) return;
     event.preventDefault();
     event.returnValue = "";
   });
@@ -80,14 +84,29 @@
       const later = easternParts(new Date(soon.getTime() + 3600000));
       scheduleDate = `${later.year}-${later.month}-${later.day}`; scheduleTime = `${later.hour}:00`;
     }
+    const hour = Number(scheduleTime.slice(0, 2));
+    if (hour < 9) scheduleTime = "09:00";
+    if (hour >= 17 || /^\d{4}-\d{2}-\d{2}$/.test(scheduleDate)
+        && [0, 6].includes(new Date(`${scheduleDate}T12:00:00Z`).getUTCDay())) {
+      let day = new Date(`${scheduleDate}T12:00:00Z`);
+      do { day = new Date(day.getTime() + 86400000); }
+      while ([0, 6].includes(day.getUTCDay()));
+      scheduleDate = day.toISOString().slice(0, 10);
+      scheduleTime = "09:00";
+    }
   }
   function scheduleCheck(batch) {
     if (sendTiming !== "later") return { date: null, error: "", quarter: "" };
+    const dailyProblem = dailyStartTimeProblem(scheduleTime);
+    if (dailyProblem) return { date: null, error: dailyProblem, quarter: "" };
     const date = easternLocalToDate(scheduleDate, scheduleTime);
     if (!date) return { date: null, error: "Choose a valid, unambiguous Eastern time.", quarter: "" };
     const earliest = Date.now() + Number(((catalog || {}).limits || {}).cancellationSeconds || 0) * 1000;
     if (date.getTime() < earliest) return { date, error: "Choose a time after the cancellation window.", quarter: "" };
-    if (date.getTime() > Date.now() + 7 * 86400000)
+    const nowParts = easternParts(new Date());
+    const maxDay = new Date(Date.UTC(Number(nowParts.year), Number(nowParts.month) - 1,
+      Number(nowParts.day) + 7, 12)).toISOString().slice(0, 10);
+    if (scheduleDate > maxDay)
       return { date, error: "Scheduled sending can begin no more than 7 days from now.", quarter: "" };
     const now = easternParts(new Date()), then = easternParts(date);
     const nowQuarter = `${now.year}-Q${Math.floor((+now.month - 1) / 3) + 1}`;
@@ -101,16 +120,33 @@
     }
     return { date, error: "", quarter: "" };
   }
+
+  function dailyStartTimeProblem(value) {
+    const match = /^(\d{2}):(\d{2})$/.exec(String(value || ""));
+    if (!match) return "Choose a daily delivery time.";
+    const minutes = Number(match[1]) * 60 + Number(match[2]);
+    return minutes < 9 * 60 || minutes >= 17 * 60
+      ? "Choose a daily delivery time from 9:00 AM through 4:59 PM Eastern." : "";
+  }
+
+  function selectedDailyStartTime() {
+    return sendTiming === "later" ? scheduleTime : continuationTime;
+  }
   function syncScheduleInputs() {
     const dateInput = document.getElementById("emailScheduleDate");
     const timeInput = document.getElementById("emailScheduleTime");
+    const continuationInput = document.getElementById("emailContinuationTime");
     if (dateInput) scheduleDate = dateInput.value || "";
     if (timeInput) scheduleTime = timeInput.value || "";
+    if (continuationInput) continuationTime = continuationInput.value || "";
     const result = scheduleCheck((detail && detail.batch) || { attachmentIds: [] });
-    const problem = result.error || result.quarter || "";
+    const problem = result.error || result.quarter
+      || (sendTiming === "now" ? dailyStartTimeProblem(continuationTime) : "");
     const status = document.getElementById("emailScheduleError");
     if (status) {
-      status.textContent = problem || scheduleDisplayText(result, false);
+      status.textContent = problem || (sendTiming === "later"
+        ? scheduleDisplayText(result, false)
+        : `Starts as soon as approved. Any later delivery days begin at ${continuationTime} Eastern.`);
       status.classList.toggle("bad", !!problem);
       status.classList.toggle("good", !problem);
     }
@@ -268,7 +304,8 @@
       }).join("")}</ol>` : ""}
       ${todayEmpty && firstDay ? `<p class="email-plan-note">No capacity remains today. This batch begins ${esc(planDayLabel(firstDay))}.</p>` : ""}
       ${weekend ? `<p class="email-plan-note">${esc(weekend)}</p>` : ""}
-      <p class="email-plan-note">Weekends are skipped. Future delivery days begin at 9:00 AM Eastern.</p>
+      <p class="email-plan-note">Weekends are skipped. Later delivery days begin at ${esc(
+        plan.dailyStartTime || selectedDailyStartTime())} Eastern.</p>
       ${problem ? `<p class="email-plan-error">${esc(problem)}</p>` : ""}`;
   }
 
@@ -281,8 +318,149 @@
   }
 
   function approvalButtonLabel(plan) {
+    if (approvalPreparing) return "Preparing approval…";
     if (plan && plan.multiDay) return "Approve multi-day send";
     return sendTiming === "later" ? "Approve &amp; Schedule" : "Approve &amp; Send";
+  }
+
+  function closeApprovalReview() {
+    const back = document.getElementById("emailApprovalBack");
+    if (back) back.remove();
+    approvalIntent = null;
+    approvalSubmitting = false;
+  }
+
+  function approvalReviewHtml(intent) {
+    const plan = intent.plan;
+    const days = plan && plan.days || [];
+    const multi = days.length > 1;
+    const heading = intent.mode === "drafts" ? `Create ${intent.recipientCount} Outlook drafts?`
+      : multi ? `Approve a ${days.length}-day send?`
+        : intent.scheduledForUtc ? `Schedule ${intent.recipientCount} emails?`
+          : `Send ${intent.recipientCount} emails?`;
+    const timing = intent.mode === "drafts"
+      ? "Drafts are created in Outlook and are not sent."
+      : intent.scheduledForUtc
+        ? `The first day and every later delivery day use ${esc(intent.dailyStartTime)} Eastern.`
+        : multi
+          ? `The first available emails start after the cancellation window. Later days begin at ${esc(intent.dailyStartTime)} Eastern.`
+          : `Sending starts after the ${Number((catalog.limits || {}).cancellationSeconds) || 0}-second cancellation window.`;
+    const finalLabel = intent.mode === "drafts"
+      ? `Create ${intent.recipientCount} Outlook drafts`
+      : multi ? `Approve & start ${days.length}-day send`
+        : intent.scheduledForUtc ? `Approve & schedule ${intent.recipientCount}`
+          : `Approve & send ${intent.recipientCount}`;
+    return `<section class="email-approval-dialog" role="dialog" aria-modal="true"
+        aria-labelledby="emailApprovalTitle" aria-describedby="emailApprovalIntro">
+      <header><div><p class="eyebrow">Final review</p><h2 id="emailApprovalTitle">${heading}</h2></div>
+        <button type="button" class="rclose" data-email="approval-cancel" aria-label="Go back">&times;</button></header>
+      <div class="email-approval-body">
+        <p id="emailApprovalIntro" class="email-approval-lead"><b>Nothing happens until you press the final button below.</b> ${timing}</p>
+        <dl class="email-approval-facts">
+          <div><dt>Recipients</dt><dd>${intent.recipientCount}</dd></div>
+          ${intent.mode === "send" ? `<div><dt>Daily capacity</dt><dd>${Number(plan.externalUnits) || 0} total</dd></div>` : ""}
+          <div><dt>Attachments</dt><dd>${intent.attachments.length ? intent.attachments.map((a) =>
+            `${esc(a.name)} (${bytes(a.size)})`).join("<br>") : "None"}</dd></div>
+          ${intent.unopened ? `<div class="warn"><dt>Not opened by you</dt><dd>${intent.unopened}</dd></div>` : ""}
+        </dl>
+        ${intent.mode === "send" && days.length ? `<div class="email-approval-plan"><h3>Exact delivery plan</h3>
+          <ol>${days.map((day) => `<li><span>${esc(planDayLabel(day))}</span><b>${Number(day.messageCount) || 0} email${
+            Number(day.messageCount) === 1 ? "" : "s"} · ${Number(day.units) || 0} capacity</b></li>`).join("")}</ol></div>` : ""}
+        ${intent.needsCode ? `<label class="email-passcode"><p><b>Approval passcode required</b><br>
+          This batch exceeds the ${Number(catalog.limits.passcodeOver)}-recipient threshold.</p>
+          <input id="emailApprovalPasscode" type="password" inputmode="numeric" autocomplete="off"
+            aria-describedby="emailApprovalError"><span>Enter the passcode to enable final approval.</span></label>` : ""}
+        <p id="emailApprovalError" class="email-approval-error" role="alert"></p>
+      </div>
+      <footer><button type="button" class="ask-btn ghost" data-email="approval-cancel">Go back</button>
+        <button type="button" class="ask-btn primary" data-email="approval-confirm">${finalLabel}</button></footer>
+    </section>`;
+  }
+
+  function openApprovalReview(mode, batch, timing) {
+    closeApprovalReview();
+    const count = tally();
+    approvalIntent = {
+      batchId: batch.id, mode, recipientCount: batch.recipientCount,
+      attachmentIds: [...batch.attachmentIds],
+      attachments: [...batch.attachmentSummary],
+      scheduledForUtc: timing.date ? timing.date.toISOString() : "",
+      dailyStartTime: selectedDailyStartTime(),
+      plan: mode === "send" ? JSON.parse(JSON.stringify(deliveryPlan)) : null,
+      needsCode: catalog.limits.passcodeOver != null
+        && batch.recipientCount > catalog.limits.passcodeOver,
+      unopened: count.unopened,
+    };
+    const back = document.createElement("div");
+    back.id = "emailApprovalBack";
+    back.className = "email-approval-back";
+    back.innerHTML = approvalReviewHtml(approvalIntent);
+    document.body.appendChild(back);
+    const focus = document.getElementById(approvalIntent.needsCode
+      ? "emailApprovalPasscode" : "emailApprovalTitle");
+    if (focus) {
+      if (!focus.hasAttribute("tabindex") && focus.id === "emailApprovalTitle")
+        focus.setAttribute("tabindex", "-1");
+      focus.focus();
+    }
+  }
+
+  async function submitApproval(button) {
+    const intent = approvalIntent;
+    if (!intent || approvalSubmitting) return;
+    const passcodeInput = document.getElementById("emailApprovalPasscode");
+    const passcode = passcodeInput ? passcodeInput.value.trim() : "";
+    const errorBox = document.getElementById("emailApprovalError");
+    if (intent.needsCode && !passcode) {
+      if (errorBox) errorBox.textContent = "Enter the approval passcode before continuing.";
+      if (passcodeInput) passcodeInput.focus();
+      return;
+    }
+    approvalSubmitting = true;
+    approvalPending = true;
+    button.disabled = true;
+    button.textContent = "Approving…";
+    for (const control of document.querySelectorAll('[data-email="approval-cancel"]'))
+      control.disabled = true;
+    if (errorBox) errorBox.textContent = "";
+    try {
+      detail = await api("approve", {
+        batchId: intent.batchId, mode: intent.mode, reviewed: true, passcode,
+        capacityPlanHash: intent.mode === "send" ? intent.plan.hash : "",
+        scheduledForUtc: intent.scheduledForUtc,
+        dailyStartTime: intent.dailyStartTime,
+        confirmation: {
+          recipientCount: intent.recipientCount,
+          attachmentIds: intent.attachmentIds,
+          capacityPlanHash: intent.mode === "send" ? intent.plan.hash : "",
+          scheduledForUtc: intent.scheduledForUtc,
+          dailyStartTime: intent.dailyStartTime,
+        },
+      });
+      closeApprovalReview();
+      deliveryPlan = storedCapacityPlan(detail.batch) || deliveryPlan;
+      composerView();
+    } catch (error) {
+      approvalSubmitting = false;
+      button.disabled = false;
+      for (const control of document.querySelectorAll('[data-email="approval-cancel"]'))
+        control.disabled = false;
+      button.textContent = intent.mode === "drafts" ? `Create ${intent.recipientCount} Outlook drafts`
+        : intent.plan && intent.plan.multiDay
+          ? `Approve & start ${(intent.plan.days || []).length}-day send`
+          : intent.scheduledForUtc ? `Approve & schedule ${intent.recipientCount}`
+            : `Approve & send ${intent.recipientCount}`;
+      if (/capacity|plan/i.test(`${error.code} ${error.message}`)) {
+        closeApprovalReview();
+        await requestCapacityPlan({ force: true });
+        notice(`${error.message} The delivery plan was refreshed; review it and approve again.`, true);
+      } else {
+        if (errorBox) errorBox.textContent = error.message;
+        if (passcodeInput) { passcodeInput.value = ""; passcodeInput.focus(); }
+      }
+    } finally {
+      approvalPending = false;
+    }
   }
 
   function paintCapacityPlanNodes() {
@@ -299,7 +477,7 @@
     const reason = detail && !locked ? sendBlockedReason(detail.batch) : "";
     if (button) {
       button.innerHTML = approvalButtonLabel(deliveryPlan);
-      button.disabled = !!reason;
+      button.disabled = approvalPreparing || !!reason;
       button.title = reason;
     }
     const off = document.getElementById("emailSendoff");
@@ -320,15 +498,17 @@
         || !["editing", "invalid"].includes(detail.batch.status)) return deliveryPlan;
     const timing = sendTiming === "later" ? scheduleCheck(detail.batch)
       : { date: null, error: "", quarter: "" };
-    if (timing.error || timing.quarter) {
+    const dailyStartTime = selectedDailyStartTime();
+    const dailyProblem = dailyStartTimeProblem(dailyStartTime);
+    if (timing.error || timing.quarter || dailyProblem) {
       deliveryPlan = null;
-      deliveryPlanError = timing.error || timing.quarter;
+      deliveryPlanError = timing.error || timing.quarter || dailyProblem;
       deliveryPlanKey = "";
       paintCapacityPlanNodes();
       return null;
     }
     const scheduledForUtc = timing.date ? timing.date.toISOString() : "";
-    const key = `${detail.batch.id}|${scheduledForUtc}|${detail.batch.recipientCount}|${detail.batch.externalCount}`;
+    const key = `${detail.batch.id}|${scheduledForUtc}|${dailyStartTime}|${detail.batch.recipientCount}|${detail.batch.externalCount}`;
     if (!force && deliveryPlan && key === deliveryPlanKey) return deliveryPlan;
     const sequence = ++deliveryPlanSequence;
     deliveryPlanLoading = true;
@@ -336,7 +516,9 @@
     if (key !== deliveryPlanKey) deliveryPlan = null;
     paintCapacityPlanNodes();
     try {
-      const result = await api("capacity_plan", { batchId: detail.batch.id, scheduledForUtc });
+      const result = await api("capacity_plan", {
+        batchId: detail.batch.id, scheduledForUtc, dailyStartTime,
+      });
       if (sequence !== deliveryPlanSequence) return deliveryPlan;
       deliveryPlan = result.deliveryPlan || null;
       deliveryPlanKey = key;
@@ -1889,15 +2071,34 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
       Number(minParts.day) + 7, 12));
     const scheduleMin = `${minParts.year}-${minParts.month}-${minParts.day}`;
     const scheduleMax = maxDate.toISOString().slice(0, 10);
-    const scheduleHtml = locked ? "" : `<fieldset class="email-schedule"><legend>When should sending begin?</legend>
-      <label><input type="radio" name="emailTiming" value="now" ${sendTiming === "now" ? "checked" : ""}> Send now</label>
-      <label><input type="radio" name="emailTiming" value="later" ${sendTiming === "later" ? "checked" : ""}> Schedule for later</label>
+    const timingProblem = schedule.error || schedule.quarter
+      || (sendTiming === "now" ? dailyStartTimeProblem(continuationTime) : "");
+    const timingStatus = timingProblem || (sendTiming === "later"
+      ? scheduleDisplayText(schedule, true)
+      : `Starts as soon as approved. Any later delivery days begin at ${continuationTime} Eastern.`);
+    const scheduleHtml = locked ? "" : `<fieldset class="email-schedule"><legend>Delivery timing</legend>
+      <div class="email-timing-options">
+        <label class="${sendTiming === "now" ? "selected" : ""}"><input type="radio" name="emailTiming" value="now"
+          ${sendTiming === "now" ? "checked" : ""}><span><b>Start as soon as approved</b>
+          <small>Uses the cancellation window, then begins with the earliest available capacity.</small></span></label>
+        <label class="${sendTiming === "later" ? "selected" : ""}"><input type="radio" name="emailTiming" value="later"
+          ${sendTiming === "later" ? "checked" : ""}><span><b>Schedule the batch</b>
+          <small>Choose the first date and the Eastern start time used on every delivery day.</small></span></label>
+      </div>
+      <div class="email-schedule-fields email-continuation-fields" ${sendTiming === "now" ? "" : "hidden"}>
+        <label>Later-day start <input id="emailContinuationTime" type="time" min="09:00" max="16:45"
+          step="900" aria-describedby="emailScheduleHelp emailScheduleError" value="${esc(continuationTime)}"></label>
+        <small id="emailScheduleHelp">Eastern Time. This time applies only if the batch continues on another weekday.</small>
+      </div>
       <div class="email-schedule-fields" ${sendTiming === "later" ? "" : "hidden"}>
-        <label>Date <input id="emailScheduleDate" type="date" min="${scheduleMin}" max="${scheduleMax}" aria-describedby="emailScheduleHelp emailScheduleError" value="${esc(scheduleDate)}"></label>
-        <label>Time <input id="emailScheduleTime" type="time" step="900" aria-describedby="emailScheduleHelp emailScheduleError" value="${esc(scheduleTime)}"></label>
-        <small id="emailScheduleHelp">Eastern Time. Sending may continue after this start time.</small>
-        <p id="emailScheduleError" class="${schedule.error || schedule.quarter ? "bad" : "good"}" role="alert">${esc(schedule.error || schedule.quarter || scheduleDisplayText(schedule, true))}</p>
-      </div></fieldset>`;
+        <label>First date <input id="emailScheduleDate" type="date" min="${scheduleMin}" max="${scheduleMax}"
+          aria-describedby="emailScheduleHelpLater emailScheduleError" value="${esc(scheduleDate)}"></label>
+        <label>Daily start <input id="emailScheduleTime" type="time" min="09:00" max="16:45" step="900"
+          aria-describedby="emailScheduleHelpLater emailScheduleError" value="${esc(scheduleTime)}"></label>
+        <small id="emailScheduleHelpLater">Eastern Time. The same start time is used on every delivery day; weekends are skipped.</small>
+      </div>
+      <p id="emailScheduleError" class="${timingProblem ? "bad" : "good"}" role="alert">${esc(timingStatus)}</p>
+    </fieldset>`;
     // The poll below re-renders every three seconds while a batch is working.
     // Replacing innerHTML resets scroll, which threw the rep back to the top of
     // a long recipient list mid-read. Keep where they were.
@@ -2298,7 +2499,22 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
 
   async function act(button) {
     const action = button.dataset.email;
+    if (action === "approval-cancel") {
+      if (approvalSubmitting) {
+        const error = document.getElementById("emailApprovalError");
+        if (error) error.textContent = "Final approval is being submitted. Wait for the result before closing.";
+        return;
+      }
+      closeApprovalReview();
+      paintCapacityPlanNodes();
+      notice("Approval was not submitted. The batch remains in review.");
+      return;
+    }
+    if (action === "approval-confirm") return submitApproval(button);
     if (action === "close") {
+      if (approvalPreparing || approvalSubmitting)
+        return notice("Please wait for the approval check to finish.", true);
+      closeApprovalReview();
       shell().hidden = true;
       clearTimeout(pollTimer); clearInterval(tickTimer); clearTimeout(deliveryPlanTimer);
       forceDetail = false; cleanEmailUrl(); return;
@@ -2741,7 +2957,7 @@ Generate emails for all of them?`)) return;
 
         const ccColleague = ((document.getElementById("ccColleague") || {}).value || "").trim();
         const followUpDays = Number((document.getElementById("followUpDays") || {}).value || 0);
-        sendTiming = "now"; scheduleDate = ""; scheduleTime = "09:00";
+        sendTiming = "now"; scheduleDate = ""; scheduleTime = "09:00"; continuationTime = "09:00";
         detail = await api("create_batch", { recipients: kept,
           templateId: (document.getElementById("emailTemplate") || {}).value || "",
           attachmentIds, materialFamilyIds, ccColleague, followUpDays });
@@ -2910,9 +3126,13 @@ They stay on your call list and keep their history — this only takes them out 
       }
       const mode = action === "approve-send" ? "send" : "drafts", b = detail.batch;
       if (mode === "send") {
+        if (approvalPreparing) return;
+        approvalPreparing = true;
         button.disabled = true;
+        button.textContent = "Preparing approval…";
         notice("Refreshing the daily delivery plan…");
-        await requestCapacityPlan({ force: true });
+        try { await requestCapacityPlan({ force: true }); }
+        finally { approvalPreparing = false; }
         const capacityProblem = sendBlockedReason(b);
         if (capacityProblem) {
           button.disabled = false;
@@ -2922,56 +3142,8 @@ They stay on your call list and keep their history — this only takes them out 
       }
       const timing = mode === "send" ? scheduleCheck(b) : { date: null, error: "", quarter: "" };
       if (timing.error || timing.quarter) return notice(timing.error || timing.quarter, true);
-      const attachmentText = b.attachmentSummary.length ? b.attachmentSummary.map((a) => `${a.name} (${bytes(a.size)})`).join("\n") : "No attachments";
-      const planLines = mode === "send" ? (deliveryPlan.days || []).map((day) =>
-        `${planDayLabel(day)} — ${Number(day.messageCount) || 0} emails · ${Number(day.units) || 0} capacity`).join("\n") : "";
-      const verb = mode === "send" ? (deliveryPlan.multiDay
-        ? `approve this ${(deliveryPlan.days || []).length}-day send`
-        : timing.date
-          ? `approve and schedule ${b.recipientCount} emails to begin ${easternLabel(timing.date)}`
-          : `approve ${b.recipientCount} emails for sending after the ${catalog.limits.cancellationSeconds}-second cancellation window`)
-        : `create ${b.recipientCount} Outlook drafts`;
-      // The unreviewed count belongs in this dialog, not only in the tally row
-      // above it. This is the last moment anyone can stop the send, and "8 not
-      // yet opened" is exactly the fact a rep needs at that moment.
-      const c = tally();
-      if (!confirm(`Review confirmation\n\n${b.recipientCount} recipients\n`
-        + `${c.unopened ? `${c.unopened} never opened by you\n` : ""}`
-        + `${mode === "send" ? `${Number(deliveryPlan.externalUnits) || 0} count toward daily capacity\n${planLines}\n\n` : ""}`
-        + `${attachmentText}\n\n${verb}?`)) {
-        button.disabled = false;
-        return;
-      }
-
-      // Server-enforced too; this only decides whether to ask. A rep who
-      // dismisses the prompt gets told the approval stopped rather than
-      // silently sending nothing.
-      const needsCode = catalog.limits.passcodeOver != null
-        && b.recipientCount > catalog.limits.passcodeOver;
-      let passcode = "";
-      if (needsCode) {
-        passcode = prompt(`This batch has ${b.recipientCount} recipients.\n\n`
-          + `Enter the approval passcode to continue.`) || "";
-        if (!passcode) {
-          button.disabled = false;
-          return notice("Approval cancelled — no passcode entered.", true);
-        }
-      }
-      button.disabled = true;
-      approvalPending = true;
-      try { detail = await api("approve", { batchId: b.id, mode, reviewed: true, passcode,
-        capacityPlanHash: mode === "send" ? deliveryPlan.hash : "",
-        scheduledForUtc: timing.date ? timing.date.toISOString() : "",
-        confirmation: { recipientCount: b.recipientCount, attachmentIds: b.attachmentIds,
-          capacityPlanHash: mode === "send" ? deliveryPlan.hash : "",
-          scheduledForUtc: timing.date ? timing.date.toISOString() : "" } }); composerView(); }
-      catch (e) {
-        button.disabled = false;
-        if (mode === "send") await requestCapacityPlan({ force: true });
-        notice(/capacity|plan/i.test(`${e.code} ${e.message}`)
-          ? `${e.message} The delivery plan was refreshed; review it and approve again.` : e.message, true);
-      }
-      finally { approvalPending = false; }
+      openApprovalReview(mode, b, timing);
+      button.disabled = false;
       return;
     }
     if (action === "review-reschedule") {
@@ -3015,7 +3187,7 @@ They stay on your call list and keep their history — this only takes them out 
       if (sendTiming === "later" && first) first.focus();
       return;
     }
-    if (["emailScheduleDate", "emailScheduleTime"].includes(event.target.id)) {
+    if (["emailScheduleDate", "emailScheduleTime", "emailContinuationTime"].includes(event.target.id)) {
       // Do not rebuild the composer here. Native date/time controls emit
       // change while their segmented editor is still active; replacing their
       // DOM at that moment discards focus and whichever segment the rep was
@@ -3069,7 +3241,7 @@ They stay on your call list and keep their history — this only takes them out 
   }, true);
 
   document.addEventListener("input", (event) => {
-    if (["emailScheduleDate", "emailScheduleTime"].includes(event.target.id)) {
+    if (["emailScheduleDate", "emailScheduleTime", "emailContinuationTime"].includes(event.target.id)) {
       syncScheduleInputs();
     } else if (event.target.id === "materialSearch") {
       materialSearch = event.target.value;

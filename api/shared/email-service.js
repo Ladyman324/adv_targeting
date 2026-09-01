@@ -199,12 +199,13 @@ function capacityEntries(messages, cfg) {
   });
 }
 
-function planOptions(scheduledForUtc, cfg, nowMs = Date.now()) {
+function planOptions(scheduledForUtc, dailyStartTime, cfg, nowMs = Date.now()) {
   const scheduled = String(scheduledForUtc || "").trim();
   const startUtc = scheduled
     ? schedule.scheduledInstant(scheduled, nowMs, cfg.cancellationSeconds)
     : new Date(nowMs + cfg.cancellationSeconds * 1000).toISOString();
   return { limit: cfg.dailyExternalLimit, nowMs, startUtc,
+    dailyStartTime: limitGuard.normalizeDailyStartTime(dailyStartTime),
     bindStart: !!scheduled, horizonDays: 7,
     mailboxIntervalSeconds: cfg.mailboxIntervalSeconds };
 }
@@ -242,7 +243,7 @@ async function capacityPlan(who, input, deps = {}) {
     { limit: cfg.dailyExternalLimit, horizonDays: 7, excludeReservationId: batch.id });
   const usage = Object.fromEntries((snapshot.days || []).map((day) => [day.day, day.committed]));
   const plan = guard.previewPlan(capacityEntries(messages, cfg), {
-    ...planOptions(input.scheduledForUtc, cfg), usage,
+    ...planOptions(input.scheduledForUtc, input.dailyStartTime, cfg), usage,
   });
   return { deliveryPlan: { ...plan, hash: plan.planHash, available: true,
     notice: plan.fit ? "" : `${plan.scheduledCount} of ${plan.recipientCount} emails fit within seven days. Remove at least ${plan.excessCount}, schedule a smaller batch, or use Outlook drafts.` } };
@@ -1185,6 +1186,8 @@ async function approve(who, input) {
   const cfg = core.config(), approvalNow = Date.now();
   const scheduledForUtc = mode === "send" && input.scheduledForUtc
     ? schedule.scheduledInstant(input.scheduledForUtc, approvalNow, cfg.cancellationSeconds) : "";
+  const dailyStartTime = mode === "send" && cfg.calendarCapacityEnabled
+    ? limitGuard.normalizeDailyStartTime(input.dailyStartTime) : "09:00";
   if (!input.confirmation || Number(input.confirmation.recipientCount) !== batch.recipientCount)
     throw httpError(400, "Confirm the exact recipient count before approval.");
   const confirmedAttachments = [...new Set(input.confirmation.attachmentIds || [])].map(String).sort();
@@ -1201,6 +1204,11 @@ async function approve(who, input) {
     if (!suppliedHash || suppliedHash !== String(input.confirmation.capacityPlanHash || ""))
       throw httpError(409, "Review the current daily delivery plan before approving.",
         "capacity_plan_required");
+    const confirmedDailyStart = limitGuard.normalizeDailyStartTime(
+      input.confirmation.dailyStartTime);
+    if (confirmedDailyStart !== dailyStartTime)
+      throw httpError(400, "Confirm the exact daily delivery time before approval.",
+        "capacity_daily_time_confirmation_mismatch");
   }
   if (validation.errors.length) throw httpError(400, `The batch has ${validation.errors.length} validation problem(s).`);
   if (validation.messages.some((m) => !m.reviewed)) throw httpError(400, "Approve the final previews before continuing.");
@@ -1255,7 +1263,7 @@ async function approve(who, input) {
     if (cfg.calendarCapacityEnabled) {
       const entries = capacityEntries(validation.messages, cfg);
       reservedPlan = await limitGuard.reservePlan(who.id, capacityReservationId, entries, {
-        ...planOptions(scheduledForUtc, cfg, approvalNow),
+        ...planOptions(scheduledForUtc, dailyStartTime, cfg, approvalNow),
         expectedPlanHash: String(input.capacityPlanHash || ""), kind: "campaign",
       });
     } else if (!scheduledForUtc) {
@@ -1302,6 +1310,7 @@ async function approve(who, input) {
     await store.audit(who.id, batch.id, "direct_send_scheduled", {
       recipientCount: batch.recipientCount, attachmentIds: batch.attachmentIds,
       scheduledForUtc: reservedPlan && reservedPlan.firstSendUtc || scheduledForUtc,
+      dailyStartTime,
       scheduleRevision, capacityPlanHash: reservedPlan && reservedPlan.planHash || "",
     });
     // Publish the normal path now, with Azure Queue holding it until the exact
@@ -1356,6 +1365,7 @@ async function approve(who, input) {
   }
   await store.audit(who.id, batch.id, mode === "send" ? "direct_send_approved" : "draft_creation_approved",
     { recipientCount: batch.recipientCount, attachmentIds: batch.attachmentIds, sendNotBeforeUtc,
+      dailyStartTime: mode === "send" ? dailyStartTime : "",
       capacityPlanHash: reservedPlan && reservedPlan.planHash || "",
       deliveryDays: reservedPlan ? reservedPlan.days.map((day) => ({ day: day.day,
         messageCount: day.messageCount, units: day.units })) : [] });

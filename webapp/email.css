@@ -319,11 +319,43 @@
 
 /* The passcode step. Deliberately plain and deliberately not pre-filled --
    the whole value of it is that it cannot be cleared by reflex. */
-.email-passcode{margin:10px 0 0;padding:12px;border:1px solid var(--warn);border-radius:10px}
+.email-passcode{display:block;margin:10px 0 0;padding:12px;border:1px solid var(--warn);border-radius:10px}
 .email-passcode p{margin:0 0 8px;font-size:12.5px}
 .email-passcode input{width:120px;font:inherit;font-size:20px;letter-spacing:.35em;
   text-align:center;padding:8px 10px;border-radius:8px;border:1px solid var(--hair);
   background:var(--panel);color:var(--ink)}
+.email-passcode span{display:block;margin-top:7px;color:var(--muted);font-size:11.5px}
+
+/* Final send approval stays inside the application. Native confirm/prompt
+   dialogs can be suppressed after an asynchronous capacity refresh, which
+   made a real send look like a dead button and sometimes hid the passcode. */
+.email-approval-back{position:fixed;inset:0;z-index:1200;display:grid;place-items:center;
+  padding:18px;background:rgba(13,24,38,.62);backdrop-filter:blur(2px)}
+.email-approval-dialog{width:min(680px,100%);max-height:min(820px,calc(100vh - 36px));
+  display:flex;flex-direction:column;overflow:hidden;border:1px solid var(--hair);
+  border-radius:14px;background:var(--panel);color:var(--ink);box-shadow:0 22px 70px rgba(0,0,0,.34)}
+.email-approval-dialog>header,.email-approval-dialog>footer{display:flex;align-items:center;
+  justify-content:space-between;gap:10px;padding:14px 16px;border-color:var(--hair)}
+.email-approval-dialog>header{border-bottom:1px solid var(--hair)}
+.email-approval-dialog>header h2{margin:2px 0 0;font-size:20px}
+.email-approval-dialog>footer{justify-content:flex-end;border-top:1px solid var(--hair)}
+.email-approval-dialog>footer .ask-btn{width:auto;margin:0}
+.email-approval-body{overflow:auto;padding:16px}
+.email-approval-lead{margin:0 0 14px;line-height:1.45}
+.email-approval-facts{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));
+  gap:8px;margin:0 0 14px}
+.email-approval-facts>div{min-width:0;padding:10px;border:1px solid var(--hair);
+  border-radius:9px;background:var(--panel-2)}
+.email-approval-facts dt{color:var(--muted);font-size:11px}.email-approval-facts dd{margin:4px 0 0;
+  font-size:13px;font-weight:650;overflow-wrap:anywhere}.email-approval-facts .warn{border-color:var(--warn)}
+.email-approval-plan{margin:0 0 12px;padding:12px;border:1px solid var(--hair);
+  border-radius:10px;background:var(--panel-2)}
+.email-approval-plan h3{margin:0 0 8px;font-size:13px}
+.email-approval-plan ol{list-style:none;margin:0;padding:0}
+.email-approval-plan li{display:flex;justify-content:space-between;gap:12px;padding:7px 0;
+  border-top:1px solid var(--hair);font-size:12px}
+.email-approval-plan li:first-child{border-top:0}.email-approval-plan li b{text-align:right}
+.email-approval-error{min-height:18px;margin:10px 0 0;color:var(--warn);font-weight:650}
 
 /* Recipients dropped for having opted out. Stated plainly at the top of the
    batch: a rep who selected 60 and sees 57 must be told why, or the missing
@@ -683,25 +715,34 @@
   .email-route-row{grid-template-columns:1fr 1fr}.email-route-row small{grid-column:1/-1}.email-search{min-width:0;width:100%}
 }
 
-/* A scheduled campaign is still prepared by the server, so this control only
-   chooses its first-send instant. It wraps above the ordinary footer actions
-   and stays usable in the shared Field composer. */
+/* The choice is intentionally two cards rather than two nearly identical radio
+   labels. The selected time is used on every later delivery day. */
 .email-footer:has(.email-schedule){flex-wrap:wrap}
-.email-schedule{display:flex;align-items:center;gap:12px;flex:1 1 100%;margin:0;padding:7px 9px;
+.email-schedule{display:block;flex:1 1 100%;margin:0;padding:8px 10px;
   border:1px solid var(--hair);border-radius:9px;background:var(--panel-2);font-size:12px}
 .email-schedule legend{padding:0 5px;color:var(--muted);font-size:11px}
-.email-schedule>label{display:flex;align-items:center;gap:5px;white-space:nowrap;cursor:pointer}
-.email-schedule-fields{display:flex;align-items:center;gap:8px;flex:1;min-width:0}
+.email-timing-options{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.email-timing-options>label{display:flex;align-items:flex-start;gap:7px;min-width:0;padding:8px;
+  border:1px solid var(--hair);border-radius:8px;background:var(--panel);cursor:pointer}
+.email-timing-options>label.selected{border-color:var(--accent);box-shadow:inset 0 0 0 1px var(--accent)}
+.email-timing-options input{margin-top:2px}.email-timing-options span{min-width:0}
+.email-timing-options b,.email-timing-options small{display:block}.email-timing-options small{margin-top:2px;color:var(--muted);line-height:1.25}
+.email-schedule-fields{display:flex;align-items:center;gap:8px;min-width:0;margin-top:8px}
 .email-schedule-fields[hidden]{display:none}
 .email-schedule-fields label{display:flex;align-items:center;gap:5px;color:var(--muted)}
 .email-schedule-fields input{height:30px;box-sizing:border-box;padding:4px 6px;border:1px solid var(--hair);
   border-radius:7px;background:var(--panel);color:var(--ink);font:inherit;font-size:12px}
 .email-schedule-fields small{color:var(--muted)}
-.email-schedule-fields p{margin:0;font-size:11px;line-height:1.25}
+.email-schedule>p{margin:7px 0 0;font-size:11px;line-height:1.25}
 .email-history-error{max-width:440px;margin:30px auto;padding:18px;text-align:center}
 @media(max-width:760px){
-  .email-grid:has(+.email-footer .email-schedule) .email-editor{padding-bottom:230px}
-  .email-schedule,.email-schedule-fields{align-items:flex-start;flex-wrap:wrap}
+  .email-grid:has(+.email-footer .email-schedule) .email-editor{padding-bottom:330px}
+  .email-timing-options{grid-template-columns:1fr}
+  .email-schedule-fields{align-items:flex-start;flex-wrap:wrap}
   .email-schedule-fields{flex-basis:100%}.email-schedule-fields p{flex-basis:100%}
   .email-schedule-fields input{font-size:16px;min-height:44px}
+  .email-approval-back{padding:8px}.email-approval-dialog{max-height:calc(100vh - 16px)}
+  .email-approval-facts{grid-template-columns:1fr}.email-approval-dialog>footer{display:grid;
+    grid-template-columns:1fr 1.5fr}.email-approval-dialog>footer .ask-btn{width:100%}
+  .email-approval-plan li{display:block}.email-approval-plan li b{display:block;margin-top:3px;text-align:left}
 }

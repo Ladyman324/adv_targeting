@@ -15,7 +15,9 @@ test("delivery plans count the final To and advisor Cc envelope, not stale batch
   const cfg = { calendarCapacityEnabled: true, dailyExternalLimit: 25,
     cancellationSeconds: 20, mailboxIntervalSeconds: 10,
     internalDomains: new Set(["eicatlanta.com"]) };
-  const result = await service.capacityPlan({ id: "u1" }, { batchId: "b1" }, {
+  const result = await service.capacityPlan({ id: "u1" }, {
+    batchId: "b1", dailyStartTime: "10:30",
+  }, {
     store: { getBatch: async () => batch, listMessages: async () => messages },
     core: { config: () => cfg },
     limitGuard: {
@@ -27,6 +29,7 @@ test("delivery plans count the final To and advisor Cc envelope, not stale batch
   assert.equal(result.deliveryPlan.externalUnits, 2,
     "one external To plus one external advisor teammate Cc consumes two units");
   assert.equal(result.deliveryPlan.days[0].units, 2);
+  assert.equal(result.deliveryPlan.dailyStartTime, "10:30");
 });
 
 test("a new plan finishes deferred release from a prior schedule review", async () => {

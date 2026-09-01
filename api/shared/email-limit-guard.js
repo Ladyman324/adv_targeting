@@ -97,6 +97,19 @@ function normalizeOrdered(ordered) {
   });
 }
 
+function normalizeDailyStartTime(value) {
+  const raw = String(value || "09:00").trim();
+  const match = /^(\d{2}):(\d{2})$/.exec(raw);
+  if (!match) throw problem("Choose a daily delivery time in Eastern Time.", 400,
+    "capacity_daily_time_invalid");
+  const hour = Number(match[1]), minute = Number(match[2]);
+  const total = hour * 60 + minute;
+  if (hour > 23 || minute > 59 || total < 9 * 60 || total >= 17 * 60)
+    throw problem("Choose a daily delivery time from 9:00 AM through 4:59 PM Eastern.",
+      400, "capacity_daily_time_invalid");
+  return `${pad(hour)}:${pad(minute)}`;
+}
+
 function usageMap(value) {
   if (value instanceof Map) return new Map(value);
   return new Map(Object.entries(value || {}).map(([key, count]) => [key, Number(count) || 0]));
@@ -114,24 +127,27 @@ function previewPlan(ordered, options = {}) {
   const requestedMs = Date.parse(String(options.startUtc || ""));
   const requested = Number.isFinite(requestedMs) ? requestedMs : nowMs;
   const requestedParts = easternParts(requested);
+  const dailyStartTime = normalizeDailyStartTime(options.dailyStartTime);
+  const [dailyHour, dailyMinute] = dailyStartTime.split(":").map(Number);
+  const dailyMinutes = dailyHour * 60 + dailyMinute;
   let day = easternDay(requested);
   let firstMinutes = requestedParts.hour * 60 + requestedParts.minute;
   let exactFirstUtc = new Date(requested).toISOString();
-  if (day < approvalDay) { day = approvalDay; firstMinutes = 9 * 60; exactFirstUtc = ""; }
-  while (!isBusinessDay(day)) { day = addDays(day, 1); firstMinutes = 9 * 60; exactFirstUtc = ""; }
+  if (day < approvalDay) { day = approvalDay; firstMinutes = dailyMinutes; exactFirstUtc = ""; }
+  while (!isBusinessDay(day)) { day = addDays(day, 1); firstMinutes = dailyMinutes; exactFirstUtc = ""; }
   if (firstMinutes < 9 * 60) { firstMinutes = 9 * 60; exactFirstUtc = ""; }
   if (firstMinutes >= 17 * 60) {
     do { day = addDays(day, 1); } while (!isBusinessDay(day));
-    firstMinutes = 9 * 60; exactFirstUtc = "";
+    firstMinutes = dailyMinutes; exactFirstUtc = "";
   }
 
   const assignments = [], summaries = [];
   let cursor = 0, trancheIndex = 0;
   while (cursor < entries.length && day <= horizonDay) {
-    if (!isBusinessDay(day)) { day = addDays(day, 1); firstMinutes = 9 * 60; continue; }
+    if (!isBusinessDay(day)) { day = addDays(day, 1); firstMinutes = dailyMinutes; continue; }
     const used = Math.max(0, Number(usage.get(day)) || 0);
     let unitsLeft = Math.max(0, limit - used);
-    const startMinute = trancheIndex === 0 ? firstMinutes : 9 * 60;
+    const startMinute = trancheIndex === 0 ? firstMinutes : dailyMinutes;
     // Keep seconds and milliseconds on the first tranche. Rounding down to the
     // minute could silently consume most of the cancellation window.
     const startUtc = trancheIndex === 0 && exactFirstUtc
@@ -151,16 +167,22 @@ function previewPlan(ordered, options = {}) {
     }
     if (position) summaries.push({ day, startUtc, messageCount: position, units,
       lastSendUtc: assignments[assignments.length - 1].plannedSendUtc });
-    day = addDays(day, 1); firstMinutes = 9 * 60; trancheIndex++;
+    day = addDays(day, 1); firstMinutes = dailyMinutes; trancheIndex++;
   }
   const externalUnits = entries.reduce((sum, entry) => sum + entry.units, 0);
   const scheduledUnits = assignments.reduce((sum, entry) => sum + entry.units, 0);
   const hashCore = { schemaVersion: 2, limit, ordered: entries,
-    assignments: assignments.map(({ key, units, day, trancheIndex, tranchePosition }) =>
-      ({ key, units, day, trancheIndex, tranchePosition })),
+    assignments: assignments.map(({ key, units, day, plannedSendUtc, trancheIndex, tranchePosition }) =>
+      ({ key, units, day,
+        // An immediate first tranche naturally moves by the seconds spent on
+        // the final review screen. Bind its day/order, while scheduled starts
+        // and every later-day time remain exact.
+        plannedSendUtc: options.bindStart === true || trancheIndex > 0 ? plannedSendUtc : "",
+        trancheIndex, tranchePosition })),
+    dailyStartTime,
     scheduledStart: options.bindStart === true ? String(options.startUtc || "") : "" };
   const planHash = digest(hashCore);
-  return { schemaVersion: 2, planHash, timeZone: TIME_ZONE, dailyLimit: limit,
+  return { schemaVersion: 2, planHash, timeZone: TIME_ZONE, dailyStartTime, dailyLimit: limit,
     recipientCount: entries.length, externalUnits, scheduledCount: assignments.length,
     scheduledUnits, excessCount: entries.length - assignments.length,
     excessUnits: externalUnits - scheduledUnits, fit: assignments.length === entries.length,
@@ -392,5 +414,6 @@ function __setClientsForTest(policy, ledger) {
 }
 
 module.exports = { TIME_ZONE, easternDay, easternInstant, addDays, isBusinessDay,
+  normalizeDailyStartTime,
   previewPlan, capacitySnapshot, reservePlan, assertReservation, releaseAllocations,
   reserve, replayReservation, rowAllocations, __setClientsForTest };

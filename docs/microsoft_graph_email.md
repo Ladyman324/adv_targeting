@@ -134,7 +134,13 @@ optimistic Table-storage mailbox gate enforces pacing across scale-out workers,
 and a per-user capacity ledger uses a short database mutex so concurrent
 approvals cannot reserve the same daily capacity. Approval freezes each
 message's Eastern business day and exact send instant. Overflow advances to
-9:00 AM on the next weekday and must fit within seven Eastern calendar dates;
+the next weekday at the salesperson's selected daily start time (9:00 AM by
+default) and must fit within seven Eastern calendar dates. A scheduled batch
+uses the selected time on its first and every later delivery day. An immediate
+batch begins its first available tranche after the cancellation window and
+uses the selected later-day time for overflow. The final review and any
+required approval passcode are shown together inside the application; the
+server still verifies the passcode, plan hash, recipients, and attachments.
 Outlook drafts do not reserve capacity.
 
 ## Approved templates and documents

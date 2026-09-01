@@ -28,14 +28,29 @@ test("daily capacity is visible and described as an Eastern calendar day", () =>
 
 test("the composer uses a server-authored plan and binds approval to its hash", () => {
   const request = bodyOf("requestCapacityPlan");
-  assert.match(request, /api\("capacity_plan", \{ batchId: detail\.batch\.id, scheduledForUtc \}\)/);
-  assert.match(email, /capacityPlanHash: mode === "send" \? deliveryPlan\.hash : ""/);
+  assert.match(request, /api\("capacity_plan", \{[\s\S]*batchId: detail\.batch\.id, scheduledForUtc, dailyStartTime/);
+  assert.match(email, /capacityPlanHash: intent\.mode === "send" \? intent\.plan\.hash : ""/);
+  assert.match(email, /dailyStartTime: intent\.dailyStartTime/);
   assert.match(email, /action === "mate-toggle"[\s\S]*?deliveryPlan = null; deliveryPlanKey = ""; deliveryPlanError = "";[\s\S]*?await requestCapacityPlan\(\)/,
     "advisor Cc changes must invalidate the visible plan even when the primary count is unchanged");
   assert.match(email, /The delivery plan was refreshed; review it and approve again\./);
   assert.match(email, /Approve multi-day send/);
   assert.match(email, /Approve &amp; Schedule/);
   assert.match(email, /Approve &amp; Send/);
+});
+
+test("final send approval and passcode use a persistent in-app review step", () => {
+  const start = email.indexOf('if (action === "approve-drafts" || action === "approve-send")');
+  const end = email.indexOf('if (action === "review-reschedule")', start);
+  const approval = email.slice(start, end);
+  assert.match(approval, /openApprovalReview\(mode, b, timing\)/);
+  assert.doesNotMatch(approval, /\bconfirm\s*\(|\bprompt\s*\(/);
+  assert.match(email, /id="emailApprovalPasscode"/);
+  assert.match(email, /Nothing happens until you press the final button below/);
+  assert.match(email, /Enter the approval passcode before continuing/);
+  assert.match(email, /Final approval is being submitted\. Wait for the result before closing/);
+  assert.match(email, /querySelectorAll\('\[data-email="approval-cancel"\]'\)/);
+  assert.match(css, /\.email-approval-back/);
 });
 
 test("schedule edits refresh capacity without replacing the active native inputs", () => {
@@ -46,13 +61,17 @@ test("schedule edits refresh capacity without replacing the active native inputs
   assert.match(request, /paintCapacityPlanNodes\(\)/);
   assert.match(email, /Your weekend start moves to/);
   assert.match(email, /weekends are skipped/i);
+  assert.match(email, /Later-day start/);
+  assert.match(email, /The same start time is used on every delivery day/);
+  assert.match(email, /emailContinuationTime/);
 });
 
 test("the plan gives fit remediation and repeats daily tranches at confirmation", () => {
   assert.match(email, /Remove at least \$\{excess\} recipient/);
   assert.match(email, /schedule a smaller batch, or use Outlook drafts/);
-  assert.match(email, /planLines = mode === "send"/);
-  assert.match(email, /\$\{planDayLabel\(day\)\} — \$\{Number\(day\.messageCount\) \|\| 0\} emails · \$\{Number\(day\.units\) \|\| 0\} capacity/);
+  assert.match(email, /Exact delivery plan/);
+  assert.match(email, /\$\{esc\(planDayLabel\(day\)\)\}/);
+  assert.match(email, /Number\(day\.units\) \|\| 0\} capacity/);
   assert.match(email, /count toward daily capacity/);
   assert.match(email, /Number\(minParts\.day\) \+ 7/,
     "the picker maximum follows Eastern calendar dates rather than 168 elapsed hours");

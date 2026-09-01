@@ -45,7 +45,7 @@ test("Other is visibly actionable, dismisses outside, and the footer reserves it
 test("editing schedule fields validates in place without replacing the active inputs", () => {
   const source = fs.readFileSync(path.join(__dirname, "..", "..", "webapp", "email.js"), "utf8");
   const listener = source.indexOf('document.addEventListener("change"');
-  const start = source.indexOf('if (["emailScheduleDate", "emailScheduleTime"]', listener);
+  const start = source.indexOf('if (["emailScheduleDate", "emailScheduleTime", "emailContinuationTime"]', listener);
   const end = source.indexOf('if (event.target.id === "docFiles")', start);
   const branch = source.slice(start, end);
 
