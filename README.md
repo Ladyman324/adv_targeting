@@ -91,6 +91,8 @@ user changes it.
 - `src/validate_webapp_data.py` — verify cross-file CRD and count invariants
 - `docs/field_audit.md` — verified field mappings and known limits
 - `docs/map_recommendations.md` — product review and enacted implementation record
+- `docs/trust_company_research.md` — isolated, non-production trust-company
+  source-comparison pipeline and review contract
 ## Microsoft 365 email
 
 The authenticated web app includes a draft-first Microsoft Graph composer for

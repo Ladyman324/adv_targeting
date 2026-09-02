@@ -1,0 +1,2 @@
+case_id,expected_name,expected_state,identifier_type,identifier_value,required_source_kind,expected_regulatory_status,notes
+blue-trust,Blue Trust Inc,TN,cik,0001856022,sec_13f,,Must be discoverable from Form 13F without assigning predecessor CRD 104605

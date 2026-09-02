@@ -425,6 +425,7 @@ async function listTemplates() {
     if (e.approved !== false) out.push({ id: e.rowKey, name: e.name, subject: e.subject,
       bodyText: e.bodyText, defaultAttachmentIds: parse(e.defaultAttachmentIdsJson, []),
       requiredDocumentIds: parse(e.requiredDocumentIdsJson, []),
+      requiredMaterialFamilyIds: parse(e.requiredMaterialFamilyIdsJson, []),
       images: parse(e.imagesJson, []), documentNumber: e.documentNumber || "",
       author: e.author || "", approvalDate: e.approvalDate || "",
       repNotes: e.repNotes || "", status: e.status || "approved",
@@ -456,7 +457,8 @@ async function listTemplates() {
     const core = require("./email-core");
     for (const t of core.BUILTIN_TEMPLATES) await client.upsertEntity({ partitionKey: "approved", rowKey: t.id,
       name: t.name, subject: t.subject, bodyText: t.bodyText,
-      defaultAttachmentIdsJson: json(t.defaultAttachmentIds), version: 1, approved: true, updatedUtc: now() }, "Replace");
+      defaultAttachmentIdsJson: json(t.defaultAttachmentIds), requiredMaterialFamilyIdsJson: "[]",
+      version: 1, approved: true, updatedUtc: now() }, "Replace");
     await markTemplatesSeeded("first run");
     out = core.BUILTIN_TEMPLATES.map((t) => ({ ...t, version: 1 }));
   }
@@ -475,9 +477,9 @@ const getTemplate = async (templateId) => (await listTemplates()).find((t) => t.
 // Approval Date. Moving templates into the application should not lose the
 // compliance record that made the Word version trustworthy.
 //
-// requiredDocumentIds is the field that changes behaviour rather than merely
-// recording something: a batch cannot be approved without those attachments
-// present and current, which turns a line of prose into a control.
+// requiredMaterialFamilyIds is the main behavioural field: the current
+// recipient-specific PDF is mandatory. requiredDocumentIds remains for true
+// standalone attachments and for reading templates saved before families.
 // ---------------------------------------------------------------------------
 async function putTemplate(who, input) {
   const core = require("./email-core");
@@ -502,14 +504,21 @@ async function putTemplate(who, input) {
     err.statusCode = 400; err.code = "template_invalid"; err.errors = lint.errors;
     throw err;
   }
+  const normalizedRequirements = materials.templateRequirements(input, await listDocuments());
+  if (normalizedRequirements.missingDocumentIds.length) {
+    const err = new Error(`Required attachments are not in the approved catalog: ${normalizedRequirements.missingDocumentIds.join(", ")}.`);
+    err.statusCode = 400; err.code = "template_attachment_invalid";
+    throw err;
+  }
   const entity = { partitionKey: "approved", rowKey: id,
     name: clean(input.name || id, 256), subject, bodyText,
     documentNumber: clean(input.documentNumber, 60),
     author: clean(input.author, 120),
     approvalDate: clean(input.approvalDate, 40),
     repNotes: clean(input.repNotes, 4000),
-    requiredDocumentIdsJson: json((input.requiredDocumentIds || []).map((x) => safeDocId(x))),
-    defaultAttachmentIdsJson: json(input.requiredDocumentIds || []),
+    requiredDocumentIdsJson: json(normalizedRequirements.documentIds.map((x) => safeDocId(x))),
+    requiredMaterialFamilyIdsJson: json(normalizedRequirements.familyIds.map((x) => safeDocId(x))),
+    defaultAttachmentIdsJson: json(normalizedRequirements.documentIds),
     imagesJson: json(images),
     status: input.status === "retired" ? "retired" : "approved",
     approved: input.status !== "retired",

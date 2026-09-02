@@ -39,7 +39,7 @@ const COMPARE = ["#12b39c", "#e0a53a", "#8079e0", "#e8615d", "#4aa3e0", "#9fc93c
 // of every deployed JSON path and byte. It changes for standalone shard
 // rebuilds too, and its leading date keeps the stale-build warning readable.
 // Do not edit it by hand.
-const DATA_VERSION = "20260831T110925Z-0d6794880eb0eb5d";
+const DATA_VERSION = "20260831T110925Z-5f6bab21f4ad4ec7";
 const dataUrl = file => `data/${file}?v=${DATA_VERSION}`;
 Dial.setContactRouteVersion(DATA_VERSION);
 // ONE scale for every mark on the map. There used to be two, and they were not
@@ -160,6 +160,7 @@ const CALL_ACTIVITY = new Map();     // advisor CRD -> my latest recorded outbou
 let emailActivityState = "idle";    // idle | loading | ready | failed
 let callActivityState = "idle";
 let activityFilterPromise = null;
+const activityOptionCache = new Map();
 let advQuery = "";                  // advisor name or CRD substring
 let focusedAdvisorId = null;        // explicit advisor-result map focus
 let focusedAdvisorLabel = "";
@@ -178,7 +179,7 @@ let firmSort = "advisors";          // firm-list order: advisors | relevant AUM
 let ownerOnly = false;              // Advanced: only firm owners and officers
 let rankedOnly = false;             // Advanced: only advisors on a published ranking
 let contactableOnly = false;        // only advisors with an email or a phone on file
-let assetsOnly = false;             // only advisors with a team or individual asset figure
+let assetsOnly = false;             // only advisors in the canonical ACT account book
 // Firms struck off the map. Distinct from selectedFirms, which is a positive
 // "show only these"; this is a negative "show everything except these", and a
 // rep builds it up one firm at a time while working a territory -- the wirehouse
@@ -958,6 +959,7 @@ function fillActivityMap(target, payload){
     const at = Date.parse(String(row && row[1] || ""));
     if (crd && Number.isFinite(at)) target.set(crd, at);
   }
+  activityOptionCache.clear();
 }
 
 function loadActivityFilters(signal=null){
@@ -1036,6 +1038,19 @@ function loadActAssets(){
       ACT_ASSETS = null;
       ACT_ASSETS_ERROR = err.message || String(err);
       supportFailed("act", err);
+      if (assetsOnly){
+        assetsOnly = false;
+        showNotice("The EIC account book could not be loaded, so the EIC-assets filter was turned off.");
+      }
+    })
+    .finally(() => {
+      // The asset book is deliberately off the first-paint path. Reconcile the
+      // control, map marks, summary and any open card as soon as that one file
+      // settles; waiting for every unrelated support file makes a fast asset
+      // response look stale.
+      syncAssetsUI();
+      redraw();
+      if (detailsCurrent) renderDetailEntry(detailsCurrent, false);
     });
 }
 
@@ -1068,13 +1083,14 @@ function teamBook(crds){
     for (const i of b.ix) seen.add(i);
   }
   if (!seen.size) return null;
-  let acv = 0, lcv = 0, mf = 0;
+  let acv = 0, lcv = 0, mf = 0, midcap = 0;
   for (const i of seen){
     const a = ACT_ASSETS.accounts[i];
     if (!a) continue;
-    acv += a[0]; lcv += a[1]; mf += a[2];
+    acv += a[0]; lcv += a[1]; mf += a[2]; midcap += a[3] || 0;
   }
-  return { total: acv + lcv + mf, acv, lcv, mf, accounts: seen.size, holders };
+  return { total: acv + lcv + mf + midcap, acv, lcv, mf, midcap,
+    accounts: seen.size, holders };
 }
 
 // ---- who covers a state ----
@@ -1552,7 +1568,7 @@ function contactBlock(p){
   // Bail only when there is genuinely nothing to say. Testing the buttons,
   // title and owner alone hid the panel for anyone whose only fact was a team
   // and its assets -- which is exactly the record a rep wants before a call.
-  const hasAssets = !!(teamFor(c) || c.ia > 0);
+  const hasAssets = !!bookFor(p.id);
   if (!rows.length && !c.ti && !c.tn && !c.o && !hasAssets) return "";
 
   // OWNERSHIP FIRST, and before the buttons. If this contact is already
@@ -1598,8 +1614,6 @@ function contactBlock(p){
     assets = `<p class="contact-team">
         <span class="contact-team-label">Team</span>
         ${esc(team.n)}${team.c ? ` &middot; ${esc(team.c)}` : ""}${per}
-        ${team.a > 0 ? `<b title="${esc(exactMoney(team.a))} — team total, not this person's book">
-          ${esc(money(team.a))}</b>` : ""}
       </p>` + teammateList(team, p.id);
   } else if (c.tn){
     // A team the FIRM names, with no asset figure attached. 31,014 advisors
@@ -1640,41 +1654,16 @@ function contactBlock(p){
       + teammateList(practice, p.id);
   }
 
-  // THE BOOK IS A SEPARATE FACT FROM THE TEAM, and used to be chained to it
-  // with `else if`. That made a team NAME and an asset FIGURE mutually
-  // exclusive on the card, which they are not: Christopher Tolman has a UBS
-  // practice (Advocate Partners) and his own $42.8M in the CRM, and the team
-  // name won the branch. 726 advisors lost $4.42B of book value that way --
-  // present in contacts.json the whole time, never rendered.
-  //
-  // Worse than a plain omission, because passesHasAssets() counts c.ia: the
-  // "has assets" filter kept these people on the map and then their card
-  // showed no money.
-  //
-  // Safe to add unconditionally alongside the CRM team block: build_contacts
-  // sets `ia` ONLY where no team-mate shares the amount, so no advisor carries
-  // both, and nothing can be double counted. The !team guard states that
-  // invariant rather than relying on it.
-  if (!team && c.ia > 0){
-    // An amount with no team-mate is this individual's own book. Labelled as
-    // such: showing it as "team assets" would repeat the CRM's own error.
-    assets += `<p class="contact-team">
-        <span class="contact-team-label">Book</span>
-        <b title="${esc(exactMoney(c.ia))} — this individual, no team recorded">
-          ${esc(money(c.ia))}</b></p>`;
-  }
-
-  // WHICH PRODUCT, from the CRM's per-account records. Added ALONGSIDE the
-  // figures above rather than replacing them: those come from the CRM's single
-  // blended "Total Assets" column, this comes from the account-level b* fields,
-  // and where they disagree that is worth seeing rather than hiding.
+  // WHICH PRODUCT, from the canonical CRD-keyed ACT account artifact. The
+  // contact file still supplies team identity and contact details above, but
+  // never decides whether this advisor has a book or how much it is worth.
   //
   // A zero is printed, not omitted. "Large-Cap —" is the sales fact; a missing
   // line just looks like missing data, and the gap is the reason to show any of
-  // this. Mid-Cap is deliberately absent: $20.6M across 20 accounts firm-wide,
-  // and giving it a slot would overstate it.
+  // this. Mid-Cap is included even though it is a smaller book: omitting it
+  // made legitimate Mid-Cap-only relationships look like unclassified data.
   const book = bookFor(p.id);
-  if (book && (book.acv > 0 || book.lcv > 0 || book.mf > 0)){
+  if (book){
     const line = (label, v, tip) =>
       `<span class="prod" title="${esc(tip)}"><i>${label}</i>`
       + (v > 0 ? `<b>${esc(money(v))}</b>` : `<b class="none">&mdash;</b>`) + `</span>`;
@@ -1688,12 +1677,16 @@ function contactBlock(p){
     const hedge = book.t === "review"
       ? `<span class="prod-warn" title="This advisor was matched to the CRM record on name, firm and location rather than a confirmed identifier — check before quoting these figures.">&#9888;</span>`
       : "";
+    const economic = book.t === "high"
+      ? ` &middot; inferred ACT economic link; contact identity is evaluated separately`
+      : "";
     assets += `<div class="contact-products">
         <span class="contact-team-label">With EIC${hedge}</span>
         ${line("All-Cap", book.acv, "All-Cap Value SMA")}
         ${line("Large-Cap", book.lcv, "Large-Cap Value SMA")}
         ${line("EICIX", book.mf, "EICIX mutual fund")}
-        <small>${book.n} account${book.n === 1 ? "" : "s"}${shared}</small>
+        ${line("Mid-Cap", book.midcap || 0, "Mid-Cap Value")}
+        <small>${book.n} account${book.n === 1 ? "" : "s"}${shared}${economic}</small>
       </div>`;
   }
 
@@ -1915,11 +1908,10 @@ function fillCardHistory(advisorId){
 // person, do we already own the relationship, and is there an asset figure.
 function contactMarks(advisorId){
   const c = contactFor(advisorId);
-  if (!c) return { reach:0, owned:false, assets:false };
   return {
-    reach: (c.e ? 1 : 0) + (c.w || c.c ? 1 : 0),   // 0, 1 or 2 ways in
-    owned: !!c.o,
-    assets: !!(c.tm || c.ia > 0),
+    reach: c ? (c.e ? 1 : 0) + (c.w || c.c ? 1 : 0) : 0, // 0, 1 or 2 ways in
+    owned: !!(c && c.o),
+    assets: SUPPORT.act === "ready" && !!bookFor(advisorId),
   };
 }
 function contactDots(advisorId){
@@ -2693,13 +2685,16 @@ async function saveCurrentAudience(){
 async function applyAudienceDefinition(audience){
   const definition = audience && audience.definition;
   if (!definition || definition.version !== 1) throw new Error("This audience uses an unsupported rule version.");
+  const f = definition.filters || {};
+  if (f.assetsOnly && SUPPORT.act !== "ready") await loadRegionalSupport();
+  if (f.assetsOnly && SUPPORT.act !== "ready")
+    throw new Error("EIC account-book data is unavailable for this saved audience.");
   const target = definition.scope && definition.scope.value;
   if (!target || target === "US") throw new Error("This audience does not identify an advisor-level state or territory.");
   if (target !== scope) {
     const result = await switchScope(target);
     if (!result || result.status !== "applied") throw new Error(`Could not load ${definition.scope.label || target}.`);
   }
-  const f = definition.filters || {};
   selectedFirms = Array.isArray(f.selectedFirms) ? f.selectedFirms.map(String) : [];
   selectsOnly = !!f.selectsOnly;
   selectsBox.checked = selectsOnly;
@@ -2748,7 +2743,7 @@ async function ensureAudienceIdentity(){
 }
 async function prepareAudiencePreviewData(audience){
   const f = audience && audience.definition && audience.definition.filters || {};
-  const support = f.ownerOnly || f.rankedOnly
+  const support = f.ownerOnly || f.rankedOnly || f.assetsOnly
     ? loadRegionalSupport()
     : (SUPPORT.territories === "ready" ? Promise.resolve() : loadTerritories());
   await Promise.all([loadContacts(), ensureAudienceIdentity(), support,
@@ -2761,6 +2756,8 @@ async function prepareAudiencePreviewData(audience){
     throw new Error("Owner and officer data is unavailable for this saved audience.");
   if (f.rankedOnly && (SUPPORT.barrons !== "ready" || SUPPORT.forbes !== "ready"))
     throw new Error("Advisor ranking data is unavailable for this saved audience.");
+  if (f.assetsOnly && SUPPORT.act !== "ready")
+    throw new Error("EIC account-book data is unavailable for this saved audience.");
   if (f.lastEmailed && emailActivityState !== "ready")
     throw new Error("Email activity is unavailable for this saved audience.");
   if (f.lastCalled && callActivityState !== "ready")
@@ -5484,6 +5481,7 @@ function renderAll(fit, transition=null){
 
 // one redraw entry point so every control works in either scope
 function redraw(fit){
+  clearUnreachableActivitySelections();
   if (scope === "US") renderNational(fit); else renderMarkers(fit);
   refreshPanel();
 }
@@ -6076,6 +6074,42 @@ function activityAgeBand(timestamp){
   if (days <= 180) return "d180";
   return "older";
 }
+/* Count distinct advisors, not pins, for every choice in one activity
+ * control while honouring every OTHER active filter. The same advisor can
+ * have several offices, so counting features here would be plausible but
+ * wrong. `rows` is national; `features` is the current state/territory. */
+function summarizeActivityOptions(features, rows, passesOther){
+  const sets = {
+    any:new Set(), d30:new Set(), d90:new Set(), d180:new Set(),
+    older:new Set(), none:new Set(),
+  };
+  const inScope = new Set();
+  const eligibleObserved = new Set();
+  for (const feature of features) {
+    const p = feature.properties;
+    const id = String(p.id);
+    if (!id) continue;
+    if (rows.has(id)) inScope.add(id);
+    if (!passesOther(p)) continue;
+    sets.any.add(id);
+    const timestamp = rows.get(id);
+    if (timestamp == null) sets.none.add(id);
+    else {
+      sets[activityAgeBand(timestamp)].add(id);
+      eligibleObserved.add(id);
+    }
+  }
+  const counts = Object.fromEntries(
+    Object.entries(sets).map(([key, ids]) => [key, ids.size]));
+  return {
+    counts,
+    observedTotal:rows.size,
+    observedInScope:inScope.size,
+    excludedByOtherFilters:[...inScope].filter(id => !eligibleObserved.has(id)).length,
+    outsideScopeOrUnmapped:Math.max(0, rows.size - inScope.size),
+  };
+}
+
 function passesActivityAge(p, selected, rows, state){
   if (!selected) return true;
   // Controls stay disabled until their own source is ready. Passing rather
@@ -6136,15 +6170,15 @@ function passesContactable(p){
   const c = contactFor(p.id);
   return !!(c && (c.e || c.w || c.c));
 }
-// Assets are on the TEAM or on the individual; either counts. Deliberately not
-// "team assets only" -- 2,062 advisors carry their own book with no team, and
-// excluding them would hide real money on a filter that says "has assets".
+// One source decides both the filter and the EIC summary: the current,
+// CRD-keyed ACT account artifact. contacts.json still supplies contact and team
+// presentation, but its legacy tm/ia fields cannot make an advisor pass. The
+// control stays disabled while this artifact is pending; an unexpected active
+// state fails closed, and a load failure clears the control with a visible
+// notice rather than silently broadening the map.
 function passesHasAssets(p){
   if (!assetsOnly) return true;
-  if (!CONTACTS_READY) return true;
-  const c = contactFor(p.id);
-  if (!c) return false;
-  return !!(c.tm && CONTACTS.teams && CONTACTS.teams[c.tm]) || c.ia > 0;
+  return SUPPORT.act === "ready" && !!bookFor(p.id);
 }
 function passesContinental(p){
   return !continentalOnly || !OUTSIDE_CONTINENTAL.has(p._state);
@@ -6161,20 +6195,21 @@ function passesTargeting(p){
   if (selectsOnly && p.sg !== 1) return false;   // 5.G(7): hires outside managers
   return passesRaum(p);                           // unknown RAUM drops out when bounded
 }
-function passesBase(p){
+function passesBase(p, skipActivity=null){
   // Exclusion belongs HERE, not in passesFilters: the firm list, the KPI counts
   // and the markers are all built from passesBase, so an excluded firm put only
   // in passesFilters stayed in the list and the counts never moved.
   if (excludedFirms.has(String(p.fc))) return false;
   if (reg === "dual" && p.d !== 1) return false;
   if (reg === "ria"  && p.d !== 0) return false;
-  return passesContinental(p) && passesTargeting(p) && passesLastEmailed(p)
-    && passesLastCalled(p) && passesJoinedFirm(p) &&
+  return passesContinental(p) && passesTargeting(p)
+    && (skipActivity === 'email' || passesLastEmailed(p))
+    && (skipActivity === 'call' || passesLastCalled(p)) && passesJoinedFirm(p) &&
     passesOwner(p) && passesRanked(p) && passesGeography(p) &&
     passesContactable(p) && passesHasAssets(p);
 }
-function passesFilters(p){
-  if (!passesBase(p)) return false;
+function passesFilters(p, skipActivity=null){
+  if (!passesBase(p, skipActivity)) return false;
   if (selectedFirms.length && !selectedFirms.includes(p.fc)) return false;
   // focusedAdvisorId deliberately does NOT filter. Treating it as one deleted
   // everybody else from the dataset, so a building holding 14 Sargent advisors
@@ -6861,16 +6896,18 @@ function estimateAum(byFirm, placements){
  * order to state the book itself, which is one de-duplicated number per product
  * and was already sitting in the file.
  *
- * So: the whole book, computed once in build_act_assets.py by counting each
- * account exactly once whoever holds it, and labelled "United States" so it is
- * never mistaken for the viewport figure its neighbours show.
+ * So: the approved, CRD-linked book represented by the same advisor population
+ * as the assets filter, computed once in build_act_assets.py by counting each
+ * mapped account exactly once whoever holds it. Complete ACT source totals and
+ * unresolved accounts remain in source_totals for reconciliation, but are not
+ * mixed into a headline that claims to describe advisors on this map.
  */
 function renderEicNational(){
   const el = (id) => document.getElementById(id);
   const t = (ACT_ASSETS && ACT_ASSETS.totals) || null;
   const scope = el("eicScope"), note = el("eicNationalNote");
   if (!t){
-    ["eicAcv", "eicLcv", "eicMf"].forEach(i => { el(i).textContent = "—"; });
+    ["eicAcv", "eicLcv", "eicMf", "eicMidcap"].forEach(i => { el(i).textContent = "—"; });
     scope.hidden = true; note.hidden = true;
     el("eicAssetsHelp").textContent = ACT_ASSETS_ERROR
       ? "EIC book figures are unavailable."
@@ -6880,12 +6917,28 @@ function renderEicNational(){
   el("eicAcv").textContent = fmtMoney(t.acv);
   el("eicLcv").textContent = fmtMoney(t.lcv);
   el("eicMf").textContent = fmtMoney(t.mf);
+  el("eicMidcap").textContent = fmtMoney(t.midcap || 0);
   scope.hidden = false;
   scope.textContent = " · United States";
 
   const n = (v) => Number(v || 0).toLocaleString();
+  const source = ACT_ASSETS.source_totals || null;
+  const approvedOffMap = Number(source && source.approved_off_map
+    && source.approved_off_map.accounts || 0);
+  const unresolvedNested = source && source.unapproved_or_unresolved
+    && source.unapproved_or_unresolved.accounts;
+  const unresolved = Number(unresolvedNested
+    ?? Math.max(0, Number(source && source.unmapped_accounts || 0) - approvedOffMap));
   const shared = t.shared_accounts
     ? `${n(t.shared_accounts)} of those accounts are shared by more than one advisor and are counted once, not once each. ` : "";
+  const reconciliation = source
+    ? `${n(t.accounts)} of ${n(source.accounts)} ACT accounts are linked to approved advisors on the map. `
+      + `${n(unresolved)} unapproved or unresolved ACT account${unresolved === 1 ? "" : "s"} `
+      + `${unresolved === 1 ? "is" : "are"} outside the approved population. `
+      + `${n(approvedOffMap)} approved account${approvedOffMap === 1 ? "" : "s"} belong${approvedOffMap === 1 ? "s" : ""} `
+      + `only to advisor${approvedOffMap === 1 ? "" : "s"} absent from the current deployed map. `
+      + `Both groups are excluded from both this headline and the EIC-assets filter. `
+    : `Only accounts linked to approved advisors on the current deployed map are included. Unapproved or unresolved accounts and approved accounts belonging only to off-map advisors are excluded from both this headline and the EIC-assets filter. `;
   /* The product gap, stated at national scale. This is the reason the file
    * splits by product at all: the two SMAs are close to mutually exclusive
    * advisor by advisor, and that is a targeting instruction, not trivia. */
@@ -6898,12 +6951,13 @@ function renderEicNational(){
     + `${n(t.accounts)} accounts. ${gaps}`;
 
   el("eicAssetsHelp").textContent =
-    `The entire EIC book, not the current viewport — the national layer carries firm-office `
+    `The approved CRD-linked EIC book, not the current viewport — the national layer carries firm-office `
     + `placements rather than advisor identities, so it cannot scope these to what is on screen. `
     + `Unlike every other figure in this strip, they do not change as you pan or zoom. `
     + `${shared}`
-    + `${n(t.accounts_on_map)} of ${n(t.accounts)} accounts reach an advisor who appears on the map; `
-    + `the rest are held by contacts we could not match to a CRD, and they are still counted here. `
+    + reconciliation
+    + `${n(t.advisors_economic_only)} advisors are included through inferred ACT economic links. `
+    + `Those links attribute an account book only; they do not approve a name, email address, phone number or other contact identity. `
     + (t.advisors_review ? `${n(t.advisors_review)} of the ${n(t.advisors)} advisors were matched to the CRM on name rather than a confirmed identifier. ` : "")
     + `Pick a state or territory for the book in view, advisor by advisor. `
     + `Source: Act! CRM account records, ${String(ACT_ASSETS.as_of).slice(0, 10)}.`;
@@ -6919,35 +6973,39 @@ function renderEicAssets(ids){
   // `null` means UNAVAILABLE, an empty array means genuinely nothing in view.
   // A detail view with no advisors on screen really is zero and says so.
   if (!ACT_ASSETS || !ACT_ASSETS.accounts || ids == null){
-    ["eicAcv", "eicLcv", "eicMf"].forEach(i => { el(i).textContent = "—"; });
+    ["eicAcv", "eicLcv", "eicMf", "eicMidcap"].forEach(i => { el(i).textContent = "—"; });
     return;
   }
   const seen = new Set();
-  let advisors = 0, review = 0;
+  let advisors = 0, review = 0, economic = 0;
   for (const id of ids){
     const b = ACT_ASSETS.advisors[String(id)];
     if (!b) continue;
     advisors++;
     if (b.t === "review") review++;
+    if (b.t === "high") economic++;
     for (const i of b.ix) seen.add(i);
   }
-  let acv = 0, lcv = 0, mf = 0;
+  let acv = 0, lcv = 0, mf = 0, midcap = 0;
   for (const i of seen){
     const a = ACT_ASSETS.accounts[i];
     if (!a) continue;
-    acv += a[0]; lcv += a[1]; mf += a[2];
+    acv += a[0]; lcv += a[1]; mf += a[2]; midcap += a[3] || 0;
   }
   el("eicAcv").textContent = fmtMoney(acv);
   el("eicLcv").textContent = fmtMoney(lcv);
   el("eicMf").textContent = fmtMoney(mf);
+  el("eicMidcap").textContent = fmtMoney(midcap);
   el("eicAssetsHelp").textContent =
     `EIC assets held by the ${advisors.toLocaleString()} advisor${advisors === 1 ? "" : "s"} `
     + `in view who have a book with us, across ${seen.size.toLocaleString()} `
     + `account${seen.size === 1 ? "" : "s"}. Each account is counted once even when `
     + `several advisors on a team share it, so these figures do not double count. `
     + (review ? `${review.toLocaleString()} of those advisors were matched to the CRM on name rather than a confirmed identifier. ` : "")
+    + (economic ? `${economic.toLocaleString()} are included through inferred ACT economic links; those links attribute the book only and do not approve contact identity. ` : "")
     + `Firm-wide the book is ${fmtMoney(ACT_ASSETS.totals.acv)} All-Cap, `
-    + `${fmtMoney(ACT_ASSETS.totals.lcv)} Large-Cap and ${fmtMoney(ACT_ASSETS.totals.mf)} EICIX. `
+    + `${fmtMoney(ACT_ASSETS.totals.lcv)} Large-Cap, ${fmtMoney(ACT_ASSETS.totals.mf)} EICIX and `
+    + `${fmtMoney(ACT_ASSETS.totals.midcap || 0)} Mid-Cap. `
     + `Source: Act! CRM account records, ${String(ACT_ASSETS.as_of).slice(0, 10)}.`;
 }
 
@@ -7225,6 +7283,77 @@ document.getElementById("regToggle").addEventListener("click", e => {
 const lastEmailedSelect = document.getElementById("lastEmailed");
 const lastCalledSelect = document.getElementById("lastCalled");
 const joinedFirmSelect = document.getElementById("joinedFirm");
+const ACTIVITY_SELECT_TEXT = {
+  '':'Any', d30:'Within 30d', d90:'31–90d', d180:'91–180d',
+  older:'181d+', none:'Not observed',
+};
+
+function activityFilterSignature(kind){
+  return JSON.stringify([
+    kind, scope, scopeRequest, Math.floor(Date.now() / FILTER_DAY_MS),
+    kind === 'email' ? lastCalled : lastEmailed,
+    selectedFirms, selectsOnly, [...aumSel].sort(), reg, joinedFirm,
+    ownerOnly, rankedOnly, [...excludedFirms].sort(), continentalOnly,
+    contactableOnly, assetsOnly, lassoPolygon,
+    CONTACTS_READY, SUPPORT.owner, SUPPORT.barrons, SUPPORT.forbes,
+  ]);
+}
+
+function activityOptionStats(kind){
+  const key = activityFilterSignature(kind);
+  const cached = activityOptionCache.get(kind);
+  if (cached && cached.key === key) return cached.stats;
+  const rows = kind === 'email' ? EMAIL_ACTIVITY : CALL_ACTIVITY;
+  const stats = summarizeActivityOptions(ALL, rows, p => passesFilters(p, kind));
+  activityOptionCache.set(kind, { key, stats });
+  return stats;
+}
+
+function activityChoiceExplanation(label, value, stats, cleared=false){
+  const detail = [];
+  if (stats.excludedByOtherFilters)
+    detail.push(`${stats.excludedByOtherFilters.toLocaleString()} observed in this scope `
+      + `${stats.excludedByOtherFilters === 1 ? 'is' : 'are'} excluded by the other active filters`);
+  if (stats.outsideScopeOrUnmapped)
+    detail.push(`${stats.outsideScopeOrUnmapped.toLocaleString()} `
+      + `${stats.outsideScopeOrUnmapped === 1 ? 'is' : 'are'} outside this scope or no longer mapped`);
+  return `${cleared ? `Cleared ${label.toLowerCase()}: ` : ''}`
+    + `No advisors match ${label.toLowerCase()}: ${ACTIVITY_FILTER_LABELS[value]} `
+    + `under the current ${scopeLabel(scope)} filters.`
+    + (detail.length ? ` Of your observed activity, ${detail.join('; ')}.` : '')
+    + (cleared ? '' : ' The map was left unchanged.');
+}
+
+function paintActivityOptions(element, kind, ready){
+  const stats = ready ? activityOptionStats(kind) : null;
+  for (const option of element.options) {
+    const value = option.value;
+    const count = stats && Object.hasOwn(stats.counts, value)
+      ? stats.counts[value] : null;
+    option.textContent = count == null
+      ? ACTIVITY_SELECT_TEXT[value]
+      : `${ACTIVITY_SELECT_TEXT[value]} · ${count.toLocaleString()}`;
+    option.disabled = value !== '' && count === 0;
+  }
+}
+
+function clearUnreachableActivitySelections(){
+  if (scope === 'US') return;
+  const configs = [
+    ['email', 'Last emailed', () => lastEmailed, value => { lastEmailed = value; }, emailActivityState],
+    ['call', 'Last called', () => lastCalled, value => { lastCalled = value; }, callActivityState],
+  ];
+  for (const [kind, label, getValue, setValue, state] of configs) {
+    const value = getValue();
+    if (!value || state !== 'ready') continue;
+    const stats = activityOptionStats(kind);
+    if (stats.counts[value]) continue;
+    setValue('');
+    activityOptionCache.clear();
+    showNotice(activityChoiceExplanation(label, value, stats, true));
+  }
+}
+
 function syncActivityFilterUI(){
   if (!lastEmailedSelect || !lastCalledSelect || !joinedFirmSelect) return;
   lastEmailedSelect.value = lastEmailed;
@@ -7234,6 +7363,8 @@ function syncActivityFilterUI(){
   lastEmailedSelect.disabled = national || emailActivityState !== "ready";
   lastCalledSelect.disabled = national || callActivityState !== "ready";
   joinedFirmSelect.disabled = national;
+  paintActivityOptions(lastEmailedSelect, 'email', !national && emailActivityState === 'ready');
+  paintActivityOptions(lastCalledSelect, 'call', !national && callActivityState === 'ready');
   lastEmailedSelect.title = emailActivityState === "failed"
     ? "Email activity is unavailable."
     : emailActivityState === "ready" ? "" : "Loading your email activity…";
@@ -7242,10 +7373,19 @@ function syncActivityFilterUI(){
     : callActivityState === "ready" ? "" : "Loading your recorded calls…";
 }
 function wireActivitySelect(element, ready, getValue, setValue, label){
+  const kind = element === lastEmailedSelect ? 'email' : 'call';
   element.addEventListener("focus", () => loadActivityFilters().catch(() => {}));
   element.addEventListener("change", () => {
     if (!ready()) { element.value = getValue(); return; }
-    setValue(element.value);
+    const value = element.value;
+    const stats = activityOptionStats(kind);
+    if (value && !stats.counts[value]) {
+      element.value = getValue();
+      showNotice(activityChoiceExplanation(label, value, stats));
+      return;
+    }
+    setValue(value);
+    activityOptionCache.clear();
     redraw();
     if (element.value) reportFilterReach(
       `No advisors match the ${label.toLowerCase()} filter.`, label.toLowerCase());
@@ -7303,10 +7443,35 @@ const syncContactableUI = wireContactSwitch("contactableOnly",
   () => contactableOnly, v => { contactableOnly = v; },
   "No advisors with contact data match the current filters.",
   "advisors with contact data");
-const syncAssetsUI = wireContactSwitch("assetsOnly",
-  () => assetsOnly, v => { assetsOnly = v; },
-  "No advisors with an asset figure match the current filters.",
-  "advisors with an asset figure");
+
+// Asset availability is independent of contacts.json. Coupling this control to
+// CONTACTS_READY was the source of two conflicting truths: summaries used the
+// canonical account artifact while the filter used stale contact-side fields.
+const assetsBox = document.getElementById("assetsOnly");
+function syncAssetsUI(){
+  if (!assetsBox) return;
+  const available = SUPPORT.act === "ready";
+  assetsBox.checked = assetsOnly;
+  assetsBox.disabled = scope === "US" || !available;
+  const shell = assetsBox.closest(".switch");
+  shell.classList.toggle("on", assetsOnly);
+  shell.classList.toggle("switch-waiting", scope !== "US" && !available);
+  shell.title = SUPPORT.act === "failed"
+    ? `EIC account book unavailable — ${ACT_ASSETS_ERROR}`
+    : (!available ? "Loading EIC account book…" : "");
+}
+assetsBox.addEventListener("change", () => {
+  if (SUPPORT.act !== "ready"){
+    assetsBox.checked = assetsOnly;
+    return;
+  }
+  assetsOnly = assetsBox.checked;
+  syncAssetsUI();
+  redraw();
+  if (assetsOnly)
+    reportFilterReach("No advisors with an approved EIC book match the current filters.",
+                      "advisors with an approved EIC book");
+});
 
 const ownerBox = document.getElementById("ownerOnly");
 function syncOwnerUI(){
@@ -7575,6 +7740,7 @@ const JOINED_FILTER_LABELS = {
 };
 
 function refreshActiveFilters(){
+  syncActivityFilterUI();
   const items = [];
   const add = (label, key) => items.push({ label, key });
   if (selectedFirms.length)

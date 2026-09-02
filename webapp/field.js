@@ -19,7 +19,7 @@ const PAGE = 200;                  // rows added per "Show more"
 // Stamped by src/web_assets.py from metadata time plus every deployed JSON
 // byte. Field data still revalidates, but the shared build ID prevents stale
 // same-day rebuilds and keeps every first-party data request explicit.
-const DATA_VERSION = "20260831T110925Z-0d6794880eb0eb5d";
+const DATA_VERSION = "20260831T110925Z-5f6bab21f4ad4ec7";
 const dataUrl = file => {
   const path = file.startsWith("data/") ? file : `data/${file}`;
   return `${path}${path.includes("?") ? "&" : "?"}v=${encodeURIComponent(DATA_VERSION)}`;
@@ -109,19 +109,46 @@ async function whoAmI(){
 // territories under 4 KB, against a tile rebuild and a bigger payload on every
 // pan. Neither blocks the map: a rep who cannot reach them still gets names,
 // numbers and the call list, which is what the field view is for.
-let BOOK = null;      // {accounts:[[acv,lcv,mf]], advisors:{crd:{t,n,ix,...}}}
+let BOOK = null;      // {accounts:[[acv,lcv,mf,midcap]], advisors:{crd:{t,n,ix,...}}}
+let BOOK_STATE = "idle"; // idle | loading | ready | failed
 let TERR = null;      // {states:{XX:{c,n,e}}, national:{...}}
+
+function syncAssetChip(){
+  const chip = document.querySelector('[data-chip="assets"]');
+  if (!chip) return;
+  const ready = BOOK_STATE === "ready";
+  chip.disabled = !ready;
+  chip.setAttribute("aria-pressed", String(ready && CHIPS.assets));
+  chip.classList.toggle("on", ready && CHIPS.assets);
+  chip.title = ready ? "This advisor has an approved EIC account book"
+    : BOOK_STATE === "failed" ? "EIC account-book data is unavailable"
+    : "Loading EIC account-book data…";
+}
 
 async function loadExtras(){
   const grab = async (url) => {
     try { const r = await fetch(url); return r.ok ? await r.json() : null; }
     catch { return null; }
   };
-  [BOOK, TERR] = await Promise.all([grab(dataUrl("act_assets.json")),
-                                    grab(dataUrl("territories.json"))]);
+  BOOK_STATE = "loading";
+  const [book, territories] = await Promise.all([grab(dataUrl("act_assets.json")),
+                                                  grab(dataUrl("territories.json"))]);
+  BOOK = book && book.advisors ? book : null;
+  BOOK_STATE = BOOK ? "ready" : "failed";
+  TERR = territories;
+  const clearedAssets = BOOK_STATE === "failed" && CHIPS.assets;
+  if (clearedAssets) CHIPS.assets = false;
+  syncAssetChip();
+  // This lookup is intentionally off the first-paint path. Reconcile an
+  // already-visible list once it arrives so its filter and badge switch to the
+  // same current book without requiring another search.
+  if (ROWS.length) render(ROWS);
+  if (clearedAssets)
+    $("status").textContent += " · EIC account-book data is unavailable; Has assets was turned off.";
 }
 
 const bookFor = (crd) => (BOOK && BOOK.advisors[String(crd)]) || null;
+syncAssetChip();
 // Territory is a function of STATE, not of any CRM field -- see
 // src/build_territories.py for why that is more accurate than the field it
 // replaces, not merely a substitute for it.
@@ -190,7 +217,9 @@ const isDirect = (r) => REACHES_PERSON.has(r[COL.phone_kind]);
 // are doing different jobs, and the second list is nine times the size of the
 // first. Splitting them makes the 2,926 reachable at all.
 const isCRM = (r) => !!r[COL.owner];
-const hasAssets = (r) => (r[COL.assets] || 0) > 0;
+function hasAssets(r){
+  return BOOK_STATE === "ready" && !!bookFor(r[COL.crd]);
+}
 const isRanked = (r) => r[COL.ranked] === 1;
 
 function passes(r){
@@ -217,6 +246,10 @@ function render(rows, note){
 
   $("list").innerHTML = shown.map((r, i) => {
     const dist = HERE ? `${milesBetween(HERE.lat, HERE.lon, r).toFixed(1)} mi` : "";
+    const assetBook = bookFor(r[COL.crd]);
+    const assetTotal = assetBook
+      ? (assetBook.acv || 0) + (assetBook.lcv || 0) + (assetBook.mf || 0)
+        + (assetBook.midcap || 0) : 0;
     // Badges sit on the NAME line, not in the detail line. The owner used to be
     // appended to "title · firm · city, state", a single truncating line -- so
     // on exactly the records with a long title AND a long firm, the initials
@@ -224,7 +257,10 @@ function render(rows, note){
     // dialling was the one most likely to be invisible.
     const badges = [
       r[COL.owner] ? `<span class="badge owned" title="EIC relationship owner">${esc(r[COL.owner])}</span>` : "",
-      r[COL.assets] > 0 ? `<span class="badge money" title="assets with EIC">${esc(money(r[COL.assets]))}</span>` : "",
+      assetBook ? `<span class="badge money" title="${assetBook.t === "high"
+        ? "Inferred ACT economic link; contact identity is evaluated separately"
+        : "EIC account book on file"}">${
+        assetTotal > 0 ? esc(money(assetTotal)) : "EIC book"}</span>` : "",
       isRanked(r) ? `<span class="badge rank" title="Barron's or Forbes ranked">&#9733;</span>` : "",
       // Swiping a row queues it, so the row has to be able to say it is queued.
       Dial.inQueue(r[COL.crd]) ? `<span class="badge queued" title="on the call list">&#10003;</span>` : "",
@@ -326,23 +362,20 @@ function teammateHtml(rec, selfCrd){
       <ul>${items}</ul></details>`;
 }
 
-// "With EIC  $5.9M  (ACV $5.9M · LCV — · Fund —)"
+// "With EIC  $5.9M  (ACV $5.9M · LCV — · Fund — · Mid-Cap —)"
 //
 // The total leads because it is what a rep reads first; the split follows
 // because it is what they act on. A ZERO PRINTS AS AN EM DASH rather than being
 // dropped -- "LCV —" is the sales fact, and an omitted line reads as missing
 // data instead of an opening.
 //
-// Falls back to the tile's blended figure when the book is unavailable, so a
-// failed fetch degrades to what the sheet showed before rather than to nothing.
+// No tile fallback: the filter, list badge and sheet must answer from the same
+// CRD-keyed artifact. If it is unavailable, omit the claim rather than revive
+// a stale row-level figure.
 function withEic(r){
   const b = bookFor(r[COL.crd]);
-  if (!b || !(b.acv > 0 || b.lcv > 0 || b.mf > 0)){
-    return r[COL.assets] > 0
-      ? `<p class="sheet-row"><span class="sheet-lab">With EIC</span> ${esc(money(r[COL.assets]))}</p>`
-      : "";
-  }
-  const total = (b.acv || 0) + (b.lcv || 0) + (b.mf || 0);
+  if (!b) return "";
+  const total = (b.acv || 0) + (b.lcv || 0) + (b.mf || 0) + (b.midcap || 0);
   const part = (lab, v) => `${lab} ${v > 0 ? esc(money(v)) : "&mdash;"}`;
   // A review-tier CRD match means the money is attributed on a name similarity
   // rather than a confirmed identity. Marked, because real dollars against
@@ -350,12 +383,15 @@ function withEic(r){
   const warn = b.t === "review"
     ? ` <span class="warn-inline" title="Matched on name, firm and location — not a confirmed identifier">&#9888;</span>`
     : "";
+  const economic = b.t === "high"
+    ? ` &middot; inferred ACT economic link; contact identity is evaluated separately`
+    : "";
   const shared = b.sh ? ` &middot; ${b.sh} shared with team-mates` : "";
   return `<p class="sheet-row"><span class="sheet-lab">With EIC</span>
-      <b>${esc(money(total))}</b>${warn}
+      <b>${total > 0 ? esc(money(total)) : "Book on file"}</b>${warn}
       <span class="eic-split">(${part("ACV", b.acv || 0)} &middot; ${part("LCV", b.lcv || 0)}
-      &middot; ${part("Fund", b.mf || 0)})</span>
-      <small class="eic-note">${b.n} account${b.n === 1 ? "" : "s"}${shared}</small></p>`;
+      &middot; ${part("Fund", b.mf || 0)} &middot; ${part("Mid-Cap", b.midcap || 0)})</span>
+      <small class="eic-note">${b.n} account${b.n === 1 ? "" : "s"}${shared}${economic}</small></p>`;
 }
 
 // Whose patch this advisor sits in. NOT a claim that a relationship exists --
@@ -2559,6 +2595,13 @@ document.addEventListener("click", (e) => {
   const chip = e.target.closest("[data-chip]");
   if (chip) {
     const k = chip.dataset.chip;
+    if (k === "assets" && BOOK_STATE !== "ready") {
+      syncAssetChip();
+      $("status").textContent = BOOK_STATE === "failed"
+        ? "EIC account-book data is unavailable; Has assets cannot be applied."
+        : "EIC account-book data is still loading; Has assets cannot be applied yet.";
+      return;
+    }
     CHIPS[k] = !CHIPS[k];
     chip.setAttribute("aria-pressed", String(CHIPS[k]));
     chip.classList.toggle("on", CHIPS[k]);

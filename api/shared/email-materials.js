@@ -83,4 +83,36 @@ function freshnessOf(d, at = Date.now()) {
 }
 function currentDocument(d, at = Date.now()) { return freshnessOf(d, at) === "current"; }
 function resolveFamilies(documents, familyIds, recipientEmail, policy) { const wanted = [...new Set((familyIds || []).map(cleanId).filter(Boolean))], target = resolveChannel(recipientEmail, policy), chosen = []; for (const familyId of wanted) { const candidates = documents.filter((d) => d.familyId === familyId && currentDocument(d)); let matches = candidates.filter((d) => d.channel === target); if (!matches.length && target !== "generic") matches = candidates.filter((d) => d.channel === "generic" && (d.genericFallbackChannels || []).includes(target)); if (!matches.length) throw error(`No current approved ${target.toUpperCase()} material is available for ${familyId}.`, "material_variant_unavailable"); matches.sort((a, b) => String(b.periodKey || "").localeCompare(String(a.periodKey || "")) || Number(b.version || 0) - Number(a.version || 0)); chosen.push(matches[0]); } return { channel: target, documents: chosen }; }
-module.exports = { CHANNELS, channel, domain, emailDomain, hash, validateRoutes, loadSeed, resolveChannel, normalizeMetadata, replacementMetadata, latestCompletedQuarter, freshnessOf, currentDocument, resolveFamilies };
+
+/* Template requirements used to point at one PDF id. Once documents gained a
+ * family and client-group channel, that made a template accidentally require
+ * (for example) the UBS PDF instead of "Case for Value". Translate those old
+ * requirements at the boundary: a family document becomes a family
+ * requirement, while a genuinely standalone document remains exact. New
+ * templates store requiredMaterialFamilyIds explicitly; the translation keeps
+ * every existing template working until an administrator next saves it. */
+function templateRequirements(template = {}, documents = []) {
+  const explicitFamilies = (Array.isArray(template.requiredMaterialFamilyIds)
+    ? template.requiredMaterialFamilyIds : []).map(cleanId).filter(Boolean);
+  const requiredDocumentIds = Array.isArray(template.requiredDocumentIds)
+    && template.requiredDocumentIds.length
+    ? template.requiredDocumentIds : (template.defaultAttachmentIds || []);
+  const legacyIds = [...new Set(requiredDocumentIds
+    .map((value) => String(value || "").trim()).filter(Boolean))];
+  const byId = new Map((documents || []).map((doc) => [String(doc.id || ""), doc]));
+  const familyIds = [...explicitFamilies], documentIds = [], missingDocumentIds = [];
+  for (const id of legacyIds) {
+    const doc = byId.get(id);
+    if (!doc) { missingDocumentIds.push(id); continue; }
+    const familyId = cleanId(doc.familyId);
+    if (familyId) familyIds.push(familyId);
+    else documentIds.push(id);
+  }
+  return {
+    familyIds: [...new Set(familyIds)],
+    documentIds: [...new Set(documentIds)],
+    missingDocumentIds,
+  };
+}
+
+module.exports = { CHANNELS, channel, domain, emailDomain, hash, validateRoutes, loadSeed, resolveChannel, normalizeMetadata, replacementMetadata, latestCompletedQuarter, freshnessOf, currentDocument, resolveFamilies, templateRequirements };

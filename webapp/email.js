@@ -998,9 +998,11 @@
     const legacyDocs = docs.filter((d) => !d.familyId && materialStatus(d) === "current");
 
     const familyMap = new Map();
-    docs.filter((d) => d.familyId && materialStatus(d) === "current").forEach((d) => {
+    docs.filter((d) => d.familyId).forEach((d) => {
       const family = familyMap.get(d.familyId) || { id: d.familyId, name: d.name, category: d.category, channels: new Set() };
-      family.channels.add(d.channel || "generic"); familyMap.set(d.familyId, family);
+      if ((d.channel || "generic") === "generic") family.name = d.name;
+      if (materialStatus(d) === "current") family.channels.add(d.channel || "generic");
+      familyMap.set(d.familyId, family);
     });
     const families = [...familyMap.values()];
     const routeRules = (((catalog || {}).materialRoutes || {}).rules || []);
@@ -1009,11 +1011,14 @@
     const preflight = families.length ? '<div class="email-material-preflight"><b>Recipient routing</b><span>'
       + domains.map((domain) => esc(domain) + ' ->  ' + esc(channelLabel(routedChannel(domain, routeRules)))).join(' / ')
       + '</span><small>The server verifies the exact approved version for every recipient when emails are generated.</small></div>' : '';
-    const familyPicker = families.length ? '<fieldset class="email-docs email-families"><legend>Material families</legend>'
-      + families.map((f) => '<label><input type="checkbox" class="email-family" value="' + esc(f.id) + '"><span><b>'
+    const familyPicker = families.length ? '<fieldset class="email-docs email-families"><legend>Material series</legend>'
+      + families.map((f) => '<label data-family="' + esc(f.id) + '" data-current="' + (f.channels.size ? '1' : '0')
+        + '"><input type="checkbox" class="email-family" value="' + esc(f.id) + '"'
+        + (f.channels.size ? '' : ' disabled') + '><span><b>'
         + esc(f.name) + '</b><small>' + esc(f.category || 'Material') + ' / '
-        + [...f.channels].map(channelLabel).map(esc).join(', ') + '</small></span></label>').join('')
-      + '<p>Choose the material once; the approved client-group version is selected per recipient.</p></fieldset>' + preflight : '';
+        + (f.channels.size ? [...f.channels].map(channelLabel).map(esc).join(', ') : 'No current approved version')
+        + '</small></span></label>').join('')
+      + '<p>Choose the series once; the current approved client-group version is selected per recipient.</p></fieldset>' + preflight : '';
     document.getElementById("emailBody").innerHTML = `<div class="email-setup">
       <p class="email-summary"><b id="emailKeptCount">${keptRecipients().length}</b> recipient${keptRecipients().length === 1 ? "" : "s"} · From <b>${esc(catalog.connection.mailbox)}</b></p>
       ${setupCapacityHtml()}
@@ -1039,16 +1044,37 @@
     // The Word templates carried instructions to the rep inside the body --
     // "INSERT LCV PERFORMANCE PAGE HERE AND ATTACH...". Those belong on screen,
     // not in the message, so they live on the template and are shown here.
-    // Attachments the chosen template REQUIRES are ticked and locked.
+    // Material series and standalone attachments the chosen template REQUIRES
+    // are ticked and locked.
     //
-    // They were drawn unticked, which was a straightforward lie: createBatch
-    // merges the template's requiredDocumentIds in regardless, so the document
-    // went out while the screen said it would not. A rep checking their work saw
-    // an empty box next to the one attachment compliance mandates.
+    // Required choices must agree with createBatch, which merges the template's
+    // series and standalone requirements regardless of browser input. A rep
+    // checking their work should see exactly what the server will enforce.
     const showRequired = () => {
       const picker = document.getElementById("emailTemplate");
       const chosen = picker && templates.find((x) => x.id === picker.value);
-      const required = new Set((chosen && chosen.requiredDocumentIds) || []);
+      const chosenRequirements = templateRequirements(chosen, docs);
+      const required = new Set(chosenRequirements.documentIds);
+      const requiredFamilies = new Set(chosenRequirements.familyIds);
+      for (const label of document.querySelectorAll(".email-families label[data-family]")) {
+        const box = label.querySelector("input");
+        const isRequired = requiredFamilies.has(label.dataset.family);
+        if (box.dataset.templateRequired === "1" && !isRequired) {
+          box.disabled = label.dataset.current !== "1";
+          box.checked = false; delete box.dataset.templateRequired;
+        }
+        label.classList.toggle("required", isRequired);
+        if (isRequired) {
+          box.checked = true; box.disabled = true; box.dataset.templateRequired = "1";
+        }
+        let tag = label.querySelector(".email-req-tag");
+        if (isRequired && !tag) {
+          tag = document.createElement("em");
+          tag.className = "email-req-tag";
+          tag.textContent = "required series";
+          label.appendChild(tag);
+        } else if (!isRequired && tag) tag.remove();
+      }
       for (const label of document.querySelectorAll("#emailDocs label[data-doc]")) {
         const box = label.querySelector("input");
         const isRequired = required.has(label.dataset.doc);
@@ -1392,8 +1418,22 @@ function routesHtml() {
   // response is indistinguishable from a broken button -- which is exactly how
   // this one read while it was silently failing on the IMAGE_TOKEN bug.
   let savedSnapshot = null;
+  function templateRequirements(template, docs) {
+    const t = template || {}, byId = new Map((docs || []).map((d) => [String(d.id), d]));
+    const familyIds = [...(t.requiredMaterialFamilyIds || [])], documentIds = [];
+    const requiredDocumentIds = (t.requiredDocumentIds || []).length
+      ? t.requiredDocumentIds : (t.defaultAttachmentIds || []);
+    for (const id of requiredDocumentIds) {
+      const doc = byId.get(String(id));
+      if (doc && doc.familyId) familyIds.push(doc.familyId);
+      else documentIds.push(String(id));
+    }
+    return { familyIds: [...new Set(familyIds)], documentIds: [...new Set(documentIds)] };
+  }
+
   const templateFingerprint = (t) => JSON.stringify([t.name, t.documentNumber, t.author,
-    t.approvalDate, t.subject, t.bodyText, t.repNotes, [...(t.requiredDocumentIds || [])].sort()]);
+    t.approvalDate, t.subject, t.bodyText, t.repNotes,
+    [...(t.requiredMaterialFamilyIds || [])].sort(), [...(t.requiredDocumentIds || [])].sort()]);
   const templateDirty = () => !savedSnapshot
     || templateFingerprint(collectTemplate()) !== savedSnapshot;
 
@@ -1519,7 +1559,7 @@ function routesHtml() {
     document.getElementById("emailTitle").textContent = "Email templates";
     document.getElementById("emailBody").innerHTML = `<div class="email-docs-admin">
       <p class="email-next">Reps choose from these and cannot write their own. Required
-        attachments set here are added to every batch automatically.</p>
+        material series set here are routed to the right firm version automatically.</p>
       ${message ? `<p class="${bad ? "email-error" : "email-ok"}">${esc(message)}</p>` : ""}
       <ul class="email-doclist">${list.length ? list.map((t) => `<li>
         <span class="email-doc-main"><b>${esc(t.name)}</b>${
@@ -1547,7 +1587,36 @@ function routesHtml() {
 
   function templateEditView(message = "", bad = false) {
     const t = editing, docs = (catalog && catalog.documents) || [];
-    const req = new Set(t.requiredDocumentIds || []);
+    const requirements = templateRequirements(t, docs);
+    const req = new Set(requirements.documentIds);
+    const reqFamilies = new Set(requirements.familyIds);
+    const familyMap = new Map();
+    docs.filter((d) => d.familyId).forEach((d) => {
+      const family = familyMap.get(d.familyId) || {
+        id: d.familyId, name: d.name, category: d.category, channels: new Set(),
+      };
+      if ((d.channel || "generic") === "generic") family.name = d.name;
+      if (materialStatus(d) === "current") family.channels.add(d.channel || "generic");
+      familyMap.set(d.familyId, family);
+    });
+    const families = [...familyMap.values()].sort((a, b) => a.name.localeCompare(b.name));
+    const standaloneDocs = docs.filter((d) => !d.familyId);
+    const requiredFamilyHtml = '<fieldset class="email-docs email-families"><legend>Required material series</legend>'
+      + '<p>Require the series. The current UBS, Morgan Stanley, Merrill Lynch, Raymond James, '
+      + 'or generic PDF is selected automatically for each recipient.</p>'
+      + (families.length ? families.map((f) =>
+        '<label><input type="checkbox" class="tpl-family-req" value="' + esc(f.id) + '"'
+        + (reqFamilies.has(f.id) ? ' checked' : '') + '><span><b>' + esc(f.name)
+        + '</b><small>' + esc(f.category || 'Material') + ' &middot; '
+        + (f.channels.size ? [...f.channels].map(channelLabel).map(esc).join(', ') : 'No current version')
+        + '</small></span></label>').join('')
+        : '<p>No material series have been categorized yet.</p>') + '</fieldset>';
+    const requiredStandaloneHtml = standaloneDocs.length
+      ? '<fieldset class="email-docs"><legend>Required standalone attachments</legend>'
+        + standaloneDocs.map((d) => '<label><input type="checkbox" class="tpl-req" value="'
+          + esc(d.id) + '"' + (req.has(d.id) ? ' checked' : '') + '><span>' + esc(d.name)
+          + '</span><small>' + bytes(d.size) + '</small></label>').join('') + '</fieldset>'
+      : '';
     document.getElementById("emailTitle").textContent = t.id ? `Edit: ${t.name}` : "New template";
     document.getElementById("emailBody").innerHTML = `<div class="email-tpl">
       ${message ? `<p class="${bad ? "email-error" : "email-ok"}">${esc(message)}</p>` : ""}
@@ -1566,10 +1635,7 @@ function routesHtml() {
       <div id="tplLint" class="email-lint"></div>
       <label class="email-label">Notes for the rep (never sent)<textarea id="tplNotes" rows="2"
         maxlength="4000">${esc(t.repNotes || "")}</textarea></label>
-      <fieldset class="email-docs"><legend>Required attachments</legend>${docs.length ? docs.map((d) =>
-        `<label><input type="checkbox" class="tpl-req" value="${esc(d.id)}"${req.has(d.id) ? " checked" : ""}>
-          <span>${esc(d.name)}</span><small>${bytes(d.size)}</small></label>`).join("")
-        : `<p>No approved documents yet.</p>`}</fieldset>
+      ${requiredFamilyHtml}${requiredStandaloneHtml}
       <fieldset class="email-doc-add"><legend>Charts in the body</legend>
         <ul class="email-doclist">${(t.images || []).length ? t.images.map((i) => `<li>
           <span class="email-doc-main"><b>${esc(i.name)}</b><small><code>{{image:${esc(i.id)}}}</code>
@@ -1603,7 +1669,7 @@ function routesHtml() {
       const el = document.getElementById(id);
       if (el) el.addEventListener("input", paintSaveState);
     }
-    for (const box of document.querySelectorAll(".tpl-req"))
+    for (const box of document.querySelectorAll(".tpl-req, .tpl-family-req"))
       box.addEventListener("change", paintSaveState);
     runLint();
     paintSaveState();
@@ -1614,6 +1680,7 @@ function routesHtml() {
     return { ...editing, name: g("tplName").trim(), documentNumber: g("tplDoc").trim(),
       author: g("tplAuthor").trim(), approvalDate: g("tplApproved").trim(),
       subject: g("tplSubject"), bodyText: g("tplBody"), repNotes: g("tplNotes"),
+      requiredMaterialFamilyIds: [...document.querySelectorAll(".tpl-family-req:checked")].map((x) => x.value),
       requiredDocumentIds: [...document.querySelectorAll(".tpl-req:checked")].map((x) => x.value) };
   }
 
@@ -2638,7 +2705,8 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
     if (action === "health-days") { healthDays = Number(button.dataset.days) || 90; return openHealth(); }
     if (action === "templates") { clearTimeout(pollTimer); return templatesView(); }
     if (action === "tpl-new") {
-      editing = { id: "", name: "", subject: "", bodyText: "", requiredDocumentIds: [], images: [] };
+      editing = { id: "", name: "", subject: "", bodyText: "",
+        requiredMaterialFamilyIds: [], requiredDocumentIds: [], images: [] };
       savedSnapshot = null;          // a new template is unsaved by definition
       return templateEditView();
     }

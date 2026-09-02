@@ -806,22 +806,30 @@ async function createBatch(who, input) {
   if (template.published === false)
     throw httpError(403, `"${template.name}" is not yet approved for sending. `
       + "An email administrator has to publish it first.", "template_not_published");
-  // Required attachments come from the template and cannot be dropped by the
-  // rep. In the Word library this was a line of prose -- "Attachments required:
-  // most recent approved Case for Value" -- which is guidance a busy person
-  // skips. Here it is the set the batch is built with.
-  const required = [...new Set((template.requiredDocumentIds || template.defaultAttachmentIds || []).map(String))];
-  const requested = [...new Set([...required, ...(input.attachmentIds || []).map(String)])];
-  const documents = await store.getDocuments(requested);
-  const materialFamilyIds = [...new Set((Array.isArray(input.materialFamilyIds) ? input.materialFamilyIds : [])
-    .map((x) => String(x || "").trim()).filter(Boolean))];
-  const allDocuments = materialFamilyIds.length ? await store.listDocuments() : documents;
+  // A template requires a SERIES, not a client-group PDF. The resolver chooses
+  // UBS/MSWM/ML/RJ/generic independently for each recipient. Older templates
+  // still carry a PDF id; templateRequirements translates it to its family at
+  // runtime, while preserving exact requirements for standalone documents.
+  const catalogDocuments = await store.listDocuments();
+  const templateRequired = materials.templateRequirements(template, catalogDocuments);
+  if (templateRequired.missingDocumentIds.length) throw httpError(400,
+    `This template requires attachments that are no longer in the approved catalog: ${templateRequired.missingDocumentIds.join(", ")}. An email administrator needs to update it.`);
+  const required = templateRequired.documentIds;
+  const optionalRequested = materials.templateRequirements({
+    requiredDocumentIds: (input.attachmentIds || []).map(String),
+  }, catalogDocuments);
+  if (optionalRequested.missingDocumentIds.length) throw httpError(400,
+    `Approved attachments are unavailable: ${optionalRequested.missingDocumentIds.join(", ")}.`);
+  const requested = [...new Set([...required, ...optionalRequested.documentIds])];
+  const documents = catalogDocuments.filter((doc) => requested.includes(doc.id));
+  const materialFamilyIds = [...new Set([
+    ...templateRequired.familyIds,
+    ...optionalRequested.familyIds,
+    ...(Array.isArray(input.materialFamilyIds) ? input.materialFamilyIds : [])
+      .map((x) => String(x || "").trim()).filter(Boolean),
+  ])];
+  const allDocuments = materialFamilyIds.length ? catalogDocuments : documents;
   const routePolicy = materialFamilyIds.length ? await store.materialRoutes() : { rules: [] };
-  const missingDocs = requested.filter((x) => !documents.some((d) => d.id === x));
-  if (missingDocs.length) throw httpError(400,
-    missingDocs.some((x) => required.includes(x))
-      ? `This template requires attachments that are no longer in the approved catalog: ${missingDocs.join(", ")}. An email administrator needs to republish them.`
-      : `Approved attachments are unavailable: ${missingDocs.join(", ")}.`);
   const noncurrentDocs = documents.filter((doc) => !materials.currentDocument(doc));
   if (noncurrentDocs.length) throw httpError(409,
     `${noncurrentDocs[0].name || "An attachment"} is not current approved material.`, "attachment_unavailable");

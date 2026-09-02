@@ -82,6 +82,10 @@ evidence hash. Inactive records cannot be manually promoted.
 
    `python src/export_act_crd_corrections.py`
 
+   `python src/build_act_economic_links.py`
+
+   `python src/build_act_assets.py`
+
    `python src/build_contacts.py`
 
    `python src/build_field_tiles.py`
@@ -97,6 +101,19 @@ evidence hash. Inactive records cannot be manually promoted.
    `python src/export_approved_recipients.py`
 
    `python src/web_assets.py`
+
+   The economic-link build reads the exact ACT JSON named by the identity
+   manifest and verifies its SHA-256 and row count before attributing assets.
+   It may approve strict ACT identity links, exact unique validated
+   ACT-to-roster emails, and strict one-to-one SEC name/location/current-firm
+   residuals. These links are economic only: they cannot authorize email,
+   calls, preferred names, ACT synchronization, or a CRD write-back.
+   `build_act_assets.py` immediately consumes that hash-bound ledger and
+   publishes only approved links whose CRDs exist in the deployed advisor
+   index. Its client-side account table contains only that map-addressable set;
+   approved off-map and unresolved source-book totals remain reconciliation
+   metadata rather than anonymous client-side account vectors. The full CSV
+   review export is research-only; no importer consumes edits to that report.
 
    The contact build validates and publishes the exact ledger/ACT provenance.
    The ACT lookup is ledger-approved only. The email registry is bound to the

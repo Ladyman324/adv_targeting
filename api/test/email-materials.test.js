@@ -39,6 +39,35 @@ test("stale variants are never selected and newest current period wins", () => {
   ];
   assert.equal(m.resolveFamilies(docs, ["deck"], "a@example.com", { rules: [] }).documents[0].id, "q2");
 });
+
+test("template requirements migrate family documents but keep standalone PDFs exact", () => {
+  const docs = [
+    { id: "case-ubs-q2", familyId: "case-value", channel: "ubs" },
+    { id: "tax-policy", familyId: "", channel: "generic" },
+  ];
+  assert.deepEqual(m.templateRequirements({
+    requiredMaterialFamilyIds: ["quarterly-update"],
+    requiredDocumentIds: ["case-ubs-q2", "tax-policy"],
+  }, docs), {
+    familyIds: ["quarterly-update", "case-value"],
+    documentIds: ["tax-policy"],
+    missingDocumentIds: [],
+  });
+});
+
+test("template requirement migration reports removed legacy documents", () => {
+  assert.deepEqual(m.templateRequirements({ requiredDocumentIds: ["gone"] }, []), {
+    familyIds: [], documentIds: [], missingDocumentIds: ["gone"],
+  });
+});
+
+test("legacy default attachments are used when the newer exact list is empty", () => {
+  assert.deepEqual(m.templateRequirements({
+    requiredDocumentIds: [], defaultAttachmentIds: ["case-generic"],
+  }, [{ id: "case-generic", familyId: "case-value" }]), {
+    familyIds: ["case-value"], documentIds: [], missingDocumentIds: [],
+  });
+});
 test("disabled tombstones remain editable but never route recipients", () => {
   const p = m.validateRoutes({ rules: [{ domain: "ubs.com", channel: "ubs", disabled: true }] });
   assert.deepEqual(p.rules, [{ domain: "ubs.com", channel: "ubs", status: "disabled",

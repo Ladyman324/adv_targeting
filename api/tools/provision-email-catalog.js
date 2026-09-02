@@ -61,6 +61,8 @@ async function template(id, jsonFile) {
   await table.upsertEntity({ partitionKey: "approved", rowKey: id, name: String(value.name).slice(0, 120),
     subject: String(value.subject).slice(0, 500), bodyText: String(value.bodyText).slice(0, core.config().maxBodyChars),
     defaultAttachmentIdsJson: JSON.stringify(value.defaultAttachmentIds || []),
+    requiredDocumentIdsJson: JSON.stringify(value.requiredDocumentIds || value.defaultAttachmentIds || []),
+    requiredMaterialFamilyIdsJson: JSON.stringify(value.requiredMaterialFamilyIds || []),
     version: (Number(old && old.version) || 0) + 1, approved: true, updatedUtc: new Date().toISOString() }, "Replace");
   console.log(`Approved template ${id}: ${value.name}`);
 }

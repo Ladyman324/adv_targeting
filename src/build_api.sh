@@ -27,7 +27,8 @@ STAGE_DIR=""
 #   41: email-calendar-capacity.test.js -- Eastern/DST planning, locking, and release
 #   42: email-capacity-service.test.js -- final envelope counting and deferred cleanup
 #   43: email-capacity-ui.test.js -- visible, server-authored multi-day plan contract
-EXPECTED_API_TEST_FILE_COUNT=43
+#   44: email-template-material-series-ui.test.js -- templates require a routed series, not one variant
+EXPECTED_API_TEST_FILE_COUNT=44
 
 cleanup() {
   test -z "$TEMP_ROOT" && return

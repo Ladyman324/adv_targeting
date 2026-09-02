@@ -843,8 +843,8 @@ body.scope-pending #map{cursor:progress}
    beside them so the two are never read as the same kind of number. */
 .stat-eic .stat-label{color:var(--accent)}
 /* Says which map this number describes. Present only when the tile is NOT
-   scoped to the viewport -- i.e. the national view, where the three EIC tiles
-   show the whole book while every tile beside them tracks what is on screen.
+   scoped to the viewport -- i.e. the national view, where the four EIC tiles
+   show the approved mapped book while every tile beside them tracks the screen.
    Deliberately quiet: it is a qualifier on the label, not a second label. */
 .stat-scope{font-style:normal;font-weight:600;opacity:.72;letter-spacing:.04em}
 .stat-eic strong{color:var(--ink)}

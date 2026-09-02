@@ -1734,12 +1734,19 @@ def _act_assets_shape():
               if not isinstance(i, int) or not (0 <= i < len(table))]
     if bad_ix:
         problems.append(f"{len(bad_ix)} account indices out of range")
+    short_rows = sum(1 for account in table if len(account) < 4)
+    if short_rows:
+        problems.append(f"{short_rows:,} account rows omit the Mid-Cap value")
 
-    naive = sum(a.get("acv", 0) + a.get("lcv", 0) + a.get("mf", 0) for a in adv.values())
+    # All three comparisons cover the same four products. Mixing a three-field
+    # advisor/stated sum with four-value account rows can manufacture an audit
+    # difference that looks like shared-account de-duplication.
+    naive = sum(a.get("acv", 0) + a.get("lcv", 0) + a.get("mf", 0)
+                + a.get("midcap", 0) for a in adv.values())
     ix = {i for a in adv.values() for i in a.get("ix", [])
           if isinstance(i, int) and 0 <= i < len(table)}
-    union = sum(sum(table[i]) for i in ix)
-    stated = totals["acv"] + totals["lcv"] + totals["mf"]
+    union = sum(sum(table[i][:4]) for i in ix)
+    stated = totals["acv"] + totals["lcv"] + totals["mf"] + totals["midcap"]
 
     # The per-advisor figures MUST exceed the de-duplicated union, because
     # shared accounts are written at full value against each holder. If they
@@ -1752,7 +1759,8 @@ def _act_assets_shape():
         problems.append("advisors reference more value than the stated firm total")
     return (not problems,
             f"{len(adv):,} advisors, {len(table):,} accounts; "
-            f"naive ${naive:,.0f} vs union ${union:,.0f} vs stated ${stated:,.0f}"
+            f"four-product naive ${naive:,.0f} vs union ${union:,.0f} "
+            f"vs stated ${stated:,.0f}"
             + ("; " + "; ".join(problems) if problems else ""))
 
 
@@ -1787,12 +1795,12 @@ def _act_assets_national():
     body = body.group(0)
 
     # Every t.<field> the client reads must be present and non-null.
-    wanted = sorted(set(re.findall(r"t\.([a-z_]+)", body)))
+    wanted = sorted(set(re.findall(r"\bt\.([a-z_]+)", body)))
     absent = [k for k in wanted if totals.get(k) is None]
     if absent:
         problems.append("client reads " + ", ".join(absent) + " but the file has no such field")
-    # The three money figures are the headline. Zero there is not a build.
-    for k in ("acv", "lcv", "mf"):
+    # The four money figures are the headline. Zero there is not a build.
+    for k in ("acv", "lcv", "mf", "midcap"):
         if not totals.get(k):
             problems.append(f"totals.{k} is empty, so the national view would show $0")
     if not totals.get("advisors"):
@@ -1816,7 +1824,8 @@ def _act_assets_national():
 
     return (not problems,
             f"${totals.get('acv', 0):,.0f} / ${totals.get('lcv', 0):,.0f} / "
-            f"${totals.get('mf', 0):,.0f} across {totals.get('advisors', 0):,} advisors, "
+            f"${totals.get('mf', 0):,.0f} / ${totals.get('midcap', 0):,.0f} "
+            f"across {totals.get('advisors', 0):,} advisors, "
             f"{len(wanted)} fields read"
             + ("; " + "; ".join(problems) if problems else ""))
 
@@ -3119,13 +3128,17 @@ def _inline_images():
     # to exist on the template, which is checked by check 50.
     token_exempt = ('/^image:/i.test(token)' in service
                     and "unresolved.push(token); continue;" in service)
-    required = "requiredDocumentIds" in service and "required.includes(x)" in service
+    required = (
+        "templateRequired = materials.templateRequirements(template, catalogDocuments)" in service
+        and "...templateRequired.familyIds" in service
+        and "materials.resolveFamilies(allDocuments, materialFamilyIds, recipient.email, routePolicy)" in service
+    )
     api_src = text(API / "email" / "index.js")
     gated = re.search(r'"put_template".{0,200}?isAdmin\(who\)', api_src, re.S) is not None
     ok = all([escapes_first, falls_through, cid_only, no_remote_img, token_exempt, required, gated])
     return (ok, f"escape before token={escapes_first}, unknown id stays text={falls_through}, "
                 f"cid-only img scheme={cid_only}, image tokens exempt from merge check={token_exempt}, "
-                f"required attachments enforced={required}, admin-gated={gated}")
+                f"required material series enforced={required}, admin-gated={gated}")
 
 
 # ---------------------------------------------------------------------------
