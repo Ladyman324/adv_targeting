@@ -11,6 +11,8 @@ const service = fs.readFileSync(path.join(ROOT, "api/shared/email-service.js"), 
 const store = fs.readFileSync(path.join(ROOT, "api/shared/email-store.js"), "utf8");
 const handler = fs.readFileSync(path.join(ROOT, "api/email/index.js"), "utf8");
 const css = fs.readFileSync(path.join(ROOT, "webapp/email.css"), "utf8");
+const desktopHtml = fs.readFileSync(path.join(ROOT, "webapp/index.html"), "utf8");
+const fieldHtml = fs.readFileSync(path.join(ROOT, "webapp/field.html"), "utf8");
 
 test("template authoring requires material series rather than version PDFs", () => {
   assert.match(email, /<legend>Required material series<\/legend>/);
@@ -42,6 +44,12 @@ test("materials administration exposes audience, strategy and scrollable PDF pre
   assert.match(email, /data-email="material-preview-doc"/);
   assert.match(email, /op=document_preview/);
   assert.match(email, /<iframe[\s\S]*materialPreview\.url/);
+  assert.doesNotMatch(email, /materialPreview\.title\)}" sandbox/);
+  assert.match(email, /fetch\(`\/api\/email\?op=document_preview/);
+  assert.match(email, /const blob = await response\.blob\(\)/);
+  assert.match(email, /URL\.createObjectURL\(blob\)/);
+  assert.match(desktopHtml, /frame-src 'self' blob:/);
+  assert.match(fieldHtml, /frame-src 'self' blob:/);
   assert.match(css, /email-material-preview-dialog[\s\S]*height:min\(880px,92vh\)/);
   assert.match(css, /email-material-preview-dialog iframe[\s\S]*height:100%/);
 });

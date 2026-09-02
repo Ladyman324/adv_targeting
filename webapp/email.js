@@ -1285,7 +1285,7 @@ function suggestMaterial(file) {
       <section class="email-material-preview-dialog" role="dialog" aria-modal="true" aria-labelledby="materialPreviewTitle">
         <header><div><p class="eyebrow">PDF preview</p><h2 id="materialPreviewTitle">${esc(materialPreview.title)}</h2></div>
           <button type="button" class="rclose" data-email="material-preview-close" aria-label="Close preview">&times;</button></header>
-        <iframe src="${esc(materialPreview.url)}" title="${esc(materialPreview.title)}" sandbox></iframe>
+        <iframe src="${esc(materialPreview.url)}" title="${esc(materialPreview.title)}"></iframe>
       </section></div>`;
   }
 function latestEndedQuarter(now = new Date()) {
@@ -2707,8 +2707,23 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
     }
     if (action === "material-preview-doc") {
       const id = String(button.dataset.id || "");
-      openMaterialPreview(button.dataset.name || "Material preview",
-        `/api/email?op=document_preview&id=${encodeURIComponent(id)}&v=${encodeURIComponent(((catalog.documents || []).find((d) => d.id === id) || {}).sha256 || "")}`);
+      button.disabled = true;
+      try {
+        const doc = ((catalog && catalog.documents) || []).find((item) => item.id === id) || {};
+        const response = await fetch(`/api/email?op=document_preview&id=${encodeURIComponent(id)}&v=${encodeURIComponent(doc.sha256 || "")}`,
+          { credentials: "same-origin", cache: "no-store" });
+        if (!response.ok) {
+          let detail = "";
+          try { detail = (await response.json()).error || ""; } catch { /* Error body was not JSON. */ }
+          throw new Error(detail || `PDF preview failed (${response.status}).`);
+        }
+        const blob = await response.blob();
+        if (blob.type && blob.type !== "application/pdf") throw new Error("The preview response was not a PDF.");
+        const objectUrl = URL.createObjectURL(blob);
+        openMaterialPreview(button.dataset.name || doc.name || "Material preview", objectUrl, objectUrl);
+      } catch (error) {
+        docsView(error.message || "The PDF could not be previewed.", true);
+      }
       return;
     }
     if (action === "doc-file-preview") {

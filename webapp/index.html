@@ -17,6 +17,7 @@
     style-src 'self' 'unsafe-inline';
     img-src 'self' data: blob: https://*.tile.openstreetmap.org;
     connect-src 'self';
+    frame-src 'self' blob:;
     font-src 'self';
     base-uri 'none';
     form-action 'none';
@@ -28,8 +29,8 @@
   <link rel="stylesheet" href="vendor/leaflet.css">
   <link rel="stylesheet" href="vendor/MarkerCluster.css">
   <link rel="stylesheet" href="vendor/MarkerCluster.Default.css">
-  <link rel="stylesheet" href="style.css?v=62f45804bf">
-  <link rel="stylesheet" href="email.css?v=62f45804bf">
+  <link rel="stylesheet" href="style.css?v=4e6d178f12">
+  <link rel="stylesheet" href="email.css?v=4e6d178f12">
 </head>
 <body>
   <div id="app">
@@ -361,8 +362,8 @@
   <script src="vendor/leaflet-heat.js"></script>
   <!-- Shared with the field view: one definition of what a call outcome is,
        one queue, one do-not-call list. Loaded before app.js, which uses it. -->
-  <script src="dial.js?v=62f45804bf"></script>
-  <script src="app.js?v=62f45804bf"></script>
-  <script src="email.js?v=62f45804bf"></script>
+  <script src="dial.js?v=4e6d178f12"></script>
+  <script src="app.js?v=4e6d178f12"></script>
+  <script src="email.js?v=4e6d178f12"></script>
 </body>
 </html>
