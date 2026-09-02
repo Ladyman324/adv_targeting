@@ -6,6 +6,15 @@ test("only five material channels are accepted", () => {
   assert.deepEqual(m.CHANNELS, ["generic", "ubs", "mswm", "ml", "rj"]);
   assert.throws(() => m.channel("wfa"), /Unknown material channel/);
 });
+test("material audience and strategy vocabulary is bounded", () => {
+  assert.deepEqual(m.AUDIENCES, ["advisor_only", "client"]);
+  assert.deepEqual(m.STRATEGIES, ["general", "acv", "lcv", "combined"]);
+  assert.equal(m.audience("Advisor Only"), "advisor_only");
+  assert.equal(m.strategy("mutual fund"), "acv");
+  assert.equal(m.strategy("all-cap"), "acv");
+  assert.throws(() => m.audience("public"), /Unknown material audience/);
+  assert.throws(() => m.strategy("midcap"), /Unknown material strategy/);
+});
 test("domain policy normalizes, disables, de-duplicates and rejects conflicts", () => {
   const p = m.validateRoutes({ rules: [
     { domain: "@UBS.COM.", channel: "UBS" }, { domain: "ubs.com", channel: "ubs" },
@@ -31,6 +40,46 @@ test("families select channel variant and only explicit generic fallback", () =>
   assert.equal(m.resolveFamilies(docs, ["case"], "a@ubs.com", p).documents[0].id, "u");
   assert.equal(m.resolveFamilies(docs, ["case"], "a@rjf.com", p).documents[0].id, "g");
   assert.throws(() => m.resolveFamilies(docs, ["case"], "a@ml.com", p), (e) => e.code === "material_variant_unavailable");
+});
+test("Client material wins within the same document slot", () => {
+  const docs = [
+    { id: "advisor", familyId: "commentary", channel: "generic", strategy: "general",
+      audience: "advisor_only", periodKey: "2026-Q2", asOfDate: "2026-07-10", freshness: "current", approved: true, version: 9 },
+    { id: "client", familyId: "commentary", channel: "generic", strategy: "general",
+      audience: "client", periodKey: "2026-Q2", asOfDate: "2026-07-28", freshness: "current", approved: true, version: 1 },
+  ];
+  assert.equal(m.resolveFamilies(docs, ["commentary"], "a@example.com", { rules: [] })
+    .documents[0].id, "client");
+  assert.equal(m.materialSlotKey(docs[0]), m.materialSlotKey(docs[1]),
+    "audience and differing approval dates do not split one quarterly slot");
+  assert.notEqual(m.materialSlotKey(docs[0]), m.materialSlotKey({ ...docs[0], strategy: "lcv" }));
+});
+
+test("Raymond James commentary follows holdings and defaults only no-holding RJ recipients to LCV", () => {
+  const docs = [
+    { id: "rj-acv", familyId: "commentary", channel: "rj", strategy: "acv", audience: "client", freshness: "current", approved: true },
+    { id: "rj-lcv", familyId: "commentary", channel: "rj", strategy: "lcv", audience: "client", freshness: "current", approved: true },
+  ], policy = { rules: [{ domain: "rjf.com", channel: "rj" }] };
+  const ids = (strategies) => m.resolveFamilies(docs, ["commentary"], "advisor@rjf.com", policy, { strategies })
+    .documents.map((doc) => doc.id);
+  assert.deepEqual(ids([]), ["rj-lcv"]);
+  assert.deepEqual(ids(["acv"]), ["rj-acv"]);
+  assert.deepEqual(ids(["lcv"]), ["rj-lcv"]);
+  assert.deepEqual(ids(["acv", "lcv"]), ["rj-acv", "rj-lcv"]);
+});
+
+test("UBS commentary requires combined material and Large-Cap is not a global default", () => {
+  const docs = [
+    { id: "ubs-acv", familyId: "commentary", channel: "ubs", strategy: "acv", freshness: "current", approved: true },
+    { id: "ubs-lcv", familyId: "commentary", channel: "ubs", strategy: "lcv", freshness: "current", approved: true },
+    { id: "ubs-combined", familyId: "commentary", channel: "ubs", strategy: "combined", freshness: "current", approved: true },
+    { id: "generic", familyId: "commentary", channel: "generic", strategy: "general", freshness: "current", approved: true },
+    { id: "generic-lcv", familyId: "commentary", channel: "generic", strategy: "lcv", freshness: "current", approved: true },
+  ], policy = { rules: [{ domain: "ubs.com", channel: "ubs" }] };
+  assert.deepEqual(m.resolveFamilies(docs, ["commentary"], "advisor@ubs.com", policy).documents.map((d) => d.id),
+    ["ubs-combined"]);
+  assert.deepEqual(m.resolveFamilies(docs, ["commentary"], "advisor@independent.com", policy).documents.map((d) => d.id),
+    ["generic"]);
 });
 test("stale variants are never selected and newest current period wins", () => {
   const docs = [
@@ -77,7 +126,7 @@ test("disabled tombstones remain editable but never route recipients", () => {
 
 test("replacing PDF bytes inherits categorization when an older client omits metadata", () => {
   const old = { familyId: "case-value", category: "case", channel: "ubs",
-    periodKey: "2026-07", periodKind: "month", asOfDate: "2026-07-31",
+    audience: "advisor_only", strategy: "general", periodKey: "2026-07", periodKind: "month", asOfDate: "2026-07-31",
     freshness: "current", genericFallbackChannels: ["rj"] };
   assert.deepEqual(m.replacementMetadata({}, old), old);
   assert.deepEqual(m.replacementMetadata({ channel: "ml", familyId: "" }, old),

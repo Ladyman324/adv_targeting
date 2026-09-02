@@ -150,6 +150,18 @@ Templates and documents are versioned rows in `EmailTemplates` and
 container. Messages snapshot document name, size, type, version, hash, and blob
 identity at batch creation, then verify blob size again before upload.
 
+The Materials Library accepts PDFs in batches and lets an administrator preview
+and scroll each PDF before publishing. Every document is marked `Client` or
+`Advisor Only`; one logical family/firm/strategy/period slot has one active
+version, and a Client version supersedes (and cannot be downgraded by) an Advisor
+Only version in that slot.
+
+Quarterly commentary routing is intentionally bounded. EICIX mutual-fund assets
+count as All-Cap assets. UBS uses the combined ACV/LCV commentary. Raymond James
+uses ACV for ACV or mutual-fund holders, LCV for LCV holders, both for holders of
+both strategies, and LCV only as the Raymond James no-holdings default. Large-Cap
+is not a default for generic, Morgan Stanley, Merrill, or any other channel.
+
 From `api/`, with storage credentials supplied only in the environment:
 
 ```powershell

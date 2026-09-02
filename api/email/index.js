@@ -48,6 +48,21 @@ module.exports = async function (context, req) {
         if (!isAdmin(who)) throw service.httpError(403, "EmailAdministrator role is required.");
         return ok(context, await store.materialRoutes());
       }
+      if (op === "document_preview") {
+        if (!isAdmin(who)) throw service.httpError(403, "EmailAdministrator role is required.");
+        const preview = await store.documentPreview(String(req.query.id || ""));
+        const fileName = String(preview.doc.fileName || preview.doc.name || "material.pdf")
+          .replace(/["\\\r\n]/g, "_").slice(0, 180);
+        const downloadName = /\.pdf$/i.test(fileName) ? fileName : `${fileName}.pdf`;
+        context.res = { status: 200, isRaw: true, body: preview.bytes, headers: {
+          "Content-Type": "application/pdf",
+          "Content-Length": String(preview.bytes.length),
+          "Content-Disposition": `inline; filename="${downloadName}"`,
+          "Cache-Control": "private, no-store",
+          "X-Content-Type-Options": "nosniff",
+        } };
+        return;
+      }
       /* The bytes behind an inline chart, so the on-screen preview can show the
        * actual image.
        *
@@ -385,7 +400,7 @@ module.exports = async function (context, req) {
       }
       if (op === "update_document") {
         const saved = await store.updateDocument(who, body.id, body);
-        await store.audit(who.id, `document:${saved.id}`, "document_metadata_updated", { id: saved.id, familyId: saved.familyId, channel: saved.channel });
+        await store.audit(who.id, `document:${saved.id}`, "document_metadata_updated", { id: saved.id, familyId: saved.familyId, channel: saved.channel, audience: saved.audience, strategy: saved.strategy, supersededIds: saved.supersededIds || [] });
         return ok(context, { ok: true, saved, documents: await store.listDocuments() });
       }
       if (!isAdmin(who)) throw service.httpError(403, "EmailAdministrator role is required.");
@@ -406,7 +421,8 @@ module.exports = async function (context, req) {
       const saved = await store.putDocument(who, { ...body, id: body.id, name: body.name,
         fileName: body.fileName, bytes, maxBytes: service.attachmentLimit() });
       await store.audit(who.id, `document:${saved.id}`, "document_published", { id: saved.id, name: saved.name,
-        fileName: saved.fileName, version: saved.version, sha256: saved.sha256, replaced: saved.replaced });
+        fileName: saved.fileName, version: saved.version, sha256: saved.sha256, replaced: saved.replaced,
+        audience: saved.audience, strategy: saved.strategy, supersededIds: saved.supersededIds || [] });
       return ok(context, { ok: true, saved, documents: await store.listDocuments() }, 201);
     }
     // Name the operation. A bare "Unknown email operation" is indistinguishable

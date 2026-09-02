@@ -1,4 +1,4 @@
-'use strict';
+﻿'use strict';
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -137,4 +137,13 @@ test('Mid-Cap and inferred-economic-link transparency reach every asset surface'
   assert.match(fieldRender, /assetBook\.t === "high"/);
   assert.match(fieldSheet, /part\("Mid-Cap", b\.midcap \|\| 0\)/);
   assert.match(fieldSheet, /inferred ACT economic link/);
+});
+
+test('mutual-fund ownership routes commentary as All-Cap on desktop and Field', () => {
+  for (const source of [desktop, field]) {
+    assert.match(source, /function materialStrategiesFor|const materialStrategiesFor/);
+    assert.match(source, /Number\(book\.acv \|\| 0\) > 0 \|\| Number\(book\.mf \|\| 0\) > 0/);
+    assert.match(source, /out\.push\("acv"\)/);
+    assert.match(source, /materialStrategies: materialStrategiesFor/);
+  }
 });

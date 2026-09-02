@@ -1,4 +1,4 @@
-"use strict";
+﻿"use strict";
 
 const { QueueClient } = require("@azure/storage-queue");
 const core = require("./email-core");
@@ -260,6 +260,9 @@ function recipientSnapshot(raw) {
     name: String(raw.name || "").slice(0, 256), email: String(raw.email || "").trim().toLowerCase().slice(0, 320),
     firm: String(raw.companyName || raw.firm || "").slice(0, 256),
     firstName: String(raw.firstName || "").slice(0, 120), lastName: String(raw.lastName || "").slice(0, 120),
+    materialStrategies: [...new Set((Array.isArray(raw.materialStrategies) ? raw.materialStrategies : [])
+      .map((value) => String(value || "").trim().toLowerCase())
+      .filter((value) => value === "acv" || value === "lcv"))],
     teammates: (Array.isArray(raw.teammates) ? raw.teammates : [])
       .map((a) => String(a || "").trim().toLowerCase().slice(0, 320))
       .filter((a) => core.validEmail(a)).slice(0, MAX_TEAMMATE_CC),
@@ -280,7 +283,7 @@ async function canonicalRecipient(raw, connection) {
     const profile = connection.profile || {}, split = core.splitName(profile.displayName || "");
     return { contactId: "", name: profile.displayName || connection.mailbox, email: mailbox,
       firm: "", firstName: profile.givenName || split.first, lastName: profile.surname || split.last,
-      teammates: [], teammatesFull: [], recipientKind: "self_test",
+      materialStrategies: [], teammates: [], teammatesFull: [], recipientKind: "self_test",
       registryHash: "", routingHash: "",
       recipientTier: "self_test",
       recipientSource: "connected_mailbox",
@@ -293,6 +296,7 @@ async function canonicalRecipient(raw, connection) {
   return { contactId: crd, name: approved.name, email: approved.email, firm: approved.firm,
     firstName: approved.greetingName, lastName: approved.lastName,
     nameFallback: false,
+    materialStrategies: raw.materialStrategies || [],
     teammates: mates.map((m) => m.email),
     teammatesFull: mates.map((m) => ({ crd: m.crd, name: m.name, email: m.email })),
     registryHash: approved.registryHash, routingHash: approved.routingHash,
@@ -867,7 +871,8 @@ async function createBatch(who, input) {
   for (const recipient of notBlocked) {
     if (!materialFamilyIds.length) { routedMaterials.set(recipient.email, { channel: "", documents: [] }); continue; }
     routedMaterials.set(recipient.email,
-      materials.resolveFamilies(allDocuments, materialFamilyIds, recipient.email, routePolicy));
+      materials.resolveFamilies(allDocuments, materialFamilyIds, recipient.email, routePolicy,
+        { strategies: recipient.materialStrategies }));
   }
   const teamCc = new Map();
   const { kept, removed: copiedInstead } = dropCopiedRecipients(notBlocked, teamCc);

@@ -650,6 +650,7 @@ async function listDocuments() {
       contentType: e.contentType || "application/octet-stream", size: Number(e.size) || 0,
       sha256: e.sha256 || "", version: Number(e.version) || 1, approved: true,
       familyId: e.familyId || "", category: e.category || "", channel: e.materialChannel || "generic",
+      audience: e.materialAudience || "advisor_only", strategy: e.materialStrategy || "general",
       periodKey: e.periodKey || "", periodKind: e.periodKind || "", asOfDate: e.asOfDate || "",
       freshness: materials.freshnessOf({ approved: true, freshness: e.freshness || "current",
         periodKind: e.periodKind || "", periodKey: e.periodKey || "",
@@ -716,14 +717,53 @@ async function container() {
  * Conflating the two meant the attachment arrived under a display name shaped
  * for a dropdown, which is a fine label and a poor filename.
  */
+function storedMaterialMetadata(entity) {
+  if (!entity) return {};
+  return { familyId: entity.familyId || "", category: entity.category || "",
+    channel: entity.materialChannel || "generic",
+    audience: entity.materialAudience || "advisor_only",
+    strategy: entity.materialStrategy || "general",
+    periodKey: entity.periodKey || "", periodKind: entity.periodKind || "",
+    asOfDate: entity.asOfDate || "", freshness: entity.freshness || "current",
+    genericFallbackChannels: parse(entity.genericFallbackChannelsJson, []) };
+}
+
+async function retireMaterialCompetitors(client, documents, survivorId) {
+  const retired = [];
+  for (const doc of documents) {
+    if (!doc || String(doc.id) === String(survivorId)) continue;
+    await client.updateEntity({ partitionKey: "approved", rowKey: String(doc.id),
+      approved: false, freshness: "superseded", supersededBy: String(survivorId),
+      updatedUtc: now() }, "Merge");
+    retired.push(String(doc.id));
+  }
+  return retired;
+}
+
 async function putDocument(who, { id: rawId, name, fileName, bytes, maxBytes, ...metadata }) {
-  const docId = safeDocId(rawId || name);
   assertPdf(bytes);
   if (maxBytes && bytes.length > maxBytes) {
     const err = new Error("That PDF exceeds the application attachment limit.");
     err.statusCode = 400;
     throw err;
   }
+  const requestedId = safeDocId(rawId || name);
+  const requestedRow = await getOptional("documents", "approved", requestedId);
+  const meta = materials.replacementMetadata(metadata, storedMaterialMetadata(requestedRow));
+  const slot = materials.materialSlotKey(meta);
+  const active = await listDocuments();
+  const sameSlot = active.filter((doc) => doc.familyId
+    && materials.materialSlotKey(doc) === slot);
+  const existingClient = sameSlot.find((doc) => doc.audience === "client");
+  if (meta.audience === "advisor_only" && existingClient) {
+    const err = new Error(`A client version of this material is already active (${existingClient.name}). Client material cannot be downgraded to Advisor Only.`);
+    err.statusCode = 409; err.code = "material_client_preferred";
+    throw err;
+  }
+  sameSlot.sort((a, b) => (b.audience === "client" ? 1 : 0) - (a.audience === "client" ? 1 : 0)
+    || Number(b.version || 0) - Number(a.version || 0));
+  const docId = sameSlot.length ? String(sameSlot[0].id) : requestedId;
+  const old = await getOptional("documents", "approved", docId);
   const sha256 = crypto.createHash("sha256").update(bytes).digest("hex");
   const c = await container();
   const blobName = `${docId}/${sha256.slice(0, 16)}.pdf`;
@@ -732,44 +772,30 @@ async function putDocument(who, { id: rawId, name, fileName, bytes, maxBytes, ..
     metadata: { approved: "true", sha256 },
   });
   const client = await table("documents");
-  const old = await getOptional("documents", "approved", docId);
-  // Version increments on every publish. validateMessage() compares the version
-  // and hash a batch was built with against the current row, so replacing a
-  // document automatically invalidates batches still carrying the old one --
-  // which is the entire point of doing it this way.
-  // "Replace", not "Merge" -- so an upload that supplies no fileName clears a
-  // stale one rather than leaving the previous file's name attached to new
-  // bytes. Falling back to the old value would be worse than falling back to
-  // the display name: it would be confidently wrong.
   const storedFileName = clean(fileName || "", 256);
-  const meta = materials.replacementMetadata(metadata, old ? {
-    familyId: old.familyId || "", category: old.category || "",
-    channel: old.materialChannel || "generic", periodKey: old.periodKey || "",
-    periodKind: old.periodKind || "", asOfDate: old.asOfDate || "",
-    freshness: old.freshness || "current",
-    genericFallbackChannels: parse(old.genericFallbackChannelsJson, []),
-  } : {});
   await client.upsertEntity({ partitionKey: "approved", rowKey: docId,
     name: clean(name || docId, 256), fileName: storedFileName,
     blobName, contentType: "application/pdf",
     size: bytes.length, sha256, version: (Number(old && old.version) || 0) + 1,
     approved: true, familyId: meta.familyId, category: meta.category, materialChannel: meta.channel,
+    materialAudience: meta.audience, materialStrategy: meta.strategy,
     periodKey: meta.periodKey, periodKind: meta.periodKind, asOfDate: meta.asOfDate,
     freshness: meta.freshness, genericFallbackChannelsJson: json(meta.genericFallbackChannels),
-    updatedUtc: now(), updatedBy: clean(who && who.name, 256) }, "Replace");
+    supersededBy: "", updatedUtc: now(), updatedBy: clean(who && who.name, 256) }, "Replace");
+  const supersededIds = await retireMaterialCompetitors(client, sameSlot, docId);
   return { id: docId, name: clean(name || docId, 256), fileName: storedFileName,
-           size: bytes.length, sha256,
-           version: (Number(old && old.version) || 0) + 1, replaced: !!old, ...meta };
+    size: bytes.length, sha256, version: (Number(old && old.version) || 0) + 1,
+    replaced: !!old || sameSlot.length > 0, supersededIds, ...meta };
 }
-
-
 async function updateDocument(who, rawId, patch) {
   const docId = safeDocId(rawId), existing = await getOptional("documents", "approved", docId);
-  if (!existing) { const e = new Error("That document is not in the approved catalog."); e.statusCode = 404; throw e; }
+  if (!existing || existing.approved === false) { const e = new Error("That document is not in the approved catalog."); e.statusCode = 404; throw e; }
   const meta = materials.normalizeMetadata({
     familyId: patch.familyId === undefined ? existing.familyId : patch.familyId,
     category: patch.category === undefined ? existing.category : patch.category,
     channel: patch.channel === undefined ? (existing.materialChannel || "generic") : patch.channel,
+    audience: patch.audience === undefined ? (existing.materialAudience || "advisor_only") : patch.audience,
+    strategy: patch.strategy === undefined ? (existing.materialStrategy || "general") : patch.strategy,
     periodKey: patch.periodKey === undefined ? existing.periodKey : patch.periodKey,
     periodKind: patch.periodKind === undefined ? existing.periodKind : patch.periodKind,
     asOfDate: patch.asOfDate === undefined ? existing.asOfDate : patch.asOfDate,
@@ -777,15 +803,41 @@ async function updateDocument(who, rawId, patch) {
     genericFallbackChannels: patch.genericFallbackChannels === undefined
       ? parse(existing.genericFallbackChannelsJson, []) : patch.genericFallbackChannels,
   });
-  await (await table("documents")).updateEntity({ partitionKey: "approved", rowKey: docId,
+  const sameSlot = (await listDocuments()).filter((doc) => String(doc.id) !== docId && doc.familyId
+    && materials.materialSlotKey(doc) === materials.materialSlotKey(meta));
+  const existingClient = sameSlot.find((doc) => doc.audience === "client");
+  if (meta.audience === "advisor_only" && existingClient) {
+    const e = new Error(`A client version of this material is already active (${existingClient.name}). Client material cannot be downgraded to Advisor Only.`);
+    e.statusCode = 409; e.code = "material_client_preferred"; throw e;
+  }
+  const client = await table("documents");
+  await client.updateEntity({ partitionKey: "approved", rowKey: docId,
     ...(patch.name === undefined ? {} : { name: clean(patch.name || docId, 256) }),
-    familyId: meta.familyId, category: meta.category, materialChannel: meta.channel,
+    approved: true, familyId: meta.familyId, category: meta.category, materialChannel: meta.channel,
+    materialAudience: meta.audience, materialStrategy: meta.strategy,
     periodKey: meta.periodKey, periodKind: meta.periodKind, asOfDate: meta.asOfDate,
     freshness: meta.freshness, genericFallbackChannelsJson: json(meta.genericFallbackChannels),
-    updatedUtc: now(), updatedBy: clean(who && who.name, 256) }, "Merge", patch.etag ? { etag: patch.etag } : undefined);
-  return (await getDocuments([docId]))[0];
+    supersededBy: "", updatedUtc: now(), updatedBy: clean(who && who.name, 256) }, "Merge", patch.etag ? { etag: patch.etag } : undefined);
+  const supersededIds = await retireMaterialCompetitors(client, sameSlot, docId);
+  return { ...(await getDocuments([docId]))[0], supersededIds };
 }
 
+async function documentPreview(rawId) {
+  const docId = safeDocId(rawId);
+  const doc = (await getDocuments([docId]))[0];
+  if (!doc || !doc.blobName) { const e = new Error("That document is not in the approved catalog."); e.statusCode = 404; throw e; }
+  const blob = (await container()).getBlobClient(doc.blobName);
+  const properties = await blob.getProperties();
+  if (Number(properties.contentLength) !== Number(doc.size)) {
+    const e = new Error("The approved PDF changed size and must be re-uploaded before preview or sending."); e.statusCode = 409; throw e;
+  }
+  const bytes = await blob.downloadToBuffer();
+  const sha256 = crypto.createHash("sha256").update(bytes).digest("hex");
+  if (doc.sha256 && sha256 !== doc.sha256) {
+    const e = new Error("The approved PDF changed content and must be re-uploaded before preview or sending."); e.statusCode = 409; throw e;
+  }
+  return { doc, bytes };
+}
 async function materialRoutes() {
   const row = await getOptional("policy", "global", "material-domain-routes-v1");
   if (!row) return materials.loadSeed();
@@ -1451,7 +1503,7 @@ module.exports = {
   id, now, batchPartition, putConnection, getConnection, putAuthState, consumeAuthState,
   createBatch, getBatch, patchBatch, listBatches, createMessage, getMessage, listMessages,
   patchMessage, deleteMessage, claimMessage, listTemplates, getTemplate, setTemplatePublished, listDocuments, getDocuments,
-  putDocument, updateDocument, deleteDocument, materialRoutes, putMaterialRoutes, putTemplate, deleteTemplate,
+  putDocument, updateDocument, documentPreview, deleteDocument, materialRoutes, putMaterialRoutes, putTemplate, deleteTemplate,
   putTemplateImage, deleteTemplateImage, templateImageBytes,
   getSuppression, suppressEmail, listConnections, sentByInternetId,
   bounceAlreadySeen, markBounceSeen, recordDeliveryEvent, deliveryEvents,

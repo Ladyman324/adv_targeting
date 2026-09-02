@@ -684,6 +684,15 @@ async function teammatesWithEmail(crd, state, teamKey){
  * all, and the per-message "copy someone on their team" picker hid itself --
  * silently, because an empty list and no teammates look identical to it.
  */
+// EICIX follows All-Cap. These bounded flags only affect Raymond James
+// quarterly-commentary routing; Mid-Cap and every other firm remain unchanged.
+function materialStrategiesFor(crd) {
+  const book = bookFor(crd), out = [];
+  if (!book) return out;
+  if (Number(book.acv || 0) > 0 || Number(book.mf || 0) > 0) out.push("acv");
+  if (Number(book.lcv || 0) > 0) out.push("lcv");
+  return out;
+}
 window.AdvisorEmailData = {
   /* A LOADED TILE IS NOT REQUIRED, and demanding one broke this on the phone.
    *
@@ -712,6 +721,7 @@ window.AdvisorEmailData = {
     const mates = await teammatesWithEmail(
       String(crd), row ? row[COL.state] : base.state, row ? row[COL.team_key] : "");
     return { ...base, firstName: greeting,
+             materialStrategies: materialStrategiesFor(crd),
              teammates: mates.map((m) => m.email), teammatesFull: mates };
   },
   list: async () => {
@@ -722,6 +732,7 @@ window.AdvisorEmailData = {
       const mates = await teammatesWithEmail(
         String(it.crd), row ? row[COL.state] : it.state, row ? row[COL.team_key] : "");
       out.push({ ...it, firstName: (row && COL.sal != null && row[COL.sal]) || "",
+                 materialStrategies: materialStrategiesFor(it.crd),
                  teammates: mates.map((m) => m.email), teammatesFull: mates });
     }
     out.eligibilitySummary = { selected: Dial.state.items.length, included: out.length,

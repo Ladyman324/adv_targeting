@@ -2190,16 +2190,28 @@ const greetingFor = (crd) => {
   const c = contactFor(crd);
   return (c && c.sal) || "";
 };
+// Product ownership is only a routing hint for firm-specific commentary. EICIX
+// follows the All-Cap strategy; Mid-Cap is neither ACV nor LCV. The API accepts
+// only these two flags, and only Raymond James varies material from them.
+const materialStrategiesFor = (crd) => {
+  const book = bookFor(crd), out = [];
+  if (!book) return out;
+  if (Number(book.acv || 0) > 0 || Number(book.mf || 0) > 0) out.push("acv");
+  if (Number(book.lcv || 0) > 0) out.push("lcv");
+  return out;
+};
 
 window.AdvisorEmailData = {
   recipientFor: (id) => {
     const snap = dialSnapshot(id);
     return !snap.emailConfirmed ? null : { ...snap, firstName: greetingFor(id),
+      materialStrategies: materialStrategiesFor(id),
       teammates: teammateEmails(id), teammatesFull: teammatesOf(id) };
   },
   list: () => {
     const out = Dial.state.items.filter((it) => Dial.emailRouteStatus(it).ok)
       .map((it) => ({ ...it, firstName: greetingFor(it.crd),
+        materialStrategies: materialStrategiesFor(it.crd),
         identityLabel: Dial.identityTierLabel(it.contactTier, it.contactSource),
         teammates: teammateEmails(it.crd), teammatesFull: teammatesOf(it.crd) }));
     out.eligibilitySummary = { selected: Dial.state.items.length, included: out.length,

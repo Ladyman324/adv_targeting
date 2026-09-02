@@ -1200,20 +1200,24 @@
 
   const MATERIAL_CHANNELS = [["generic", "Generic"], ["ubs", "UBS"], ["rj", "Raymond James"],
     ["mswm", "Morgan Stanley"], ["ml", "Merrill"]];
-  const MATERIAL_CATEGORIES = ["Presentation", "Update & Positioning", "Case for Value vs Growth",
+  const MATERIAL_AUDIENCES = [["client", "Client"], ["advisor_only", "Advisor Only"]];
+  const MATERIAL_STRATEGIES = [["general", "General"], ["acv", "All-Cap"], ["lcv", "Large-Cap"], ["combined", "ACV/LCV combined"]];
+  const MATERIAL_CATEGORIES = ["Presentation", "Quarterly Commentary", "Update & Positioning", "Case for Value vs Growth",
     "Performance", "Cash Allocation", "Periodic Table", "Standard Deviation", "Tax Policy", "Other"];
-  let materialQueue = [], materialSearch = "", routeSearch = "";
+  let materialQueue = [], materialSearch = "", routeSearch = "", materialPreview = null;
 
 function suggestMaterial(file) {
     const raw = String(file.name || "").replace(/\.pdf$/i, "").replace(/^p\s+/i, "")
-      .replace(/\s*-\s*/g, " - ").replace(/\s+/g, " ").trim();
+      .replace(/_+/g, " ").replace(/\s*-\s*/g, " - ").replace(/\s+/g, " ").trim();
     let channel = "generic";
     if (/\bUBS\b/i.test(raw)) channel = "ubs";
     else if (/\b(RJ|Raymond James)\b/i.test(raw)) channel = "rj";
     else if (/\b(MSWM|Morgan Stanley)\b/i.test(raw)) channel = "mswm";
     else if (/\b(ML|Merrill)\b/i.test(raw)) channel = "ml";
+    const audience = /\bclient(?:\s+approved)?\b/i.test(raw) ? "client" : "advisor_only";
     let category = "Other";
-    if (/standard deviation/i.test(raw)) category = "Standard Deviation";
+    if (/\bcommentary\b/i.test(raw)) category = "Quarterly Commentary";
+    else if (/standard deviation/i.test(raw)) category = "Standard Deviation";
     else if (/periodic table/i.test(raw)) category = "Periodic Table";
     else if (/cash allocation/i.test(raw)) category = "Cash Allocation";
     else if (/performance page/i.test(raw)) category = "Performance";
@@ -1236,20 +1240,54 @@ function suggestMaterial(file) {
         asOfDate = (2000 + yy) + "-" + String(mm).padStart(2, "0") + "-" + String(dd).padStart(2, "0");
     }
     const displayName = raw.replace(/\s+-\s+\d{6,}(?:\s*-\s*\d+)*\s*$/i, "").trim();
-    const familyName = displayName
+    let familyName = displayName
       .replace(/\b(UBS|RJ|MSWM|ML|Raymond James|Morgan Stanley|Merrill)\b/ig, "")
       .replace(/\bQ[1-4]\s*\d{2}\b/ig, "")
       .replace(/\b(January|February|March|April|May|June|July|August|September|October|November|December)\s+20\d{2}\b/ig, "")
       .replace(/\s+-\s*/g, " ").replace(/\s+/g, " ").trim();
+    let strategy = "general";
+    if (category === "Quarterly Commentary") {
+      if (/\b(?:ACV|All[- ]Cap)\b/i.test(raw) && /\b(?:LCV|Large[- ]Cap)\b/i.test(raw)) strategy = "combined";
+      else if (/\b(?:LCV|Large[- ]Cap)\b/i.test(raw)) strategy = "lcv";
+      else if (/\b(?:ACV|All[- ]Cap|EICIX|Mutual Fund)\b/i.test(raw)) strategy = "acv";
+      familyName = familyName.replace(/\b(Client(?: Approved)?|Advisor(?: Only| Approved)?|ACV|LCV|All[- ]Cap|Large[- ]Cap|Combined)\b/ig, "")
+        .replace(/\s+/g, " ").trim();
+    }
     const familyId = (familyName || displayName).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
-    const logicalId = (displayName + "-" + channel + "-" + (periodKey || asOfDate || "current"))
+    const logicalId = (displayName + "-" + channel + "-" + strategy + "-" + (periodKey || asOfDate || "current"))
       .toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 80);
-    return { file, name: displayName, familyId, logicalId, category, channel, periodKind, periodKey,
+    return { file, name: displayName, familyId, logicalId, category, channel, audience, strategy, periodKind, periodKey,
       asOfDate, status: "ready", error: "", duplicate: "" };
   }
 
   const channelLabel = (value) => (MATERIAL_CHANNELS.find(([key]) => key === String(value || "").toLowerCase())
     || [null, value || "Generic"])[1];
+  const audienceLabel = (value) => (MATERIAL_AUDIENCES.find(([key]) => key === String(value || "advisor_only").toLowerCase())
+    || [null, "Advisor Only"])[1];
+  const strategyLabel = (value) => (MATERIAL_STRATEGIES.find(([key]) => key === String(value || "general").toLowerCase())
+    || [null, "General"])[1];
+
+  function closeMaterialPreview(redraw = true) {
+    if (materialPreview && materialPreview.objectUrl) URL.revokeObjectURL(materialPreview.objectUrl);
+    materialPreview = null;
+    if (redraw) docsView();
+  }
+
+  function openMaterialPreview(title, url, objectUrl = "") {
+    closeMaterialPreview(false);
+    materialPreview = { title: title || "Material preview", url, objectUrl };
+    docsView();
+  }
+
+  function materialPreviewHtml() {
+    if (!materialPreview) return "";
+    return `<div class="email-material-preview" role="presentation">
+      <section class="email-material-preview-dialog" role="dialog" aria-modal="true" aria-labelledby="materialPreviewTitle">
+        <header><div><p class="eyebrow">PDF preview</p><h2 id="materialPreviewTitle">${esc(materialPreview.title)}</h2></div>
+          <button type="button" class="rclose" data-email="material-preview-close" aria-label="Close preview">&times;</button></header>
+        <iframe src="${esc(materialPreview.url)}" title="${esc(materialPreview.title)}" sandbox></iframe>
+      </section></div>`;
+  }
 function latestEndedQuarter(now = new Date()) {
     let year = now.getFullYear(), quarter = Math.floor(now.getMonth() / 3) + 1;
     quarter -= 1;
@@ -1285,24 +1323,82 @@ function latestEndedQuarter(now = new Date()) {
 
 
   function uploadLogicalId(row) {
-    return (String(row.name || "") + "-" + String(row.channel || "generic") + "-"
+    return (String(row.name || "") + "-" + String(row.channel || "generic") + "-" + String(row.strategy || "general") + "-"
       + String(row.periodKey || row.asOfDate || "current")).toLowerCase()
       .replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 80);
   }
   function uploadTuple(row) {
-    return [row.familyId, row.channel || "generic", row.periodKind || "", row.periodKey || "", row.asOfDate || ""].join("|");
+    const periodIdentity = row.periodKey ? `${row.periodKind || ""}|${row.periodKey}`
+      : `${row.periodKind || ""}|${row.asOfDate || ""}`;
+    return [row.familyId, row.channel || "generic", row.strategy || "general", periodIdentity].join("|");
   }
 
+  function reconcileMaterialQueue() {
+    const existing = (catalog && catalog.documents) || [];
+    const bySlot = new Map();
+    for (const doc of existing) {
+      const key = uploadTuple(doc), current = bySlot.get(key);
+      if (!current || (doc.audience === "client" && current.audience !== "client")
+          || (doc.audience === current.audience && Number(doc.version || 0) > Number(current.version || 0)))
+        bySlot.set(key, doc);
+    }
+    const queuedSlots = new Map(), queuedNames = new Map();
+    for (const row of materialQueue) {
+      if (["invalid", "done", "uploading"].includes(row.status)) continue;
+      row.status = "ready"; row.error = ""; row.duplicate = ""; row.replaces = null;
+      row.logicalId = uploadLogicalId(row);
+      const slot = uploadTuple(row), fileName = String(row.file && row.file.name || "").toLowerCase();
+      const prior = queuedSlots.get(slot);
+      if (prior) {
+        if (row.audience === "client" && prior.audience !== "client") {
+          prior.status = "duplicate";
+          prior.duplicate = "A Client version is queued for this same slot and will be used instead.";
+          queuedSlots.set(slot, row);
+        } else {
+          row.status = "duplicate";
+          row.duplicate = prior.audience === "client"
+            ? "A Client version is already queued for this slot."
+            : "Another Advisor Only version is already queued for this slot.";
+          continue;
+        }
+      } else queuedSlots.set(slot, row);
+      const sameName = queuedNames.get(fileName);
+      if (fileName && sameName && sameName !== row) {
+        row.status = "duplicate"; row.duplicate = "This filename is already queued."; continue;
+      }
+      queuedNames.set(fileName, row);
+      const published = bySlot.get(slot);
+      if (published) {
+        if (published.audience === "client" && row.audience !== "client") {
+          row.status = "duplicate";
+          row.duplicate = "A Client version is already active. It cannot be replaced by Advisor Only.";
+        } else {
+          row.logicalId = published.id;
+          row.replaces = { id: published.id, name: published.name,
+            audience: published.audience || "advisor_only" };
+        }
+      } else {
+        const nameConflict = existing.find((doc) => String(doc.fileName || "").toLowerCase() === fileName);
+        if (nameConflict) {
+          row.status = "duplicate";
+          row.duplicate = "That filename belongs to a different material slot. Review its family, firm, strategy, and period.";
+        }
+      }
+    }
+  }
   function queueRows() {
+    const select = (items, selected) => items.map(([value, label]) =>
+      `<option value="${value}"${value === selected ? " selected" : ""}>${esc(label)}</option>`).join("");
     return materialQueue.map((row, i) => '<div class="email-material-upload ' + esc(row.status) + '" data-upload-row="' + i + '">'
       + '<div class="email-material-file"><b>' + esc(row.file.name) + '</b><small>' + bytes(row.file.size)
-      + (row.duplicate ? ' / ' + esc(row.duplicate) : '') + '</small></div>'
+      + (row.duplicate ? ' / ' + esc(row.duplicate) : '') + '</small><button type="button" class="email-small" data-email="material-preview-queue" data-index="' + i + '">Preview PDF</button></div>'
       + '<label>Display name<input data-upload-field="name" value="' + esc(row.name) + '"></label>'
       + '<label>Family<input data-upload-field="familyId" value="' + esc(row.familyId) + '"></label>'
       + '<label>Category<select data-upload-field="category">' + MATERIAL_CATEGORIES.map((v) =>
         '<option' + (v === row.category ? ' selected' : '') + '>' + esc(v) + '</option>').join('') + '</select></label>'
-      + '<label>Version for<select data-upload-field="channel">' + MATERIAL_CHANNELS.map(([v, label]) =>
-        '<option value="' + v + '"' + (v === row.channel ? ' selected' : '') + '>' + esc(label) + '</option>').join('') + '</select></label>'
+      + '<label>Firm version<select data-upload-field="channel">' + select(MATERIAL_CHANNELS, row.channel) + '</select></label>'
+      + '<label>Approved for<select data-upload-field="audience">' + select(MATERIAL_AUDIENCES, row.audience || 'advisor_only') + '</select></label>'
+      + '<label>Commentary strategy<select data-upload-field="strategy">' + select(MATERIAL_STRATEGIES, row.strategy || 'general') + '</select></label>'
       + '<label>Period<select data-upload-field="periodKind"><option value="quarter"' + (row.periodKind === 'quarter' ? ' selected' : '') + '>Quarter</option>'
       + '<option value="month"' + (row.periodKind === 'month' ? ' selected' : '') + '>Month</option><option value="as_of"' + (row.periodKind === 'as_of' ? ' selected' : '') + '>As of</option>'
       + '<option value="evergreen"' + (row.periodKind === 'evergreen' ? ' selected' : '') + '>Evergreen</option></select></label>'
@@ -1310,9 +1406,9 @@ function latestEndedQuarter(now = new Date()) {
       + '<label>As of<input type="date" data-upload-field="asOfDate" value="' + esc(row.asOfDate) + '"></label>'
       + '<button type="button" class="email-small grave" data-email="material-queue-remove" data-index="' + i + '">Remove</button>'
       + '<p class="email-material-result">' + (row.status === 'uploading' ? 'Publishing...' : row.status === 'done' ? 'Published'
-        : row.error ? esc(row.error) : row.duplicate ? 'Check this duplicate before publishing.' : 'Ready') + '</p></div>').join('');
+        : row.error ? esc(row.error) : row.duplicate ? 'Resolve this item before publishing.'
+          : row.replaces ? 'Ready — replaces ' + esc(row.replaces.name) + '.' : 'Ready') + '</p></div>').join('');
   }
-
 function materialEditFields(d) {
     const option = (value, label, selected) => '<option value="' + value + '"' + (value === selected ? ' selected' : '') + '>' + label + '</option>';
     return '<div class="email-material-edit">'
@@ -1320,8 +1416,12 @@ function materialEditFields(d) {
       + '<label>Family<input data-material-field="familyId" value="' + esc(d.familyId || d.id) + '"></label>'
       + '<label>Category<select data-material-field="category">' + MATERIAL_CATEGORIES.map((v) =>
         '<option' + (v === (d.category || 'Other') ? ' selected' : '') + '>' + esc(v) + '</option>').join('') + '</select></label>'
-      + '<label>Version for<select data-material-field="channel">' + MATERIAL_CHANNELS.map(([v, label]) =>
+      + '<label>Firm version<select data-material-field="channel">' + MATERIAL_CHANNELS.map(([v, label]) =>
         option(v, esc(label), d.channel || 'generic')).join('') + '</select></label>'
+      + '<label>Approved for<select data-material-field="audience">' + MATERIAL_AUDIENCES.map(([v, label]) =>
+        option(v, esc(label), d.audience || 'advisor_only')).join('') + '</select></label>'
+      + '<label>Commentary strategy<select data-material-field="strategy">' + MATERIAL_STRATEGIES.map(([v, label]) =>
+        option(v, esc(label), d.strategy || 'general')).join('') + '</select></label>'
       + '<label>Period type<select data-material-field="periodKind">' + [['quarter','Quarter'],['month','Month'],['as_of','As of'],['evergreen','Evergreen']].map((v) =>
         option(v[0], v[1], d.periodKind || 'as_of')).join('') + '</select></label>'
       + '<label>Period key<input data-material-field="periodKey" value="' + esc(d.periodKey || '') + '"></label>'
@@ -1330,10 +1430,9 @@ function materialEditFields(d) {
         option(v[0], v[1], materialStatus(d))).join('') + '</select></label>'
       + '<button type="button" class="email-small primary" data-email="material-save" data-id="' + esc(d.id) + '">Save metadata</button></div>';
   }
-
   function libraryHtml(docs) {
     const q = materialSearch.toLowerCase();
-    const shown = docs.filter((d) => !q || [d.name, d.familyId, d.category, d.channel, d.periodKey, d.fileName].join(' ').toLowerCase().includes(q));
+    const shown = docs.filter((d) => !q || [d.name, d.familyId, d.category, d.channel, d.audience, d.strategy, d.periodKey, d.fileName].join(' ').toLowerCase().includes(q));
     const groups = new Map();
     shown.forEach((d) => {
       const key = d.familyId || d.id, group = groups.get(key) || { key, category: d.category || 'Uncategorized', docs: [] };
@@ -1356,10 +1455,12 @@ function materialEditFields(d) {
           '<span class="' + (channels.has(key) ? 'on' : 'off') + '">' + esc(label) + '</span>').join('') + '</div>'
         + g.docs.sort((a, b) => String(b.periodKey || b.asOfDate || '').localeCompare(String(a.periodKey || a.asOfDate || ''))).map((d) =>
           '<details class="email-material-version"><summary><b>' + esc(channelLabel(d.channel)) + '</b> / '
+          + esc(audienceLabel(d.audience)) + ' / ' + esc(strategyLabel(d.strategy)) + ' / '
           + esc(d.periodKey || d.asOfDate || 'Evergreen') + '<span class="email-fresh ' + esc(materialStatus(d)) + '">'
           + esc(materialStatus(d)) + '</span></summary><p>' + esc(d.fileName || d.name + '.pdf') + ' / ' + bytes(d.size)
           + ' / v' + d.version + '</p>' + materialEditFields(d)
-          + '<p><button type="button" class="email-small" data-email="doc-replace" data-id="' + esc(d.id) + '" data-name="' + esc(d.name) + '">Replace PDF</button> '
+          + '<p><button type="button" class="email-small" data-email="material-preview-doc" data-id="' + esc(d.id) + '" data-name="' + esc(d.name) + '">Preview PDF</button> '
+          + '<button type="button" class="email-small" data-email="doc-replace" data-id="' + esc(d.id) + '" data-name="' + esc(d.name) + '">Replace PDF</button> '
           + '<button type="button" class="grave email-small" data-email="doc-delete" data-id="' + esc(d.id) + '" data-name="' + esc(d.name) + '">'
           + 'Remove' + '</button></p></details>').join('')
         + '</section>';
@@ -1388,12 +1489,13 @@ function routesHtml() {
     const docs = (catalog && catalog.documents) || [];
     document.getElementById("emailTitle").textContent = "Materials Library";
     document.getElementById("emailBody").innerHTML = '<div class="email-docs-admin email-materials">'
-      + '<div class="email-material-intro"><div><h2>Approved sales materials</h2><p>Upload PDFs together, confirm the suggested organization, and publish. Reps see only approved, current versions.</p></div>'
+      + '<div class="email-material-intro"><div><h2>Approved sales materials</h2><p>Upload PDFs together, preview each report, and mark it Client or Advisor Only. Client versions replace Advisor Only versions in the same slot.</p></div>'
       + '<label class="email-upload-button">Choose PDFs<input id="docFiles" type="file" accept="application/pdf,.pdf" multiple></label></div>'
       + (replacing ? '<fieldset class="email-doc-add"><legend>Replace ' + esc(replacing.name) + '</legend>'
         + '<p class="email-fine">The new PDF keeps this material ID and advances its version. Existing unapproved batches carrying the old version become invalid.</p>'
         + '<label class="email-label">Display name<input id="docName" maxlength="120" value="' + esc(replacing.name) + '"></label>'
         + '<label class="email-label">Replacement PDF<input id="docFile" type="file" accept="application/pdf,.pdf"></label>'
+        + '<button type="button" class="email-small" data-email="doc-file-preview">Preview selected PDF</button> '
         + '<button type="button" class="ask-btn primary" data-email="doc-upload">Publish replacement</button> '
         + '<button type="button" class="email-small" data-email="doc-replace-cancel">Cancel</button></fieldset>' : '')
       + (message ? '<p class="' + (bad ? 'email-error' : 'email-ok') + '">' + esc(message) + '</p>' : '')
@@ -1403,7 +1505,8 @@ function routesHtml() {
       + '<span>' + docs.length + ' approved version' + (docs.length === 1 ? '' : 's') + '</span></div>'
       + '<div class="email-material-library">' + libraryHtml(docs) + '</div>'
       + routesHtml()
-      + '<div class="email-done-actions"><button type="button" class="ask-btn" data-email="docs-back">Back</button></div></div>';
+      + '<div class="email-done-actions"><button type="button" class="ask-btn" data-email="docs-back">Back</button></div>'
+      + materialPreviewHtml() + '</div>';
   }
 
   // ---- template authoring (EmailAdministrator only) ------------------------
@@ -2426,6 +2529,7 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
       unconfirmed: !!r.unconfirmed,
       contactTier: r.contactTier || "",
       contactSource: r.contactSource || "",
+      materialStrategies: Array.isArray(r.materialStrategies) ? r.materialStrategies.filter((value) => value === "acv" || value === "lcv") : [],
       identityLabel: r.identityLabel || (global.Dial
         ? global.Dial.identityTierLabel(r.contactTier, r.contactSource) : ""),
       teammates: Array.isArray(r.teammates) ? r.teammates : [],
@@ -2593,6 +2697,27 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
 
   async function act(button) {
     const action = button.dataset.email;
+    if (action === "material-preview-close") { closeMaterialPreview(); return; }
+    if (action === "material-preview-queue") {
+      const row = materialQueue[Number(button.dataset.index)];
+      if (!row || !row.file) return docsView("That queued PDF is no longer available. Choose it again.", true);
+      const objectUrl = URL.createObjectURL(row.file);
+      openMaterialPreview(row.file.name, objectUrl, objectUrl);
+      return;
+    }
+    if (action === "material-preview-doc") {
+      const id = String(button.dataset.id || "");
+      openMaterialPreview(button.dataset.name || "Material preview",
+        `/api/email?op=document_preview&id=${encodeURIComponent(id)}&v=${encodeURIComponent(((catalog.documents || []).find((d) => d.id === id) || {}).sha256 || "")}`);
+      return;
+    }
+    if (action === "doc-file-preview") {
+      const input = document.getElementById("docFile"), file = input && input.files && input.files[0];
+      if (!file) return docsView("Choose a replacement PDF to preview.", true);
+      const objectUrl = URL.createObjectURL(file);
+      openMaterialPreview(file.name, objectUrl, objectUrl);
+      return;
+    }
     if (action === "approval-cancel") {
       if (approvalSubmitting) {
         const error = document.getElementById("emailApprovalError");
@@ -2849,31 +2974,19 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
     // batch behind them, so falling through to setupView() would show a
     // recipient list that does not exist -- go back where we came from instead.
     if (action === "docs-back" && !detail) {
+      closeMaterialPreview(false);
       shell().hidden = true;
       if (adminReturn) { const back = adminReturn; adminReturn = null; back(); }
       return;
     }
-    if (action === "docs-back") { return detail ? composerView() : setupView(); }
+    if (action === "docs-back") { closeMaterialPreview(false); return detail ? composerView() : setupView(); }
 
     if (action === "material-queue-remove") {
       materialQueue.splice(Number(button.dataset.index), 1); return docsView();
     }
     if (action === "materials-upload") {
+      reconcileMaterialQueue();
       const candidates = materialQueue.filter((row) => !["done", "invalid"].includes(row.status));
-      const existing = (catalog && catalog.documents) || [], seenIds = new Set(), seenTuples = new Set(), seenNames = new Set();
-      for (const row of candidates) {
-        row.logicalId = uploadLogicalId(row);
-        const tuple = uploadTuple(row), fileName = String(row.file.name || "").toLowerCase();
-        const conflict = existing.some((d) => d.id === row.logicalId || uploadTuple(d) === tuple
-          || String(d.fileName || "").toLowerCase() === fileName)
-          || seenIds.has(row.logicalId) || seenTuples.has(tuple) || seenNames.has(fileName);
-        if (conflict) {
-          row.status = "duplicate"; row.duplicate = "Already published or queued for this family, version, and period. Remove it and use Replace PDF when it supersedes an existing version.";
-        } else {
-          row.status = "ready"; row.error = ""; row.duplicate = "";
-          seenIds.add(row.logicalId); seenTuples.add(tuple); seenNames.add(fileName);
-        }
-      }
       const pending = candidates.filter((row) => row.status === "ready");
       if (!pending.length) return docsView("Nothing was published. Remove duplicate rows or use Replace PDF on the existing material.", true);
       button.disabled = true;
@@ -2887,7 +3000,8 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
             const dataBase64 = await readAsBase64(row.file);
             const result = await api("put_document", { id: row.logicalId,
               name: row.name, fileName: row.file.name, dataBase64, familyId: row.familyId,
-              category: row.category, channel: row.channel, periodKind: row.periodKind,
+              category: row.category, channel: row.channel, audience: row.audience, strategy: row.strategy,
+              periodKind: row.periodKind,
               periodKey: row.periodKey, asOfDate: row.asOfDate, freshness: "current" });
             catalog.documents = result.documents || catalog.documents;
             row.status = "done";
@@ -2910,6 +3024,7 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
       try {
         const result = await api("update_document", { id: button.dataset.id, name: value("name"),
           familyId: value("familyId"), category: value("category"), channel: value("channel"),
+          audience: value("audience"), strategy: value("strategy"),
           periodKind: value("periodKind"), periodKey: value("periodKey"), asOfDate: value("asOfDate"),
           freshness: value("freshness") });
         catalog.documents = result.documents || catalog.documents;
@@ -3296,26 +3411,14 @@ They stay on your call list and keep their history — this only takes them out 
       syncScheduleInputs(); return;
     }
     if (event.target.id === "docFiles") {
-      const existingNames = new Set(((catalog && catalog.documents) || []).map((d) => String(d.fileName || "").toLowerCase()));
-      const queuedNames = new Set(materialQueue.map((r) => String(r.file.name).toLowerCase()));
       for (const file of [...(event.target.files || [])]) {
-        const row = suggestMaterial(file), key = file.name.toLowerCase();
+        const row = suggestMaterial(file);
         if (!/\.pdf$/i.test(file.name) && file.type !== "application/pdf") {
           row.status = "invalid"; row.error = "Only PDF files can be published.";
-          materialQueue.push(row); continue;
         }
-        row.logicalId = uploadLogicalId(row);
-        if (existingNames.has(key)) row.duplicate = "A published file has this name";
-        else if (queuedNames.has(key)) row.duplicate = "This filename is already queued";
-        else if (((catalog && catalog.documents) || []).some((d) =>
-          d.id === row.logicalId || uploadTuple(d) === uploadTuple(row)))
-          row.duplicate = "This logical material or family/version/period already exists; use Replace PDF if this supersedes it";
-        else if (materialQueue.some((d) =>
-          uploadLogicalId(d) === row.logicalId || uploadTuple(d) === uploadTuple(row)))
-          row.duplicate = "Another queued PDF has the same logical ID or family/version/period";
-        if (row.duplicate) row.status = "duplicate";
-        materialQueue.push(row); queuedNames.add(key);
+        materialQueue.push(row);
       }
+      reconcileMaterialQueue();
       docsView();
       const first = document.querySelector(".email-material-upload input");
       if (first) first.focus();
@@ -3337,7 +3440,11 @@ They stay on your call list and keep their history — this only takes them out 
     const row = event.target.closest("[data-upload-row]");
     if (row && event.target.dataset.uploadField) {
       const item = materialQueue[Number(row.dataset.uploadRow)];
-      if (item) { item[event.target.dataset.uploadField] = event.target.value; item.status = "ready"; item.error = ""; item.duplicate = ""; }
+      if (item) {
+        item[event.target.dataset.uploadField] = event.target.value;
+        reconcileMaterialQueue();
+        docsView();
+      }
     }
   }, true);
 
@@ -3364,6 +3471,10 @@ They stay on your call list and keep their history — this only takes them out 
     // Native <details> disclosures do not close when their user clicks away.
     // This menu behaves like the rest of the app's popovers: a click anywhere
     // outside it dismisses it before the clicked control performs its action.
+    if (event.target.classList && event.target.classList.contains("email-material-preview")) {
+      closeMaterialPreview(); return;
+    }
+
     const openOther = document.querySelector(".email-other[open]");
     if (openOther && !openOther.contains(event.target)) openOther.open = false;
 
