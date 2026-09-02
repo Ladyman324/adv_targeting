@@ -28,7 +28,9 @@ STAGE_DIR=""
 #   42: email-capacity-service.test.js -- final envelope counting and deferred cleanup
 #   43: email-capacity-ui.test.js -- visible, server-authored multi-day plan contract
 #   44: email-template-material-series-ui.test.js -- templates require a routed series, not one variant
-EXPECTED_API_TEST_FILE_COUNT=44
+#   45: map-activity-filter-ui.test.js -- activity filters stay scoped and never blank the map at zero
+#   46: map-assets-filter-ui.test.js -- desktop and Field use the canonical CRD-keyed EIC asset book
+EXPECTED_API_TEST_FILE_COUNT=46
 
 cleanup() {
   test -z "$TEMP_ROOT" && return
