@@ -49,6 +49,12 @@ test("the composer exposes hidden orphan requirements before batch creation", ()
 
 test("materials administration exposes audience, strategy and scrollable PDF preview controls", () => {
   assert.match(email, /<label>Approved for<select data-upload-field="audience">/);
+  assert.match(email, /Family name<input data-upload-field="familyName"/);
+  assert.match(email, /Family ID<input data-upload-field="familyId"/);
+  assert.match(email, /Family name<input data-material-field="familyName"/);
+  assert.match(email, /familyName: row\.familyName/);
+  assert.match(email, /familyName: value\("familyName"\)/);
+  assert.match(email, /name: d\.familyName \|\| d\.name/);
   assert.match(email, /\["client", "Client"\]/);
   assert.match(email, /\["advisor_only", "Advisor Only"\]/);
   assert.match(email, /data-email="material-preview-queue"/);
@@ -117,6 +123,9 @@ test("the PDF preview endpoint executes only for an email administrator", async 
   }
 });
 test("the catalog keeps audience and commentary strategy as server metadata", () => {
+  assert.match(store, /familyName: e\.familyName \|\| ""/);
+  assert.match(store, /familyName: meta\.familyName/);
+  assert.match(store, /propagateFamilyName/);
   assert.match(store, /audience: e\.materialAudience \|\| "advisor_only"/);
   assert.match(store, /strategy: e\.materialStrategy \|\| "general"/);
   assert.match(store, /materialAudience: meta\.audience, materialStrategy: meta\.strategy/);

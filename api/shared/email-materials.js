@@ -67,7 +67,8 @@ function normalizeMetadata(input = {}) {
   const periodKind = String(input.periodKind || "").trim().toLowerCase();
   if (periodKind && !["quarter", "month", "year", "evergreen", "as_of"].includes(periodKind))
     throw error(`Unknown material period kind "${periodKind}".`);
-  return { familyId: cleanId(input.familyId), category: String(input.category || "").trim().slice(0, 80),
+  return { familyId: cleanId(input.familyId), familyName: safeLabel(input.familyName, ""),
+    category: String(input.category || "").trim().slice(0, 80),
     channel: channel(input.channel || "generic"), audience: audience(input.audience || "advisor_only"),
     strategy: strategy(input.strategy || "general"),
     periodKey: String(input.periodKey || "").trim().slice(0, 20), periodKind,
@@ -86,6 +87,7 @@ function replacementMetadata(input = {}, existing = {}) {
   const own = (key) => Object.prototype.hasOwnProperty.call(input, key);
   return normalizeMetadata({
     familyId: own("familyId") ? input.familyId : existing.familyId,
+    familyName: own("familyName") ? input.familyName : existing.familyName,
     category: own("category") ? input.category : existing.category,
     channel: own("channel") ? input.channel : existing.channel,
     audience: own("audience") ? input.audience : existing.audience,

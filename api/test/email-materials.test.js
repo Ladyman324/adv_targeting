@@ -145,12 +145,19 @@ test("disabled tombstones remain editable but never route recipients", () => {
 });
 
 test("replacing PDF bytes inherits categorization when an older client omits metadata", () => {
-  const old = { familyId: "case-value", category: "case", channel: "ubs",
+  const old = { familyId: "case-value", familyName: "Case for Value", category: "case", channel: "ubs",
     audience: "advisor_only", strategy: "general", periodKey: "2026-07", periodKind: "month", asOfDate: "2026-07-31",
     freshness: "current", genericFallbackChannels: ["rj"] };
   assert.deepEqual(m.replacementMetadata({}, old), old);
   assert.deepEqual(m.replacementMetadata({ channel: "ml", familyId: "" }, old),
     { ...old, familyId: "", channel: "ml" });
+});
+
+test("family display names are safe metadata and inherit across replacement uploads", () => {
+  assert.equal(m.normalizeMetadata({ familyName: "  Case for Value\u0000  " }).familyName, "Case for Value");
+  const existing = { familyId: "case-value", familyName: "Case for Value" };
+  assert.equal(m.replacementMetadata({}, existing).familyName, "Case for Value");
+  assert.equal(m.replacementMetadata({ familyName: "Value vs. Growth" }, existing).familyName, "Value vs. Growth");
 });
 
 test("quarter freshness uses the latest completed calendar quarter", () => {

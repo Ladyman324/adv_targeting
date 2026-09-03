@@ -649,7 +649,7 @@ async function listDocuments() {
       fileName: e.fileName || "",
       contentType: e.contentType || "application/octet-stream", size: Number(e.size) || 0,
       sha256: e.sha256 || "", version: Number(e.version) || 1, approved: true,
-      familyId: e.familyId || "", category: e.category || "", channel: e.materialChannel || "generic",
+      familyId: e.familyId || "", familyName: e.familyName || "", category: e.category || "", channel: e.materialChannel || "generic",
       audience: e.materialAudience || "advisor_only", strategy: e.materialStrategy || "general",
       periodKey: e.periodKey || "", periodKind: e.periodKind || "", asOfDate: e.asOfDate || "",
       freshness: materials.freshnessOf({ approved: true, freshness: e.freshness || "current",
@@ -706,20 +706,17 @@ async function container() {
   return c;
 }
 
-/* TWO NAMES, ON PURPOSE.
+/* THREE NAMES, ON PURPOSE.
  *
- * `name` is the display name -- what an administrator types so the picker in
- * the app reads well ("Q2 2026 ACV & LCV Client Commentary"). `fileName` is
- * what the file was called on the way in ("EIC_ACV_LCV_Q2_2026.pdf"), and that
- * is what the advisor should see land in their inbox: it is the name their
- * compliance archive, their filing and any later conversation will use.
- *
- * Conflating the two meant the attachment arrived under a display name shaped
- * for a dropdown, which is a fine label and a poor filename.
+ * `familyName` is the timeless series label ("EIC Quarterly Commentary").
+ * `name` identifies this approved version ("Q2 2026 ACV Client Commentary").
+ * `fileName` is the original uploaded filename and is what the advisor receives.
+ * Keeping these separate lets templates follow the permanent family, lets admins
+ * distinguish versions, and preserves the compliance-facing attachment name.
  */
 function storedMaterialMetadata(entity) {
   if (!entity) return {};
-  return { familyId: entity.familyId || "", category: entity.category || "",
+  return { familyId: entity.familyId || "", familyName: entity.familyName || "", category: entity.category || "",
     channel: entity.materialChannel || "generic",
     audience: entity.materialAudience || "advisor_only",
     strategy: entity.materialStrategy || "general",
@@ -740,6 +737,15 @@ async function retireMaterialCompetitors(client, documents, survivorId) {
   return retired;
 }
 
+async function propagateFamilyName(client, documents, familyId, familyName, who, excludeId) {
+  if (!familyId || !familyName) return;
+  for (const doc of documents) {
+    if (!doc || doc.id === excludeId || doc.familyId !== familyId || doc.familyName === familyName) continue;
+    await client.updateEntity({ partitionKey: "approved", rowKey: String(doc.id), familyName,
+      updatedUtc: now(), updatedBy: clean(who && who.name, 256) }, "Merge");
+  }
+}
+
 async function putDocument(who, { id: rawId, name, fileName, bytes, maxBytes, ...metadata }) {
   assertPdf(bytes);
   if (maxBytes && bytes.length > maxBytes) {
@@ -752,6 +758,12 @@ async function putDocument(who, { id: rawId, name, fileName, bytes, maxBytes, ..
   const meta = materials.replacementMetadata(metadata, storedMaterialMetadata(requestedRow));
   const slot = materials.materialSlotKey(meta);
   const active = await listDocuments();
+  const namedPeer = active.find((doc) => doc.familyId === meta.familyId && doc.familyName);
+  if (!meta.familyName && namedPeer) meta.familyName = namedPeer.familyName;
+  if (meta.familyId && !meta.familyName) {
+    const err = new Error("A family name is required for categorized material.");
+    err.statusCode = 400; err.code = "material_family_name_required"; throw err;
+  }
   const sameSlot = active.filter((doc) => doc.familyId
     && materials.materialSlotKey(doc) === slot);
   const existingClient = sameSlot.find((doc) => doc.audience === "client");
@@ -777,12 +789,13 @@ async function putDocument(who, { id: rawId, name, fileName, bytes, maxBytes, ..
     name: clean(name || docId, 256), fileName: storedFileName,
     blobName, contentType: "application/pdf",
     size: bytes.length, sha256, version: (Number(old && old.version) || 0) + 1,
-    approved: true, familyId: meta.familyId, category: meta.category, materialChannel: meta.channel,
+    approved: true, familyId: meta.familyId, familyName: meta.familyName, category: meta.category, materialChannel: meta.channel,
     materialAudience: meta.audience, materialStrategy: meta.strategy,
     periodKey: meta.periodKey, periodKind: meta.periodKind, asOfDate: meta.asOfDate,
     freshness: meta.freshness, genericFallbackChannelsJson: json(meta.genericFallbackChannels),
     supersededBy: "", updatedUtc: now(), updatedBy: clean(who && who.name, 256) }, "Replace");
   const supersededIds = await retireMaterialCompetitors(client, sameSlot, docId);
+  await propagateFamilyName(client, active, meta.familyId, meta.familyName, who, docId);
   return { id: docId, name: clean(name || docId, 256), fileName: storedFileName,
     size: bytes.length, sha256, version: (Number(old && old.version) || 0) + 1,
     replaced: !!old || sameSlot.length > 0, supersededIds, ...meta };
@@ -790,8 +803,10 @@ async function putDocument(who, { id: rawId, name, fileName, bytes, maxBytes, ..
 async function updateDocument(who, rawId, patch) {
   const docId = safeDocId(rawId), existing = await getOptional("documents", "approved", docId);
   if (!existing || existing.approved === false) { const e = new Error("That document is not in the approved catalog."); e.statusCode = 404; throw e; }
+  const active = await listDocuments();
   const meta = materials.normalizeMetadata({
     familyId: patch.familyId === undefined ? existing.familyId : patch.familyId,
+    familyName: patch.familyName === undefined ? existing.familyName : patch.familyName,
     category: patch.category === undefined ? existing.category : patch.category,
     channel: patch.channel === undefined ? (existing.materialChannel || "generic") : patch.channel,
     audience: patch.audience === undefined ? (existing.materialAudience || "advisor_only") : patch.audience,
@@ -803,7 +818,13 @@ async function updateDocument(who, rawId, patch) {
     genericFallbackChannels: patch.genericFallbackChannels === undefined
       ? parse(existing.genericFallbackChannelsJson, []) : patch.genericFallbackChannels,
   });
-  const sameSlot = (await listDocuments()).filter((doc) => String(doc.id) !== docId && doc.familyId
+  const namedPeer = active.find((doc) => doc.id !== docId && doc.familyId === meta.familyId && doc.familyName);
+  if (!meta.familyName && namedPeer) meta.familyName = namedPeer.familyName;
+  if (meta.familyId && !meta.familyName) {
+    const err = new Error("A family name is required for categorized material.");
+    err.statusCode = 400; err.code = "material_family_name_required"; throw err;
+  }
+  const sameSlot = active.filter((doc) => String(doc.id) !== docId && doc.familyId
     && materials.materialSlotKey(doc) === materials.materialSlotKey(meta));
   const existingClient = sameSlot.find((doc) => doc.audience === "client");
   if (meta.audience === "advisor_only" && existingClient) {
@@ -813,12 +834,13 @@ async function updateDocument(who, rawId, patch) {
   const client = await table("documents");
   await client.updateEntity({ partitionKey: "approved", rowKey: docId,
     ...(patch.name === undefined ? {} : { name: clean(patch.name || docId, 256) }),
-    approved: true, familyId: meta.familyId, category: meta.category, materialChannel: meta.channel,
+    approved: true, familyId: meta.familyId, familyName: meta.familyName, category: meta.category, materialChannel: meta.channel,
     materialAudience: meta.audience, materialStrategy: meta.strategy,
     periodKey: meta.periodKey, periodKind: meta.periodKind, asOfDate: meta.asOfDate,
     freshness: meta.freshness, genericFallbackChannelsJson: json(meta.genericFallbackChannels),
     supersededBy: "", updatedUtc: now(), updatedBy: clean(who && who.name, 256) }, "Merge", patch.etag ? { etag: patch.etag } : undefined);
   const supersededIds = await retireMaterialCompetitors(client, sameSlot, docId);
+  await propagateFamilyName(client, active, meta.familyId, meta.familyName, who, docId);
   return { ...(await getDocuments([docId]))[0], supersededIds };
 }
 

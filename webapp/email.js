@@ -999,8 +999,8 @@
 
     const familyMap = new Map();
     docs.filter((d) => d.familyId).forEach((d) => {
-      const family = familyMap.get(d.familyId) || { id: d.familyId, name: d.name, category: d.category, channels: new Set() };
-      if ((d.channel || "generic") === "generic") family.name = d.name;
+      const family = familyMap.get(d.familyId) || { id: d.familyId, name: d.familyName || d.name, category: d.category, channels: new Set() };
+      if ((d.channel || "generic") === "generic") family.name = d.familyName || d.name;
       if (materialStatus(d) === "current") family.channels.add(d.channel || "generic");
       familyMap.set(d.familyId, family);
     });
@@ -1265,10 +1265,11 @@ function suggestMaterial(file) {
       familyName = familyName.replace(/\b(Client(?: Approved)?|Advisor(?: Only| Approved)?|ACV|LCV|All[- ]Cap|Large[- ]Cap|Combined)\b/ig, "")
         .replace(/\s+/g, " ").trim();
     }
+    if (category === "Quarterly Commentary") familyName = "EIC Quarterly Commentary";
     const familyId = category === "Quarterly Commentary" ? "eic-commentary" : (familyName || displayName).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
     const logicalId = (displayName + "-" + channel + "-" + strategy + "-" + (periodKey || asOfDate || "current"))
       .toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 80);
-    return { file, name: displayName, familyId, logicalId, category, channel, audience, strategy, periodKind, periodKey,
+    return { file, name: displayName, familyId, familyName, logicalId, category, channel, audience, strategy, periodKind, periodKey,
       asOfDate, status: "ready", error: "", duplicate: "" };
   }
 
@@ -1405,7 +1406,8 @@ function latestEndedQuarter(now = new Date()) {
       + '<div class="email-material-file"><b>' + esc(row.file.name) + '</b><small>' + bytes(row.file.size)
       + (row.duplicate ? ' / ' + esc(row.duplicate) : '') + '</small><button type="button" class="email-small" data-email="material-preview-queue" data-index="' + i + '">Preview PDF</button></div>'
       + '<label>Display name<input data-upload-field="name" value="' + esc(row.name) + '"></label>'
-      + '<label>Family<input data-upload-field="familyId" value="' + esc(row.familyId) + '"></label>'
+      + '<label>Family name<input data-upload-field="familyName" value="' + esc(row.familyName) + '"></label>'
+      + '<label>Family ID<input data-upload-field="familyId" value="' + esc(row.familyId) + '"></label>'
       + '<label>Category<select data-upload-field="category">' + MATERIAL_CATEGORIES.map((v) =>
         '<option' + (v === row.category ? ' selected' : '') + '>' + esc(v) + '</option>').join('') + '</select></label>'
       + '<label>Firm version<select data-upload-field="channel">' + select(MATERIAL_CHANNELS, row.channel) + '</select></label>'
@@ -1425,7 +1427,8 @@ function materialEditFields(d) {
     const option = (value, label, selected) => '<option value="' + value + '"' + (value === selected ? ' selected' : '') + '>' + label + '</option>';
     return '<div class="email-material-edit">'
       + '<label>Display name<input data-material-field="name" value="' + esc(d.name) + '"></label>'
-      + '<label>Family<input data-material-field="familyId" value="' + esc(d.familyId || d.id) + '"></label>'
+      + '<label>Family name<input data-material-field="familyName" value="' + esc(d.familyName || d.name) + '"></label>'
+      + '<label>Family ID<input data-material-field="familyId" value="' + esc(d.familyId || d.id) + '"></label>'
       + '<label>Category<select data-material-field="category">' + MATERIAL_CATEGORIES.map((v) =>
         '<option' + (v === (d.category || 'Other') ? ' selected' : '') + '>' + esc(v) + '</option>').join('') + '</select></label>'
       + '<label>Firm version<select data-material-field="channel">' + MATERIAL_CHANNELS.map(([v, label]) =>
@@ -1444,10 +1447,10 @@ function materialEditFields(d) {
   }
   function libraryHtml(docs) {
     const q = materialSearch.toLowerCase();
-    const shown = docs.filter((d) => !q || [d.name, d.familyId, d.category, d.channel, d.audience, d.strategy, d.periodKey, d.fileName].join(' ').toLowerCase().includes(q));
+    const shown = docs.filter((d) => !q || [d.name, d.familyName, d.familyId, d.category, d.channel, d.audience, d.strategy, d.periodKey, d.fileName].join(' ').toLowerCase().includes(q));
     const groups = new Map();
     shown.forEach((d) => {
-      const key = d.familyId || d.id, group = groups.get(key) || { key, category: d.category || 'Uncategorized', docs: [] };
+      const key = d.familyId || d.id, group = groups.get(key) || { key, name: d.familyName || d.name, category: d.category || 'Uncategorized', docs: [] };
       group.docs.push(d); groups.set(key, group);
     });
     if (!groups.size) return '<p class="email-doc-none">No materials match this search.</p>';
@@ -1461,7 +1464,7 @@ function materialEditFields(d) {
       const health = !targetPeriod ? 'No current period'
         : missing.length ? missing.length + ' versions missing for ' + targetPeriod : 'All ' + targetPeriod + ' versions current';
       return '<section class="email-material-family"><header><div><span class="email-material-category">' + esc(g.category)
-        + '</span><h3>' + esc(g.docs[0].name || g.key) + '</h3></div><span class="email-material-health '
+        + '</span><h3>' + esc(g.name || g.key) + '</h3></div><span class="email-material-health '
         + (missing.length || !targetPeriod ? 'incomplete' : 'complete') + '">' + esc(health) + '</span></header>'
         + '<div class="email-channel-badges">' + MATERIAL_CHANNELS.map(([key, label]) =>
           '<span class="' + (channels.has(key) ? 'on' : 'off') + '">' + esc(label) + '</span>').join('') + '</div>'
@@ -1710,9 +1713,9 @@ function routesHtml() {
     const familyMap = new Map();
     docs.filter((d) => d.familyId).forEach((d) => {
       const family = familyMap.get(d.familyId) || {
-        id: d.familyId, name: d.name, category: d.category, channels: new Set(),
+        id: d.familyId, name: d.familyName || d.name, category: d.category, channels: new Set(),
       };
-      if ((d.channel || "generic") === "generic") family.name = d.name;
+      if ((d.channel || "generic") === "generic") family.name = d.familyName || d.name;
       if (materialStatus(d) === "current") family.channels.add(d.channel || "generic");
       familyMap.set(d.familyId, family);
     });
@@ -3030,12 +3033,12 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
       const worker = async () => {
         while (next < pending.length) {
           const row = pending[next++];
-          if (!row.name || !row.familyId) { row.status = "error"; row.error = "Display name and family are required."; continue; }
+          if (!row.name || !row.familyName || !row.familyId) { row.status = "error"; row.error = "Display name, family name, and family ID are required."; continue; }
           row.status = "uploading"; docsView();
           try {
             const dataBase64 = await readAsBase64(row.file);
             const result = await api("put_document", { id: row.logicalId,
-              name: row.name, fileName: row.file.name, dataBase64, familyId: row.familyId,
+              name: row.name, fileName: row.file.name, dataBase64, familyId: row.familyId, familyName: row.familyName,
               category: row.category, channel: row.channel, audience: row.audience, strategy: row.strategy,
               periodKind: row.periodKind,
               periodKey: row.periodKey, asOfDate: row.asOfDate, freshness: "current" });
@@ -3059,7 +3062,7 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
       button.disabled = true;
       try {
         const result = await api("update_document", { id: button.dataset.id, name: value("name"),
-          familyId: value("familyId"), category: value("category"), channel: value("channel"),
+          familyId: value("familyId"), familyName: value("familyName"), category: value("category"), channel: value("channel"),
           audience: value("audience"), strategy: value("strategy"),
           periodKind: value("periodKind"), periodKey: value("periodKey"), asOfDate: value("asOfDate"),
           freshness: value("freshness") });
