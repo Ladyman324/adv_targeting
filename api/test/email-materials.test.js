@@ -68,6 +68,15 @@ test("Raymond James commentary follows holdings and defaults only no-holding RJ 
   assert.deepEqual(ids(["acv", "lcv"]), ["rj-acv", "rj-lcv"]);
 });
 
+test("Merrill commentary uses the All-Cap client version", () => {
+  const docs = [
+    { id: "ml-acv", familyId: "commentary", channel: "ml", strategy: "acv", audience: "client", freshness: "current", approved: true },
+    { id: "ml-lcv", familyId: "commentary", channel: "ml", strategy: "lcv", audience: "client", freshness: "current", approved: true },
+  ], policy = { rules: [{ domain: "ml.com", channel: "ml" }] };
+  assert.deepEqual(m.resolveFamilies(docs, ["commentary"], "advisor@ml.com", policy).documents.map((d) => d.id),
+    ["ml-acv"]);
+});
+
 test("UBS commentary requires combined material and Large-Cap is not a global default", () => {
   const docs = [
     { id: "ubs-acv", familyId: "commentary", channel: "ubs", strategy: "acv", freshness: "current", approved: true },
@@ -108,6 +117,17 @@ test("template requirement migration reports removed legacy documents", () => {
   assert.deepEqual(m.templateRequirements({ requiredDocumentIds: ["gone"] }, []), {
     familyIds: [], documentIds: [], missingDocumentIds: ["gone"],
   });
+});
+
+test("exact template requirements prevent their document from being removed", () => {
+  const templates = [
+    { name: "Series based", requiredMaterialFamilyIds: ["commentary"], requiredDocumentIds: [] },
+    { name: "Exact PDF", requiredDocumentIds: ["standard-deviation"] },
+    { name: "Legacy exact PDF", requiredDocumentIds: [], defaultAttachmentIds: ["legacy-deck"] },
+  ];
+  assert.deepEqual(m.templatesRequiringDocument(templates, "standard-deviation").map((t) => t.name), ["Exact PDF"]);
+  assert.deepEqual(m.templatesRequiringDocument(templates, "legacy-deck").map((t) => t.name), ["Legacy exact PDF"]);
+  assert.deepEqual(m.templatesRequiringDocument(templates, "commentary"), []);
 });
 
 test("legacy default attachments are used when the newer exact list is empty", () => {

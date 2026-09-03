@@ -1029,6 +1029,7 @@
             : ` An email administrator needs to publish one before you can send.`}</p>`}
       <p id="emailTplNotes" class="email-tpl-notes"></p>
       ${familyPicker}
+      <p id="emailRequirementWarning" class="email-error" hidden></p>
       <fieldset class="email-docs" id="emailDocs"><legend>Approved attachments</legend>${legacyDocs.length ? legacyDocs.map((d) =>
         `<label data-doc="${esc(d.id)}"><input type="checkbox" value="${esc(d.id)}"> <span>${esc(d.name)}</span><small>${bytes(d.size)}</small></label>`).join("")
         : `<p>No additional legacy attachments are available. You can continue without them.</p>`}</fieldset>
@@ -1039,7 +1040,7 @@
       ${followUpPicker()}
       ${domainPicker()}
       <p id="emailNotice" class="email-notice"></p>
-      <button type="button" class="ask-btn primary" data-email="create"${
+      <button type="button" id="emailCreateButton" class="ask-btn primary" data-email="create"${
         templates.length ? "" : " disabled"}>Generate personalized emails</button></div>`;
     // The Word templates carried instructions to the rep inside the body --
     // "INSERT LCV PERFORMANCE PAGE HERE AND ATTACH...". Those belong on screen,
@@ -1056,6 +1057,17 @@
       const chosenRequirements = templateRequirements(chosen, docs);
       const required = new Set(chosenRequirements.documentIds);
       const requiredFamilies = new Set(chosenRequirements.familyIds);
+      const missing = chosenRequirements.missingDocumentIds || [];
+      const warning = document.getElementById("emailRequirementWarning");
+      if (warning) {
+        warning.textContent = missing.length
+          ? `This template still references approved material that has been removed (${missing.join(", ")}). `
+            + "An email administrator needs to replace the obsolete requirement before this template can be used."
+          : "";
+        warning.hidden = !missing.length;
+      }
+      const create = document.getElementById("emailCreateButton");
+      if (create) create.disabled = !templates.length || missing.length > 0;
       for (const label of document.querySelectorAll(".email-families label[data-family]")) {
         const box = label.querySelector("input");
         const isRequired = requiredFamilies.has(label.dataset.family);
@@ -1253,7 +1265,7 @@ function suggestMaterial(file) {
       familyName = familyName.replace(/\b(Client(?: Approved)?|Advisor(?: Only| Approved)?|ACV|LCV|All[- ]Cap|Large[- ]Cap|Combined)\b/ig, "")
         .replace(/\s+/g, " ").trim();
     }
-    const familyId = (familyName || displayName).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+    const familyId = category === "Quarterly Commentary" ? "eic-commentary" : (familyName || displayName).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
     const logicalId = (displayName + "-" + channel + "-" + strategy + "-" + (periodKey || asOfDate || "current"))
       .toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 80);
     return { file, name: displayName, familyId, logicalId, category, channel, audience, strategy, periodKind, periodKey,
@@ -1523,15 +1535,17 @@ function routesHtml() {
   let savedSnapshot = null;
   function templateRequirements(template, docs) {
     const t = template || {}, byId = new Map((docs || []).map((d) => [String(d.id), d]));
-    const familyIds = [...(t.requiredMaterialFamilyIds || [])], documentIds = [];
+    const familyIds = [...(t.requiredMaterialFamilyIds || [])], documentIds = [], missingDocumentIds = [];
     const requiredDocumentIds = (t.requiredDocumentIds || []).length
       ? t.requiredDocumentIds : (t.defaultAttachmentIds || []);
     for (const id of requiredDocumentIds) {
       const doc = byId.get(String(id));
       if (doc && doc.familyId) familyIds.push(doc.familyId);
-      else documentIds.push(String(id));
+      else if (doc) documentIds.push(String(id));
+      else missingDocumentIds.push(String(id));
     }
-    return { familyIds: [...new Set(familyIds)], documentIds: [...new Set(documentIds)] };
+    return { familyIds: [...new Set(familyIds)], documentIds: [...new Set(documentIds)],
+      missingDocumentIds: [...new Set(missingDocumentIds)] };
   }
 
   const templateFingerprint = (t) => JSON.stringify([t.name, t.documentNumber, t.author,
@@ -1720,6 +1734,13 @@ function routesHtml() {
           + esc(d.id) + '"' + (req.has(d.id) ? ' checked' : '') + '><span>' + esc(d.name)
           + '</span><small>' + bytes(d.size) + '</small></label>').join('') + '</fieldset>'
       : '';
+    const missingRequirementHtml = requirements.missingDocumentIds.length
+      ? '<fieldset class="email-docs"><legend>Obsolete required attachments</legend>'
+        + '<p class="email-error">This template still requires material that is no longer in the approved catalog. '
+        + 'It will block the sales team until you select the replacement series above and save. Saving removes these obsolete IDs.</p>'
+        + '<ul>' + requirements.missingDocumentIds.map((id) => '<li><code>' + esc(id) + '</code></li>').join('')
+        + '</ul></fieldset>'
+      : '';
     document.getElementById("emailTitle").textContent = t.id ? `Edit: ${t.name}` : "New template";
     document.getElementById("emailBody").innerHTML = `<div class="email-tpl">
       ${message ? `<p class="${bad ? "email-error" : "email-ok"}">${esc(message)}</p>` : ""}
@@ -1738,7 +1759,7 @@ function routesHtml() {
       <div id="tplLint" class="email-lint"></div>
       <label class="email-label">Notes for the rep (never sent)<textarea id="tplNotes" rows="2"
         maxlength="4000">${esc(t.repNotes || "")}</textarea></label>
-      ${requiredFamilyHtml}${requiredStandaloneHtml}
+      ${requiredFamilyHtml}${requiredStandaloneHtml}${missingRequirementHtml}
       <fieldset class="email-doc-add"><legend>Charts in the body</legend>
         <ul class="email-doclist">${(t.images || []).length ? t.images.map((i) => `<li>
           <span class="email-doc-main"><b>${esc(i.name)}</b><small><code>{{image:${esc(i.id)}}}</code>

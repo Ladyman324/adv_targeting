@@ -20,6 +20,8 @@ test("template authoring requires material series rather than version PDFs", () 
   assert.match(email, /requiredMaterialFamilyIds: \[\.\.\.document\.querySelectorAll\("\.tpl-family-req:checked"\)/);
   assert.match(email, /current UBS, Morgan Stanley, Merrill Lynch, Raymond James/);
   assert.doesNotMatch(email, /<legend>Required attachments<\/legend>\$\{docs\.length/);
+  assert.match(email, /<legend>Obsolete required attachments<\/legend>/);
+  assert.match(email, /Saving removes these obsolete IDs/);
 });
 
 test("the composer locks template-required series and explains automatic routing", () => {
@@ -34,6 +36,15 @@ test("the server merges template-required series independently of client input",
   assert.match(service, /materials\.resolveFamilies\(allDocuments, materialFamilyIds, recipient\.email, routePolicy,[\s\S]*strategies: recipient\.materialStrategies/);
   assert.match(store, /requiredMaterialFamilyIdsJson/);
   assert.match(store, /normalizedRequirements = materials\.templateRequirements\(input, await listDocuments\(\)\)/);
+  assert.match(store, /templatesRequiringDocument\(await listTemplates\(\), docId\)/);
+  assert.match(store, /document_required_by_template/);
+});
+
+test("the composer exposes hidden orphan requirements before batch creation", () => {
+  assert.match(email, /id="emailRequirementWarning"/);
+  assert.match(email, /chosenRequirements\.missingDocumentIds/);
+  assert.match(email, /emailCreateButton/);
+  assert.match(email, /missing\.length > 0/);
 });
 
 test("materials administration exposes audience, strategy and scrollable PDF preview controls", () => {
@@ -58,6 +69,7 @@ test("commentary upload suggestions understand EICIX and separator-heavy filenam
   assert.match(email, /replace\(\/_\+\/g, " "\)/);
   assert.match(email, /if \(\/\\bcommentary\\b\/i\.test\(raw\)\)/);
   assert.match(email, /ACV\|All\[- \]Cap\|EICIX\|Mutual Fund/);
+  assert.match(email, /category === "Quarterly Commentary" \? "eic-commentary"/);
 });
 test("document preview is an admin-only, integrity-checked PDF response", () => {
   assert.match(handler, /op === "document_preview"[\s\S]*if \(!isAdmin\(who\)\)/);

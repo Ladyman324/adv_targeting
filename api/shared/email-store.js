@@ -862,6 +862,13 @@ async function deleteDocument(who, rawId) {
     err.statusCode = 404;
     throw err;
   }
+  const usedBy = materials.templatesRequiringDocument(await listTemplates(), docId);
+  if (usedBy.length) {
+    const err = new Error(`That document is still required by ${usedBy.map((template) => `"${template.name}"`).join(", ")}. Update those templates before removing it.`);
+    err.statusCode = 409;
+    err.code = "document_required_by_template";
+    throw err;
+  }
   // The table row goes first: it is what listDocuments() reads, so removing it
   // takes the document out of circulation immediately even if the blob delete
   // fails. The reverse order would leave a selectable document whose bytes are

@@ -140,6 +140,7 @@ function strategySelection(matches, target, held, familyId) {
     if (!desired.length) desired.push("lcv");
     return desired.map(pick);
   }
+  if (target === "ml" && available.has("acv")) return [pick("acv")];
   if (available.has("general")) return [pick("general")];
   if (available.has("combined")) return [pick("combined")];
   throw error(`No general current approved ${target.toUpperCase()} material is available for ${familyId}.`, "material_variant_unavailable");
@@ -193,7 +194,18 @@ function templateRequirements(template = {}, documents = []) {
   };
 }
 
+function templatesRequiringDocument(templates = [], documentId) {
+  const id = String(documentId || "").trim();
+  if (!id) return [];
+  return (templates || []).filter((template) => {
+    const exact = Array.isArray(template.requiredDocumentIds) && template.requiredDocumentIds.length
+      ? template.requiredDocumentIds : (template.defaultAttachmentIds || []);
+    return exact.map((value) => String(value || "").trim()).includes(id);
+  });
+}
+
 module.exports = { CHANNELS, AUDIENCES, STRATEGIES, channel, audience, strategy,
   domain, emailDomain, hash, validateRoutes, loadSeed, resolveChannel,
   normalizeMetadata, materialSlotKey, replacementMetadata, latestCompletedQuarter,
-  freshnessOf, currentDocument, resolveFamilies, templateRequirements };
+  freshnessOf, currentDocument, resolveFamilies, templateRequirements,
+  templatesRequiringDocument };
