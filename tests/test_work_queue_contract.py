@@ -36,11 +36,13 @@ class WorkQueueContractTests(unittest.TestCase):
     def test_reason_fallbacks_exclude_ineffective_actions(self):
         for source, anchor in ((APP, "const QUEUE_ACTIONS"), (FIELD, "const WORK_ACTIONS")):
             table = section(source, anchor, "};")
-            self.assertIn('reply_new: ["mark_reviewed", "snooze"]', table)
+            self.assertIn('reply_followup: ["follow_up", "done", "snooze"]', table)
             self.assertIn('due: ["follow_up", "snooze"]', table)
-            self.assertIn('bounced: ["dismiss_bounce", "snooze"]', table)
-            self.assertIn('quiet_warm: ["follow_up", "snooze"]', table)
-            self.assertNotIn('bounced: ["follow_up"', table)
+            # Outlook owns one-off replies and bounces. The app surfaces only
+            # explicit follow-up commitments and scalable account/batch alerts.
+            self.assertNotIn('reply_new:', table)
+            self.assertNotIn('bounced:', table)
+            self.assertNotIn('quiet_warm:', table)
             self.assertNotIn('due: ["done"', table)
 
     def test_sync_status_stays_inside_deferred_queue_loads(self):

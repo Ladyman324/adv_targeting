@@ -37,6 +37,9 @@ def sec(crd="123", first="Christopher", last="Tolman"):
 class NormalizationTests(unittest.TestCase):
     def test_crd_is_strict_and_name_parser_removes_honorific(self):
         self.assertEqual("123", normalize_crd("00123.0"))
+        self.assertEqual("7540546", normalize_crd("7,540,546"))
+        self.assertEqual("7540546", normalize_crd("7,540,546.0"))
+        self.assertEqual("", normalize_crd("75,40,546"))
         self.assertEqual("", normalize_crd("CRD 123"))
         parsed = parse_full_name("Mr. Christopher Tolman, CFP")
         self.assertEqual("", parsed.last)  # commas are deliberately review-only

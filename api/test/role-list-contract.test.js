@@ -7,18 +7,41 @@ const path = require("node:path");
 
 const read = (name) => fs.readFileSync(path.join(__dirname, "..", "..", "webapp", name), "utf8");
 const desk = read("app.js");
+const index = read("index.html");
 const field = read("field.js");
 const dial = read("dial.js");
 
-test("Analyst uses the same shield-with-check drawing on desk and field", () => {
+test("Key Person and Research use the same drawings on desk and field", () => {
   for (const source of [desk, field]) {
-    assert.match(source, /const SHIELD_PATH =/);
-    assert.match(source, /const CHECK_PATH =/);
-    assert.match(source, /"Analyst", SHIELD_PATH/);
-    assert.doesNotMatch(source, /"Analyst", DOC_PATH/);
+    assert.match(source, /const KEY_PATH =/);
+    assert.match(source, /const SEARCH_PATH =/);
+    assert.match(source, /const SEARCH_HANDLE_PATH =/);
+    assert.match(source, /"Key Person", KEY_PATH/);
+    assert.match(source, /"Research", SEARCH_PATH/);
+    assert.doesNotMatch(source, /"Research", SHIELD_PATH/);
   }
 });
 
+test("desktop role filters are multi-selectable and persist in dynamic audiences", () => {
+  assert.match(index, /id="roleToggle"[\s\S]*data-role="key"[\s\S]*data-role="dd"[\s\S]*data-role="scheduler"/);
+  assert.match(desk, /roleSel\.has\("key"\)[\s\S]*\|\|[\s\S]*roleSel\.has\("dd"\)[\s\S]*\|\|[\s\S]*roleSel\.has\("scheduler"\)/);
+  assert.match(desk, /roles:\[\.\.\.roleSel\]/);
+  assert.match(desk, /refill\(roleSel, f\.roles\)/);
+});
+
+test("dynamic audiences distinguish personal ownership from advisor territory coverage", () => {
+  assert.match(desk, /kind:"administrator", rows:preview\.rows/);
+  assert.match(desk, /kind:"unassigned", rows:\[\], outside:preview\.matches/);
+  assert.match(desk, /Advisor territory coverage:/);
+  assert.match(desk, /explicit administrator review/);
+  assert.doesNotMatch(desk, /Owner distribution:/);
+});
+test("building rosters can sort by team and show job titles instead of registration badges", () => {
+  assert.match(desk, /data-roster-sort="team"/);
+  assert.match(desk, /contactFor\(x\.properties\.id\)\?\.tn/);
+  assert.match(desk, /contact\.ti/);
+  assert.doesNotMatch(desk, /const bits = \[\s*p\.d \? "Dually registered" : "RIA-only"/);
+});
 test("role projections have reserved ids and name aliases are migration-only", () => {
   for (const source of [desk, field]) {
     assert.match(source, /ROLE_LIST_IDS = \{ key: "role-key", dd: "role-analyst", scheduler: "role-scheduler" \}/);

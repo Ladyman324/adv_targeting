@@ -2,12 +2,12 @@
 const test=require("node:test"),assert=require("node:assert/strict"),Module=require("module");
 const {FakeTableService}=require("./helpers/fake-table"),defs=require("../shared/audience-definition");
 const WHO={id:"rep-one",name:"rep@example.com"};
-const raw=()=>({version:1,scope:{kind:"territory",value:"T:Northeast",states:["CT","MA","ME","NH","NY","RI","VT"],label:"Northeast"},filters:{selectedFirms:["123"],assetsOnly:true}});
+const raw=()=>({version:1,scope:{kind:"territory",value:"T:Northeast",states:["CT","MA","ME","NH","NY","RI","VT"],label:"Northeast"},filters:{selectedFirms:["123"],assetsOnly:true,roles:["dd","key","dd"]}});
 function env(){const service=new FakeTableService(),p=require.resolve("../shared/store.js");delete require.cache[p];const real=Module._load;Module._load=function(r,parent){if(parent&&parent.filename===p&&r==="@azure/data-tables")return{TableClient:{fromConnectionString:(_c,n)=>service.table(n)},odata:(s,...v)=>s.reduce((o,x,i)=>o+x+(i<v.length?"'"+v[i]+"'":""),"")};return real.apply(this,arguments)};process.env.AZURE_STORAGE_CONNECTION_STRING="x";try{const store=require(p);store.__testService=service;return store}finally{Module._load=real}}
-test("definition v1 canonicalizes and rejects unsupported or national criteria",()=>{const n=defs.normalizeDefinition(raw()).definition;assert.equal(n.filters.assetsOnly,true);assert.deepEqual(n.filters.excluded,[]);assert.throws(()=>defs.normalizeDefinition({...raw(),mystery:true}),/not supported/);assert.throws(()=>defs.normalizeDefinition({version:1,scope:{kind:"state",value:"US",states:["NY"]},filters:{}}),/national/);assert.throws(()=>defs.normalizeDefinition({...raw(),filters:{query:"x"}}),/not supported/)});
+test("definition v1 canonicalizes and rejects unsupported or national criteria",()=>{const n=defs.normalizeDefinition(raw()).definition;assert.equal(n.filters.assetsOnly,true);assert.deepEqual(n.filters.roles,["dd","key"]);assert.deepEqual(n.filters.excluded,[]);assert.throws(()=>defs.normalizeDefinition({...raw(),mystery:true}),/not supported/);assert.throws(()=>defs.normalizeDefinition({version:1,scope:{kind:"state",value:"US",states:["NY"]},filters:{}}),/national/);assert.throws(()=>defs.normalizeDefinition({...raw(),filters:{query:"x"}}),/not supported/)});
 
 test("definition rejects invalid filter enums and noncanonical territories", () => {
-  for (const [key, value] of [["aum", ["bogus"]], ["lastEmailed", "weekly"],
+  for (const [key, value] of [["aum", ["bogus"]], ["roles", ["bogus"]], ["lastEmailed", "weekly"],
     ["lastCalled", "recent"], ["joinedFirm", "d30"]])
     assert.throws(() => defs.normalizeDefinition({
       ...raw(), filters: { [key]: value },

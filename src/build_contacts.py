@@ -194,7 +194,8 @@ ROSTER_COLUMNS = {
                     "profile_url": ["profile_url"]},
     "chevy_chase_trust": {"profile_url": ["profile_url"]},
     "cetera": {"crd": ["advisor_crd"]},
-    "morgan_stanley": {"team": ["Team Name"], "profile_url": ["Profile URL"]},
+    "morgan_stanley": {"team": ["Team Name"], "team_url": ["Profile URL"],
+                       "profile_url": ["Profile URL"]},
     "merrill": {"team": ["Team Name"], "team_url": ["Team Site"],
                 "profile_url": ["Profile URL"]},
     "raymond_james": {"team": ["team_name"], "profile_url": ["advisor_profile_url"],
@@ -579,7 +580,8 @@ def owner_by_contact_id(contacts_path) -> dict:
     return owners
 
 
-def load_crm(domains: dict[str, tuple[str, ...]]) -> pd.DataFrame:
+def load_crm(domains: dict[str, tuple[str, ...]],
+             team_sites: dict[str, dict[str, str]] | None = None) -> pd.DataFrame:
     """The CRM half of the population, from the Act! API pull.
 
     THIS USED TO READ AN EXCEL EXPORT. The dated Act JSON is now the sole
@@ -655,6 +657,9 @@ def load_crm(domains: dict[str, tuple[str, ...]]) -> pd.DataFrame:
         # acv/lcv figures -- that would change every displayed book value and
         # every team key in the same commit as the migration.
         "assets_raw": cf(r, "user10"),
+        # Used only for an exact same-firm join to a roster team page below.
+        # Arbitrary ACT websites never become team evidence.
+        "act_website": absolute_url(r.get("website") or ""),
     } for r, n, link in normalized])
 
     frame["allowed_firm_crds"] = frame["email"].map(
@@ -664,6 +669,22 @@ def load_crm(domains: dict[str, tuple[str, ...]]) -> pd.DataFrame:
     # (Raymond James/Wells Fargo) must stay a family until SEC is compared.
     frame["firm_crd"] = frame["allowed_firm_crds"].map(
         lambda value: crd_tuple(value)[0] if len(crd_tuple(value)) == 1 else "")
+
+    # ACT often contains junior team members omitted by an advisor-only roster.
+    # Their team URL can still identify the practice, but only when that URL is
+    # an exact, unambiguous roster team page at the same regulatory firm.
+    matched_sites = [
+        act_team_site_fields(site, firm_crd, team_sites or {})
+        for site, firm_crd in zip(frame["act_website"], frame["firm_crd"])
+    ]
+    frame["team"] = [m[0] for m in matched_sites]
+    frame["team_url"] = [m[1] for m in matched_sites]
+    frame["profile_url"] = [m[2] for m in matched_sites]
+    frame.drop(columns=["act_website"], inplace=True)
+    enriched = int((frame["team"] != "").sum())
+    if enriched:
+        print(f"[*] {enriched:,} ACT contacts linked to an exact same-firm roster team page")
+
     missing_phone = int((frame["phone"] == "").sum())
     if missing_phone:
         print(f"[*] {missing_phone:,} Act contacts have no API business phone; "
@@ -688,7 +709,7 @@ def load_crm(domains: dict[str, tuple[str, ...]]) -> pd.DataFrame:
     # only for a confirmed winner and is the sole identifier used for Act writes.
     # Fields only the rosters publish. Declared here so the concat has one
     # schema and a missing column can never become the string "nan".
-    for col in ("team", "profile_url", "linkedin", "office"):
+    for col in ("linkedin", "office"):
         frame[col] = ""
 
     named = int((frame["salutation"] != "").sum())
@@ -846,6 +867,53 @@ def team_name(raw) -> str:
         return ""
     return text
 
+
+def site_key(raw) -> str:
+    """Canonical host/path key for an exact team-page comparison."""
+    url = absolute_url(first_url(raw))
+    if not url:
+        return ""
+    key = re.sub(r"^https?://", "", url.casefold())
+    if key.startswith("www."):
+        key = key[4:]
+    return key.split("#", 1)[0].split("?", 1)[0].rstrip("/")
+
+
+def roster_team_sites(rosters: pd.DataFrame) -> dict[str, dict[str, str]]:
+    """Unambiguous roster team pages, keyed by their exact canonical URL.
+
+    A URL is omitted if it names two different teams or firms. That fail-closed
+    behavior is what makes it safe to use as enrichment for an ACT-only junior
+    contact: the URL contributes a practice label, never an identity match.
+    """
+    candidates: dict[str, dict[str, dict[str, str]]] = collections.defaultdict(dict)
+    for row in rosters.itertuples(index=False):
+        team = str(getattr(row, "team", "") or "").strip()
+        firm_crd = str(getattr(row, "firm_crd", "") or "").strip()
+        if not team or not firm_crd:
+            continue
+        for raw in (getattr(row, "team_url", ""),
+                    getattr(row, "profile_url", "")):
+            key = site_key(raw)
+            if not key:
+                continue
+            identity = f"{firm_crd}|{norm(team)}"
+            candidates[key][identity] = {
+                "team": team,
+                "firm_crd": firm_crd,
+                "url": absolute_url(first_url(raw)),
+            }
+    return {key: next(iter(found.values()))
+            for key, found in candidates.items() if len(found) == 1}
+
+
+def act_team_site_fields(website: object, firm_crd: object,
+                         team_sites: dict[str, dict[str, str]]) -> tuple[str, str, str]:
+    """Team, team URL and profile URL for an exact same-firm ACT site match."""
+    found = team_sites.get(site_key(website))
+    if not found or str(firm_crd or "").strip() != found["firm_crd"]:
+        return "", "", ""
+    return found["team"], found["url"], found["url"]
 
 def area_code_states(people: pd.DataFrame) -> dict:
     """area code -> state, LEARNED from the rows that carry both.
@@ -2051,7 +2119,7 @@ def load_people(limit: int | None = None) -> pd.DataFrame:
                     if row["status"] == "ambiguous")
     print(f"[*] authoritative roster domains: {len(domains):,}; "
           f"{ambiguous:,} ambiguous domains excluded")
-    crm = load_crm(domains)
+    crm = load_crm(domains, roster_team_sites(rosters))
     eic = load_eic()
     people = pd.concat([f for f in (crm, rosters, eic) if len(f)], ignore_index=True)
     # Greeting refinement may use an email local-part only when its domain is

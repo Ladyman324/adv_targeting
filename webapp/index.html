@@ -29,8 +29,8 @@
   <link rel="stylesheet" href="vendor/leaflet.css">
   <link rel="stylesheet" href="vendor/MarkerCluster.css">
   <link rel="stylesheet" href="vendor/MarkerCluster.Default.css">
-  <link rel="stylesheet" href="style.css?v=270c3458bf">
-  <link rel="stylesheet" href="email.css?v=270c3458bf">
+  <link rel="stylesheet" href="style.css?v=a8185d91da">
+  <link rel="stylesheet" href="email.css?v=a8185d91da">
 </head>
 <body>
   <div id="app">
@@ -167,6 +167,14 @@
               <span class="info-popover" role="tooltip">From Form ADV Schedule A, collected for the full firm roster, so this covers every mapped firm rather than only those reporting Item 5.G(7). A holding below 5% is an officer rather than an owner and is tagged as such.</span>
             </span>
           </div>
+          </div>
+          <div class="filter-row role-filter-row">
+            <span class="label">People</span>
+            <div id="roleToggle" class="seg role-seg" aria-label="People labels; choose one or more">
+              <button type="button" data-role="key" aria-pressed="false" title="Key Person"><span aria-hidden="true">&#128273;</span>Key Person</button>
+              <button type="button" data-role="dd" aria-pressed="false" title="Research"><span aria-hidden="true">&#128269;</span>Research</button>
+              <button type="button" data-role="scheduler" aria-pressed="false" title="Scheduler"><span aria-hidden="true">&#128197;</span>Scheduler</button>
+            </div>
           </div>
           <div class="filter-row">
             <span class="label">Registration</span>
@@ -362,8 +370,8 @@
   <script src="vendor/leaflet-heat.js"></script>
   <!-- Shared with the field view: one definition of what a call outcome is,
        one queue, one do-not-call list. Loaded before app.js, which uses it. -->
-  <script src="dial.js?v=270c3458bf"></script>
-  <script src="app.js?v=270c3458bf"></script>
-  <script src="email.js?v=270c3458bf"></script>
+  <script src="dial.js?v=a8185d91da"></script>
+  <script src="app.js?v=a8185d91da"></script>
+  <script src="email.js?v=a8185d91da"></script>
 </body>
 </html>

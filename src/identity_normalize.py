@@ -63,8 +63,11 @@ def name_tokens(value: object) -> list[str]:
 
 def normalize_crd(value: object) -> str:
     text = clean_text(value)
-    if re.fullmatch(r"\d+(?:\.0+)?", text):
-        return text.split(".", 1)[0].lstrip("0") or "0"
+    # Act users sometimes enter a CRD with ordinary thousands separators.
+    # Accept only correctly grouped commas so a typo such as ``75,40,546``
+    # cannot be silently changed into another person's valid identifier.
+    if re.fullmatch(r"(?:\d+|\d{1,3}(?:,\d{3})+)(?:\.0+)?", text):
+        return text.split(".", 1)[0].replace(",", "").lstrip("0") or "0"
     return ""
 
 

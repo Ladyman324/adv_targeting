@@ -54,6 +54,8 @@
     running: false,         // a session is under way (not "a call is happening")
     dnc: new Map(),         // crd -> {by, at, reason}
     flags: new Map(),       // crd -> {key, dd, scheduler, name, firmCrd, by, at}
+    flagsReady: false,      // prevents a failed flag read from looking like zero labels
+    flagsProblem: "",
     saving: false,
     auto: { on: false, delay: 4, announce: true },
     pending: null,          // an auto-dial counting down: {crd, name, left}
@@ -511,8 +513,18 @@
   const isScheduler = (crd) => !!(flagsOf(crd) && flagsOf(crd).scheduler);
 
   async function fetchFlags() {
-    const d = await call(API.flags);
-    state.flags = new Map((d.entries || []).map((e) => [String(e.crd), e]));
+    try {
+      const d = await call(API.flags);
+      state.flags = new Map((d.entries || []).map((e) => [String(e.crd), e]));
+      state.flagsReady = true;
+      state.flagsProblem = "";
+      emit();
+    } catch (error) {
+      state.flagsReady = false;
+      state.flagsProblem = error.message || "Role labels are unavailable.";
+      emit();
+      throw error;
+    }
   }
 
   /* Optimistic, then reconciled.

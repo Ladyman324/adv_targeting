@@ -1997,7 +1997,7 @@ def _flag_lists_parity():
     # views share only dial.js, which has no DOM -- and duplicated geometry is
     # exactly what drifts silently. A star that is a slightly different star on
     # the phone is the kind of thing nobody reports and everybody notices.
-    for const in ("STAR_PATH", "SHIELD_PATH", "CHECK_PATH", "CALENDAR_PATH", "CLOCK_PATH"):
+    for const in ("KEY_PATH", "SEARCH_PATH", "SEARCH_HANDLE_PATH", "CALENDAR_PATH", "CLOCK_PATH"):
         got = []
         for src in (desk, field):
             found = re.search(const + r'\s*=\s*(".*?");', src, re.S)
@@ -3131,7 +3131,7 @@ def _inline_images():
     required = (
         "templateRequired = materials.templateRequirements(template, catalogDocuments)" in service
         and "...templateRequired.familyIds" in service
-        and "materials.resolveFamilies(allDocuments, materialFamilyIds, recipient.email, routePolicy)" in service
+        and re.search(r"materials\.resolveFamilies\(\s*allDocuments,\s*materialFamilyIds,\s*recipient\.email,\s*routePolicy,", service) is not None
     )
     api_src = text(API / "email" / "index.js")
     gated = re.search(r'"put_template".{0,200}?isAdmin\(who\)', api_src, re.S) is not None

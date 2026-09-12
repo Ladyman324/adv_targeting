@@ -9,8 +9,9 @@ import pandas as pd
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from build_contacts import (ANCHOR_RESIDUAL_REASON,
-                            apply_anchor_residual_pass, score_contacts)
+from build_contacts import (ANCHOR_RESIDUAL_REASON, act_team_site_fields,
+                            apply_anchor_residual_pass, roster_team_sites,
+                            score_contacts)
 from forbes_match import name_score
 
 
@@ -50,6 +51,32 @@ def shaw_index(extra=None):
         rows.extend(extra)
     return {"shaw": rows}
 
+
+class ActTeamSiteTests(unittest.TestCase):
+    def test_exact_same_firm_team_page_enriches_without_matching_identity(self):
+        rosters = pd.DataFrame([{
+            "team": "The Condron Team", "firm_crd": "149777",
+            "team_url": "https://advisor.morganstanley.com/the-condron-team/",
+            "profile_url": "https://advisor.morganstanley.com/the-condron-team",
+        }])
+        sites = roster_team_sites(rosters)
+        self.assertEqual(
+            ("The Condron Team",
+             "https://advisor.morganstanley.com/the-condron-team",
+             "https://advisor.morganstanley.com/the-condron-team"),
+            act_team_site_fields(
+                "https://www.advisor.morganstanley.com/the-condron-team?ref=act",
+                "149777", sites))
+        self.assertEqual(("", "", ""), act_team_site_fields(
+            "https://advisor.morganstanley.com/the-condron-team",
+            "19616", sites))
+
+    def test_ambiguous_team_page_is_excluded(self):
+        rosters = pd.DataFrame([
+            {"team": "First Team", "firm_crd": "1", "team_url": "https://x.test/team", "profile_url": ""},
+            {"team": "Second Team", "firm_crd": "1", "team_url": "https://x.test/team", "profile_url": ""},
+        ])
+        self.assertNotIn("x.test/team", roster_team_sites(rosters))
 
 class DirectRosterCrdTests(unittest.TestCase):
     def test_equal_bare_initial_is_not_a_full_given_name_match(self):

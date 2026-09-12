@@ -19,7 +19,7 @@ const PAGE = 200;                  // rows added per "Show more"
 // Stamped by src/web_assets.py from metadata time plus every deployed JSON
 // byte. Field data still revalidates, but the shared build ID prevents stale
 // same-day rebuilds and keeps every first-party data request explicit.
-const DATA_VERSION = "20260831T110925Z-5f6bab21f4ad4ec7";
+const DATA_VERSION = "20260831T110925Z-e5baa26c18bc3cc5";
 const dataUrl = file => {
   const path = file.startsWith("data/") ? file : `data/${file}`;
   return `${path}${path.includes("?") ? "&" : "?"}v=${encodeURIComponent(DATA_VERSION)}`;
@@ -1017,11 +1017,10 @@ function renderLists(){
  * permanently set while the star changed colour correctly -- two controls, one
  * of them lying about its state.
  */
-const STAR_PATH = "M12 2.6l2.9 6 6.6.9-4.8 4.6 1.2 6.5L12 17.6 6.1 20.6l1.2-6.5"
-                + "L2.5 9.5l6.6-.9z";
-const SHIELD_PATH = "M12 2.5l7.5 3v5.2c0 4.7-3.2 8.6-7.5 9.8-4.3-1.2-7.5-5.1"
-                  + "-7.5-9.8V5.5z";
-const CHECK_PATH = "M8.4 12.2l2.4 2.4 4.6-4.9";
+const KEY_PATH = "M15.75 3a5.25 5.25 0 0 0-4.94 7.03L3 17.84V21h3.16l1.59-1.59V17.5"
+               + "h1.91v-1.91h1.91l1.4-1.4A5.25 5.25 0 1 0 15.75 3z M17 7.75h.01";
+const SEARCH_PATH = "M10.5 3.5a7 7 0 1 1 0 14 7 7 0 0 1 0-14z";
+const SEARCH_HANDLE_PATH = "M15.5 15.5L21 21";
 const CALENDAR_PATH = "M5 5.5h14v14H5z M5 9h14 M8 3v5 M16 3v5";
 const CLOCK_PATH = "M16.5 13.2a4.2 4.2 0 1 1 0 8.4 4.2 4.2 0 0 1 0-8.4z M16.5 15.2v2.4l1.7 1";
 
@@ -1046,9 +1045,9 @@ function flagMarksField(crd){
   const others = { key: Dial.flaggedByOthers(crd, "key"), dd: Dial.flaggedByOthers(crd, "dd"),
                    scheduler: Dial.flaggedByOthers(crd, "scheduler") };
   return `<span class="contact-flags">`
-    + flagMarkField(crd, "key", mine.key, "Key person", STAR_PATH, "", others.key)
-    + flagMarkField(crd, "dd", mine.dd, "Analyst", SHIELD_PATH,
-        `<path d="${CHECK_PATH}" fill="none" stroke="${mine.dd ? "var(--panel, #fff)" : "currentColor"}"
+    + flagMarkField(crd, "key", mine.key, "Key Person", KEY_PATH, "", others.key)
+    + flagMarkField(crd, "dd", mine.dd, "Research", SEARCH_PATH,
+        `<path d="${SEARCH_HANDLE_PATH}" fill="none" stroke="currentColor"
           stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>`, others.dd)
     + flagMarkField(crd, "scheduler", mine.scheduler, "Scheduler", CALENDAR_PATH,
         `<path d="${CLOCK_PATH}" fill="var(--panel, #fff)" stroke="currentColor"
@@ -1178,18 +1177,18 @@ document.addEventListener("click", async (event) => {
 // Which standing flag a REAL list corresponds to, by name. Mirrors the desk;
 // the two must agree or the same list means different things per device.
 const FIELD_ROLE_META = {
-  key: { label: "Key people", symbol: "&#9733;" },
-  dd: { label: "Analysts", symbol: "&#128737;" },
+  key: { label: "Key People", symbol: "&#128273;" },
+  dd: { label: "Research", symbol: "&#128269;" },
   scheduler: { label: "Schedulers", symbol: "&#128197;" },
 };
 const ROLE_LIST_IDS = { key: "role-key", dd: "role-analyst", scheduler: "role-scheduler" };
 const LEGACY_ROLE_IDS = {
-  keypeople: "key", keycontacts: "key", analyst: "dd", analysts: "dd",
+  keypeople: "key", keycontacts: "key", analyst: "dd", analysts: "dd", research: "dd",
   duediligence: "dd", scheduler: "scheduler", schedulers: "scheduler",
 };
 const STANDING_NAMES = {
   "key contacts": "key", "key people": "key",
-  "due diligence": "dd", "analyst": "dd", "analysts": "dd",
+  "due diligence": "dd", "analyst": "dd", "analysts": "dd", "research": "dd",
   "scheduler": "scheduler", "schedulers": "scheduler",
 };
 function standingKindOf(listId){

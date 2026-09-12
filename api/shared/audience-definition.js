@@ -15,7 +15,7 @@ const TERRITORIES = {
   Northeast: ["CT", "MA", "ME", "NH", "NY", "RI", "VT"],
   "Florida/PR": ["FL", "PR", "VI"],
 };
-const ARRAY_FILTERS = new Set(["selectedFirms", "aum", "excluded"]);
+const ARRAY_FILTERS = new Set(["selectedFirms", "aum", "excluded", "roles"]);
 const BOOLEAN_FILTERS = new Set([
   "selectsOnly", "ownerOnly", "rankedOnly", "continentalOnly",
   "contactableOnly", "assetsOnly",
@@ -24,6 +24,7 @@ const STRING_FILTERS = new Set(["reg", "lastEmailed", "lastCalled", "joinedFirm"
 const FILTER_KEYS = new Set([...ARRAY_FILTERS, ...BOOLEAN_FILTERS, ...STRING_FILTERS]);
 const ENUMS = {
   aum: new Set(["lt100m", "100m1b", "1b10b", "10b100b", "gt100b"]),
+  roles: new Set(["key", "dd", "scheduler"]),
   reg: new Set(["all", "dual", "ria"]),
   lastEmailed: new Set(["", "d30", "d90", "d180", "older", "none"]),
   lastCalled: new Set(["", "d30", "d90", "d180", "older", "none"]),

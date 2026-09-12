@@ -39,7 +39,7 @@ const COMPARE = ["#12b39c", "#e0a53a", "#8079e0", "#e8615d", "#4aa3e0", "#9fc93c
 // of every deployed JSON path and byte. It changes for standalone shard
 // rebuilds too, and its leading date keeps the stale-build warning readable.
 // Do not edit it by hand.
-const DATA_VERSION = "20260831T110925Z-5f6bab21f4ad4ec7";
+const DATA_VERSION = "20260831T110925Z-e5baa26c18bc3cc5";
 const dataUrl = file => `data/${file}?v=${DATA_VERSION}`;
 Dial.setContactRouteVersion(DATA_VERSION);
 // ONE scale for every mark on the map. There used to be two, and they were not
@@ -178,6 +178,7 @@ let aumSel = new Set();              // empty = Any; otherwise union of AUM band
 let firmSort = "advisors";          // firm-list order: advisors | relevant AUM
 let ownerOnly = false;              // Advanced: only firm owners and officers
 let rankedOnly = false;             // Advanced: only advisors on a published ranking
+let roleSel = new Set();            // Key Person / Research / Scheduler; union when multiple
 let contactableOnly = false;        // only advisors with an email or a phone on file
 let assetsOnly = false;             // only advisors in the canonical ACT account book
 // Firms struck off the map. Distinct from selectedFirms, which is a positive
@@ -1287,11 +1288,10 @@ function renderContactCount(){
  * both marks behave the same way. No text labels -- they sit beside the name at
  * reading size and the title says what they are.
  */
-const STAR_PATH = "M12 2.6l2.9 6 6.6.9-4.8 4.6 1.2 6.5L12 17.6 6.1 20.6l1.2-6.5"
-                + "L2.5 9.5l6.6-.9z";
-const SHIELD_PATH = "M12 2.5l7.5 3v5.2c0 4.7-3.2 8.6-7.5 9.8-4.3-1.2-7.5-5.1"
-                  + "-7.5-9.8V5.5z";
-const CHECK_PATH = "M8.4 12.2l2.4 2.4 4.6-4.9";
+const KEY_PATH = "M15.75 3a5.25 5.25 0 0 0-4.94 7.03L3 17.84V21h3.16l1.59-1.59V17.5"
+               + "h1.91v-1.91h1.91l1.4-1.4A5.25 5.25 0 1 0 15.75 3z M17 7.75h.01";
+const SEARCH_PATH = "M10.5 3.5a7 7 0 1 1 0 14 7 7 0 0 1 0-14z";
+const SEARCH_HANDLE_PATH = "M15.5 15.5L21 21";
 const CALENDAR_PATH = "M5 5.5h14v14H5z M5 9h14 M8 3v5 M16 3v5";
 const CLOCK_PATH = "M16.5 13.2a4.2 4.2 0 1 1 0 8.4 4.2 4.2 0 0 1 0-8.4z M16.5 15.2v2.4l1.7 1";
 
@@ -1326,9 +1326,9 @@ function flagMarks(crd){
   const others = { key: Dial.flaggedByOthers(crd, "key"), dd: Dial.flaggedByOthers(crd, "dd"),
                    scheduler: Dial.flaggedByOthers(crd, "scheduler") };
   return `<span class="contact-flags">`
-    + flagMark(crd, "key", mine.key, "Key person", STAR_PATH, "", others.key)
-    + flagMark(crd, "dd", mine.dd, "Analyst", SHIELD_PATH,
-        `<path d="${CHECK_PATH}" fill="none" stroke="${mine.dd ? "var(--panel, #fff)" : "currentColor"}"
+    + flagMark(crd, "key", mine.key, "Key Person", KEY_PATH, "", others.key)
+    + flagMark(crd, "dd", mine.dd, "Research", SEARCH_PATH,
+        `<path d="${SEARCH_HANDLE_PATH}" fill="none" stroke="currentColor"
           stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>`, others.dd)
     + flagMark(crd, "scheduler", mine.scheduler, "Scheduler", CALENDAR_PATH,
         `<path d="${CLOCK_PATH}" fill="var(--panel, #fff)" stroke="currentColor"
@@ -1346,9 +1346,9 @@ function flagGlyphs(crd){
       role="img" aria-label="${esc(label)}"><title>${esc(label)}</title>
       <path d="${path}" fill="currentColor"/>${extra || ""}</svg>`;
   return `<span class="flag-glyphs">`
-    + (key ? one("Key person", STAR_PATH, "", "key") : "")
-    + (dd ? one("Analyst", SHIELD_PATH,
-        `<path d="${CHECK_PATH}" fill="none" stroke="var(--panel, #fff)"
+    + (key ? one("Key Person", KEY_PATH, "", "key") : "")
+    + (dd ? one("Research", SEARCH_PATH,
+        `<path d="${SEARCH_HANDLE_PATH}" fill="none" stroke="currentColor"
           stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>`, "dd") : "")
     + (scheduler ? one("Scheduler", CALENDAR_PATH,
         `<path d="${CLOCK_PATH}" fill="var(--panel, #fff)" stroke="currentColor"
@@ -2254,18 +2254,18 @@ let standingCleanup = null;
 // Which standing flag a REAL list corresponds to, by name, or "" for an
 // ordinary list the rep made themselves.
 const ROLE_META = {
-  key: { label: "Key people", singular: "Key person", symbol: "&#9733;" },
-  dd: { label: "Analysts", singular: "Analyst", symbol: "&#128737;" },
+  key: { label: "Key People", singular: "Key Person", symbol: "&#128273;" },
+  dd: { label: "Research", singular: "Research", symbol: "&#128269;" },
   scheduler: { label: "Schedulers", singular: "Scheduler", symbol: "&#128197;" },
 };
 const ROLE_LIST_IDS = { key: "role-key", dd: "role-analyst", scheduler: "role-scheduler" };
 const LEGACY_ROLE_IDS = {
-  keypeople: "key", keycontacts: "key", analyst: "dd", analysts: "dd",
+  keypeople: "key", keycontacts: "key", analyst: "dd", analysts: "dd", research: "dd",
   duediligence: "dd", scheduler: "scheduler", schedulers: "scheduler",
 };
 const STANDING_NAMES = {
   "key contacts": "key", "key people": "key",
-  "due diligence": "dd", "analyst": "dd", "analysts": "dd",
+  "due diligence": "dd", "analyst": "dd", "analysts": "dd", "research": "dd",
   "scheduler": "scheduler", "schedulers": "scheduler",
 };
 function standingKindOf(listId){
@@ -2674,7 +2674,7 @@ function audienceScopeDefinition(){
 }
 function captureAudienceDefinition(){
   return { version:1, scope:audienceScopeDefinition(), filters:{
-    selectedFirms:[...selectedFirms], selectsOnly, aum:[...aumSel], reg,
+    selectedFirms:[...selectedFirms], selectsOnly, aum:[...aumSel], roles:[...roleSel], reg,
     lastEmailed, lastCalled, joinedFirm, ownerOnly,
     rankedOnly, excluded:[...excludedFirms], continentalOnly,
     contactableOnly, assetsOnly,
@@ -2711,7 +2711,7 @@ async function applyAudienceDefinition(audience){
   selectsOnly = !!f.selectsOnly;
   selectsBox.checked = selectsOnly;
   selectsBox.closest(".switch").classList.toggle("on", selectsOnly);
-  refill(aumSel, f.aum); reg = f.reg || "all";
+  refill(aumSel, f.aum); refill(roleSel, f.roles); reg = f.reg || "all";
   if (f.lastEmailed || f.lastCalled) await loadActivityFilters();
   if (f.lastEmailed && emailActivityState !== "ready")
     throw new Error("Email activity is unavailable for this saved audience.");
@@ -2755,6 +2755,11 @@ async function ensureAudienceIdentity(){
 }
 async function prepareAudiencePreviewData(audience){
   const f = audience && audience.definition && audience.definition.filters || {};
+  await dialReady;
+  if (!ADMIN && window.EmailComposer && EmailComposer.isAdmin) {
+    try { ADMIN = await EmailComposer.isAdmin(); } catch {}
+  }
+  if ((f.roles || []).length && !Dial.state.flagsReady) await Dial.fetchFlags();
   const support = f.ownerOnly || f.rankedOnly || f.assetsOnly
     ? loadRegionalSupport()
     : (SUPPORT.territories === "ready" ? Promise.resolve() : loadTerritories());
@@ -2762,6 +2767,8 @@ async function prepareAudiencePreviewData(audience){
     (f.lastEmailed || f.lastCalled) ? loadActivityFilters() : Promise.resolve()]);
   if (!CONTACTS_READY)
     throw new Error("Contact eligibility is unavailable, so this audience cannot be previewed safely. Try again after contact data loads.");
+  if ((f.roles || []).length && !Dial.state.flagsReady)
+    throw new Error("People labels are unavailable, so this saved audience cannot be evaluated safely.");
   if (SUPPORT.territories !== "ready")
     throw new Error("Territory assignments are unavailable, so ownership cannot be reviewed safely.");
   if (f.ownerOnly && SUPPORT.owner !== "ready")
@@ -2789,8 +2796,11 @@ function audienceTerritoryPolicy(preview){
     return { kind:"territory", rows, outside:preview.matches - rows.length,
       text:`${esc(assigned.n || email)}: ${rows.length.toLocaleString()} in my assigned territory; ${(preview.matches - rows.length).toLocaleString()} outside and excluded from new snapshots.` };
   }
-  return { kind:"unassigned", rows:preview.rows, outside:0,
-    text:`No sales territory is assigned to this account${email ? ` (${esc(email)})` : ""}. Review the owner distribution before preparing a contact list.` };
+  if (email && ADMIN)
+    return { kind:"administrator", rows:preview.rows, outside:0,
+      text:`Administrative account (${esc(email)}): this audience is yours. Its advisors retain their normal sales-territory ownership; all matches require an explicit territory review before a snapshot is created.` };
+  return { kind:"unassigned", rows:[], outside:preview.matches,
+    text:`No sales territory is assigned to this account${email ? ` (${esc(email)})` : ""}. Snapshot creation is disabled; ask an administrator to assign the account before using dynamic audiences.` };
 }
 function dynamicAudienceRows(){
   if (audienceProblem) return `<p class="lists-none">${esc(audienceProblem)}</p>`;
@@ -2811,7 +2821,7 @@ function paintAudiencePreview(){
   listsBack.innerHTML = `<div class="ask lists lists-workspace" role="dialog" aria-modal="true" aria-label="Dynamic audience preview">
     <div class="lists-title"><div><span class="list-type dynamic">Dynamic audience</span><h3>${esc(p.audience.name)}</h3><p>${esc(p.audience.description || "Updates when source data or saved rules change.")}</p></div><button type="button" class="ask-btn ghost" data-lists="close">Close</button></div>
     <div class="audience-counts"><span><b>${p.matches.toLocaleString()}</b> matches</span><span><b>${p.callable.toLocaleString()}</b> callable</span><span><b>${p.emailable.toLocaleString()}</b> emailable</span><span class="excluded"><b>${p.excluded.toLocaleString()}</b> no usable route</span></div>
-    <p class="audience-owner"><b>${policy.text}</b><br>Owner distribution: ${owners.size ? [...owners].map(([n,c]) => `${esc(n)} (${c})`).join("; ") : "assignment information unavailable"}. Raw channel counts above describe the full audience; snapshot actions below use ${policy.kind === "territory" ? "only this account's assigned territory" : policy.kind === "national" ? "national coverage" : "all matches after an explicit ownership review"}.</p>
+    <p class="audience-owner"><b>${policy.text}</b><br>Advisor territory coverage: ${owners.size ? [...owners].map(([n,c]) => `${esc(n)} (${c})`).join("; ") : "assignment information unavailable"}. Raw channel counts above describe the full audience; snapshot actions below use ${policy.kind === "territory" ? "only this account's assigned territory" : policy.kind === "national" ? "national coverage" : policy.kind === "administrator" ? "all matches after an explicit administrator review" : "no matches until an account territory is assigned"}.</p>
     <p class="dial-menu-note">Ready for a new snapshot: ${readyCall.toLocaleString()} callable; ${readyEmail.toLocaleString()} emailable${policy.outside ? `; ${policy.outside.toLocaleString()} outside-territory matches excluded before channel checks` : ""}.</p>
     ${p.excluded ? `<p class="dial-menu-note">Review: ${p.dnc.toLocaleString()} do-not-call; ${p.identity.toLocaleString()} with non-actionable identity evidence; ${p.excluded.toLocaleString()} with neither a callable nor emailable route. Excluded contacts remain in the match count and never enter the call snapshot.</p>` : ""}
     <div class="lists-preview-actions"><button type="button" class="ask-btn" data-lists="audience-back">Back to lists</button><button type="button" class="ask-btn" data-lists="audience-queue"${readyCall ? "" : " disabled"}>Create call list</button><button type="button" class="ask-btn primary" data-lists="audience-email"${readyEmail ? "" : " disabled"}>Prepare email batch</button></div>
@@ -3059,7 +3069,8 @@ document.addEventListener("click", async e => {
       if (!audiencePreview) return;
       const channel = act === "audience-email" ? "email" : "call";
       const policy = audienceTerritoryPolicy(audiencePreview);
-      if (policy.kind === "unassigned" && !confirm("No sales territory is assigned to this account. Review the owner distribution above before continuing.\n\nHave you reviewed ownership and want to prepare this list?")) return;
+      if (policy.kind === "unassigned") return showNotice("No sales territory is assigned to this account, so this snapshot cannot be created.");
+      if (policy.kind === "administrator" && !confirm("This administrative account is not assigned a sales territory. Review the advisor territory coverage above before continuing.\n\nHave you reviewed ownership and want to prepare this list?")) return;
       const eligible = policy.rows.filter(x => channel === "email" ? x.emailable : x.callable).map(x => x.item);
       if (eligible.length > 250) {
         showNotice(`This audience has ${eligible.length.toLocaleString()} ${channel === "email" ? "emailable" : "callable"} people in the permitted snapshot scope; a static list holds 250. Refine the saved filters so contacts are not selected arbitrarily.`);
@@ -4665,6 +4676,8 @@ const PERF = window.PERF = {
 
 Dial.onChange(() => {
   renderDialer();
+  syncRoleFilterUI();
+  if (roleSel.size) redraw();
   // Covers lists opened after boot as well as the initially selected list.
   reconcileDesktopDialRoutes().catch(() => {});
 });
@@ -5481,6 +5494,7 @@ function applyScopeUI(){
   syncRankedUI();
   syncContactSwitches();
   syncActivityFilterUI();
+  syncRoleFilterUI();
   syncTargetingUI();
   document.title = `Advisor Map — ${scopeLabel(scope)}`;
 }
@@ -6148,6 +6162,15 @@ function joinedAgeBand(day){
 function passesJoinedFirm(p){
   return !joinedFirm || joinedAgeBand(p.jd) === joinedFirm;
 }
+// Labels are shared sales knowledge. Multiple selected labels are a union: a person
+// carrying any chosen label remains visible.
+function passesRole(p){
+  if (!roleSel.size) return true;
+  if (!Dial.state.flagsReady) return false;
+  return (roleSel.has("key") && Dial.isKeyContact(p.id))
+    || (roleSel.has("dd") && Dial.isDueDiligence(p.id))
+    || (roleSel.has("scheduler") && Dial.isScheduler(p.id));
+}
 // Owner or officer of the firm they are filed at. Schedule A was collected only
 // for firms reporting 5.G(7), so this narrows rather than answers: an owner at a
 // firm outside that scope is a miss we cannot detect. Those firms do not hire
@@ -6217,7 +6240,7 @@ function passesBase(p, skipActivity=null){
   return passesContinental(p) && passesTargeting(p)
     && (skipActivity === 'email' || passesLastEmailed(p))
     && (skipActivity === 'call' || passesLastCalled(p)) && passesJoinedFirm(p) &&
-    passesOwner(p) && passesRanked(p) && passesGeography(p) &&
+    passesOwner(p) && passesRanked(p) && passesRole(p) && passesGeography(p) &&
     passesContactable(p) && passesHasAssets(p);
 }
 function passesFilters(p, skipActivity=null){
@@ -7285,7 +7308,27 @@ document.getElementById("clearFirms").addEventListener("click", () => {
   redraw();
 });
 
-// ---- registration + sales-activity filters ----
+// ---- people, registration + sales-activity filters ----
+const ROLE_FILTER_LABELS = { key:"Key Person", dd:"Research", scheduler:"Scheduler" };
+function syncRoleFilterUI(){
+  const unavailable = scope === "US" || !Dial.state.flagsReady;
+  document.querySelectorAll("#roleToggle button").forEach(button => {
+    button.setAttribute("aria-pressed", roleSel.has(button.dataset.role));
+    button.disabled = unavailable;
+    button.title = scope === "US" ? "Choose a state or territory to filter people"
+      : !Dial.state.flagsReady ? (Dial.state.flagsProblem || "People labels are still loading")
+      : ROLE_FILTER_LABELS[button.dataset.role];
+  });
+}
+document.getElementById("roleToggle").addEventListener("click", event => {
+  const button = event.target.closest("button[data-role]");
+  if (!button) return;
+  if (!Dial.state.flagsReady) return showNotice(Dial.state.flagsProblem || "People labels are still loading.");
+  const kind = button.dataset.role;
+  if (roleSel.has(kind)) roleSel.delete(kind); else roleSel.add(kind);
+  syncRoleFilterUI();
+  redraw();
+});
 document.getElementById("regToggle").addEventListener("click", e => {
   const b = e.target.closest("button"); if (!b) return;
   reg = b.dataset.reg;
@@ -7304,7 +7347,7 @@ function activityFilterSignature(kind){
   return JSON.stringify([
     kind, scope, scopeRequest, Math.floor(Date.now() / FILTER_DAY_MS),
     kind === 'email' ? lastCalled : lastEmailed,
-    selectedFirms, selectsOnly, [...aumSel].sort(), reg, joinedFirm,
+    selectedFirms, selectsOnly, [...aumSel].sort(), [...roleSel].sort(), reg, joinedFirm,
     ownerOnly, rankedOnly, [...excludedFirms].sort(), continentalOnly,
     contactableOnly, assetsOnly, lassoPolygon,
     CONTACTS_READY, SUPPORT.owner, SUPPORT.barrons, SUPPORT.forbes,
@@ -7763,6 +7806,7 @@ function refreshActiveFilters(){
     add(`Firm AUM ${[...aumSel].map(key => AUM_BANDS[key].label).join(", ")}`, "raum");
   if (selectsOnly) add("Reports selecting outside managers", "selects");
   if (scope !== "US"){
+    if (roleSel.size) add(`People: ${[...roleSel].map(kind => ROLE_FILTER_LABELS[kind]).join(", ")}`, "roles");
     if (reg !== "all") add(reg === "dual" ? "Dually registered" : "RIA-only", "reg");
     if (lastEmailed) add(`Last emailed: ${ACTIVITY_FILTER_LABELS[lastEmailed]}`, "lastEmailed");
     if (lastCalled) add(`Last called: ${ACTIVITY_FILTER_LABELS[lastCalled]}`, "lastCalled");
@@ -7799,6 +7843,7 @@ function refreshActiveFilters(){
 function syncFilterButtons(){
   document.querySelectorAll("#regToggle button").forEach(b => b.setAttribute("aria-pressed", b.dataset.reg === reg));
   syncActivityFilterUI();
+  syncRoleFilterUI();
   syncTargetingUI();
   syncOwnerUI();
   syncRankedUI();
@@ -7808,7 +7853,7 @@ function syncFilterButtons(){
 }
 
 function resetAllFilters(){
-  reg = "all"; lastEmailed = ""; lastCalled = ""; joinedFirm = "";
+  reg = "all"; roleSel.clear(); lastEmailed = ""; lastCalled = ""; joinedFirm = "";
   ownerOnly = false;
   rankedOnly = false;
   contactableOnly = false; assetsOnly = false;
@@ -7835,6 +7880,7 @@ document.getElementById("activeFilters").addEventListener("click", e => {
   if (key === "lasso") clearLasso(false);
   if (key === "selects"){ selectsOnly = false; selectsBox.checked = false; selectsBox.closest(".switch").classList.remove("on"); }
   if (key === "raum"){ aumSel.clear(); syncTargetingUI(); }
+  if (key === "roles") roleSel.clear();
   if (key === "reg") reg = "all";
   if (key === "lastEmailed") lastEmailed = "";
   if (key === "lastCalled") lastCalled = "";
@@ -7860,7 +7906,7 @@ function joinLabels(labels){
 function captureAdvisorFilters(){
   return {
     selectedFirms:[...selectedFirms], selectsOnly,
-    aum:[...aumSel], reg, lastEmailed, lastCalled, joinedFirm,
+    aum:[...aumSel], roles:[...roleSel], reg, lastEmailed, lastCalled, joinedFirm,
     ownerOnly, rankedOnly, excluded:[...excludedFirms],
   };
 }
@@ -7873,6 +7919,7 @@ function restoreAdvisorFilters(saved){
   selectsBox.checked = selectsOnly;
   selectsBox.closest(".switch").classList.toggle("on", selectsOnly);
   refill(aumSel, saved.aum);
+  refill(roleSel, saved.roles);
   reg = saved.reg;
   lastEmailed = saved.lastEmailed || "";
   lastCalled = saved.lastCalled || "";
@@ -7910,6 +7957,7 @@ function relaxFiltersForAdvisor(features, advisorName, announce=true){
     syncTargetingUI(); add("the firm AUM range");
   }
   const passesReg = p => reg === "all" || (reg === "dual" ? p.d === 1 : p.d === 0);
+  if (roleSel.size && !props.some(passesRole)){ roleSel.clear(); add("the people-label filter"); }
   if (reg !== "all" && !props.some(passesReg)){ reg = "all"; add("the registration filter"); }
   if (lastEmailed && !props.some(passesLastEmailed)){ lastEmailed = ""; add("the last-emailed filter"); }
   if (lastCalled && !props.some(passesLastCalled)){ lastCalled = ""; add("the last-called filter"); }
@@ -7924,7 +7972,7 @@ function relaxFiltersForAdvisor(features, advisorName, announce=true){
   // single pin satisfies their combination. In that rare case, clear the
   // remaining view filters rather than navigating to another invisible pin.
   if (!props.some(passesFilters)){
-    reg = "all";
+    reg = "all"; roleSel.clear();
     lastEmailed = ""; lastCalled = ""; joinedFirm = ""; resetTargeting();
     selectedFirms = []; firmColor = {}; document.getElementById("clearFirms").hidden = true;
     if (lassoPolygon) clearLasso(false);
@@ -8474,6 +8522,9 @@ function flyTo(f){
 // features backing the rendered rows, in render order, so a row click can find
 // its advisor -- indices are rebuilt on every openRoster
 let rosterRows = [];
+let rosterSort = "name";
+let rosterLocation = null;
+let rosterOnlyFirm = null;
 
 function rosterBtn(a, label){
   return `<button class="rbtn" data-a="${a.i}"${a.bldg ? ' data-bldg="1"' : ""}>${esc(label)}</button>`;
@@ -8495,6 +8546,8 @@ function openRoster(a, detailPush=true, onlyFirm=null){
   beginDetails({ type:"location", location:a }, detailPush);
   openFirmCrd = null;
   rosterRows = [];
+  rosterLocation = a;
+  rosterOnlyFirm = onlyFirm;
   const seen = new Map();                       // one row per advisor, not per pin
   a.feats.forEach(f => {
     if (onlyFirm && String(f.properties.fc) !== String(onlyFirm)) return;
@@ -8537,20 +8590,37 @@ function openRoster(a, detailPush=true, onlyFirm=null){
     ? `<div class="profile-actions"><button type="button" data-a="${a.i}"` +
       `${a.bldg ? ' data-bldg="1"' : ""}>Show all ${allFirms.size} firms at this address</button></div>`
     : "";
-  document.getElementById("firmOverviewBody").innerHTML = showAll + groups.map(group => {
+  const sortBar = rows.length > 1
+    ? `<div class="roster-sort"><span>Sort people</span><div class="seg mini-seg">
+         <button type="button" data-roster-sort="name" aria-pressed="${rosterSort === "name"}">Name</button>
+         <button type="button" data-roster-sort="team" aria-pressed="${rosterSort === "team"}">Team</button>
+       </div></div>`
+    : "";
+  document.getElementById("firmOverviewBody").innerHTML = showAll + sortBar + groups.map(group => {
     const firm = group.name, crd = group.crd, list = group.rows;
     const col = selectedFirms.length
       ? (firmColor[crd] || cssVar("--m-unc"))
       : cssVar("--accent");
     const people = list
       .slice()
-      .sort((x, y) => x.properties.n.localeCompare(y.properties.n))
+      .sort((x, y) => {
+        if (rosterSort === "team") {
+          const xt = String(contactFor(x.properties.id)?.tn || "").trim();
+          const yt = String(contactFor(y.properties.id)?.tn || "").trim();
+          if (!!xt !== !!yt) return xt ? -1 : 1;
+          const teamOrder = xt.localeCompare(yt, undefined, { sensitivity:"base" });
+          if (teamOrder) return teamOrder;
+        }
+        return x.properties.n.localeCompare(y.properties.n, undefined, { sensitivity:"base" });
+      })
       .map(f => {
         const p = f.properties;
+        const contact = contactFor(p.id) || {};
         const dim = passesFilters(p) ? "" : " dim";
         const bits = [
-          p.d ? "Dually registered" : "RIA-only",
-          p.g ? esc(p.g.split("|").join(", ")) : null,
+          contact.ti,
+          contact.tn ? `Team: ${contact.tn}` : "",
+          p.g ? p.g.split("|").join(", ") : "",
         ].filter(Boolean).join(" · ");
         // disclosures are the one thing a rep must not have to click to discover
         const flag = p.dr && p.dr.length
@@ -8576,7 +8646,7 @@ function openRoster(a, detailPush=true, onlyFirm=null){
           : "";
         return `<div class="rrow${dim}" data-ri="${rosterRows.push(f) - 1}" role="button" tabindex="0">
           <span class="rrl"><span class="rn">${esc(p.n)}${flag}${contactDots(p.id)}${barTag}${forTag}${ownTag}${uncTag}</span>
-          <span class="rm">${bits}</span>${line}</span>${personActionButton(p.id, p.n)}${link}</div>`;
+          <span class="rm">${esc(bits || "Job title not on file")}</span>${line}</span>${personActionButton(p.id, p.n)}${link}</div>`;
       }).join("");
     return `<div class="rgrp">
       <div class="rfirm"><span class="swatch" style="background:${col}"></span>
@@ -8588,6 +8658,13 @@ function openRoster(a, detailPush=true, onlyFirm=null){
 
   syncDetailHash(null);
 }
+
+document.addEventListener("click", event => {
+  const button = event.target.closest("[data-roster-sort]");
+  if (!button || !rosterLocation) return;
+  rosterSort = button.dataset.rosterSort === "team" ? "team" : "name";
+  openRoster(rosterLocation, false, rosterOnlyFirm);
+});
 
 // Opening a location or a building from any drawer row now also takes the map
 // there and rings it. The viewport moves only as far as it must: the zoom is
@@ -8699,11 +8776,6 @@ function openAdvisorDetails(f, detailPush=true){
   // CRM, so it belongs beside the name rather than only inside the IAPD link
   document.getElementById("firmOverviewMeta").textContent =
     [p.f, `CRD ${p.id}`, [p.c, p.z].filter(Boolean).join(" ")].filter(Boolean).join(" · ");
-  // the prior-firm COUNT is gone from the badges: the History section below
-  // names the firms and their dates, which is what the count was standing in for
-  const bits = [
-    p.d ? "Dually registered" : "RIA-only",
-  ].filter(Boolean);
   const bl = bldgForAddr(at, p.a);
   // Schedule A role at THIS firm, plus any held at another firm -- an advisor
   // who also owns a second RIA is worth surfacing, not hiding.
@@ -8790,7 +8862,6 @@ function openAdvisorDetails(f, detailPush=true){
         <small>${bl.ids.size.toLocaleString()} advisors across ${bl.lines.size} filed address line${bl.lines.size === 1 ? "" : "s"}</small></span><span class="detail-chevron">›</span></button>` : ""}
       ${otherOfficeRows(p)}
     </div><div id="advisorElsewhere" data-for="${esc(p.id)}"></div>${remoteNote(p)}${uncertainNote(p)}</section>` : ""}
-    <div class="profile-badges">${bits.map(bit => `<span class="profile-badge">${esc(bit)}</span>`).join("")}</div>
     <section class="profile-section"><h3>History${infoBox(
       "Current registration facts and registration history as filed with the SEC. Dates can differ by days from the advisor's actual start and finish.")}</h3>
       <div id="advisorHistory" data-for="${esc(p.id)}"><p class="profile-empty">Loading history…</p></div></section>
