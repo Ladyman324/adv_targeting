@@ -456,6 +456,13 @@ def write_release_descriptor(payload: dict, shard_manifest: dict) -> pathlib.Pat
     return RELEASE_DESCRIPTOR_PATH
 
 
+def shard_file_key(path: pathlib.Path) -> str:
+    """The two-digit manifest key represented by ``NN.json.gz``."""
+    match = re.fullmatch(r"(\d{2})\.json\.gz", path.name)
+    if not match:
+        raise ValueError(f"Unexpected recipient shard filename: {path.name}")
+    return match.group(1)
+
 def upload_shards(manifest_path: pathlib.Path,
                   shard_paths: list[pathlib.Path]) -> int:
     """Explicit only; local generation never needs the Azure SDK or credential."""
@@ -480,7 +487,7 @@ def upload_shards(manifest_path: pathlib.Path,
     release_prefix = (f"{SHARD_PREFIX}/releases/"
                       f"{manifest['registryContentHash']}")
     for shard_path in shard_paths:
-        entry = (manifest.get("shards") or {}).get(shard_path.stem)
+        entry = (manifest.get("shards") or {}).get(shard_file_key(shard_path))
         blob = clean_text((entry or {}).get("blob"))
         if not blob.startswith(f"{release_prefix}/shards/"):
             raise ValueError(f"Unsafe shard blob path for {shard_path.name}")

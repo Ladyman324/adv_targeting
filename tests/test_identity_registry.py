@@ -16,6 +16,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from export_approved_recipients import (
     RELEASE_PROVENANCE_KEYS, bounded_match_score, build_registry,
     build_release_descriptor, build_shards, registry_quality_summary,
+    shard_file_key,
 )
 from export_act_crd_corrections import REQUIRED_ACT_IDS
 import build_act_lookup
@@ -53,6 +54,11 @@ class RegistryTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unapproved fields"):
             build_release_descriptor(payload, manifest)
 
+    def test_shard_upload_key_strips_the_full_double_suffix(self):
+        self.assertEqual("10", shard_file_key(pathlib.Path("10.json.gz")))
+        for bad in ("10.json", "10.json.json.gz", "1.json.gz", "aa.json.gz"):
+            with self.assertRaisesRegex(ValueError, "Unexpected recipient shard"):
+                shard_file_key(pathlib.Path(bad))
     def test_shards_are_point_lookup_sized_and_manifest_bound(self):
         payload = {"schemaVersion": 1, "contentHash": "b" * 64,
                    "recipients": {"100": {"email": "one@example.com",
