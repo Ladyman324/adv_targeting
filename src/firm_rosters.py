@@ -46,6 +46,12 @@ FIRMS = {
     # lives in "Office Name". "Entity Type" is ADVISOR or PROFESSIONAL_STAFF
     # straight from Merrill -- 7,509 of the 18,867 are support staff.
     "merrill":        {"label": "Merrill Lynch",  "crds": ["7691"]},
+    # The advisor-search API publishes FAs only. morgan_team_async.py augments
+    # it with people Morgan publishes on team pages (Entity Type TEAM_MEMBER).
+    # Those rows receive no CRD here; the normal SEC name/firm/location gates
+    # must independently prove a registered identity. Branch and complex
+    # entities live in interim/morgan_stanley_offices_* and never enter this
+    # person roster.
     "morgan_stanley": {"label": "Morgan Stanley", "crds": ["149777"]},
     # TWO sources merged by src/ubs_async.py: the Broadridge locator API, which
     # lists advisors only, and every team/branch page it names. The pages carry

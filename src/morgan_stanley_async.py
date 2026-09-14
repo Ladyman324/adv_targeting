@@ -14,6 +14,12 @@ import httpx
 import pandas as pd
 from playwright.sync_api import sync_playwright
 
+for stream in (_sys.stdout, _sys.stderr):
+    if hasattr(stream, "reconfigure"):
+        # Windows PowerShell 5 commonly exposes cp1252. Status glyphs must
+        # never be able to abort a data refresh.
+        stream.reconfigure(errors="replace")
+
 # --- Configuration & Constants ---
 CDP_HOST = "http://127.0.0.1:9222"
 TARGET_DOMAIN = "https://advisor.morganstanley.com/"
@@ -29,6 +35,44 @@ REGION_POINTS = [
     {"name": "West Coast / North", "lat": 47.60, "lng": -122.33, "radius": 1500000},
     {"name": "West Coast / South", "lat": 34.05, "lng": -118.24, "radius": 1500000},
 ]
+
+
+def first_text(value):
+    """Return the first non-empty scalar from Yext's mixed scalar/list fields."""
+    if isinstance(value, (list, tuple)):
+        return next((str(item).strip() for item in value if str(item).strip()), "")
+    return str(value or "").strip()
+
+
+def advisor_record(data, uid=""):
+    """Translate one public FA entity without discarding its team-page URL."""
+    address = data.get("address") or {}
+    return {
+        "Name": data.get("c_pagesName") or data.get("name", ""),
+        "Primary Title": data.get("c_primaryTitle", ""),
+        "Secondary Titles": " | ".join(data.get("c_secondaryTitles", [])),
+        "Team Name": data.get("c_teamEntityName", ""),
+        "Branch Name": data.get("c_branchName", ""),
+        "Office Number": data.get("c_officeNumber", ""),
+        "FA Number": data.get("c_faNumber", ""),
+        "Complex ID": data.get("c_complexID", ""),
+        "Main Phone": data.get("mainPhone", ""),
+        "Branch Phone": data.get("c_branchPhone", ""),
+        "LinkedIn": "",
+        "Email": first_text(data.get("emails")),
+        "Certifications": " | ".join(data.get("c_listOfCertifications", [])),
+        "Street Line 1": address.get("line1", ""),
+        "Street Line 2": address.get("line2", ""),
+        "City": address.get("city", ""),
+        "State": address.get("region", ""),
+        "Postal Code": address.get("postalCode", ""),
+        "Profile URL": first_text(
+            data.get("c_pagesURL") or data.get("c_locatorURL")),
+        "Team Page URL": first_text(data.get("c_teamPagesURL")),
+        "Entity Type": "ADVISOR",
+        "Source": "directory",
+        "Yext ID": first_text(uid or data.get("uid") or data.get("id")),
+    }
 
 
 # =====================================================================
@@ -133,7 +177,8 @@ def obtain_native_session():
         context = browser.contexts[0]
         cookies = context.cookies(TARGET_DOMAIN)
         cookies_dict = {c["name"]: c["value"] for c in cookies}
-        browser.close()
+        # The debug browser belongs to the user. Disconnect by leaving the
+        # Playwright scope; browser.close() would terminate their Chrome.
 
     user_agent = get_chrome_user_agent()
     return user_agent, cookies_dict
@@ -241,27 +286,7 @@ async def run_async_extraction(user_agent, cookies_dict, api_key):
                     if d.get("c_profileType") == "FA":
                         uid = d.get("uid") or d.get("c_faNumber") or d.get("id")
                         if uid and uid not in advisor_map:
-                            addr = d.get("address", {})
-                            advisor_map[uid] = {
-                                "Name": d.get("c_pagesName") or d.get("name", ""),
-                                "Primary Title": d.get("c_primaryTitle", ""),
-                                "Secondary Titles": " | ".join(d.get("c_secondaryTitles", [])),
-                                "Team Name": d.get("c_teamEntityName", ""),
-                                "Branch Name": d.get("c_branchName", ""),
-                                "Office Number": d.get("c_officeNumber", ""),
-                                "FA Number": d.get("c_faNumber", ""),
-                                "Complex ID": d.get("c_complexID", ""),
-                                "Main Phone": d.get("mainPhone", ""),
-                                "Branch Phone": d.get("c_branchPhone", ""),
-                                "Email": (d.get("emails", [""])[0] if d.get("emails") else ""),
-                                "Certifications": " | ".join(d.get("c_listOfCertifications", [])),
-                                "Street Line 1": addr.get("line1", ""),
-                                "Street Line 2": addr.get("line2", ""),
-                                "City": addr.get("city", ""),
-                                "State": addr.get("region", ""),
-                                "Postal Code": addr.get("postalCode", ""),
-                                "Profile URL": d.get("c_pagesURL") or d.get("c_locatorURL", "")
-                            }
+                            advisor_map[uid] = advisor_record(d, uid)
 
             print(f"   ✓ Captured {len(advisor_map)} unique Financial Advisors so far...")
 
