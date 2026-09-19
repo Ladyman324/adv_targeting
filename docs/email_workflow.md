@@ -37,10 +37,35 @@ run again before sending.
 Terminal unknown sends are never unlocked by a draft or empty search result.
 
 An expired or future reserved capacity day cannot be overridden by Retry selected.
-For an expired day, review the safe unsent recipients in a new batch with a new
-delivery plan. Do not recreate uncertain or manually handled messages. A failure
-before any traceable Outlook draft exists may also require a new reviewed batch;
-the UI does not infer absence from a failed search.
+Use **Prepare selected for retry** for a new reviewed batch and delivery plan:
+
+1. Select only the intended failures, then choose **Prepare selected for retry**.
+2. Confirm that you have not sent separate replacements outside the app.
+3. The app checks the original messages in Outlook. Unknown submissions, bounces,
+   manual exclusions, active work, suppressed recipients, and inconclusive checks
+   remain blocked. A missing item qualifies only with independent recorded evidence
+   of a known pre-send failure and zero app send attempts; absence alone is insufficient.
+4. Eligible originals are atomically retired together and linked to one new batch.
+   The new batch preserves personalized wording, copy choices, and current approved
+   versions of the original attachment IDs. It has no approval, Graph message IDs,
+   or old capacity allocations. Nothing is sent or queued by preparation.
+5. Review every replacement, its attachments, and the fresh delivery plan. Sending
+   requires the normal approval and capacity reservation. You can leave it unapproved.
+6. Repeating the same selection reopens the same review without resetting edits
+   or approval. Overlapping selections cannot reuse a retired original. If preparation
+   was interrupted, open its linked review and choose **Finish retry preparation**.
+
+Original Outlook drafts are not deleted. Before drafting and sending a replacement,
+workers recheck the original retry ancestry, local manual/bounce state, and Outlook
+evidence. Sending the original draft manually can therefore block a later replacement;
+a separately composed external email still cannot be identified reliably. Do not send
+from Outlook while a replacement is approved or processing. The final external send
+cannot be made atomic with a human sending from Outlook.
+
+The source-row retirement uses one same-partition ETag transaction (maximum 100 rows).
+Child IDs and message IDs are deterministic; incomplete children stay non-approvable
+in building state and resume without recreating existing messages. Released source
+capacity is best-effort after finalization; a failure conservatively leaves it counted.
 
 ## What happens from composition to completion
 
@@ -137,12 +162,10 @@ happened several days earlier.
    part of the user's selection accepted; the rest must be reviewed again.
 4. Introduce an explicit stale-work policy for legacy unscheduled approvals,
    measured against intended delivery time. Preserve deliberately future schedules.
-5. Build a reviewed retry-plan workflow for expired-day safe failures. It must
-   reserve new capacity and display the new dates rather than silently moving mail.
-6. Consider more prompt bounce observation with an incremental/checkpointed scan,
+5. Consider more prompt bounce observation with an incremental/checkpointed scan,
    balanced against the shared mailbox request budget. Never retry a bounce as
    though it were an application timeout.
-7. Exercise approved internal acceptance batches and restart/failure drills.
+6. Exercise approved internal acceptance batches and restart/failure drills.
    Mock tests cover safety decisions but cannot guarantee Microsoft's real-world
    delivery, mailbox consistency, or exactly-once external effects.
 

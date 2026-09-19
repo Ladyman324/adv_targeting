@@ -227,7 +227,7 @@ function leasedDependencies(work, claimed, deps) {
       return async (...args) => {
         const renew = async () => {
         const current = await deps.store.getMessage(work.userId, work.batchId, work.messageId);
-        if (!current || current.handledManuallyUtc || current.workerLeaseId !== workerLeaseId
+        if (!current || current.handledManuallyUtc || current.retryBatchId || current.workerLeaseId !== workerLeaseId
             || Date.parse(current.leaseUntilUtc || "") <= Date.now())
           throw Object.assign(new Error("Another worker owns this message."), { code: "worker_lease_lost" });
         let renewed;
@@ -589,6 +589,7 @@ async function draft(work, deps) {
     const token = await deps.auth.tokenFor(work.userId);
     if (String(token.mailboxId).toLowerCase() !== String(batch.graphMailboxId).toLowerCase())
       throw service.httpError(403, "Mailbox identity changed after batch creation; refusing to create a draft.");
+    await require("../shared/email-retry-preparation").assertOriginalUnsent(claimed, batch, token.accessToken, deps);
     await verifyIdentity(claimed, batch, deps, { force: true });
     const attachmentIds = (claimed.attachments || []).map((doc) => doc.id);
     const currentAttachments = attachmentIds.length ? await deps.store.getDocuments(attachmentIds) : [];
@@ -844,6 +845,7 @@ async function send(work, deps) {
         return;
       }
 
+      await require("../shared/email-retry-preparation").assertOriginalUnsent(claimed, batch, token.accessToken, deps);
       Object.assign(claimed, await deps.store.patchMessage(work.userId, work.batchId, work.messageId, {
         sendOutcome: "started", sendStartedUtc: new Date().toISOString(),
         sendAttemptId: require("node:crypto").randomUUID(),
@@ -939,7 +941,7 @@ async function processWork(raw, overrides = {}) {
     throw new Error("Incomplete email queue message.");
   if (work.messageId) {
     const current = await deps.store.getMessage(work.userId, work.batchId, work.messageId);
-    if (current?.handledManuallyUtc) return;
+    if (current?.handledManuallyUtc || current?.retryBatchId) return;
     const retryAt = Date.parse(current?.retryAfterUtc || "");
     if (retryAt > Date.now()) {
       await deps.enqueue(work, Math.ceil((retryAt - Date.now()) / 1000));

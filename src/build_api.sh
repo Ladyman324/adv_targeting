@@ -32,7 +32,8 @@ STAGE_DIR=""
 #   46: map-assets-filter-ui.test.js -- desktop and Field use the canonical CRD-keyed EIC asset book
 #   47: graph-mailbox-control.test.js -- shared leases, cooldowns, and transport outcomes
 #   48: email-review.test.js -- check-only reconciliation and explicit selected retries
-EXPECTED_API_TEST_FILE_COUNT=48
+#   49: email-retry-preparation.test.js -- unapproved replacement reviews and source guards
+EXPECTED_API_TEST_FILE_COUNT=49
 
 cleanup() {
   test -z "$TEMP_ROOT" && return

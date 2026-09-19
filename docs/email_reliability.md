@@ -5,6 +5,13 @@ check-only status refresh, selected retry, manual-handling controls, production
 timing, and remaining reliability gaps. Campaign recovery was enabled for all
 connected users on September 19, 2026; terminal failures were not reopened.
 
+Prepare selected for retry creates a separate unapproved review, not a send.
+Originals are retired with a conditional same-partition transaction; deterministic
+replacement IDs make interrupted requests resumable without duplicate reviews.
+Workers exclude retired sources and recheck original retry ancestry before creating
+or sending replacements. Unknown submissions and manual/bounce exclusions remain
+blocked. Deployment does not prepare or resend any existing failed batch.
+
 The Graph mail transport uses an Azure Table lease keyed by tenant and mailbox.
 Drafts, attachments, sends, reconciliation, and reply/bounce scans using that
 transport share one concurrent request and a mailbox-wide cooldown. Requests

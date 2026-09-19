@@ -37,7 +37,7 @@ function timestamp(value) {
 }
 
 function workFor(message, batch, nowMs, intervalSeconds) {
-  if (!message || message.handledManuallyUtc || TERMINAL_MESSAGES.has(message.state)) return null;
+  if (!message || message.handledManuallyUtc || message.retryBatchId || TERMINAL_MESSAGES.has(message.state)) return null;
   const approvedAt = timestamp(batch.approvedUtc);
   if (!approvedAt) return null;
   if (message.leaseUntilUtc && timestamp(message.leaseUntilUtc) > nowMs) return null;
@@ -120,7 +120,7 @@ async function run(context = {}, overrides = {}) {
         }
         for (let index = 0; !incomplete && index < batchMessages.length; index++) {
           const message = batchMessages[index];
-          if (message.handledManuallyUtc) continue;
+          if (message.handledManuallyUtc || message.retryBatchId) continue;
           if (message.plannedSendUtc || !["editing", "scheduled_pending"].includes(message.state)) continue;
           const assignment = assignments.get(message.id);
           if (!assignment) { incomplete = true; continue; }
@@ -183,7 +183,7 @@ async function run(context = {}, overrides = {}) {
         continue;
       }
       for (let message of batchMessages || await deps.store.listMessages(userId, batch.id)) {
-        if (message.handledManuallyUtc) continue;
+        if (message.handledManuallyUtc || message.retryBatchId) continue;
         summary.messages++;
         let promoted = capacityRepaired.has(message.id);
         if (batch.capacityPlanHash && !message.plannedSendUtc

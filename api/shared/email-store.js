@@ -160,6 +160,8 @@ function batchFromEntity(e) {
      */
     followUpDays: Number(e.followUpDays) || 0,
     parentBatchId: e.parentBatchId || "",
+    retrySourceBatchId: e.retrySourceBatchId || "",
+    retrySourceMessageIds: parse(e.retrySourceMessageIdsJson, []),
     followUpSentUtc: e.followUpSentUtc || "",
     followUpBatchId: e.followUpBatchId || "",
     copyInternalTo: e.copyInternalTo || "", senderMail: e.senderMail || "",
@@ -220,6 +222,8 @@ async function createBatch(who, batch) {
     // and made a derived follow-up look like another original campaign.
     followUpDays: Number(batch.followUpDays) || 0,
     parentBatchId: clean(batch.parentBatchId, 80),
+    retrySourceBatchId: clean(batch.retrySourceBatchId, 80),
+    retrySourceMessageIdsJson: json(batch.retrySourceMessageIds || []),
     followUpSentUtc: clean(batch.followUpSentUtc, 64),
     followUpBatchId: clean(batch.followUpBatchId, 80),
     copyInternalTo: clean(batch.copyInternalTo, 254), senderMail: clean(batch.senderMail, 254),
@@ -295,6 +299,9 @@ function messageFromEntity(e) {
     sendOutcome: e.sendOutcome || "", sendAttemptId: e.sendAttemptId || "",
     workerLeaseId: e.workerLeaseId || "",
     handledManuallyUtc: e.handledManuallyUtc || "", handledManuallyBy: e.handledManuallyBy || "",
+    retryBatchId: e.retryBatchId || "", retryPreparedUtc: e.retryPreparedUtc || "",
+    retryPreparedBy: e.retryPreparedBy || "", retryOriginalState: e.retryOriginalState || "",
+    retryOfBatchId: e.retryOfBatchId || "", retryOfMessageId: e.retryOfMessageId || "",
     outlookCheckStatus: e.outlookCheckStatus || "", outlookCheckedUtc: e.outlookCheckedUtc || "",
     draftCreationStartedUtc: e.draftCreationStartedUtc || "",
     reconcileStartedUtc: e.reconcileStartedUtc || "",
@@ -344,7 +351,9 @@ async function createMessage(userId, batchId, message) {
     bodyText: clean(message.bodyText, 50000), bodyHtml: clean(message.bodyHtml, 50000),
     signatureHtml: clean(message.signatureHtml, 50000),
     inlineImagesJson: json(message.inlineImages || []), state: message.state || "editing",
-    subjectOverridden: false, bodyOverridden: false, baseRevision: message.baseRevision || 1,
+    subjectOverridden: message.subjectOverridden === true, bodyOverridden: message.bodyOverridden === true, baseRevision: message.baseRevision || 1,
+    retryOfBatchId: clean(message.retryOfBatchId, 80), retryOfMessageId: clean(message.retryOfMessageId, 80),
+    followUpOfGraphId: clean(message.followUpOfGraphId, 2000),
     reviewed: false, validationJson: json(message.validation || { errors: [], warnings: [] }),
     attachmentsJson: json(message.attachments || []), attemptCount: 0,
     draftAttempts: 0, sendAttempts: 0, reconcileAttempts: 0, createdUtc: at, updatedUtc: at });
@@ -369,6 +378,7 @@ async function patchMessage(userId, batchId, messageId, patch, etag) {
     "graphRequestId", "draftCreatedUtc", "queuedUtc", "sendStartedUtc", "submittedUtc", "failureCode",
     "sendOutcome", "sendAttemptId", "draftCreationStartedUtc", "reconcileStartedUtc", "workerLeaseId",
     "handledManuallyUtc", "handledManuallyBy", "outlookCheckStatus", "outlookCheckedUtc",
+    "retryBatchId", "retryPreparedUtc", "retryPreparedBy", "retryOriginalState",
     "failureMessage", "bounceKind", "bounceAtUtc", "bounceReason", "retryAfterUtc", "leaseUntilUtc",
     /* THE THIRD TIME THIS WHITELIST ATE A FEATURE.
      *
@@ -411,7 +421,7 @@ async function patchMessage(userId, batchId, messageId, patch, etag) {
 async function claimMessage(userId, batchId, messageId, allowedStates, nextState,
                             leaseSeconds = 120, phase = "") {
   const m = await getMessage(userId, batchId, messageId);
-  if (!m || m.handledManuallyUtc || !allowedStates.includes(m.state)) return null;
+  if (!m || m.handledManuallyUtc || m.retryBatchId || !allowedStates.includes(m.state)) return null;
   if (m.leaseUntilUtc && new Date(m.leaseUntilUtc).getTime() > Date.now()) return null;
   const counter = phase ? `${phase}Attempts` : "";
   try {
@@ -427,6 +437,20 @@ async function claimMessage(userId, batchId, messageId, allowedStates, nextState
 
 async function deleteMessage(userId, batchId, messageId) {
   await (await table("messages")).deleteEntity(batchPartition(userId, batchId), messageId);
+}
+
+// Every original is in one EmailMessages partition. Retire the whole selection
+// atomically, conditional on the exact evidence the preparation request checked.
+async function reserveRetryMessages(userId, batchId, messages, retryBatchId) {
+  if (!messages.length || messages.length > 100 || messages.some(m => !m.etag || m.retryBatchId))
+    throw Object.assign(new Error("Retry selection changed; reload its status."), { statusCode: 409 });
+  const at = now();
+  await (await table("messages")).submitTransaction(messages.map(m => ["update", {
+    partitionKey: batchPartition(userId, batchId), rowKey: m.id,
+    state: "canceled", retryBatchId, retryOriginalState: m.state,
+    retryPreparedUtc: at, retryPreparedBy: userId,
+    leaseUntilUtc: "", workerLeaseId: "", retryAfterUtc: "", updatedUtc: at,
+  }, "Merge", { etag: m.etag }]));
 }
 
 async function listTemplates() {
@@ -1542,7 +1566,7 @@ module.exports = {
   passcodeAttempts, recordPasscodeFailure, clearPasscodeFailures,
   id, now, batchPartition, putConnection, getConnection, putAuthState, consumeAuthState,
   createBatch, getBatch, patchBatch, listBatches, createMessage, getMessage, listMessages,
-  patchMessage, deleteMessage, claimMessage, listTemplates, getTemplate, setTemplatePublished, listDocuments, getDocuments,
+  patchMessage, deleteMessage, reserveRetryMessages, claimMessage, listTemplates, getTemplate, setTemplatePublished, listDocuments, getDocuments,
   putDocument, updateDocument, documentPreview, deleteDocument, materialRoutes, putMaterialRoutes, putTemplate, deleteTemplate,
   putTemplateImage, deleteTemplateImage, templateImageBytes,
   getSuppression, suppressEmail, listConnections, sentByInternetId,

@@ -330,7 +330,7 @@ module.exports = async function (context, req) {
     if (op === "validate") return ok(context, await service.validateBatch(who, body.batchId));
     if (op === "remove_recipient") return ok(context, await service.removeRecipient(who, body));
     if (op === "approve") return ok(context, await service.approve(who, body), 202);
-    if (["pause", "cancel", "resume", "retry", "review_schedule", "check_status", "handled_manually", "retry_selected"].includes(op)) return ok(context, await service.control(who, { ...body, action: op }));
+    if (["pause", "cancel", "resume", "retry", "review_schedule", "check_status", "handled_manually", "retry_selected", "prepare_retry"].includes(op)) return ok(context, await service.control(who, { ...body, action: op }));
     if (op === "policy") {
       if (!isAdmin(who)) throw service.httpError(403, "EmailAdministrator role is required.");
       return ok(context, await store.setPolicy(who, body.killed, body.reason));

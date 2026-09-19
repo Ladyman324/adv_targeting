@@ -13,6 +13,7 @@ const fail = (message, code = "review_required", statusCode = 409) =>
 const leased = (m, now) => Date.parse(m.leaseUntilUtc || "") > now;
 
 function eligibility(batch, m, now = Date.now()) {
+  if (m.retryBatchId) return { reason: "Moved to a new retry review; open that batch." };
   if (m.handledManuallyUtc) return { reason: "Handled manually; excluded from sending." };
   if (m.bounceKind || m.bounceAtUtc) return { reason: "Bounced; not eligible for retry." };
   if (["sent", "submitted"].includes(m.state)) return { reason: "Already submitted or sent." };
@@ -41,6 +42,33 @@ function eligibility(batch, m, now = Date.now()) {
   if (!(checked <= now && checked >= now - CHECK_MAX_AGE)) return { reason: "Check Outlook status first (valid for 10 minutes)." };
   if (m.outlookCheckStatus !== "draft") return { reason: "No confirmed original Outlook draft. Missing is not proof of unsent." };
   return { phase, reason: phase === "draft" ? "Original draft found; retry preparation." : "Original draft found; safe send retry." };
+}
+
+function prepareEligibility(batch, m, now = Date.now()) {
+  if (m.retryBatchId) return { existingBatchId: m.retryBatchId, reason: "Already moved to a retry review. Open or finish that review." };
+  if (m.handledManuallyUtc || m.bounceKind || m.bounceAtUtc)
+    return { reason: "Manually handled or bounced; cannot prepare a replacement." };
+  if (!batch.approvedUtc || !["send", "drafts"].includes(batch.mode)
+      || !["partial_failure", "action_required", "completed", "drafts_ready"].includes(batch.status))
+    return { reason: "Wait for active work to finish before preparing failed messages." };
+  if (!["failed", "auth_required"].includes(m.state) || leased(m, now))
+    return { reason: "Only inactive, safely unsent failures can be prepared." };
+  if (["started", "accepted"].includes(m.sendOutcome) || m.submittedUtc
+      || ["send_outcome_unknown", "sent_item_not_confirmed", "reconciliation_failed", "reconciliation_pending"].includes(m.failureCode))
+    return { reason: "Send outcome uncertain or already submitted; do not prepare another send." };
+  const noSend = m.sendAttempts === 0 && !m.sendStartedUtc && !m.sendAttemptId;
+  const safeDraftFailure = ["draft_retryable_exhausted", "draft_permanent_failure", "auth_required_draft", "capacity_day_expired"].includes(m.failureCode) && noSend;
+  const safeSendFailure = ["send_retryable_exhausted", "auth_required_send", "capacity_day_expired"].includes(m.failureCode)
+    && ["rejected", "not_started"].includes(m.sendOutcome);
+  if (!safeDraftFailure && !safeSendFailure) return { reason: "Insufficient evidence that sending is safe to repeat." };
+  const checked = Date.parse(m.outlookCheckedUtc || "");
+  if (!(checked <= now && checked >= now - CHECK_MAX_AGE))
+    return { reason: "Check Outlook first; the check must be within 10 minutes." };
+  if (m.outlookCheckStatus !== "draft" && !(safeDraftFailure && m.outlookCheckStatus === "not_found"))
+    return { reason: "Outlook check is unavailable, inconclusive, or shows a send." };
+  return { ready: true, reason: safeDraftFailure && m.outlookCheckStatus === "not_found"
+    ? "Failed before any app send attempt; eligible for a new review after your confirmation."
+    : "Eligible for a new review and delivery plan; nothing sends during preparation." };
 }
 
 function dependencies(overrides) { return { store, auth, graph, suppress, now: () => Date.now(), ...overrides }; }
@@ -153,4 +181,4 @@ async function retry(who, input, overrides = {}) {
   return results;
 }
 
-module.exports = { check, markManual, retry, eligibility };
+module.exports = { check, markManual, retry, eligibility, prepareEligibility };

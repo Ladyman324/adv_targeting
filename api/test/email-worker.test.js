@@ -10,6 +10,36 @@ function routedDraft(id = "draft-1", extra = {}) {
     ccRecipients: [], bccRecipients: [], ...extra };
 }
 
+test("replacement draft and send stop when the original Outlook message was sent manually", async () => {
+  for (const kind of ["draft", "send"]) {
+    const f = fixture("send", kind === "draft" ? "draft_pending" : "send_scheduled");
+    Object.assign(f.message, { retryOfBatchId: "parent", retryOfMessageId: "source", graphMessageId: kind === "send" ? "new-draft" : "" });
+    const get = f.store.getMessage;
+    f.store.getMessage = async (u, b, id) => b === "parent" ? {
+      id: "source", state: "canceled", retryBatchId: "batch-1", graphMessageId: "old-draft", sendAttempts: 0,
+    } : get(u, b, id);
+    let creates = 0, sends = 0;
+    const graph = {
+      getMessage: async (_t, id) => id === "old-draft" ? { id, isDraft: false } : routedDraft("new-draft"),
+      findByAppId: async () => null,
+      createDraft: async () => { creates++; return routedDraft(); },
+      sendDraft: async () => { sends++; },
+    };
+    await worker.processWork({ kind, userId: "user-1", batchId: "batch-1", messageId: "message-1" }, { ...f, graph });
+    assert.equal(creates, 0); assert.equal(sends, 0);
+    assert.equal(f.message.state, "failed"); assert.equal(f.message.failureCode, "retry_original_not_draft");
+  }
+});
+
+test("queued hints cannot revive a source already moved to a retry review", async () => {
+  const f = fixture("send", "draft_pending");
+  f.message.retryBatchId = "replacement";
+  await worker.processWork({ kind: "draft", userId: "user-1", batchId: "batch-1", messageId: "message-1" }, {
+    ...f, auth: { tokenFor: async () => { throw new Error("must not reach Graph authentication"); } },
+  });
+  assert.equal(f.message.state, "draft_pending"); assert.equal(f.message.attemptCount, 0);
+});
+
 function fixture(mode, state) {
   let version = 1;
   const batch = { id: "batch-1", userId: "user-1", status: mode === "send" ? "sending" : "drafting",

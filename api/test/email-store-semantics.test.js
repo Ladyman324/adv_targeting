@@ -118,6 +118,36 @@ function conflict() {
   return err;
 }
 
+test("retry preparation persists ancestry and atomically retires all source rows", async () => {
+  const { store, restore } = loadStore();
+  try {
+    await store.createBatch({ id: "u1", name: "Rep" }, { id: "child", status: "building",
+      retrySourceBatchId: "parent", retrySourceMessageIds: ["m1", "m2"] });
+    const child = await store.getBatch("u1", "child");
+    assert.equal(child.retrySourceBatchId, "parent");
+    assert.deepEqual(child.retrySourceMessageIds, ["m1", "m2"]);
+    assert.equal(child.mode, ""); assert.equal(child.approvedUtc, "");
+    for (const id of ["m1", "m2"]) await store.createMessage("u1", "parent", { id, ordinal: 0, state: "failed" });
+    const stale = await store.listMessages("u1", "parent");
+    await store.patchMessage("u1", "parent", "m2", { outlookCheckStatus: "draft" }, stale[1].etag);
+    await assert.rejects(store.reserveRetryMessages("u1", "parent", stale, "child"), e => e.statusCode === 412);
+    assert.ok((await store.listMessages("u1", "parent")).every(m => !m.retryBatchId && m.state === "failed"));
+    await store.reserveRetryMessages("u1", "parent", await store.listMessages("u1", "parent"), "child");
+    const original = await store.getMessage("u1", "parent", "m1");
+    assert.equal(original.retryBatchId, "child"); assert.equal(original.retryOriginalState, "failed");
+    assert.equal(original.retryPreparedBy, "u1"); assert.ok(original.retryPreparedUtc);
+    assert.equal(original.state, "canceled");
+    await store.patchMessage("u1", "parent", "m1", { state: "draft_pending" }, original.etag);
+    assert.equal(await store.claimMessage("u1", "parent", "m1", ["draft_pending"], "draft_creating"), null);
+    await store.createMessage("u1", "child", { id: "new", ordinal: 0, retryOfBatchId: "parent",
+      retryOfMessageId: "m1", subjectOverridden: true, bodyOverridden: true, followUpOfGraphId: "sent-original" });
+    const copy = await store.getMessage("u1", "child", "new");
+    assert.equal(copy.retryOfBatchId, "parent"); assert.equal(copy.retryOfMessageId, "m1");
+    assert.equal(copy.subjectOverridden, true); assert.equal(copy.bodyOverridden, true);
+    assert.equal(copy.followUpOfGraphId, "sent-original"); assert.equal(copy.reviewed, false);
+  } finally { restore(); }
+});
+
 test("manual exclusion and Outlook-check evidence survive real store round trips", async () => {
   const { store, restore } = loadStore();
   try {

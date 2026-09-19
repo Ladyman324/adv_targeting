@@ -1878,6 +1878,7 @@ ${t.bodyText}`);
       <div class="email-review-actions">
         <button type="button" class="ask-btn" data-email="review-check" ${reviewBusy ? "disabled" : ""}>Check sent status</button>
         <button type="button" class="ask-btn" data-email="review-retry" ${reviewBusy ? "disabled" : ""}>Retry selected</button>
+        <button type="button" class="ask-btn" data-email="review-prepare" ${reviewBusy ? "disabled" : ""}>Prepare selected for retry</button>
         <button type="button" class="ask-btn" data-email="review-manual" ${reviewBusy ? "disabled" : ""}>Already sent manually</button>
         <button type="button" class="ask-btn" data-email="review-reload" ${reviewBusy ? "disabled" : ""}>Reload status</button>
         <button type="button" class="ask-btn" data-email="details" ${reviewBusy ? "disabled" : ""}>Back to messages</button>
@@ -1891,9 +1892,11 @@ ${t.bodyText}`);
             ${m.handledManuallyUtc ? `<small>Recorded ${esc(new Date(m.handledManuallyUtc).toLocaleString())}; not verified delivery</small>` : ""}
             ${m.bounceKind ? `<small class="bad">Bounced: ${esc(m.bounceKind)}</small>` : ""}</td>
           <td>${esc(statusText[m.outlookCheckStatus] || "Not checked")}${m.outlookCheckedUtc ? `<small>${esc(new Date(m.outlookCheckedUtc).toLocaleString())}</small>` : ""}</td>
-          <td>${esc(m.retryEligibility?.reason || "Check status before retrying.")}</td></tr>`).join("")}
+          <td>${esc(m.retryEligibility?.reason || "Check status before retrying.")}
+            <small>New review: ${esc(m.prepareRetryEligibility?.reason || "Check Outlook first.")}</small>
+            ${m.retryBatchId ? `<button type="button" class="ask-btn" data-email="open-batch" data-id="${esc(m.retryBatchId)}">Open retry review</button>` : ""}</td></tr>`).join("")}
       </tbody></table></div>
-      <p>For an expired reserved sending day, create a new reviewed batch and delivery plan. Missing or uncertain messages are never unlocked merely because Outlook did not find them.</p>
+      <p>For an expired sending day, use Prepare selected for retry. It checks Outlook and opens an unapproved review with a new delivery plan; it sends nothing. Original messages are retired from this batch. Missing alone is not proof of unsent; uncertain sends remain blocked.</p>
     </section>`;
   }
 
@@ -1902,6 +1905,7 @@ ${t.bodyText}`);
     const ids = [...reviewSelected].filter(id => detail.messages.some(m => m.id === id));
     if (action !== "review-reload" && (!ids.length || ids.length > 100))
       return reviewView("Select between 1 and 100 messages.", true);
+    if (action === "review-prepare") return prepareSelectedRetry(detail.batch.id, ids);
     if (action === "review-retry") {
       const blocked = detail.messages.filter(m => ids.includes(m.id) && !m.retryEligibility?.phase);
       if (blocked.length) return reviewView("Some selected messages are not eligible. Check Outlook and select only eligible failures.", true);
@@ -1944,6 +1948,26 @@ ${t.bodyText}`);
     finally { reviewBusy = false; reviewView(report, bad); }
   }
 
+  async function prepareSelectedRetry(batchId, ids) {
+    if (reviewBusy || !ids?.length) return;
+    if (!confirm(`Prepare a new review for these ${ids.length} messages?\n\nI confirm I have NOT already sent them outside the app.\n\nNothing will send now. Retries of these originals will be disabled. Review the replacement messages and approve a fresh delivery plan before sending.`)) return;
+    reviewBusy = true;
+    try {
+      detail = await api(`batch&id=${encodeURIComponent(batchId)}`, null, "GET");
+      for (let i = 0; i < ids.length; i++) {
+        reviewView(`Checking Outlook before preparation: ${i + 1} of ${ids.length}...`);
+        detail = await api("check_status", { batchId, messageId: ids[i] });
+      }
+      reviewView("Preparing a new, unapproved review. Nothing is being sent...");
+      const prepared = await api("prepare_retry", { batchId, messageIds: ids, confirmNotSentElsewhere: true });
+      reviewSelected.clear();
+      await openBatchById(prepared.batch.id, true);
+    } catch (e) {
+      reviewBusy = false;
+      reviewView(e.message + " Nothing was authorized to send by this preparation request. Reload status or repeat the same selection to reopen or finish its review.", true);
+    } finally { reviewBusy = false; }
+  }
+
   // Terminal states used to leave the full editor on screen with a green label
   // buried in the recipient list, so a finished batch looked identical to a
   // working one. Show what happened, and what to do next, instead.
@@ -1955,7 +1979,8 @@ ${t.bodyText}`);
     const n = (k) => counts[k] || 0;
     const ready = n("draft_ready"), sent = n("sent") + n("submitted");
     const failed = n("failed"), manual = detail.messages.filter(m => m.handledManuallyUtc).length,
-      canceled = n("canceled") - manual;
+      moved = detail.messages.filter(m => m.retryBatchId && !m.handledManuallyUtc && m.state === "canceled").length,
+      canceled = n("canceled") - manual - moved;
     const headline = { drafts_ready: "Drafts are in your Outlook",
       completed: "Batch complete", partial_failure: "Completed, with failures",
       canceled: "Batch canceled" }[b.status] || stateLabel(b.status);
@@ -1964,6 +1989,7 @@ ${t.bodyText}`);
       sent ? [`${sent} sent`, "good"] : null,
       failed ? [`${failed} failed`, "bad"] : null,
       manual ? [`${manual} handled manually (not verified delivery)`, ""] : null,
+      moved ? [`${moved} moved to a new retry review`, ""] : null,
       canceled ? [`${canceled} canceled`, ""] : null,
     ].filter(Boolean);
     document.getElementById("emailTitle").textContent = b.name || "Email batch";
@@ -2338,6 +2364,12 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
 
   function composerView() {
     reviewOpen = false;
+    if (detail?.batch?.status === "building" && detail.batch.retrySourceBatchId) {
+      clearTimeout(pollTimer); clearInterval(tickTimer);
+      document.getElementById("emailTitle").textContent = "Retry preparation incomplete";
+      document.getElementById("emailBody").innerHTML = '<p>No send has been authorized. Finish preparation to review the messages and choose a new delivery plan.</p><button type="button" class="ask-btn" data-email="review-prepare-finish">Finish retry preparation</button>';
+      return;
+    }
     if (!detail || !detail.messages || !detail.messages.length) return;
     // The countdown has to stop here too. Cancelling inside the send window
     // ended the batch but left the ticker running, so the screen went on
@@ -2872,7 +2904,8 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
     }
     if (reviewBusy) return;
     if (action === "review-safety" || action === "retry") { reviewSelected.clear(); reviewView(); return; }
-    if (["review-check", "review-retry", "review-manual", "review-reload"].includes(action)) return reviewAction(action);
+    if (["review-check", "review-retry", "review-prepare", "review-manual", "review-reload"].includes(action)) return reviewAction(action);
+    if (action === "review-prepare-finish") return prepareSelectedRetry(detail.batch.retrySourceBatchId, detail.batch.retrySourceMessageIds);
     if (action === "details") { forceDetail = true; composerView(); return; }
     // ---- recipient domain grouping ----
     // Every one of these re-renders the setup screen, which would otherwise

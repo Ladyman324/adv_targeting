@@ -5,6 +5,7 @@ const path = require("node:path");
 const assert = require("node:assert/strict");
 const root = path.resolve(__dirname, "..");
 const batchId = "11111111-1111-4111-8111-111111111111";
+const childId = "22222222-2222-4222-8222-222222222222";
 (async () => {
   const browser = await chromium.launch({ headless: true, executablePath: process.env.CHROME_EXECUTABLE });
   try {
@@ -14,6 +15,7 @@ const batchId = "11111111-1111-4111-8111-111111111111";
       const data = { batch: { id: batchId, name: "Local safety test", status: "partial_failure", mode: "send", recipientCount: 2 },
         messages: [1, 2].map(i => ({ id: "m" + i, recipientName: "Example " + i, recipientEmail: `example${i}@example.test`,
           state: "failed", retryEligibility: { reason: "Check Outlook status first." } })) };
+      let child;
       page.on("pageerror", e => errors.push(e.message));
       await page.route("**/*", async route => {
         const url = new URL(route.request().url());
@@ -25,7 +27,22 @@ const batchId = "11111111-1111-4111-8111-111111111111";
         if (url.pathname !== "/api/email") throw new Error("Unexpected path " + url.pathname);
         const op = url.searchParams.get("op"), body = route.request().postDataJSON();
         requests.push({ op, body });
-        if (op === "catalog") return route.fulfill({ json: { templates: [], documents: [], config: {} } });
+        if (op === "catalog") return route.fulfill({ json: { templates: [], documents: [], config: {},
+          policy: { directSendAvailable: true }, limits: {}, connection: { connected: true, profile: {} } } });
+        if (op === "batch" && url.searchParams.get("id") === childId) return route.fulfill({ json: child });
+        if (op === "update_message" && body.batchId === childId) {
+          child.messages[0].reviewed = true; return route.fulfill({ json: child });
+        }
+        if (op === "prepare_retry") {
+          assert.equal(body.confirmNotSentElsewhere, true);
+          assert.deepEqual(body.messageIds, ["m1"]);
+          child = { batch: { id: childId, name: "Retry review", status: "editing", mode: "", recipientCount: 1,
+            attachmentIds: [], warningMessage: "Prepared for retry. Nothing has been sent." },
+            messages: [{ id: "new1", state: "editing", recipientEmail: "example1@example.test",
+              recipientName: "Example 1", subject: "Preserved subject", bodyText: "Preserved wording",
+              bodyHtml: "<p>Preserved wording</p>", attachments: [], validation: { errors: [], warnings: [] } }] };
+          return route.fulfill({ json: child });
+        }
         if (op === "check_status") {
           const m = data.messages.find(m => m.id === body.messageId);
           Object.assign(m, { outlookCheckStatus: "draft", outlookCheckedUtc: new Date().toISOString(), retryEligibility: { phase: "draft", reason: "Original draft found; retry preparation." } });
@@ -68,7 +85,22 @@ const batchId = "11111111-1111-4111-8111-111111111111";
       assert.deepEqual(errors, []);
       const overflow = await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth);
       assert.equal(overflow, false, "table scroll must not overflow the page");
-      console.log(`PASS ${viewport.width}px: selection, check-only, confirmation, selective retry, manual handling, layout`);
+      await page.locator('input[value="m2"]').uncheck();
+      await page.locator('input[value="m1"]').check();
+      page.once("dialog", dialog => dialog.dismiss());
+      await page.getByRole("button", { name: "Prepare selected for retry", exact: true }).click();
+      assert.equal(requests.filter(r => r.op === "prepare_retry").length, 0);
+      page.once("dialog", dialog => dialog.accept());
+      await page.getByRole("button", { name: "Prepare selected for retry", exact: true }).click();
+      await page.locator(".email-rendered").filter({ hasText: "Preserved wording" }).waitFor({ timeout: 10000 })
+        .catch(async error => { console.error(await page.locator("body").innerText(), errors, requests.map(r => r.op)); throw error; });
+      assert.equal(requests.filter(r => r.op === "prepare_retry").length, 1);
+      assert.equal(requests.filter(r => r.op === "approve").length, 0);
+      assert.equal(requests.filter(r => r.op === "retry_selected").length, 1, "preparation must not queue retry");
+      assert.ok(requests.some(r => r.op === "capacity_plan" && r.body.batchId === childId));
+      assert.deepEqual(errors, []);
+      assert.equal(await page.evaluate(() => new URL(location.href).searchParams.get("emailBatch")), childId);
+      console.log(`PASS ${viewport.width}px: selection, check-only, confirmation, selective retry, manual handling, prepare unapproved review, layout`);
       await context.close();
     }
   } finally { await browser.close(); }
