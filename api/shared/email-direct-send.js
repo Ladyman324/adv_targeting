@@ -439,14 +439,15 @@ async function processSend(operation, deps) {
       }, new Date(Date.now() + 5000).toISOString(), submitting.etag);
       await enqueueOperation(deps, "direct_reconcile", next, 5);
     } catch (err) {
-      const ambiguous = err && (err.ambiguous || Number(err.statusCode) >= 500 || !err.statusCode);
+      const safeRetry = err && (err.safeToRetry === true || Number(err.statusCode) === 429);
+      const ambiguous = !safeRetry && err && (err.ambiguous || Number(err.statusCode) >= 500 || !err.statusCode);
       if (ambiguous) {
         const next = await deps.opsStore.scheduleOperation(submitting.userId, submitting.operationId, {
           state: "ambiguous", lastErrorCode: err.graphCode || "send_ambiguous",
           graphRequestId: err.requestId || "",
         }, new Date(Date.now() + 10000).toISOString(), submitting.etag);
         await enqueueOperation(deps, "direct_reconcile", next, 10);
-      } else if (Number(err.statusCode) === 429) {
+      } else if (safeRetry) {
         const seconds = Math.max(5, Number(err.retryAfter) || RETRY_SECONDS);
         const next = await deps.opsStore.scheduleOperation(submitting.userId, submitting.operationId, {
           state: "prepared", lastErrorCode: err.graphCode || "throttled",

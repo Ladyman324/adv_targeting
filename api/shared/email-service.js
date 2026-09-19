@@ -1605,6 +1605,7 @@ async function control(who, input) {
       ["send_retryable_exhausted", "send"],
     ]);
     const retryPhase = (message) => {
+      if (["started", "accepted"].includes(message.sendOutcome)) return "";
       if (message.state === "auth_required") {
         if (message.failureCode === "auth_required_draft") return "draft";
         if (message.failureCode === "auth_required_send") return "send";

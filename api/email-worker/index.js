@@ -114,6 +114,7 @@ async function refreshBatch(userId, batchId, deps) {
 }
 
 const RETRY_CEILING = 6;
+const RECONCILE_WINDOW_MS = 24 * 60 * 60 * 1000;
 function terminalFailureCode(err, phase, retryable) {
   if (phase === "send" && err.ambiguous && err.safeToRetry !== true)
     return "send_outcome_unknown";
@@ -172,7 +173,9 @@ async function routingView(found, token, deps) {
 }
 
 async function failOrRetry(work, claimed, err, phase, deps) {
-  if (["graph_not_connected", "graph_reconnect_required"].includes(err.code)) {
+  if (!claimed || ["sent", "failed", "canceled"].includes(claimed.state)) return;
+  if (err.code === "worker_lease_lost" || (deps.workerLeaseId && claimed.workerLeaseId !== deps.workerLeaseId)) return;
+  if (["graph_not_connected", "graph_reconnect_required"].includes(err.code) || err.statusCode === 401) {
     await deps.store.patchMessage(work.userId, work.batchId, work.messageId, { state: "auth_required",
       failureCode: `auth_required_${phase}`, failureMessage: err.message, leaseUntilUtc: "" }, claimed.etag);
     await deps.store.audit(work.userId, work.batchId, "microsoft_reconnect_required", { messageId: work.messageId, phase });
@@ -180,19 +183,25 @@ async function failOrRetry(work, claimed, err, phase, deps) {
   }
   const retryable = err.safeToRetry === true || err.statusCode === 429
     || err.ambiguous || (err.statusCode >= 500);
+  const uncertainSend = phase === "send"
+    && (claimed.sendOutcome === "started" || claimed.sendOutcome === "accepted");
   // This phase's own budget. Sharing one counter meant several draft retries
   // could leave the first send attempt with no allowance at all -- the message
   // failed permanently on a transient error it had never actually hit while
   // sending.
   const tries = Number(claimed[`${phase}Attempts`]) || 0;
-  if (retryable && tries < RETRY_CEILING) {
-    const seconds = Math.max(Number(err.retryAfter) || 0, err.ambiguous ? 120 : Math.min(300, 2 ** tries * 5));
+  if (uncertainSend || (retryable && (err.deferred || err.statusCode === 429 || tries < RETRY_CEILING))) {
+    const seconds = Math.max(Number(err.retryAfter) || 0, err.ambiguous ? 120 : Math.min(300, 2 ** tries * 5))
+      + Math.floor(Math.random() * 4);
     await deps.store.patchMessage(work.userId, work.batchId, work.messageId, {
-      state: `${phase}_ambiguous`, failureCode: err.graphCode || (err.statusCode === 429 ? "throttled" : "ambiguous"),
+      state: phase === "send" && !uncertainSend ? "send_scheduled" : `${phase}_ambiguous`,
+      failureCode: err.graphCode || err.code || (err.statusCode === 429 ? "throttled" : "retry_pending"),
       failureMessage: err.message, graphRequestId: err.requestId || "", leaseUntilUtc: "",
       retryAfterUtc: new Date(Date.now() + seconds * 1000).toISOString(),
+      ...(uncertainSend ? { reconcileStartedUtc: claimed.reconcileStartedUtc || new Date().toISOString() } : {}),
+      ...(err.deferred || err.statusCode === 429 ? { [`${phase}Attempts`]: Math.max(0, tries - 1) } : {}),
     }, claimed.etag);
-    await deps.enqueue({ ...work, kind: phase === "draft" ? "draft" : "reconcile" }, seconds);
+    await deps.enqueue({ ...work, kind: phase === "draft" ? "draft" : uncertainSend ? "reconcile" : "send" }, seconds);
   } else {
     const terminalCode = terminalFailureCode(err, phase, retryable);
     await deps.store.patchMessage(work.userId, work.batchId, work.messageId, { state: "failed",
@@ -200,9 +209,44 @@ async function failOrRetry(work, claimed, err, phase, deps) {
       graphRequestId: err.requestId || "", leaseUntilUtc: "" }, claimed.etag);
   }
   await deps.store.audit(work.userId, work.batchId, `${phase}_failed`, { messageId: work.messageId,
-    retryable, safeToRetry: retryable
-      && terminalFailureCode(err, phase, retryable) !== "send_outcome_unknown",
-    code: err.graphCode || "", requestId: err.requestId || "" });
+    retryable, safeToRetry: retryable && !uncertainSend,
+    code: err.graphCode || err.code || "", requestId: err.requestId || "",
+    statusCode: Number(err.statusCode) || 0, method: err.method || "",
+    operation: err.operation || "", clientRequestId: err.clientRequestId || "",
+    durationMs: Number(err.durationMs) || 0, retryAfter: Number(err.retryAfter) || 0,
+    sendOutcome: claimed.sendOutcome || "not_started" });
+}
+
+function leasedDependencies(work, claimed, deps) {
+  if (!claimed.workerLeaseId) return deps; // Older test/adapter stores, never the Azure store.
+  const workerLeaseId = claimed.workerLeaseId;
+  return { ...deps, workerLeaseId, graph: new Proxy(deps.graph, {
+    get(target, name) {
+      const action = target[name];
+      if (typeof action !== "function") return action;
+      return async (...args) => {
+        const renew = async () => {
+        const current = await deps.store.getMessage(work.userId, work.batchId, work.messageId);
+        if (!current || current.workerLeaseId !== workerLeaseId
+            || Date.parse(current.leaseUntilUtc || "") <= Date.now())
+          throw Object.assign(new Error("Another worker owns this message."), { code: "worker_lease_lost" });
+        let renewed;
+        try {
+          renewed = await deps.store.patchMessage(work.userId, work.batchId, work.messageId,
+            { leaseUntilUtc: new Date(Date.now() + 300000).toISOString() }, current.etag);
+        } catch (error) {
+          if (error.statusCode === 412) error.code = "worker_lease_lost";
+          throw error;
+        }
+        Object.assign(claimed, renewed);
+        };
+        await renew();
+        return typeof target.withLease === "function"
+          ? target.withLease(renew, () => action.apply(target, args))
+          : action.apply(target, args);
+      };
+    },
+  }) };
 }
 
 function safeHold(err) {
@@ -448,7 +492,7 @@ async function notifyScheduleHold(work, deps) {
       }) : await deps.graph.findByAppId(token.accessToken, notificationId);
     if (!remote && mayCreate) {
       const link = scheduleLink(batch.id);
-      remote = await deps.graph.createDraft(token.accessToken, { id: notificationId,
+      try { remote = await deps.graph.createDraft(token.accessToken, { id: notificationId,
         subject: "Scheduled email batch needs review", recipientEmail: owner,
         recipientName: batch.userName || "", signatureHtml: "",
         bodyHtml: `<p>Your scheduled email batch is on hold. No advisor emails were started.</p>`
@@ -456,7 +500,17 @@ async function notifyScheduleHold(work, deps) {
           + (batch.scheduleLastErrorId
             ? `<p>Support reference: <code>${batch.scheduleLastErrorId}</code></p>` : "")
           + (link ? `<p><a href="${link}">Review the held batch</a></p>` : ""),
-      });
+      }); } catch (error) {
+        if (error.safeToRetry || error.statusCode === 429) {
+          const current = await deps.store.getBatch(work.userId, work.batchId);
+          if (current && schedule.currentRevision(current, work)) {
+            await deps.store.patchBatch(work.userId, work.batchId,
+              { scheduleNotificationState: "pending" }, current.etag);
+            await deps.enqueue({ ...work, kind: "schedule_notify" }, Math.max(error.retryAfter || 0, 30));
+          }
+        }
+        throw error;
+      }
       const latest = await deps.store.getBatch(work.userId, work.batchId);
       if (!latest || !schedule.currentRevision(latest, work)) return;
       batch = await deps.store.patchBatch(work.userId, work.batchId, {
@@ -505,8 +559,15 @@ async function notifyScheduleHold(work, deps) {
       if (after && schedule.currentRevision(after, work)) await deps.store.patchBatch(work.userId, work.batchId, {
         scheduleNotificationState: "submitted", scheduleNotificationSubmittedUtc: new Date().toISOString(),
       }, after.etag);
-    } catch {
+    } catch (error) {
       const after = await deps.store.getBatch(work.userId, work.batchId);
+      if (after && schedule.currentRevision(after, work) && (error.safeToRetry || error.statusCode === 429)) {
+        await deps.store.patchBatch(work.userId, work.batchId, {
+          scheduleNotificationState: "draft_ready", scheduleNotificationPhase: "create",
+        }, after.etag);
+        await deps.enqueue({ ...work, kind: "schedule_notify" }, Math.max(error.retryAfter || 0, 30));
+        return;
+      }
       if (after && schedule.currentRevision(after, work)) await deps.store.patchBatch(work.userId, work.batchId,
         { scheduleNotificationState: "ambiguous" }, after.etag).catch(() => {});
     }
@@ -523,6 +584,7 @@ async function draft(work, deps) {
   const claimed = await deps.store.claimMessage(work.userId, work.batchId, work.messageId,
     ["draft_pending", "draft_ambiguous", "draft_creating"], "draft_creating", 300, "draft");
   if (!claimed) return;
+  deps = leasedDependencies(work, claimed, deps);
   try {
     const token = await deps.auth.tokenFor(work.userId);
     if (String(token.mailboxId).toLowerCase() !== String(batch.graphMailboxId).toLowerCase())
@@ -583,18 +645,47 @@ async function draft(work, deps) {
         claimed.bodyHtml + (claimed.signatureHtml || ""));
       found = await deps.graph.getMessage(token.accessToken, draft.id);
     }
-    if (!found) found = await deps.graph.createDraft(token.accessToken,
-      { ...claimed, ...copies });
+    if (!found) {
+      if (claimed.draftCreationStartedUtc) {
+        const age = Date.now() - Date.parse(claimed.draftCreationStartedUtc);
+        throw new graph.GraphError("Checking whether Outlook created the draft; no duplicate has been created.", {
+          code: "draft_creation_unconfirmed", deferred: age < RECONCILE_WINDOW_MS,
+          safeToRetry: age < RECONCILE_WINDOW_MS, retryAfter: 120 });
+      }
+      const beforeCreate = await deps.store.getMessage(work.userId, work.batchId, work.messageId);
+      await deps.store.patchMessage(work.userId, work.batchId, work.messageId, {
+        draftCreationStartedUtc: new Date().toISOString(),
+      }, beforeCreate.etag);
+      try { found = await deps.graph.createDraft(token.accessToken, { ...claimed, ...copies }); }
+      catch (error) {
+        if (error.safeToRetry || (error.statusCode >= 400 && error.statusCode < 500)) {
+          const current = await deps.store.getMessage(work.userId, work.batchId, work.messageId);
+          await deps.store.patchMessage(work.userId, work.batchId, work.messageId,
+            { draftCreationStartedUtc: "" }, current.etag);
+        }
+        throw error;
+      }
+    }
+    if (found.isDraft === false) {
+      const current = await deps.store.getMessage(work.userId, work.batchId, work.messageId);
+      await deps.store.patchMessage(work.userId, work.batchId, work.messageId, {
+        state: "sent", graphMessageId: found.id, submittedUtc: found.sentDateTime || new Date().toISOString(),
+        leaseUntilUtc: "", failureCode: "", failureMessage: "",
+      }, current.etag);
+      await refreshBatch(work.userId, work.batchId, deps);
+      return;
+    }
     const routed = await routingView(found, token.accessToken, deps);
     assertRouting(routed, claimed.recipientEmail, copies);
     await deps.store.patchMessage(work.userId, work.batchId, work.messageId, {
       graphMessageId: found.id, graphInternetMessageId: found.internetMessageId || "",
+      draftCreationStartedUtc: "",
       // Captured at draft time because it is the only moment we are certain to
       // hold it. It is what a later reply is matched back to; a message stored
       // without one can never be tied to its answer.
       graphConversationId: found.conversationId || "",
       graphRequestId: found.requestId || "", draftCreatedUtc: claimed.draftCreatedUtc || new Date().toISOString(),
-      leaseUntilUtc: "",
+      leaseUntilUtc: new Date(Date.now() + 300000).toISOString(),
     }, (await deps.store.getMessage(work.userId, work.batchId, work.messageId)).etag);
 
     await deps.graph.attachDocuments(token.accessToken, found.id, claimed.attachments);
@@ -631,12 +722,26 @@ async function send(work, deps) {
   if (batch.status === "canceled") return;
   if (Number(work.scheduleRevision) > 0 && (!schedule.currentRevision(batch, work) || batch.scheduleState !== "passed")) return;
   const pending = await deps.store.getMessage(work.userId, work.batchId, work.messageId);
+  if (!pending || !["send_scheduled", "sending", "submitted", "send_ambiguous"].includes(pending.state)) return;
+  if (pending && (["started", "accepted"].includes(pending.sendOutcome)
+      || ["submitted", "send_ambiguous"].includes(pending.state)
+      || (pending.state === "sending" && !pending.sendOutcome))) {
+    if (Date.parse(pending.leaseUntilUtc || "") > Date.now()) return;
+    if (!["submitted", "send_ambiguous"].includes(pending.state)) {
+      await deps.store.patchMessage(work.userId, work.batchId, work.messageId, {
+        state: "send_ambiguous", leaseUntilUtc: "",
+        reconcileStartedUtc: pending.reconcileStartedUtc || new Date().toISOString(),
+      }, pending.etag);
+    }
+    return reconcile({ ...work, kind: "reconcile" }, deps);
+  }
   if (await waitForPlannedTime(work, batch, pending, deps)) return;
   const due = Date.parse(schedule.messageDueUtc(batch, pending, deps.core.config()));
   if (due > Date.now()) { await deps.enqueue(work, Math.ceil((due - Date.now()) / 1000)); return; }
   const claimed = await deps.store.claimMessage(work.userId, work.batchId, work.messageId,
     ["send_scheduled", "send_ambiguous", "sending"], "sending", 180, "send");
   if (!claimed) return;
+  deps = leasedDependencies(work, claimed, deps);
   try {
     const token = await deps.auth.tokenFor(work.userId);
     if (String(token.mailboxId).toLowerCase() !== String(batch.graphMailboxId).toLowerCase())
@@ -661,13 +766,6 @@ async function send(work, deps) {
         ...(claimed.graphConversationId ? {} : { graphConversationId: remote.conversationId || "" }),
         failureCode: "", failureMessage: "" }, claimed.etag);
     } else {
-      const delay = await deps.mailboxGate.acquire(work.userId, deps.core.config().mailboxIntervalSeconds);
-      if (delay) {
-        await deps.store.patchMessage(work.userId, work.batchId, work.messageId,
-          { state: "send_scheduled", leaseUntilUtc: "" }, claimed.etag);
-        await deps.enqueue({ ...work, kind: "send" }, delay);
-        return;
-      }
       const latestBatch = await deps.store.getBatch(work.userId, work.batchId);
       if (latestBatch.status === "canceled") {
         await deps.store.patchMessage(work.userId, work.batchId, work.messageId,
@@ -746,8 +844,24 @@ async function send(work, deps) {
         return;
       }
 
-      const result = await deps.graph.sendDraft(token.accessToken, remote.id);
+      Object.assign(claimed, await deps.store.patchMessage(work.userId, work.batchId, work.messageId, {
+        sendOutcome: "started", sendStartedUtc: new Date().toISOString(),
+        sendAttemptId: require("node:crypto").randomUUID(),
+        reconcileStartedUtc: new Date().toISOString(),
+      }, claimed.etag));
+      let result;
+      try { result = await deps.graph.sendDraft(token.accessToken, remote.id); }
+      catch (error) {
+        // Only a definite rejection/non-dispatch may clear the durable send intent.
+        // Timeouts and server errors remain uncertain, even if the worker restarts.
+        if (error.safeToRetry || (error.statusCode >= 400 && error.statusCode < 500)) {
+          Object.assign(claimed, await deps.store.patchMessage(work.userId, work.batchId, work.messageId,
+            { sendOutcome: "rejected", sendStartedUtc: "", reconcileStartedUtc: "" }, claimed.etag));
+        } else error.ambiguous = true;
+        throw error;
+      }
       await deps.store.patchMessage(work.userId, work.batchId, work.messageId, { state: "submitted",
+        sendOutcome: "accepted",
         sendStartedUtc: claimed.sendStartedUtc || new Date().toISOString(), submittedUtc: new Date().toISOString(),
         graphRequestId: result.requestId || "", leaseUntilUtc: "", failureCode: "", failureMessage: "" }, claimed.etag);
       await deps.enqueue({ ...work, kind: "reconcile" }, 30);
@@ -762,6 +876,14 @@ async function reconcile(work, deps) {
   const message = await deps.store.claimMessage(work.userId, work.batchId, work.messageId,
     ["submitted", "send_ambiguous"], initial.state, 90, "reconcile");
   if (!message) return;
+  deps = leasedDependencies(work, message, deps);
+  const started = Date.parse(message.reconcileStartedUtc || message.submittedUtc || message.sendStartedUtc || "") || Date.now();
+  if (!message.reconcileStartedUtc) {
+    const saved = await deps.store.patchMessage(work.userId, work.batchId, work.messageId,
+      { reconcileStartedUtc: new Date(started).toISOString() }, message.etag);
+    Object.assign(message, saved);
+  }
+  const mayContinue = Date.now() - started < RECONCILE_WINDOW_MS;
   const batch = await deps.store.getBatch(work.userId, work.batchId);
   if (!batch) return;
   try {
@@ -776,9 +898,13 @@ async function reconcile(work, deps) {
         leaseUntilUtc: "", failureCode: "", failureMessage: "" }, message.etag);
       await deps.store.audit(work.userId, work.batchId, "send_reconciled", { messageId: message.id,
         status: "no_known_failure" });
-    } else if (message.reconcileAttempts < RETRY_CEILING) {
-      await deps.store.patchMessage(work.userId, work.batchId, work.messageId, { leaseUntilUtc: "" }, message.etag);
-      await deps.enqueue(work, 60);
+    } else if (mayContinue) {
+      const delay = Math.min(900, 30 * 2 ** Math.min(message.reconcileAttempts, 5));
+      await deps.store.patchMessage(work.userId, work.batchId, work.messageId, {
+        leaseUntilUtc: "", retryAfterUtc: new Date(Date.now() + delay * 1000).toISOString(),
+        failureCode: "reconciliation_pending", failureMessage: "Checking whether Outlook sent this message.",
+      }, message.etag);
+      await deps.enqueue(work, delay);
     } else {
       const unknown = message.state === "send_ambiguous";
       await deps.store.patchMessage(work.userId, work.batchId, work.messageId, { state: "failed",
@@ -789,11 +915,16 @@ async function reconcile(work, deps) {
         message.etag);
     }
   } catch (err) {
-    if (message.reconcileAttempts < RETRY_CEILING) {
+    if (err.code === "worker_lease_lost") return;
+    if (mayContinue) {
       const latest = await deps.store.getMessage(work.userId, work.batchId, work.messageId);
+      if (!latest || (deps.workerLeaseId && latest.workerLeaseId !== deps.workerLeaseId)
+          || !["submitted", "send_ambiguous"].includes(latest.state)) return;
+      const delay = Math.max(err.retryAfter || 0, Math.min(900, 30 * 2 ** Math.min(message.reconcileAttempts, 5)));
       await deps.store.patchMessage(work.userId, work.batchId, work.messageId, { leaseUntilUtc: "",
+        retryAfterUtc: new Date(Date.now() + delay * 1000).toISOString(),
         failureCode: "reconciliation_pending", failureMessage: err.message || "Sent Items reconciliation is pending." }, latest.etag);
-      await deps.enqueue(work, Math.max(err.retryAfter || 0, 60));
+      await deps.enqueue(work, delay);
     } else await deps.store.patchMessage(work.userId, work.batchId, work.messageId, { state: "failed",
       leaseUntilUtc: "", failureCode: "reconciliation_failed", failureMessage: "Could not reconcile the submitted message; it was not resubmitted." }, message.etag);
   }
@@ -806,6 +937,14 @@ async function processWork(raw, overrides = {}) {
     recipientRegistry, service, ...overrides };
   if (!work.userId || !work.batchId || (!work.messageId && !["preflight", "schedule_notify"].includes(work.kind)))
     throw new Error("Incomplete email queue message.");
+  if (work.messageId) {
+    const current = await deps.store.getMessage(work.userId, work.batchId, work.messageId);
+    const retryAt = Date.parse(current?.retryAfterUtc || "");
+    if (retryAt > Date.now()) {
+      await deps.enqueue(work, Math.ceil((retryAt - Date.now()) / 1000));
+      return;
+    }
+  }
   if (work.kind === "preflight") return preflight(work, deps);
   if (work.kind === "schedule_notify") return notifyScheduleHold(work, deps);
   if (work.kind === "draft") return draft(work, deps);

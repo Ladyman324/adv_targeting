@@ -108,6 +108,15 @@ test("Graph success becomes submitted, not sent, until a sent item is observed",
   assert.equal(direct.publicStatus(h.current()).status, "confirming");
 }));
 
+test("shared mailbox contention safely requeues a direct send without declaring uncertainty", () => enabled(async () => {
+  const h = harness({}, { sendDraft: async () => {
+    throw Object.assign(new Error("Mailbox busy"), { deferred: true, safeToRetry: true, retryAfter: 10 });
+  } });
+  await direct.processWork({ v: 1, kind: "direct_send", userId: "u1", operationId: OP }, h.deps);
+  assert.equal(h.current().state, "prepared");
+  assert.deepEqual(h.calls.queue, ["direct_send"]);
+}));
+
 test("turning off the canary after preparation defers without Graph or poison failure", async () => {
   const before = process.env.EMAIL_DIRECT_SEND_OPS_ENABLED;
   delete process.env.EMAIL_DIRECT_SEND_OPS_ENABLED;

@@ -292,6 +292,10 @@ function messageFromEntity(e) {
     followUpOfGraphId: e.followUpOfGraphId || "",
     draftCreatedUtc: e.draftCreatedUtc || "", queuedUtc: e.queuedUtc || "",
     sendStartedUtc: e.sendStartedUtc || "", submittedUtc: e.submittedUtc || "",
+    sendOutcome: e.sendOutcome || "", sendAttemptId: e.sendAttemptId || "",
+    workerLeaseId: e.workerLeaseId || "",
+    draftCreationStartedUtc: e.draftCreationStartedUtc || "",
+    reconcileStartedUtc: e.reconcileStartedUtc || "",
     failureCode: e.failureCode || "", failureMessage: e.failureMessage || "",
     bounceKind: e.bounceKind || "", bounceAtUtc: e.bounceAtUtc || "", bounceReason: e.bounceReason || "",
     retryAfterUtc: e.retryAfterUtc || "", attemptCount: Number(e.attemptCount) || 0,
@@ -361,6 +365,7 @@ async function patchMessage(userId, batchId, messageId, patch, etag) {
     // than the conversation id because the worker replies to a MESSAGE.
     "followUpOfGraphId",
     "graphRequestId", "draftCreatedUtc", "queuedUtc", "sendStartedUtc", "submittedUtc", "failureCode",
+    "sendOutcome", "sendAttemptId", "draftCreationStartedUtc", "reconcileStartedUtc", "workerLeaseId",
     "failureMessage", "bounceKind", "bounceAtUtc", "bounceReason", "retryAfterUtc", "leaseUntilUtc",
     /* THE THIRD TIME THIS WHITELIST ATE A FEATURE.
      *
@@ -408,6 +413,9 @@ async function claimMessage(userId, batchId, messageId, allowedStates, nextState
   const counter = phase ? `${phase}Attempts` : "";
   try {
     return await patchMessage(userId, batchId, messageId, { state: nextState,
+      workerLeaseId: require("node:crypto").randomUUID(),
+      ...(phase === "send" && m.state === "send_scheduled" && !m.sendOutcome
+        ? { sendOutcome: "not_started" } : {}),
       leaseUntilUtc: new Date(Date.now() + leaseSeconds * 1000).toISOString(),
       attemptCount: m.attemptCount + 1,
       ...(counter ? { [counter]: (Number(m[counter]) || 0) + 1 } : {}) }, m.etag);

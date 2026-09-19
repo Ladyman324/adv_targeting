@@ -32,10 +32,15 @@ function fixture(mode, state) {
     claimMessage: async (_u, _b, _m, allowed, next, _lease, phase) => {
       if (!allowed.includes(message.state)) return null;
       message.state = next; message.attemptCount++;
+      message.workerLeaseId = "lease-" + (++version);
+      message.leaseUntilUtc = new Date(Date.now() + 300000).toISOString();
       if (phase) message[`${phase}Attempts`] = (message[`${phase}Attempts`] || 0) + 1;
       message.etag = `m${++version}`; return { ...message };
     },
-    patchMessage: async (_u, _b, _m, patch) => { Object.assign(message, patch); message.etag = `m${++version}`; return { ...message }; },
+    patchMessage: async (_u, _b, _m, patch, etag) => {
+      if (etag && etag !== message.etag) throw Object.assign(new Error("Stale message write"), { statusCode: 412 });
+      Object.assign(message, patch); message.etag = `m${++version}`; return { ...message };
+    },
     audit: async (...args) => audits.push(args),
     // The kill switch. Defaults to off; the fault-injection tests flip it.
     policy: async () => ({ ...policy }),
@@ -277,7 +282,8 @@ test("an unavailable registry retries and never sends open", async () => {
   await worker.processWork({ kind: "send", userId: "user-1", batchId: "batch-1",
     messageId: "message-1" }, { ...f, graph });
   assert.equal(sends, 0);
-  assert.equal(f.message.state, "send_ambiguous");
+  assert.equal(f.message.state, "send_scheduled");
+  assert.equal(f.enqueued[0].work.kind, "send");
   assert.ok(f.enqueued.length);
 });
 
@@ -301,7 +307,7 @@ test("draft retries do not spend the send phase's retry budget", async () => {
   assert.ok(f.enqueued.length >= 1, "a retry should have been queued");
 });
 
-test("a phase still fails permanently once its own budget is gone", async () => {
+test("an uncertain submission is reconciled even when the send retry budget is gone", async () => {
   const f = fixture("send", "send_scheduled");
   f.message.sendAttempts = 6;           // this phase has genuinely run out
   const graph = {
@@ -311,7 +317,183 @@ test("a phase still fails permanently once its own budget is gone", async () => 
   };
   await worker.processWork({ kind: "send", userId: "user-1", batchId: "batch-1", messageId: "message-1" },
     { ...f, graph });
-  assert.equal(f.message.state, "failed");
+  assert.equal(f.message.state, "send_ambiguous");
+  assert.equal(f.enqueued[0].work.kind, "reconcile");
+});
+
+test("a throttled send resumes the send queue and eventually sends exactly once", async () => {
+  const f = fixture("send", "send_scheduled");
+  let accepted = 0, calls = 0;
+  const graph = {
+    getMessage: async () => routedDraft(),
+    findByAppId: async () => routedDraft(),
+    sendDraft: async () => {
+      assert.equal(f.message.sendOutcome, "started", "intent must be durable before Graph");
+      assert.ok(f.message.sendAttemptId);
+      if (++calls === 1) throw Object.assign(new Error("Throttled"), {
+        statusCode: 429, graphCode: "ApplicationThrottled", retryAfter: 45 });
+      accepted++; return { requestId: "accepted" };
+    },
+  };
+  const work = { kind: "send", userId: "user-1", batchId: "batch-1", messageId: "message-1" };
+  await worker.processWork(work, { ...f, graph });
+  assert.equal(f.message.sendOutcome, "rejected");
+  assert.equal(f.message.state, "send_scheduled");
+  assert.equal(f.enqueued[0].work.kind, "send");
+  assert.ok(f.enqueued[0].delay >= 45);
+  assert.equal(f.message.sendAttempts, 0, "cooldown does not spend the failure budget");
+  await worker.processWork(work, { ...f, graph });
+  assert.equal(calls, 1, "early duplicate queue hints respect Retry-After");
+  f.message.retryAfterUtc = "";
+  await worker.processWork(work, { ...f, graph });
+  assert.equal(accepted, 1);
+  assert.equal(f.message.state, "submitted");
+});
+
+test("a read timeout retries drafting without a permanent failure", async () => {
+  const f = fixture("drafts", "draft_pending");
+  const graph = { findByAppId: async () => { throw Object.assign(new Error("Read timeout"), {
+    safeToRetry: true, ambiguous: false, method: "GET", retryAfter: 30 }); } };
+  await worker.processWork({ kind: "draft", userId: "user-1", batchId: "batch-1", messageId: "message-1" }, { ...f, graph });
+  assert.equal(f.message.state, "draft_ambiguous");
+  assert.equal(f.enqueued[0].work.kind, "draft");
+  assert.equal(f.audits.at(-1)[3].method, "GET");
+});
+
+test("accepted send followed by a failed Table write cannot submit twice", async () => {
+  const f = fixture("send", "send_scheduled");
+  let sends = 0;
+  const patch = f.store.patchMessage;
+  f.store.patchMessage = async (...args) => {
+    if (args[3].state === "submitted") throw new Error("Worker lost storage after Graph accepted");
+    return patch(...args);
+  };
+  const graph = {
+    getMessage: async () => sends ? { id: "draft-1", isDraft: false } : routedDraft(),
+    findByAppId: async () => sends ? { id: "draft-1", isDraft: false } : routedDraft(),
+    sendDraft: async () => { sends++; return { requestId: "sent" }; },
+  };
+  const work = { kind: "send", userId: "user-1", batchId: "batch-1", messageId: "message-1" };
+  await worker.processWork(work, { ...f, graph });
+  assert.equal(f.message.state, "send_ambiguous");
+  f.message.retryAfterUtc = "";
+  await worker.processWork(work, { ...f, graph });
+  assert.equal(sends, 1);
+  assert.equal(f.message.state, "sent");
+});
+
+test("expired worker after send intent reconciles even if Outlook still shows a draft", async () => {
+  const f = fixture("send", "sending");
+  f.message.sendOutcome = "started";
+  f.message.reconcileStartedUtc = new Date().toISOString();
+  let sends = 0;
+  const graph = { getMessage: async () => routedDraft(), findByAppId: async () => routedDraft(),
+    sendDraft: async () => { sends++; } };
+  await worker.processWork({ kind: "send", userId: "user-1", batchId: "batch-1", messageId: "message-1" }, { ...f, graph });
+  assert.equal(sends, 0);
+  assert.equal(f.message.state, "send_ambiguous");
+  assert.equal(f.enqueued.at(-1).work.kind, "reconcile");
+});
+
+test("late queue hints cannot revive terminal messages with persisted send intent", async () => {
+  for (const state of ["sent", "failed", "canceled"]) {
+    const f = fixture("send", state);
+    f.message.sendOutcome = "started";
+    await worker.processWork({ kind: "send", userId: "user-1", batchId: "batch-1", messageId: "message-1" },
+      { ...f, graph: new Proxy({}, { get() { throw new Error("Terminal message touched Graph"); } }) });
+    assert.equal(f.message.state, state);
+    assert.equal(f.enqueued.length, 0);
+  }
+});
+
+test("lost draft response never creates another draft from an empty reconciliation lookup", async () => {
+  const f = fixture("drafts", "draft_pending");
+  let creates = 0;
+  const graph = { findByAppId: async () => null,
+    createDraft: async () => { creates++; throw Object.assign(new Error("Lost response"), { ambiguous: true }); } };
+  const work = { kind: "draft", userId: "user-1", batchId: "batch-1", messageId: "message-1" };
+  await worker.processWork(work, { ...f, graph });
+  assert.ok(f.message.draftCreationStartedUtc);
+  f.message.retryAfterUtc = "";
+  await worker.processWork(work, { ...f, graph });
+  assert.equal(creates, 1);
+  assert.equal(f.message.failureCode, "draft_creation_unconfirmed");
+});
+
+test("reconciliation survives six transient failures but holds after 24 hours", async () => {
+  const f = fixture("send", "send_ambiguous");
+  f.message.reconcileAttempts = 10;
+  f.message.reconcileStartedUtc = new Date().toISOString();
+  const graph = { getMessage: async () => routedDraft(), findByAppId: async () => routedDraft() };
+  const work = { kind: "reconcile", userId: "user-1", batchId: "batch-1", messageId: "message-1" };
+  await worker.processWork(work, { ...f, graph });
+  assert.equal(f.message.state, "send_ambiguous");
+  f.message.retryAfterUtc = "";
+  f.message.reconcileStartedUtc = new Date(Date.now() - 86400001).toISOString();
+  await worker.processWork(work, { ...f, graph });
+  assert.equal(f.message.failureCode, "send_outcome_unknown");
+});
+
+test("a replaced worker lease stops the stale worker before Graph mutation", async () => {
+  const f = fixture("send", "send_scheduled");
+  let sends = 0;
+  const graph = { getMessage: async () => routedDraft(), findByAppId: async () => routedDraft(),
+    sendDraft: async () => { sends++; } };
+  f.store.policy = async () => {
+    f.message.workerLeaseId = "different-owner";
+    f.message.etag = "different-etag";
+    return { killed: false };
+  };
+  await worker.processWork({ kind: "send", userId: "user-1", batchId: "batch-1", messageId: "message-1" }, { ...f, graph });
+  assert.equal(sends, 0);
+  assert.equal(f.message.workerLeaseId, "different-owner");
+});
+
+test("23-message campaign recovers read and throttle failures with one confirmed submission each", async () => {
+  const submissions = new Map();
+  for (let index = 0; index < 23; index++) {
+    const f = fixture("send", "draft_pending");
+    f.message.id = "campaign-" + index;
+    f.message.attachments = [{ id: "pdf", version: 1, sha256: "hash", size: 493321, approved: true }];
+    f.store.getDocuments = async () => f.message.attachments;
+    f.core.extraRecipients = require("../shared/email-core").extraRecipients;
+    const copies = f.core.extraRecipients(f.message);
+    const draftView = () => routedDraft("draft-" + index, {
+      ccRecipients: copies.cc.map(address => ({ emailAddress: { address } })),
+      bccRecipients: copies.bcc.map(address => ({ emailAddress: { address } })),
+    });
+    let reads = 0, sendCalls = 0, attached = 0;
+    const graph = {
+      findByAppId: async () => {
+        if (index < 7 && reads++ === 0)
+          throw Object.assign(new Error("Read timeout"), { safeToRetry: true });
+        return null;
+      },
+      createDraft: async () => draftView(),
+      getMessage: async () => submissions.has(index)
+        ? { id: "draft-" + index, isDraft: false }
+        : draftView(),
+      attachDocuments: async () => { attached++; },
+      sendDraft: async () => {
+        if (index >= 20 && sendCalls++ === 0)
+          throw Object.assign(new Error("Throttled"), { statusCode: 429, retryAfter: 60 });
+        submissions.set(index, (submissions.get(index) || 0) + 1);
+        return { requestId: "accepted-" + index };
+      },
+    };
+    const work = { kind: "draft", userId: "user-1", batchId: "batch-1", messageId: f.message.id };
+    await worker.processWork(work, { ...f, graph });
+    for (let round = 0; round < 10 && f.message.state !== "sent"; round++) {
+      const queued = f.enqueued.shift();
+      assert.ok(queued, JSON.stringify({ index, state: f.message.state, reason: f.message.failureMessage }));
+      f.message.retryAfterUtc = ""; // advance to its due time in this fixture
+      await worker.processWork(queued.work, { ...f, graph });
+    }
+    assert.equal(f.message.state, "sent");
+    assert.equal(attached, 1);
+  }
+  assert.equal(submissions.size, 23);
+  assert.ok([...submissions.values()].every(count => count === 1));
 });
 
 /* conversationId is what ties a REPLY back to the message it answers. These

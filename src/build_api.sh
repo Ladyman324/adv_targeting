@@ -30,7 +30,8 @@ STAGE_DIR=""
 #   44: email-template-material-series-ui.test.js -- templates require a routed series, not one variant
 #   45: map-activity-filter-ui.test.js -- activity filters stay scoped and never blank the map at zero
 #   46: map-assets-filter-ui.test.js -- desktop and Field use the canonical CRD-keyed EIC asset book
-EXPECTED_API_TEST_FILE_COUNT=46
+#   47: graph-mailbox-control.test.js -- shared leases, cooldowns, and transport outcomes
+EXPECTED_API_TEST_FILE_COUNT=47
 
 cleanup() {
   test -z "$TEMP_ROOT" && return

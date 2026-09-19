@@ -2,6 +2,8 @@
 
 const crypto = require("crypto");
 const { BlobServiceClient } = require("@azure/storage-blob");
+const mailboxControl = require("./graph-mailbox-control");
+const leaseContext = new (require("node:async_hooks").AsyncLocalStorage)();
 
 const BASE = "https://graph.microsoft.com/v1.0";
 const IMMUTABLE = 'IdType="ImmutableId"';
@@ -11,30 +13,80 @@ class GraphError extends Error {
   constructor(message, info = {}) { super(message); Object.assign(this, info); }
 }
 
-async function request(token, method, path, body, options = {}) {
-  let response;
+function retrySeconds(value) {
+  const seconds = Number(value);
+  if (Number.isFinite(seconds) && seconds > 0) return seconds;
+  const date = Date.parse(value);
+  return Number.isFinite(date) ? Math.max(1, Math.ceil((date - Date.now()) / 1000)) : 30;
+}
+
+async function transport(token, method, path, init, options = {}) {
+  const renew = leaseContext.getStore();
+  if (renew) await renew();
+  const timeoutMs = options.timeoutMs || 30000;
+  const sending = method === "POST" && /\/send(?:\?|$)/.test(path);
+  const key = mailboxControl.mailboxKey(token);
+  const control = mailboxControl.control();
+  let lease;
   try {
+    lease = await control.acquire(key, { timeoutMs, sending,
+      intervalSeconds: Math.max(10, Number(process.env.EMAIL_MAILBOX_INTERVAL_SECONDS) || 10) });
+  } catch (error) {
+    // No request was dispatched, including when the coordination store is unavailable.
+    if (error.deferred) throw error;
+    throw new GraphError("Mailbox coordination is temporarily unavailable.", {
+      safeToRetry: true, deferred: true, retryAfter: 30, code: "mailbox_coordination_unavailable" });
+  }
+  const start = Date.now();
+  const clientRequestId = crypto.randomUUID();
+  let response, dispatched = false;
+  try {
+    if (Date.now() >= lease.expiresAt - timeoutMs)
+      throw Object.assign(new Error("Mailbox lease expired before dispatch."), { safeToRetry: true });
+    dispatched = true;
     response = await fetch(path.startsWith("http") ? path : BASE + path, {
-      method, headers: { Authorization: `Bearer ${token}`, Accept: "application/json",
-        Prefer: IMMUTABLE, ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
-        ...(options.headers || {}) }, body: body === undefined ? undefined : JSON.stringify(body),
-      signal: AbortSignal.timeout(options.timeoutMs || 30000),
+      ...init, method, signal: AbortSignal.timeout(timeoutMs),
+      headers: { ...init.headers, ...(options.upload ? {} : {
+        "client-request-id": clientRequestId, "return-client-request-id": "true" }) },
     });
+    if (response.status === 429 || response.status === 503)
+      await control.cooldown(key, retrySeconds(response.headers.get("retry-after")));
+    const requestId = response.headers.get("request-id") || "";
+    if (!response.ok) {
+      let detail = {};
+      try { detail = await response.json(); } catch { /* retain the HTTP outcome */ }
+      throw new GraphError(detail.error?.message || `Microsoft Graph returned ${response.status}.`, {
+        statusCode: response.status, graphCode: detail.error?.code, requestId,
+        retryAfter: retrySeconds(response.headers.get("retry-after")),
+        safeToRetry: response.status === 429 || (method === "GET" && response.status >= 500),
+        ambiguous: method !== "GET" && response.status >= 500 });
+    }
+    if (response.status === 202 || response.status === 204) return { requestId };
+    const text = await response.text();
+    return { requestId, data: text ? JSON.parse(text) : null };
   } catch (cause) {
-    throw new GraphError("Microsoft Graph request did not return a definitive result.", { ambiguous: method !== "GET", cause });
+    const error = cause instanceof GraphError ? cause : new GraphError(
+      "Microsoft Graph request did not return a definitive result.", {
+        cause, safeToRetry: !dispatched || method === "GET" || response?.status === 429,
+        ambiguous: dispatched && method !== "GET" && response?.status !== 429,
+        statusCode: response?.status, retryAfter: 30, graphCode: "graph_transport_failure" });
+    Object.assign(error, { method, operation: options.upload ? "attachment_upload" :
+      path.split("?")[0].replace(/\/messages\/[^/]+/g, "/messages/{id}"),
+      clientRequestId, durationMs: Date.now() - start });
+    if (!response && dispatched) await control.cooldown(key, 30).catch(() => {});
+    throw error;
+  } finally {
+    // A release failure retains the bounded lease; it must not change a known send outcome.
+    await control.release(lease).catch(() => {});
   }
-  const requestId = response.headers.get("request-id") || "";
-  const retryAfter = Number(response.headers.get("retry-after") || 0);
-  if (!response.ok) {
-    let detail = {};
-    try { detail = await response.json(); } catch { detail = {}; }
-    const msg = detail.error && detail.error.message ? detail.error.message : `Microsoft Graph returned ${response.status}.`;
-    throw new GraphError(msg, { statusCode: response.status, graphCode: detail.error && detail.error.code,
-      requestId, retryAfter, ambiguous: method !== "GET" && response.status >= 500 });
-  }
-  if (response.status === 202 || response.status === 204) return { requestId };
-  const text = await response.text();
-  return { requestId, data: text ? JSON.parse(text) : null };
+}
+
+async function request(token, method, path, body, options = {}) {
+  return transport(token, method, path, {
+    headers: { Authorization: `Bearer ${token}`, Accept: "application/json", Prefer: IMMUTABLE,
+      ...(body !== undefined ? { "Content-Type": "application/json" } : {}), ...(options.headers || {}) },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  }, options);
 }
 
 /* The message properties every lookup here asks for, named once.
@@ -165,9 +217,8 @@ async function largeAttachment(token, messageId, doc, bytes) {
   // turns into 24 MB of upload.
   const nextExpectedStart = async () => {
     try {
-      const probe = await fetch(uploadUrl, { method: "GET", signal: AbortSignal.timeout(30000) });
-      if (!probe.ok) return null;
-      const body = await probe.json();
+      const probe = await transport(token, "GET", uploadUrl, {}, { upload: true });
+      const body = probe.data || {};
       const range = (body.nextExpectedRanges || [])[0];
       const from = Number(String(range || "").split("-")[0]);
       return Number.isFinite(from) ? from : null;
@@ -180,11 +231,12 @@ async function largeAttachment(token, messageId, doc, bytes) {
     const end = Math.min(bytes.length, start + chunkSize) - 1;
     let response;
     try {
-      response = await fetch(uploadUrl, { method: "PUT", headers: {
+      response = await transport(token, "PUT", uploadUrl, { headers: {
         "Content-Type": "application/octet-stream", "Content-Length": String(end - start + 1),
         "Content-Range": `bytes ${start}-${end}/${bytes.length}`,
-      }, body: bytes.subarray(start, end + 1), signal: AbortSignal.timeout(120000) });
+      }, body: bytes.subarray(start, end + 1) }, { timeoutMs: 120000, upload: true });
     } catch (err) {
+      if (err.deferred || err.statusCode) throw err;
       /* A NETWORK failure, not an HTTP one -- a timeout, a reset, a dropped
        * connection. These arrive as a bare TypeError or AbortError with no
        * statusCode, so failOrRetry() saw retryable === false and marked the
@@ -205,8 +257,6 @@ async function largeAttachment(token, messageId, doc, bytes) {
       if (resumeAt !== null) start = resumeAt;
       continue;
     }
-    if (!response.ok && response.status !== 202) throw new GraphError(`Attachment upload failed (${response.status}).`, {
-      statusCode: response.status, ambiguous: true, retryAfter: Number(response.headers.get("retry-after") || 0) });
     networkFailures = 0;                       // progress resets the allowance
     start = end + 1;
   }
@@ -476,6 +526,7 @@ async function sendDraft(token, messageId) {
 }
 
 module.exports = { GraphError, APP_PROPERTY_ID, NDR_FIELDS, ACTIVITY_FIELDS,
+  withLease: (renew, action) => leaseContext.run(renew, action),
   findByAppId, createDraft, getMessage, getDirectMessage, getMessageContent, attachDocuments,
   attachInlineImages, attachFiles, createReply, patchDraftRecipients,
   updateDraftBody, sendDraft,
