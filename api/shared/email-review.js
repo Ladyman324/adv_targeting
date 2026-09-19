@@ -143,7 +143,11 @@ async function retry(who, input, overrides = {}) {
       try { await d.enqueue({ kind: phase, userId: who.id, batchId: batch.id, messageId: m.id }, i * 10); }
       catch { queued = false; }
       results.push({ messageId: m.id, result: queued ? "queued" : "awaiting_recovery" });
-    } catch { results.push({ messageId: m.id, result: "not_queued_changed" }); }
+    } catch {
+      // A storage write can commit before its response is lost. Never promise
+      // 'not queued': recovery may already own that durable send obligation.
+      results.push({ messageId: m.id, result: "needs_status_check" });
+    }
   }
   await d.store.audit(who.id, batch.id, "selected_failures_retried", { results, confirmedNotSentElsewhere: true });
   return results;

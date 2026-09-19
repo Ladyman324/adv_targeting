@@ -1917,7 +1917,9 @@ ${t.bodyText}`);
         detail = await api("retry_selected", { batchId, messageIds: ids, confirmNotSentElsewhere: true });
         const results = detail.retryResults || [];
         const accepted = results.filter(r => ["queued", "awaiting_recovery"].includes(r.result)).length;
-        report = `${accepted} accepted for retry; ${results.length - accepted} changed and were not queued. Reload status to see progress.`;
+        const uncertain = results.length - accepted;
+        bad = uncertain > 0;
+        report = `${accepted} accepted for retry; ${uncertain} require a status check. Reload status to see progress.${uncertain ? " Some requests may already be queued. Do not send replacements until their status is resolved." : ""}`;
         reviewSelected.clear();
       } else if (action !== "review-reload") {
         let ok = 0; const problems = [];
@@ -1933,7 +1935,12 @@ ${t.bodyText}`);
         report = `${ok} of ${ids.length} processed. ${action === "review-check" ? "No emails were sent." : "Marked messages will not be sent by this batch."} ${[...new Set(problems)].join(" ")}`;
       } else report = "Stored status reloaded. No Outlook check or send was triggered.";
       detail = await api(`batch&id=${encodeURIComponent(batchId)}`, null, "GET");
-    } catch (e) { report = e.message; bad = true; }
+    } catch (e) {
+      report = e.message + (action === "review-retry"
+        ? " The retry result could not be confirmed. Some messages may already be queued; reload status before taking further action."
+        : " Reload status before taking further action.");
+      bad = true;
+    }
     finally { reviewBusy = false; reviewView(report, bad); }
   }
 

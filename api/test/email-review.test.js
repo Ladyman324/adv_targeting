@@ -160,6 +160,13 @@ test("queue outage leaves an explicit durable recovery obligation", async () => 
   const result = await review.retry(who, retry, f);
   assert.equal(result[0].result, "awaiting_recovery"); assert.equal(f.messages[0].state, "draft_pending");
 });
+test("a committed storage write with a lost response is never reported as not queued", async () => {
+  const f = fixture(), patch = f.store.patchMessage;
+  f.store.patchMessage = async (...args) => { await patch(...args); throw new Error("response lost"); };
+  const result = await review.retry(who, retry, f);
+  assert.equal(f.messages[0].state, "draft_pending");
+  assert.equal(result[0].result, "needs_status_check");
+});
 test("legacy draft failure is retryable only with positive draft evidence and no send history", () => {
   const f = fixture(), m = { ...f.messages[0], failureCode: "draft_permanent_failure" };
   assert.equal(review.eligibility(f.batch, m, f.now()).phase, "draft");

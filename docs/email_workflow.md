@@ -30,8 +30,10 @@ Retry is deliberately conservative. It requires positive original-draft evidence
 checked within ten minutes, an allowlisted safe failure, no bounce/manual exclusion/
 uncertain submission, a connected mailbox, and no suppressed recipient. A pending
 or running batch cannot be bulk-resumed through this action. All selected rows are
-validated before starting; concurrent changes can cause individual rows not to queue,
-and results say so. Worker-side safety checks still run again before sending.
+validated before starting; concurrent changes or lost storage responses can leave
+individual results unconfirmed. Those rows require a status check, not a manual
+replacement: a write may already have committed. Worker-side safety checks still
+run again before sending.
 Terminal unknown sends are never unlocked by a draft or empty search result.
 
 An expired or future reserved capacity day cannot be overridden by Retry selected.
