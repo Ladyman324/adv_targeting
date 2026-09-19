@@ -294,6 +294,8 @@ function messageFromEntity(e) {
     sendStartedUtc: e.sendStartedUtc || "", submittedUtc: e.submittedUtc || "",
     sendOutcome: e.sendOutcome || "", sendAttemptId: e.sendAttemptId || "",
     workerLeaseId: e.workerLeaseId || "",
+    handledManuallyUtc: e.handledManuallyUtc || "", handledManuallyBy: e.handledManuallyBy || "",
+    outlookCheckStatus: e.outlookCheckStatus || "", outlookCheckedUtc: e.outlookCheckedUtc || "",
     draftCreationStartedUtc: e.draftCreationStartedUtc || "",
     reconcileStartedUtc: e.reconcileStartedUtc || "",
     failureCode: e.failureCode || "", failureMessage: e.failureMessage || "",
@@ -366,6 +368,7 @@ async function patchMessage(userId, batchId, messageId, patch, etag) {
     "followUpOfGraphId",
     "graphRequestId", "draftCreatedUtc", "queuedUtc", "sendStartedUtc", "submittedUtc", "failureCode",
     "sendOutcome", "sendAttemptId", "draftCreationStartedUtc", "reconcileStartedUtc", "workerLeaseId",
+    "handledManuallyUtc", "handledManuallyBy", "outlookCheckStatus", "outlookCheckedUtc",
     "failureMessage", "bounceKind", "bounceAtUtc", "bounceReason", "retryAfterUtc", "leaseUntilUtc",
     /* THE THIRD TIME THIS WHITELIST ATE A FEATURE.
      *
@@ -408,7 +411,7 @@ async function patchMessage(userId, batchId, messageId, patch, etag) {
 async function claimMessage(userId, batchId, messageId, allowedStates, nextState,
                             leaseSeconds = 120, phase = "") {
   const m = await getMessage(userId, batchId, messageId);
-  if (!m || !allowedStates.includes(m.state)) return null;
+  if (!m || m.handledManuallyUtc || !allowedStates.includes(m.state)) return null;
   if (m.leaseUntilUtc && new Date(m.leaseUntilUtc).getTime() > Date.now()) return null;
   const counter = phase ? `${phase}Attempts` : "";
   try {

@@ -118,6 +118,26 @@ function conflict() {
   return err;
 }
 
+test("manual exclusion and Outlook-check evidence survive real store round trips", async () => {
+  const { store, restore } = loadStore();
+  try {
+    await store.createMessage("u1", "b1", { id: "m1", ordinal: 0, state: "failed" });
+    const original = await store.getMessage("u1", "b1", "m1");
+    const marked = await store.patchMessage("u1", "b1", "m1", {
+      state: "canceled", handledManuallyUtc: "2026-09-21T13:00:00Z",
+      handledManuallyBy: "u1", outlookCheckStatus: "not_found",
+      outlookCheckedUtc: "2026-09-21T12:59:00Z",
+    }, original.etag);
+    assert.equal(marked.handledManuallyBy, "u1");
+    assert.equal(marked.outlookCheckStatus, "not_found");
+    assert.equal(marked.outlookCheckedUtc, "2026-09-21T12:59:00Z");
+    // Even a legacy caller writing a runnable state cannot erase the exclusion.
+    await store.patchMessage("u1", "b1", "m1", { state: "draft_pending" }, marked.etag);
+    assert.equal(await store.claimMessage("u1", "b1", "m1", ["draft_pending"], "draft_creating"), null);
+    assert.equal((await store.getMessage("u1", "b1", "m1")).handledManuallyUtc, "2026-09-21T13:00:00Z");
+  } finally { restore(); }
+});
+
 /* ---- optimistic concurrency foundations -------------------------------- */
 
 test("connection replacement is conditional and returns the new etag", async () => {

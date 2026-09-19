@@ -229,7 +229,7 @@ test("returning a schedule to review succeeds and defers a failed capacity relea
   assert.ok(h.audits.some((args) => args[2] === "scheduled_batch_returned_to_review"));
 });
 
-test("retry re-queues genuinely failed messages, paced, but never an unknown send", async () => {
+test("confirmed selected retry is paced, excludes unknown sends, and refuses legacy bulk retry", async () => {
   /* THE BUG THIS ENCODES. "Retry failed" counted `failed` and re-queued only
    * `auth_required`, so a batch that lost recipients to a transient Graph
    * failure offered a button that did nothing. The rep's only recovery was to
@@ -250,8 +250,14 @@ test("retry re-queues genuinely failed messages, paced, but never an unknown sen
     { id: "m5", state: "failed", failureCode: "send_outcome_unknown",
       graphMessageId: "CCC", etag: "e5" },
   ];
-  const { service, sent } = load(messages, { status: "paused", mode: "send" });
-  await service.control({ id: "u1", name: "Rep" }, { batchId: "b1", action: "retry" });
+  for (const message of messages) Object.assign(message, {
+    outlookCheckStatus: "draft", outlookCheckedUtc: new Date().toISOString(),
+  });
+  const { service, sent } = load(messages, { status: "partial_failure", mode: "send",
+    approvedUtc: new Date().toISOString() });
+  await assert.rejects(service.control({ id: "u1" }, { batchId: "b1", action: "retry" }), /Confirm/);
+  await service.control({ id: "u1", name: "Rep" }, { batchId: "b1", action: "retry_selected",
+    messageIds: ["m0", "m1", "m3"], confirmNotSentElsewhere: true });
 
   const requeued = sent.map((s) => s.work.messageId);
   assert.deepEqual(requeued, ["m0", "m1", "m3"],

@@ -227,7 +227,7 @@ function leasedDependencies(work, claimed, deps) {
       return async (...args) => {
         const renew = async () => {
         const current = await deps.store.getMessage(work.userId, work.batchId, work.messageId);
-        if (!current || current.workerLeaseId !== workerLeaseId
+        if (!current || current.handledManuallyUtc || current.workerLeaseId !== workerLeaseId
             || Date.parse(current.leaseUntilUtc || "") <= Date.now())
           throw Object.assign(new Error("Another worker owns this message."), { code: "worker_lease_lost" });
         let renewed;
@@ -939,6 +939,7 @@ async function processWork(raw, overrides = {}) {
     throw new Error("Incomplete email queue message.");
   if (work.messageId) {
     const current = await deps.store.getMessage(work.userId, work.batchId, work.messageId);
+    if (current?.handledManuallyUtc) return;
     const retryAt = Date.parse(current?.retryAfterUtc || "");
     if (retryAt > Date.now()) {
       await deps.enqueue(work, Math.ceil((retryAt - Date.now()) / 1000));

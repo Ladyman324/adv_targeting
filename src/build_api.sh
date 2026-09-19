@@ -31,7 +31,8 @@ STAGE_DIR=""
 #   45: map-activity-filter-ui.test.js -- activity filters stay scoped and never blank the map at zero
 #   46: map-assets-filter-ui.test.js -- desktop and Field use the canonical CRD-keyed EIC asset book
 #   47: graph-mailbox-control.test.js -- shared leases, cooldowns, and transport outcomes
-EXPECTED_API_TEST_FILE_COUNT=47
+#   48: email-review.test.js -- check-only reconciliation and explicit selected retries
+EXPECTED_API_TEST_FILE_COUNT=48
 
 cleanup() {
   test -z "$TEMP_ROOT" && return

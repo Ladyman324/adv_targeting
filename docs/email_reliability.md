@@ -1,5 +1,10 @@
 # Email reliability and incident recovery
 
+See [the operating guide and worker walkthrough](email_workflow.md) for the
+check-only status refresh, selected retry, manual-handling controls, production
+timing, and remaining reliability gaps. Campaign recovery was enabled for all
+connected users on September 19, 2026; terminal failures were not reopened.
+
 The Graph mail transport uses an Azure Table lease keyed by tenant and mailbox.
 Drafts, attachments, sends, reconciliation, and reply/bounce scans using that
 transport share one concurrent request and a mailbox-wide cooldown. Requests

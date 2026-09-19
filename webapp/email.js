@@ -15,6 +15,9 @@
   // Set when the rep explicitly asks to see a finished batch's messages, so the
   // completion panel does not immediately replace what they opened.
   let forceDetail = false;
+  let reviewBusy = false;
+  let reviewOpen = false;
+  const reviewSelected = new Set();
   // Edits to a single message used to be lost by moving to the next recipient:
   // the override only existed once "Save override" was pressed, and nothing on
   // screen said so. Now the edit is the thing that matters and saving is
@@ -1860,6 +1863,80 @@ ${t.bodyText}`);
       completed: "Complete", partial_failure: "Completed with failures" })[state] || state;
   }
 
+  function reviewView(message = "", bad = false) {
+    reviewOpen = true;
+    clearTimeout(pollTimer); clearInterval(tickTimer);
+    const b = detail.batch;
+    const statusText = { sent: "Sent in Outlook (not a delivery receipt)", draft: "Original draft found",
+      not_found: "Not found; outcome unproven", unavailable: "Check unavailable", inconclusive: "Inconclusive" };
+    document.getElementById("emailBody").innerHTML = `<section class="email-review-safety">
+      <h3>Check status &amp; retry</h3>
+      <p>Checking Outlook never sends mail. Separately composed replacement emails cannot be identified reliably.
+        Mark those <b>Already sent manually</b>. This records your confirmation, not verified delivery.</p>
+      <p>If work is active, pause it and wait for in-progress messages before handling anything manually.
+        Cancellation cannot recall mail already submitted.</p>
+      <div class="email-review-actions">
+        <button type="button" class="ask-btn" data-email="review-check" ${reviewBusy ? "disabled" : ""}>Check sent status</button>
+        <button type="button" class="ask-btn" data-email="review-retry" ${reviewBusy ? "disabled" : ""}>Retry selected</button>
+        <button type="button" class="ask-btn" data-email="review-manual" ${reviewBusy ? "disabled" : ""}>Already sent manually</button>
+        <button type="button" class="ask-btn" data-email="review-reload" ${reviewBusy ? "disabled" : ""}>Reload status</button>
+        <button type="button" class="ask-btn" data-email="details" ${reviewBusy ? "disabled" : ""}>Back to messages</button>
+      </div>
+      <p role="status" aria-live="polite" class="${bad ? "bad" : ""}">${esc(message || "Select messages to check or mark manually. Select only eligible failures to retry; nothing is selected automatically.")}</p>
+      <div class="email-review-table"><table><thead><tr><th scope="col">Select</th><th scope="col">Recipient</th><th scope="col">Application status</th><th scope="col">Outlook check</th><th scope="col">Retry eligibility</th></tr></thead><tbody>
+        ${detail.messages.map(m => `<tr><td><input type="checkbox" name="emailReviewSelection" value="${esc(m.id)}"
+          aria-label="Select ${esc(m.recipientName || m.recipientEmail)}" ${reviewSelected.has(m.id) ? "checked" : ""} ${reviewBusy ? "disabled" : ""}></td>
+          <td>${esc(m.recipientName || m.recipientEmail)}<small>${esc(m.recipientEmail)}</small></td>
+          <td>${esc(m.handledManuallyUtc ? "Handled manually" : stateLabel(m.state))}
+            ${m.handledManuallyUtc ? `<small>Recorded ${esc(new Date(m.handledManuallyUtc).toLocaleString())}; not verified delivery</small>` : ""}
+            ${m.bounceKind ? `<small class="bad">Bounced: ${esc(m.bounceKind)}</small>` : ""}</td>
+          <td>${esc(statusText[m.outlookCheckStatus] || "Not checked")}${m.outlookCheckedUtc ? `<small>${esc(new Date(m.outlookCheckedUtc).toLocaleString())}</small>` : ""}</td>
+          <td>${esc(m.retryEligibility?.reason || "Check status before retrying.")}</td></tr>`).join("")}
+      </tbody></table></div>
+      <p>For an expired reserved sending day, create a new reviewed batch and delivery plan. Missing or uncertain messages are never unlocked merely because Outlook did not find them.</p>
+    </section>`;
+  }
+
+  async function reviewAction(action) {
+    if (reviewBusy) return;
+    const ids = [...reviewSelected].filter(id => detail.messages.some(m => m.id === id));
+    if (action !== "review-reload" && (!ids.length || ids.length > 100))
+      return reviewView("Select between 1 and 100 messages.", true);
+    if (action === "review-retry") {
+      const blocked = detail.messages.filter(m => ids.includes(m.id) && !m.retryEligibility?.phase);
+      if (blocked.length) return reviewView("Some selected messages are not eligible. Check Outlook and select only eligible failures.", true);
+      if (!confirm(`Retry only these ${ids.length} selected failures?\n\nI confirm I have NOT already sent these messages outside the app.\n\nEligible send-mode messages will be queued for sending; draft-only batches will only prepare drafts.`)) return;
+    }
+    if (action === "review-manual" && !confirm(`Mark ${ids.length} selected messages as already sent manually?\n\nThis permanently excludes them from sending in this batch. It does not verify delivery or recall mail already in progress.`)) return;
+    reviewBusy = true;
+    let report = "", bad = false;
+    const batchId = detail.batch.id;
+    try {
+      if (action === "review-retry") {
+        reviewView("Queuing selected retries...");
+        detail = await api("retry_selected", { batchId, messageIds: ids, confirmNotSentElsewhere: true });
+        const results = detail.retryResults || [];
+        const accepted = results.filter(r => ["queued", "awaiting_recovery"].includes(r.result)).length;
+        report = `${accepted} accepted for retry; ${results.length - accepted} changed and were not queued. Reload status to see progress.`;
+        reviewSelected.clear();
+      } else if (action !== "review-reload") {
+        let ok = 0; const problems = [];
+        for (let i = 0; i < ids.length; i++) {
+          reviewView(`${action === "review-check" ? "Checking Outlook" : "Recording manual handling"}: ${i + 1} of ${ids.length}...`);
+          try {
+            detail = await api(action === "review-check" ? "check_status" : "handled_manually",
+              { batchId, messageId: ids[i], confirmHandledManually: action === "review-manual" });
+            ok++;
+          } catch (e) { problems.push(e.message); }
+        }
+        bad = problems.length > 0;
+        report = `${ok} of ${ids.length} processed. ${action === "review-check" ? "No emails were sent." : "Marked messages will not be sent by this batch."} ${[...new Set(problems)].join(" ")}`;
+      } else report = "Stored status reloaded. No Outlook check or send was triggered.";
+      detail = await api(`batch&id=${encodeURIComponent(batchId)}`, null, "GET");
+    } catch (e) { report = e.message; bad = true; }
+    finally { reviewBusy = false; reviewView(report, bad); }
+  }
+
   // Terminal states used to leave the full editor on screen with a green label
   // buried in the recipient list, so a finished batch looked identical to a
   // working one. Show what happened, and what to do next, instead.
@@ -1870,7 +1947,8 @@ ${t.bodyText}`);
     for (const m of detail.messages) counts[m.state] = (counts[m.state] || 0) + 1;
     const n = (k) => counts[k] || 0;
     const ready = n("draft_ready"), sent = n("sent") + n("submitted");
-    const failed = n("failed"), canceled = n("canceled");
+    const failed = n("failed"), manual = detail.messages.filter(m => m.handledManuallyUtc).length,
+      canceled = n("canceled") - manual;
     const headline = { drafts_ready: "Drafts are in your Outlook",
       completed: "Batch complete", partial_failure: "Completed, with failures",
       canceled: "Batch canceled" }[b.status] || stateLabel(b.status);
@@ -1878,6 +1956,7 @@ ${t.bodyText}`);
       ready ? [`${ready} draft${ready === 1 ? "" : "s"} created`, "good"] : null,
       sent ? [`${sent} sent`, "good"] : null,
       failed ? [`${failed} failed`, "bad"] : null,
+      manual ? [`${manual} handled manually (not verified delivery)`, ""] : null,
       canceled ? [`${canceled} canceled`, ""] : null,
     ].filter(Boolean);
     document.getElementById("emailTitle").textContent = b.name || "Email batch";
@@ -1891,7 +1970,7 @@ ${t.bodyText}`);
         failed and why. Retrying only affects those.</p>` : ""}
       <div class="email-done-actions">
         <button type="button" class="ask-btn" data-email="details">Review messages</button>
-        ${failed ? `<button type="button" class="ask-btn" data-email="retry">Retry failed</button>` : ""}
+        <button type="button" class="ask-btn" data-email="review-safety">Check status &amp; retry</button>
         <button type="button" class="ask-btn primary" data-email="close">Close</button>
       </div></div>`;
   }
@@ -2251,6 +2330,7 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
   }
 
   function composerView() {
+    reviewOpen = false;
     if (!detail || !detail.messages || !detail.messages.length) return;
     // The countdown has to stop here too. Cancelling inside the send window
     // ended the batch but left the ticker running, so the screen went on
@@ -2389,7 +2469,7 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
               It is now suppressed and will be excluded from future batches.</p>
           </div>` : ""}
           ${m.failureMessage ? `<div class="email-failure">
-            <p class="email-failure-head">&#9888; This message did not go out</p>
+            <p class="email-failure-head">&#9888; This message needs review</p>
             <p class="email-failure-why">${esc(m.failureMessage)}</p>
             ${m.failureCode ? `<p class="email-fine">Code: <code>${esc(m.failureCode)}</code>${
               m.graphRequestId ? ` &middot; Microsoft request id <code>${esc(m.graphRequestId)}</code>` : ""}</p>` : ""}
@@ -2412,7 +2492,8 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
           : (b.warningMessage || (locked ? lockedNotice : ""))) + supportReference)}</span></p><div>
         ${b.status === "completed" && b.mode === "send" && !b.parentBatchId && !b.followUpSentUtc
           ? `<button type="button" class="ask-btn" data-email="follow-up-open" data-id="${esc(b.id)}">Follow up on no reply</button>` : ""}
-        ${b.status === "action_required" ? `<button type="button" class="ask-btn" data-email="connect">Reconnect Microsoft 365</button><button type="button" class="ask-btn" data-email="retry">Retry remaining</button>` : ""}
+        ${b.status === "action_required" ? `<button type="button" class="ask-btn" data-email="connect">Reconnect Microsoft 365</button>` : ""}
+        ${locked ? `<button type="button" class="ask-btn" data-email="review-safety">Check status &amp; retry</button>` : ""}
         ${["held", "needs_review", "schedule_held"].includes(b.status) ? `<button type="button" class="ask-btn primary" data-email="review-reschedule">Review &amp; reschedule</button>` : ""}
         ${locked && b.mode === "send" && !["completed", "canceled", "action_required", "held", "needs_review", "schedule_held"].includes(b.status) ? `<button type="button" class="ask-btn" data-email="pause">${b.status === "paused" ? "Resume remaining" : "Pause remaining"}</button>` : ""}
         ${locked && !["completed", "canceled", "drafts_ready"].includes(b.status) ? `<button type="button" class="ask-btn ghost" data-email="cancel">Cancel remaining</button>` : ""}
@@ -2517,7 +2598,11 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
     clearTimeout(pollTimer);
     if (!detail || ["editing", "invalid", "drafts_ready", "completed", "partial_failure", "canceled", "action_required"].includes(detail.batch.status)) return;
     pollTimer = setTimeout(async () => {
-      try { detail = await api(`batch&id=${encodeURIComponent(detail.batch.id)}`, null, "GET"); composerView(); }
+      try {
+        const result = await api(`batch&id=${encodeURIComponent(detail.batch.id)}`, null, "GET");
+        if (reviewOpen) return;
+        detail = result; composerView();
+      }
       catch { schedulePoll(); }
     }, 3000);
   }
@@ -2770,6 +2855,7 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
     }
     if (action === "approval-confirm") return submitApproval(button);
     if (action === "close") {
+      if (reviewBusy) return;
       if (approvalPreparing || approvalSubmitting)
         return notice("Please wait for the approval check to finish.", true);
       closeApprovalReview();
@@ -2777,6 +2863,9 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
       clearTimeout(pollTimer); clearInterval(tickTimer); clearTimeout(deliveryPlanTimer);
       forceDetail = false; cleanEmailUrl(); return;
     }
+    if (reviewBusy) return;
+    if (action === "review-safety" || action === "retry") { reviewSelected.clear(); reviewView(); return; }
+    if (["review-check", "review-retry", "review-manual", "review-reload"].includes(action)) return reviewAction(action);
     if (action === "details") { forceDetail = true; composerView(); return; }
     // ---- recipient domain grouping ----
     // Every one of these re-renders the setup screen, which would otherwise
@@ -3432,6 +3521,11 @@ They stay on your call list and keep their history — this only takes them out 
 
 
   document.addEventListener("change", (event) => {
+    if (event.target.name === "emailReviewSelection") {
+      if (event.target.checked) reviewSelected.add(event.target.value);
+      else reviewSelected.delete(event.target.value);
+      return;
+    }
     if (event.target.name === "emailTiming") {
       sendTiming = event.target.value === "later" ? "later" : "now";
       deliveryPlanSequence += 1;

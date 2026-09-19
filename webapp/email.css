@@ -755,3 +755,11 @@
     grid-template-columns:1fr 1.5fr}.email-approval-dialog>footer .ask-btn{width:100%}
   .email-approval-plan li{display:block}.email-approval-plan li b{display:block;margin-top:3px;text-align:left}
 }
+.email-review-safety { padding: 1rem; max-width: 100%; }
+.email-review-safety p { max-width: 85ch; }
+.email-review-actions { display: flex; flex-wrap: wrap; gap: .5rem; margin: 1rem 0; }
+.email-review-table { overflow-x: auto; max-height: 65vh; }
+.email-review-table table { border-collapse: collapse; width: 100%; min-width: 700px; }
+.email-review-table th, .email-review-table td { padding: .65rem; text-align: left; vertical-align: top; border-bottom: 1px solid rgba(128,128,128,.3); }
+.email-review-table small { display: block; margin-top: .3rem; opacity: .8; }
+.email-review-table input[type="checkbox"] { width: 20px; height: 20px; }

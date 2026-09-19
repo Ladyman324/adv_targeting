@@ -10,6 +10,7 @@ const health = require("./email-health");
 const recipientRegistry = require("./recipient-registry");
 const materials = require("./email-materials");
 const schedule = require("./email-schedule");
+const review = require("./email-review");
 // The rep's own account settings live in the app store, not the email store --
 // same table the map's default scope and call list come from.
 const appStore = require("./store");
@@ -1210,6 +1211,7 @@ async function approve(who, input) {
         .map((assignment) => [assignment.key, assignment]));
       let slot = 0;
       for (const message of await store.listMessages(who.id, existingBatch.id)) {
+        if (message.handledManuallyUtc) continue;
         const assignment = assignments.get(message.id);
         if (message.state === "editing") {
           if (existingBatch.capacityPlanHash && !assignment) continue;
@@ -1531,6 +1533,7 @@ async function getBatchDetail(who, batchId, deps = {}) {
   const prefs = { copySelf: batch.copySelf, copyInternal: batch.copyInternal,
                   copyInternalTo: batch.copyInternalTo, ccColleague: batch.ccColleague };
   const withCopies = messages.map((m) => ({ ...m,
+    retryEligibility: review.eligibility(batch, m),
     ...core.extraRecipients(m, prefs, { mail: batch.senderMail }, cfg) }));
   return { batch, messages: withCopies, counts };
 }
@@ -1551,6 +1554,14 @@ async function releaseCapacity(batch, messages, all = false) {
 async function control(who, input) {
   const batch = await store.getBatch(who.id, input.batchId);
   if (!batch) throw httpError(404, "Email batch not found.");
+  if (["check_status", "handled_manually", "retry_selected", "retry"].includes(input.action)) {
+    let results;
+    if (input.action === "check_status") await review.check(who, input, { store, auth });
+    else if (input.action === "handled_manually") await review.markManual(who, input, { store });
+    else results = await review.retry(who, input, { store, auth, suppress, enqueue });
+    await require("../email-worker/index").refreshBatch(who.id, batch.id, { store, core });
+    return { ...await getBatchDetail(who, batch.id), ...(results ? { retryResults: results } : {}) };
+  }
   if (input.action === "pause") {
     if (batch.mode !== "send") throw httpError(409, "Only a direct-send batch can be paused.");
     await store.patchBatch(who.id, batch.id, { status: "paused", pausedUtc: new Date().toISOString() }, batch.etag);
@@ -1596,54 +1607,11 @@ async function control(who, input) {
     // pre-send boundary when cancellation won the batch ETag race.
     await releaseCapacity(batch, messages, false).catch(() => ({ released: 0 }));
     await store.audit(who.id, batch.id, "remaining_canceled", {});
-  } else if (input.action === "retry") {
-    const connection = await auth.status(who.id);
-    if (!connection.connected) throw httpError(409, "Reconnect Microsoft 365 before retrying remaining work.");
-    const messages = await store.listMessages(who.id, batch.id);
-    const SAFE_FAILED_RETRIES = new Map([
-      ["draft_retryable_exhausted", "draft"],
-      ["send_retryable_exhausted", "send"],
-    ]);
-    const retryPhase = (message) => {
-      if (["started", "accepted"].includes(message.sendOutcome)) return "";
-      if (message.state === "auth_required") {
-        if (message.failureCode === "auth_required_draft") return "draft";
-        if (message.failureCode === "auth_required_send") return "send";
-        return "";
-      }
-      if (message.state === "failed")
-        return SAFE_FAILED_RETRIES.get(String(message.failureCode || "")) || "";
-      return "";
-    };
-    const candidates = messages.map((message) => ({ message, phase: retryPhase(message) }))
-      .filter(({ phase }) => phase);
-    if (!candidates.length) throw httpError(409,
-      "None of the remaining failures has a send outcome that is safe to retry.",
-      "no_safe_retry");
-    const nextStatus = batch.mode === "send" ? "sending" : "drafting";
-    await store.patchBatch(who.id, batch.id, { status: nextStatus }, batch.etag);
-    const paceSeconds = core.config().mailboxIntervalSeconds;
-    let slot = 0;
-    for (const { message: m, phase } of candidates) {
-      const draftPhase = phase === "draft";
-      await store.patchMessage(who.id, batch.id, m.id, {
-        state: draftPhase ? "draft_pending" : "send_scheduled",
-        failureCode: "", failureMessage: "", retryAfterUtc: "", leaseUntilUtc: "",
-        ...(draftPhase ? { draftAttempts: 0 } : { sendAttempts: 0 }),
-      }, m.etag);
-      await enqueue({ kind: phase, userId: who.id, batchId: batch.id,
-        messageId: m.id }, slot * paceSeconds);
-      slot += 1;
-    }
-    await store.audit(who.id, batch.id, "remaining_retried", {
-      requeued: candidates.length,
-      draft: candidates.filter((x) => x.phase === "draft").length,
-      send: candidates.filter((x) => x.phase === "send").length,
-    });
   } else if (input.action === "resume") {
     if (batch.status !== "paused") throw httpError(409, "This batch is not paused.");
     await store.patchBatch(who.id, batch.id, { status: "sending", pausedUtc: "" }, batch.etag);
     for (const m of await store.listMessages(who.id, batch.id)) {
+      if (m.handledManuallyUtc) continue;
       if (!["draft_ready", "send_scheduled"].includes(m.state)) continue;
       if (m.state === "draft_ready") await store.patchMessage(who.id, batch.id, m.id, { state: "send_scheduled" }, m.etag);
       await enqueue({ kind: "send", userId: who.id, batchId: batch.id, messageId: m.id });
