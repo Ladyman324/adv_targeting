@@ -1,8 +1,4 @@
-"""Fast, resumable Edward Jones advisor discovery and email extraction.
-import sys as _sys, pathlib as _pathlib
-_sys.path.insert(0, str(_pathlib.Path(__file__).resolve().parent))
-from firm_rosters import roster_path, scratch_path  # one naming convention, defined once
-
+"""Fast, resumable Edward Jones advisor discovery, email and bio extraction.
 
 The public search API may require browser session cookies.  The ``discover``
 command therefore accepts an optional Cookie header.  The ``enrich`` command
@@ -32,6 +28,9 @@ from urllib.parse import urlencode, urljoin, urlparse
 
 import httpx
 from lxml import etree, html
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from firm_rosters import roster_path, scratch_path  # one naming convention, defined once
 
 
 ROOT = Path(__file__).parents[1]
@@ -561,6 +560,35 @@ def extract_emails(page_html: str) -> Tuple[List[str], str]:
     return sorted(emails), "ok" if emails else "field_empty"
 
 
+def extract_bio(page_html: str) -> Optional[str]:
+    """The advisor's full bio, as plain text with paragraph breaks kept.
+
+    The page renders the bio truncated behind a "Show Full Bio" button, but the
+    button fetches nothing: the complete text ships in the enhanced-fa-bio
+    widget's JSON as HTML (entities like &trade; and <br> breaks included).
+    """
+    try:
+        tree = html.fromstring(page_html)
+    except (ValueError, etree.ParserError):
+        return None
+    nodes = tree.xpath('//div[@data-widget="enhanced-fa-bio"]/script[@type="application/json"]/text()')
+    if not nodes:
+        return None
+    try:
+        content = json.loads(nodes[0]).get("content")
+    except (json.JSONDecodeError, AttributeError):
+        return None
+    if not isinstance(content, str) or not content.strip():
+        return None
+    content = re.sub(r"<br\s*/?>|</p>", "\n", content, flags=re.I)
+    try:
+        text = html.fragment_fromstring(content, create_parent="div").text_content()
+    except (ValueError, etree.ParserError):
+        return None
+    lines = [re.sub(r"[ \t\xa0]+", " ", line).strip() for line in text.split("\n")]
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip() or None
+
+
 def load_enrichment_checkpoint(path: Path) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, Any]]:
     results: Dict[str, Dict[str, Any]] = {}
     metadata: Dict[str, Any] = {}
@@ -768,6 +796,7 @@ def write_enriched_records(records: List[Dict[str, Any]], results: Dict[str, Dic
         record["emails"] = emails
         record["email_status"] = result.get("status", "profile_url_missing" if not profile_url else "not_processed")
         record["email_source_url"] = profile_url
+        record["bio"] = result.get("bio")
         if result.get("http_status") is not None:
             record["email_http_status"] = result["http_status"]
         if result.get("error"):
@@ -829,7 +858,7 @@ async def enrich(args: argparse.Namespace, records: Optional[List[Dict[str, Any]
     if not urls:
         raise RuntimeError("No profile URLs found. Inspect the JSON and pass --url-field FIELD.NAME")
 
-    fingerprint = stable_fingerprint({"urls": sorted(urls), "extractor_version": 2})
+    fingerprint = stable_fingerprint({"urls": sorted(urls), "extractor_version": 3})
     prior_results: Dict[str, Dict[str, Any]] = {}
     prior_meta: Dict[str, Any] = {}
     if args.resume:
@@ -895,6 +924,7 @@ async def enrich(args: argparse.Namespace, records: Optional[List[Dict[str, Any]
                             row["http_status"] = response.status_code
                             if response.is_success:
                                 row["emails"], row["status"] = extract_emails(response.text)
+                                row["bio"] = extract_bio(response.text)
                             elif response.status_code == 404:
                                 row["status"] = "not_found"
                             else:
@@ -993,7 +1023,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     combined.add_argument("--progress-every", type=int, default=100)
     add_cdp_args(combined)
     add_network_args(combined, default_rate=2.0)
-    enrichment = subparsers.add_parser("enrich", help="Extract hidden email fields from profile pages")
+    enrichment = subparsers.add_parser("enrich", help="Extract hidden email fields and bios from profile pages")
     enrichment.add_argument("--input", type=Path, required=True, help="Advisor JSON array")
     enrichment.add_argument("--url-field", help="Dotted path of profile URL if auto-detection is wrong")
     enrichment.add_argument("--output", type=Path, default=roster_path("edward_jones"), help="Single complete advisor CSV with email fields added")
