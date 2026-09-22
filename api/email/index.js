@@ -109,6 +109,10 @@ module.exports = async function (context, req) {
         return ok(context, await engagement.queue(who.id));
       }
       if (op === "activity_filter_summary") {
+        // `scope=team` is every rep's latest email per advisor; anything else
+        // is this rep's own, which is what the filter has always meant.
+        if (String(req.query.scope || "") === "team")
+          return ok(context, await engagement.teamActivitySummary());
         return ok(context, await engagement.activitySummary(who.id));
       }
       /* Exactly who a Reply All would reach, so the rep can see it.

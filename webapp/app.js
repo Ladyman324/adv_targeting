@@ -155,11 +155,18 @@ let reg = "all";                    // all | dual | ria
 let lastEmailed = "";               // d30 | d90 | d180 | older | none
 let lastCalled = "";                // d30 | d90 | d180 | older | none
 let joinedFirm = "";                // d90 | d180 | d360
-const EMAIL_ACTIVITY = new Map();    // advisor CRD -> my latest outbound email
-const CALL_ACTIVITY = new Map();     // advisor CRD -> my latest recorded outbound call
-let emailActivityState = "idle";    // idle | loading | ready | failed
-let callActivityState = "idle";
-let activityFilterPromise = null;
+let emailScope = "me";              // me | team: whose email Last emailed reads
+let callScope = "me";               // me | team: whose calls Last called reads
+// kind -> scope -> advisor CRD -> latest outbound timestamp. Each of the four
+// sources loads on its own, so a team view costs nothing until it is asked for.
+const newActivitySource = () => ({ rows:new Map(), state:"idle", promise:null }); // idle | loading | ready | failed
+const ACTIVITY = {
+  email:{ me:newActivitySource(), team:newActivitySource() },
+  call:{ me:newActivitySource(), team:newActivitySource() },
+};
+const activityScope = kind => kind === 'email' ? emailScope : callScope;
+const activitySource = (kind, which=activityScope(kind)) => ACTIVITY[kind][which];
+const activityState = kind => activitySource(kind).state;
 const activityOptionCache = new Map();
 let advQuery = "";                  // advisor name or CRD substring
 let focusedAdvisorId = null;        // explicit advisor-result map focus
@@ -964,35 +971,37 @@ function fillActivityMap(target, payload){
 }
 
 function loadActivityFilters(signal=null){
-  if (emailActivityState === "ready" && callActivityState === "ready")
-    return Promise.resolve();
-  if (activityFilterPromise) return activityFilterPromise;
-  if (emailActivityState !== "ready") emailActivityState = "loading";
-  if (callActivityState !== "ready") callActivityState = "loading";
+  return Promise.all(['email', 'call'].map(kind =>
+    loadActivitySource(kind, activityScope(kind), signal)));
+}
+
+const ACTIVITY_URLS = {
+  email:{ me:"/api/email?op=activity_filter_summary",
+          team:"/api/email?op=activity_filter_summary&scope=team" },
+  call:{ me:"/api/log?summary=1", team:"/api/log?summary=1&scope=team" },
+};
+function loadActivitySource(kind, which, signal=null){
+  const source = ACTIVITY[kind][which];
+  if (source.state === "ready") return Promise.resolve();
+  if (source.promise) return source.promise;
+  source.state = "loading";
   syncActivityFilterUI();
-  const loadOne = (url, target, setState) => fetch(url, { signal, cache:"no-store" })
+  source.promise = fetch(ACTIVITY_URLS[kind][which], { signal, cache:"no-store" })
     .then(response => {
       if (!response.ok) throw new Error(`${response.status}`);
       return response.json();
     })
-    .then(payload => { fillActivityMap(target, payload); setState("ready"); })
+    .then(payload => { fillActivityMap(source.rows, payload); source.state = "ready"; })
     .catch(error => {
-      if (error && error.name === "AbortError") throw error;
-      setState("failed");
+      if (error && error.name === "AbortError") { source.state = "idle"; throw error; }
+      source.state = "failed";
+    })
+    .finally(() => {
+      source.promise = null;
+      syncActivityFilterUI();
+      if (activityScope(kind) === which && (kind === 'email' ? lastEmailed : lastCalled)) redraw();
     });
-  activityFilterPromise = Promise.all([
-    emailActivityState === "ready" ? Promise.resolve() : loadOne(
-      "/api/email?op=activity_filter_summary", EMAIL_ACTIVITY,
-      value => { emailActivityState = value; }),
-    callActivityState === "ready" ? Promise.resolve() : loadOne(
-      "/api/log?summary=1", CALL_ACTIVITY,
-      value => { callActivityState = value; }),
-  ]).finally(() => {
-    activityFilterPromise = null;
-    syncActivityFilterUI();
-    if (lastEmailed || lastCalled) redraw();
-  });
-  return activityFilterPromise;
+  return source.promise;
 }
 
 function preferredDisplayName(formalName, preferredFirst){
@@ -2675,7 +2684,7 @@ function audienceScopeDefinition(){
 function captureAudienceDefinition(){
   return { version:1, scope:audienceScopeDefinition(), filters:{
     selectedFirms:[...selectedFirms], selectsOnly, aum:[...aumSel], roles:[...roleSel], reg,
-    lastEmailed, lastCalled, joinedFirm, ownerOnly,
+    lastEmailed, lastCalled, joinedFirm, ownerOnly, emailScope, callScope,
     rankedOnly, excluded:[...excludedFirms], continentalOnly,
     contactableOnly, assetsOnly,
   }};
@@ -2712,11 +2721,9 @@ async function applyAudienceDefinition(audience){
   selectsBox.checked = selectsOnly;
   selectsBox.closest(".switch").classList.toggle("on", selectsOnly);
   refill(aumSel, f.aum); refill(roleSel, f.roles); reg = f.reg || "all";
-  if (f.lastEmailed || f.lastCalled) await loadActivityFilters();
-  if (f.lastEmailed && emailActivityState !== "ready")
-    throw new Error("Email activity is unavailable for this saved audience.");
-  if (f.lastCalled && callActivityState !== "ready")
-    throw new Error("Call activity is unavailable for this saved audience.");
+  await loadAudienceActivity(f);
+  emailScope = audienceActivityScope(f, 'email');
+  callScope = audienceActivityScope(f, 'call');
   lastEmailed = f.lastEmailed || "";
   lastCalled = f.lastCalled || "";
   joinedFirm = f.joinedFirm || "";
@@ -2764,7 +2771,7 @@ async function prepareAudiencePreviewData(audience){
     ? loadRegionalSupport()
     : (SUPPORT.territories === "ready" ? Promise.resolve() : loadTerritories());
   await Promise.all([loadContacts(), ensureAudienceIdentity(), support,
-    (f.lastEmailed || f.lastCalled) ? loadActivityFilters() : Promise.resolve()]);
+    loadAudienceActivity(f).catch(() => {})]);
   if (!CONTACTS_READY)
     throw new Error("Contact eligibility is unavailable, so this audience cannot be previewed safely. Try again after contact data loads.");
   if ((f.roles || []).length && !Dial.state.flagsReady)
@@ -2777,10 +2784,21 @@ async function prepareAudiencePreviewData(audience){
     throw new Error("Advisor ranking data is unavailable for this saved audience.");
   if (f.assetsOnly && SUPPORT.act !== "ready")
     throw new Error("EIC account-book data is unavailable for this saved audience.");
-  if (f.lastEmailed && emailActivityState !== "ready")
-    throw new Error("Email activity is unavailable for this saved audience.");
-  if (f.lastCalled && callActivityState !== "ready")
-    throw new Error("Call activity is unavailable for this saved audience.");
+  await loadAudienceActivity(f);
+}
+// Audiences saved before the team view carry no scope, and meant "me".
+const audienceActivityScope = (f, kind) =>
+  f[kind === 'email' ? 'emailScope' : 'callScope'] === 'team' ? 'team' : 'me';
+async function loadAudienceActivity(f){
+  const wanted = [['email', f.lastEmailed, 'email'], ['call', f.lastCalled, 'call']]
+    .filter(([, value]) => value);
+  await Promise.all(wanted.map(([kind]) =>
+    loadActivitySource(kind, audienceActivityScope(f, kind))));
+  for (const [kind, , noun] of wanted) {
+    const which = audienceActivityScope(f, kind);
+    if (ACTIVITY[kind][which].state !== "ready")
+      throw new Error(`${which === 'team' ? 'Team' : 'Your'} ${noun} activity is unavailable for this saved audience.`);
+  }
 }
 function audienceTerritoryPolicy(preview){
   const email = String(ME && ME.userDetails || "").trim().toLowerCase();
@@ -4706,8 +4724,8 @@ let backgroundRunning = false;
 // for 6.9 MB even when the user never needed the filed-name/office expansion.
 const backgroundComplete = () =>
   (NAT_DETAIL_READY || NAT_DETAIL_ERROR) && (CONTACTS_READY || CONTACTS_ERROR)
-  && ["ready", "failed"].includes(emailActivityState)
-  && ["ready", "failed"].includes(callActivityState);
+  && ["ready", "failed"].includes(activityState('email'))
+  && ["ready", "failed"].includes(activityState('call'));
 
 function cancelScheduledBackground(){
   if (supportTimer != null){
@@ -6146,10 +6164,10 @@ function passesActivityAge(p, selected, rows, state){
   return timestamp != null && activityAgeBand(timestamp) === selected;
 }
 function passesLastEmailed(p){
-  return passesActivityAge(p, lastEmailed, EMAIL_ACTIVITY, emailActivityState);
+  return passesActivityAge(p, lastEmailed, activitySource('email').rows, activityState('email'));
 }
 function passesLastCalled(p){
-  return passesActivityAge(p, lastCalled, CALL_ACTIVITY, callActivityState);
+  return passesActivityAge(p, lastCalled, activitySource('call').rows, activityState('call'));
 }
 function joinedAgeBand(day){
   if (!Number.isFinite(day)) return "";
@@ -7338,6 +7356,10 @@ document.getElementById("regToggle").addEventListener("click", e => {
 const lastEmailedSelect = document.getElementById("lastEmailed");
 const lastCalledSelect = document.getElementById("lastCalled");
 const joinedFirmSelect = document.getElementById("joinedFirm");
+const ACTIVITY_SCOPE_TOGGLES = {
+  email:document.getElementById("emailScopeToggle"),
+  call:document.getElementById("callScopeToggle"),
+};
 const ACTIVITY_SELECT_TEXT = {
   '':'Any', d30:'Within 30d', d90:'31–90d', d180:'91–180d',
   older:'181d+', none:'Not observed',
@@ -7346,7 +7368,7 @@ const ACTIVITY_SELECT_TEXT = {
 function activityFilterSignature(kind){
   return JSON.stringify([
     kind, scope, scopeRequest, Math.floor(Date.now() / FILTER_DAY_MS),
-    kind === 'email' ? lastCalled : lastEmailed,
+    kind === 'email' ? lastCalled : lastEmailed, emailScope, callScope,
     selectedFirms, selectsOnly, [...aumSel].sort(), [...roleSel].sort(), reg, joinedFirm,
     ownerOnly, rankedOnly, [...excludedFirms].sort(), continentalOnly,
     contactableOnly, assetsOnly, lassoPolygon,
@@ -7358,7 +7380,7 @@ function activityOptionStats(kind){
   const key = activityFilterSignature(kind);
   const cached = activityOptionCache.get(kind);
   if (cached && cached.key === key) return cached.stats;
-  const rows = kind === 'email' ? EMAIL_ACTIVITY : CALL_ACTIVITY;
+  const rows = activitySource(kind).rows;
   const stats = summarizeActivityOptions(ALL, rows, p => passesFilters(p, kind));
   activityOptionCache.set(kind, { key, stats });
   return stats;
@@ -7395,8 +7417,8 @@ function paintActivityOptions(element, kind, ready){
 function clearUnreachableActivitySelections(){
   if (scope === 'US') return;
   const configs = [
-    ['email', 'Last emailed', () => lastEmailed, value => { lastEmailed = value; }, emailActivityState],
-    ['call', 'Last called', () => lastCalled, value => { lastCalled = value; }, callActivityState],
+    ['email', 'Last emailed', () => lastEmailed, value => { lastEmailed = value; }, activityState('email')],
+    ['call', 'Last called', () => lastCalled, value => { lastCalled = value; }, activityState('call')],
   ];
   for (const [kind, label, getValue, setValue, state] of configs) {
     const value = getValue();
@@ -7415,17 +7437,20 @@ function syncActivityFilterUI(){
   lastCalledSelect.value = lastCalled;
   joinedFirmSelect.value = joinedFirm;
   const national = scope === "US";
-  lastEmailedSelect.disabled = national || emailActivityState !== "ready";
-  lastCalledSelect.disabled = national || callActivityState !== "ready";
   joinedFirmSelect.disabled = national;
-  paintActivityOptions(lastEmailedSelect, 'email', !national && emailActivityState === 'ready');
-  paintActivityOptions(lastCalledSelect, 'call', !national && callActivityState === 'ready');
-  lastEmailedSelect.title = emailActivityState === "failed"
-    ? "Email activity is unavailable."
-    : emailActivityState === "ready" ? "" : "Loading your email activity…";
-  lastCalledSelect.title = callActivityState === "failed"
-    ? "Call activity is unavailable."
-    : callActivityState === "ready" ? "" : "Loading your recorded calls…";
+  for (const [kind, element, noun] of [['email', lastEmailedSelect, 'email activity'],
+                                       ['call', lastCalledSelect, 'recorded calls']]) {
+    const state = activityState(kind), team = activityScope(kind) === 'team';
+    element.disabled = national || state !== "ready";
+    paintActivityOptions(element, kind, !national && state === 'ready');
+    element.title = state === "failed"
+      ? `${team ? 'Team' : 'Your'} ${noun} ${kind === 'email' ? 'is' : 'are'} unavailable.`
+      : state === "ready" ? "" : `Loading ${team ? 'team' : 'your'} ${noun}…`;
+    for (const button of ACTIVITY_SCOPE_TOGGLES[kind].querySelectorAll("button")) {
+      button.setAttribute("aria-pressed", String(button.dataset.scope === activityScope(kind)));
+      button.disabled = national;
+    }
+  }
 }
 function wireActivitySelect(element, ready, getValue, setValue, label){
   const kind = element === lastEmailedSelect ? 'email' : 'call';
@@ -7446,10 +7471,29 @@ function wireActivitySelect(element, ready, getValue, setValue, label){
       `No advisors match the ${label.toLowerCase()} filter.`, label.toLowerCase());
   });
 }
-wireActivitySelect(lastEmailedSelect, () => emailActivityState === "ready",
+wireActivitySelect(lastEmailedSelect, () => activityState('email') === "ready",
   () => lastEmailed, value => { lastEmailed = value; }, "Last emailed");
-wireActivitySelect(lastCalledSelect, () => callActivityState === "ready",
+wireActivitySelect(lastCalledSelect, () => activityState('call') === "ready",
   () => lastCalled, value => { lastCalled = value; }, "Last called");
+/* Me | Team beside each activity filter. Switching keeps the chosen age band:
+ * "within 30 days" is the question, the toggle only changes whose activity
+ * answers it. The team overlay loads the first time it is asked for; if the
+ * band then matches nobody, the usual unreachable-choice rule clears it. */
+for (const kind of ['email', 'call']) {
+  ACTIVITY_SCOPE_TOGGLES[kind].addEventListener("click", e => {
+    const button = e.target.closest("button[data-scope]");
+    if (!button || button.disabled || button.dataset.scope === activityScope(kind)) return;
+    const which = button.dataset.scope;
+    if (kind === 'email') emailScope = which; else callScope = which;
+    activityOptionCache.clear();
+    syncFilterButtons(); redraw();
+    loadActivitySource(kind, which).then(() => {
+      if (activityScope(kind) !== which) return;
+      clearUnreachableActivitySelections();
+      syncFilterButtons(); redraw();
+    }).catch(() => {});
+  });
+}
 joinedFirmSelect.addEventListener("change", () => {
   joinedFirm = joinedFirmSelect.value;
   redraw();
@@ -7808,8 +7852,8 @@ function refreshActiveFilters(){
   if (scope !== "US"){
     if (roleSel.size) add(`People: ${[...roleSel].map(kind => ROLE_FILTER_LABELS[kind]).join(", ")}`, "roles");
     if (reg !== "all") add(reg === "dual" ? "Dually registered" : "RIA-only", "reg");
-    if (lastEmailed) add(`Last emailed: ${ACTIVITY_FILTER_LABELS[lastEmailed]}`, "lastEmailed");
-    if (lastCalled) add(`Last called: ${ACTIVITY_FILTER_LABELS[lastCalled]}`, "lastCalled");
+    if (lastEmailed) add(`Last emailed${emailScope === "team" ? " (team)" : ""}: ${ACTIVITY_FILTER_LABELS[lastEmailed]}`, "lastEmailed");
+    if (lastCalled) add(`Last called${callScope === "team" ? " (team)" : ""}: ${ACTIVITY_FILTER_LABELS[lastCalled]}`, "lastCalled");
     if (joinedFirm) add(`Joined firm: ${JOINED_FILTER_LABELS[joinedFirm]}`, "joinedFirm");
     if (ownerOnly) add("Owners/officers", "owner");
     // Distinct advisors, not pins -- an advisor filed at two offices is two
@@ -7854,6 +7898,7 @@ function syncFilterButtons(){
 
 function resetAllFilters(){
   reg = "all"; roleSel.clear(); lastEmailed = ""; lastCalled = ""; joinedFirm = "";
+  emailScope = "me"; callScope = "me"; activityOptionCache.clear();
   ownerOnly = false;
   rankedOnly = false;
   contactableOnly = false; assetsOnly = false;
@@ -7907,7 +7952,7 @@ function captureAdvisorFilters(){
   return {
     selectedFirms:[...selectedFirms], selectsOnly,
     aum:[...aumSel], roles:[...roleSel], reg, lastEmailed, lastCalled, joinedFirm,
-    ownerOnly, rankedOnly, excluded:[...excludedFirms],
+    emailScope, callScope, ownerOnly, rankedOnly, excluded:[...excludedFirms],
   };
 }
 
@@ -7923,6 +7968,9 @@ function restoreAdvisorFilters(saved){
   reg = saved.reg;
   lastEmailed = saved.lastEmailed || "";
   lastCalled = saved.lastCalled || "";
+  emailScope = saved.emailScope === "team" ? "team" : "me";
+  callScope = saved.callScope === "team" ? "team" : "me";
+  activityOptionCache.clear();
   joinedFirm = saved.joinedFirm || "";
   ownerOnly = !!saved.ownerOnly;
   rankedOnly = !!saved.rankedOnly;

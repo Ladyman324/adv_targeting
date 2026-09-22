@@ -1514,6 +1514,22 @@ async function listEngagement(userId) {
   return out;
 }
 
+/* Every rep's last outbound email per advisor, for the team map overlay.
+ *
+ * A scan across partitions, which the per-rep reads deliberately avoid. It is
+ * acceptable here because the table holds one row per (rep, advisor) pair --
+ * bounded by advisors actually contacted, times a team of six -- and only the
+ * three columns the overlay needs are read.
+ */
+async function listTeamLastOutbound() {
+  const out = [];
+  for await (const e of (await table("engagement")).listEntities({
+    queryOptions: { select: ["PartitionKey", "RowKey", "advisorCrd", "lastOutboundAt"] } })) {
+    if (e.lastOutboundAt) out.push(e);
+  }
+  return out;
+}
+
 /* Which rep's mailbox one activity row came from.
  *
  * Scoped by advisor because that is the partition key, so this is one small
@@ -1563,6 +1579,7 @@ module.exports = {
   claimEngagementDirty, ackEngagementDirty, failEngagementDirty,
   getEngagementRepairCursor, putEngagementRepairCursor,
   getEngagement, putEngagement, putEngagementProjection, listEngagement,
+  listTeamLastOutbound,
   passcodeAttempts, recordPasscodeFailure, clearPasscodeFailures,
   id, now, batchPartition, putConnection, getConnection, putAuthState, consumeAuthState,
   createBatch, getBatch, patchBatch, listBatches, createMessage, getMessage, listMessages,

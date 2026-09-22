@@ -20,7 +20,11 @@ const BOOLEAN_FILTERS = new Set([
   "selectsOnly", "ownerOnly", "rankedOnly", "continentalOnly",
   "contactableOnly", "assetsOnly",
 ]);
-const STRING_FILTERS = new Set(["reg", "lastEmailed", "lastCalled", "joinedFirm"]);
+const STRING_FILTERS = new Set(["reg", "lastEmailed", "lastCalled", "joinedFirm",
+  "emailScope", "callScope"]);
+// Whose activity each activity filter reads. Absent means "me", which is what
+// every audience saved before the team view existed was built on.
+const STRING_DEFAULTS = { reg: "all", emailScope: "me", callScope: "me" };
 const FILTER_KEYS = new Set([...ARRAY_FILTERS, ...BOOLEAN_FILTERS, ...STRING_FILTERS]);
 const ENUMS = {
   aum: new Set(["lt100m", "100m1b", "1b10b", "10b100b", "gt100b"]),
@@ -29,6 +33,8 @@ const ENUMS = {
   lastEmailed: new Set(["", "d30", "d90", "d180", "older", "none"]),
   lastCalled: new Set(["", "d30", "d90", "d180", "older", "none"]),
   joinedFirm: new Set(["", "d90", "d180", "d360"]),
+  emailScope: new Set(["me", "team"]),
+  callScope: new Set(["me", "team"]),
 };
 
 function bad(message, statusCode = 400) {
@@ -97,7 +103,7 @@ function normalizeFilters(value) {
       : array(input[key], `filters.${key}`);
   for (const key of BOOLEAN_FILTERS) filters[key] = input[key] === true;
   for (const key of STRING_FILTERS) {
-    const fallback = key === "reg" ? "all" : "";
+    const fallback = STRING_DEFAULTS[key] || "";
     filters[key] = text(input[key] === undefined ? fallback : input[key], 16, `filters.${key}`);
     if (!ENUMS[key].has(filters[key])) throw bad(`filters.${key} is invalid.`);
   }

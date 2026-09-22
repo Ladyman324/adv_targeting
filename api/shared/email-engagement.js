@@ -511,6 +511,37 @@ async function activitySummary(userId, deps = {}) {
   };
 }
 
+/* The same overlay across every rep: each advisor's latest outbound email from
+ * anyone on the team, and whose mailbox it came from.
+ *
+ * Dates and rep addresses only -- never subject, content or advisor address. That is
+ * no more than the shared timeline already shows about a colleague's mail.
+ * Advisors who are our own people are left out, as they are on the timeline:
+ * when reps email each other is nobody else's business. */
+async function teamActivitySummary(deps = {}) {
+  const st = deps.store || store;
+  const ad = deps.advisors || require("./advisor-lookup");
+  const [rows, connections] = await Promise.all([st.listTeamLastOutbound(), st.listConnections()]);
+  // The rep's mailbox address, which is also what the call log records.
+  const names = new Map(connections.map((c) => [String(c.userId), String(c.mailbox || "")]));
+  const latest = new Map();
+  for (const row of rows) {
+    const crd = String(row.advisorCrd || row.rowKey || "");
+    const at = String(row.lastOutboundAt || "");
+    if (!crd || !at) continue;
+    const seen = latest.get(crd);
+    if (!seen || at > seen.at) latest.set(crd, { at, userId: String(row.partitionKey || "") });
+  }
+  // Loaded once for the whole summary. An unavailable lookup keeps every row,
+  // as the timeline does, rather than retrying the download per advisor.
+  let internal = new Set();
+  try { internal = (await ad.load()).internalCrds || internal; } catch { /* keep all */ }
+  const entries = [];
+  for (const [crd, { at, userId }] of latest)
+    if (!internal.has(crd)) entries.push([crd, at, names.get(userId) || ""]);
+  return { generatedUtc: new Date().toISOString(), entries };
+}
+
 /* Throw a rep's whole projection away and regenerate it from the log.
  *
  * The repair path, and the proof that this really is a cache. Anything the log
@@ -615,7 +646,7 @@ async function completeOutbound(userId, advisorCrd, deps = {}) {
   });
 }
 
-module.exports = { fold, reason, rank, refresh, refreshDirty, rebuild, queue, activitySummary, setReplyState,
+module.exports = { fold, reason, rank, refresh, refreshDirty, rebuild, queue, activitySummary, teamActivitySummary, setReplyState,
                    snooze, dismissBounce, completeOutbound, batchAttention,
                    mailboxAttention, replySweepHealth,
                    REPLY_STATES, REASONS, ACTIONS_BY_REASON, stateIndex };

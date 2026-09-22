@@ -188,9 +188,13 @@
             <label class="label" for="lastEmailed">Last emailed
               <span class="info-wrap">
                 <button type="button" class="info-button" aria-label="About the last emailed filter">i</button>
-                <span class="info-popover" role="tooltip">Email observed from your connected mailbox. Not observed is honest about the available mailbox history; it does not claim nobody has ever emailed this advisor.</span>
+                <span class="info-popover" role="tooltip">Me: email observed from your connected mailbox. Team: the latest email from anyone on the team whose mailbox is connected. Not observed is honest about the available mailbox history; it does not claim nobody has ever emailed this advisor.</span>
               </span>
             </label>
+            <div id="emailScopeToggle" class="seg scope-seg" role="group" aria-label="Whose email the last emailed filter reads">
+              <button type="button" data-scope="me" aria-pressed="true">Me</button>
+              <button type="button" data-scope="team" aria-pressed="false">Team</button>
+            </div>
             <select id="lastEmailed" class="filter-select">
               <option value="">Any</option>
               <option value="d30">Within 30d</option>
@@ -204,9 +208,13 @@
             <label class="label" for="lastCalled">Last called
               <span class="info-wrap">
                 <button type="button" class="info-button" aria-label="About the last called filter">i</button>
-                <span class="info-popover" role="tooltip">Your recorded outbound call outcomes. Incoming calls and skipped queue entries do not reset this clock. Calls made outside the application may not be observed.</span>
+                <span class="info-popover" role="tooltip">Me: your recorded outbound call outcomes. Team: the latest recorded call from anyone on the team. Incoming calls and skipped queue entries do not reset this clock. Calls made outside the application may not be observed.</span>
               </span>
             </label>
+            <div id="callScopeToggle" class="seg scope-seg" role="group" aria-label="Whose calls the last called filter reads">
+              <button type="button" data-scope="me" aria-pressed="true">Me</button>
+              <button type="button" data-scope="team" aria-pressed="false">Team</button>
+            </div>
             <select id="lastCalled" class="filter-select">
               <option value="">Any</option>
               <option value="d30">Within 30d</option>

@@ -46,6 +46,70 @@ test("last-called summary is per rep, outbound-only, and uses the latest event t
   ]);
 });
 
+test("team last-called summary spans reps, keeps the caller, and applies the same exclusions", async () => {
+  const store = env();
+  const log = store.__testService.table("CallLog");
+  const add = (partitionKey, rowKey, crd, atUtc, disposition, userName) =>
+    log.createEntity({ partitionKey, rowKey, crd, atUtc, disposition, userName, note: "private" });
+  await add(WHO.id, "001", "111", "2026-08-01T12:00:00Z", "connected", WHO.name);
+  await add("other-rep", "001", "111", "2026-08-12T12:00:00Z", "voicemail", "other@example.com");
+  await add("other-rep", "002", "222", "2026-08-20T12:00:00Z", "received", "other@example.com");
+  await add(WHO.id, "002", "333", "2026-08-21T12:00:00Z", "skipped", WHO.name);
+  await add(WHO.id, "003", "444", "2026-08-22T12:00:00Z", "attempted", WHO.name);
+  assert.deepEqual(await store.latestCallsForTeam(), [
+    ["111", "2026-08-12T12:00:00Z", "other@example.com"],
+    ["444", "2026-08-22T12:00:00Z", WHO.name],
+  ]);
+});
+
+test("definition activity scopes default to me and accept only me or team", () => {
+  const plain = defs.normalizeDefinition(raw()).definition.filters;
+  assert.equal(plain.emailScope, "me");
+  assert.equal(plain.callScope, "me");
+  const team = defs.normalizeDefinition({ ...raw(),
+    filters: { lastEmailed: "d30", emailScope: "team", callScope: "me" } }).definition.filters;
+  assert.equal(team.emailScope, "team");
+  assert.equal(team.callScope, "me");
+  for (const key of ["emailScope", "callScope"])
+    assert.throws(() => defs.normalizeDefinition({ ...raw(), filters: { [key]: "firm" } }),
+      new RegExp("filters." + key));
+});
+
+test("call log summary route serves the team only when asked, without our own people", async () => {
+  const target = require.resolve("../log/index.js");
+  delete require.cache[target];
+  const real = Module._load;
+  const calls = [];
+  const fakeStore = {
+    identity: () => WHO,
+    latestCallsForUser: async (who) => { calls.push(["mine", who.id]); return [["111", "2026-08-01T12:00:00Z"]]; },
+    latestCallsForTeam: async () => { calls.push(["team"]); return [
+      ["111", "2026-08-02T12:00:00Z", "other@example.com"],
+      ["999", "2026-08-03T12:00:00Z", "other@example.com"]]; },
+    ok: (context, body) => { context.res = { status: 200, body }; return context.res; },
+    fail: (context, error) => { context.res = { status: error.statusCode || 500, body: { error: error.message } }; return context.res; },
+  };
+  const fakeAdvisors = { load: async () => ({ internalCrds: new Set(["999"]) }) };
+  Module._load = function (request, parent) {
+    if (parent && parent.filename === target) {
+      if (request === "../shared/store") return fakeStore;
+      if (request === "../shared/act") return {};
+      if (request === "../shared/advisor-lookup") return fakeAdvisors;
+    }
+    return real.apply(this, arguments);
+  };
+  let handler;
+  try { handler = require(target); } finally { Module._load = real; delete require.cache[target]; }
+
+  const mine = {};
+  await handler(mine, { method: "GET", query: { summary: "1" } });
+  assert.deepEqual(mine.res.body.entries, [["111", "2026-08-01T12:00:00Z"]]);
+  const team = {};
+  await handler(team, { method: "GET", query: { summary: "1", scope: "team" } });
+  assert.deepEqual(team.res.body.entries, [["111", "2026-08-02T12:00:00Z", "other@example.com"]]);
+  assert.deepEqual(calls, [["mine", WHO.id], ["team"]]);
+});
+
 test("audience HTTP endpoint authenticates and routes GET, PUT, and DELETE", async () => {
   const target = require.resolve("../audiences/index.js");
   delete require.cache[target];

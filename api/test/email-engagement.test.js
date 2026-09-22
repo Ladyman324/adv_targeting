@@ -167,6 +167,48 @@ test("activity summary exposes only compact last-outbound rows", async () => {
     "the map overlay must not become another contact-data payload");
 });
 
+test("team activity summary keeps each advisor's latest email and who sent it", async () => {
+  const summary = await engagement.teamActivitySummary({
+    store: {
+      listTeamLastOutbound: async () => [
+        { partitionKey: "u1", advisorCrd: "111", lastOutboundAt: "2026-08-01T12:00:00Z" },
+        { partitionKey: "u2", advisorCrd: "111", lastOutboundAt: "2026-08-05T12:00:00Z" },
+        { partitionKey: "u1", rowKey: "222", lastOutboundAt: "2026-08-03T12:00:00Z" },
+        { partitionKey: "u3", advisorCrd: "333", lastOutboundAt: "2026-08-04T12:00:00Z" },
+        { partitionKey: "u2", advisorCrd: "444", lastOutboundAt: "2026-08-06T12:00:00Z" },
+        { partitionKey: "u2", advisorCrd: "555", lastOutboundAt: "" },
+      ],
+      listConnections: async () => [
+        { userId: "u1", mailbox: "bo@eicatlanta.com" },
+        { userId: "u2", mailbox: "kate@eicatlanta.com" },
+      ],
+    },
+    advisors: { load: async () => ({ internalCrds: new Set(["444"]) }) },
+  });
+  assert.deepEqual(summary.entries, [
+    ["111", "2026-08-05T12:00:00Z", "kate@eicatlanta.com"],
+    ["222", "2026-08-03T12:00:00Z", "bo@eicatlanta.com"],
+    ["333", "2026-08-04T12:00:00Z", ""],
+  ], "latest sender wins, a disconnected rep is unnamed, and our own people are left out");
+  assert.ok(summary.generatedUtc);
+});
+
+test("team activity summary keeps every row when the internal list is unavailable", async () => {
+  let loads = 0;
+  const summary = await engagement.teamActivitySummary({
+    store: {
+      listTeamLastOutbound: async () => [
+        { partitionKey: "u1", advisorCrd: "111", lastOutboundAt: "2026-08-01T12:00:00Z" },
+        { partitionKey: "u1", advisorCrd: "222", lastOutboundAt: "2026-08-02T12:00:00Z" },
+      ],
+      listConnections: async () => [],
+    },
+    advisors: { load: async () => { loads++; throw new Error("blob down"); } },
+  });
+  assert.equal(summary.entries.length, 2);
+  assert.equal(loads, 1, "the lookup is tried once per summary, not once per advisor");
+});
+
 test("ordinary replies and inferred quiet contacts do not become notifications", async () => {
   const q = await engagement.queue("u1", queueStore([
     { advisorCrd: "quiet", everReplied: true, lastActivityAt: ago(300), replyState: "reviewed" },

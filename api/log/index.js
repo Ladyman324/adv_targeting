@@ -11,6 +11,7 @@
 
 const store = require("../shared/store");
 const actSync = require("../shared/act");
+const advisors = require("../shared/advisor-lookup");
 
 // A closed set, checked server-side. The client offers buttons, but the client
 // is not the authority on what a valid outcome is -- and "do-not-call" in
@@ -37,6 +38,14 @@ const DISPOSITIONS = new Set([
 // Must agree with Dial.PURPOSES in webapp/dial.js; audit.py checks that it does.
 const PURPOSES = new Set(["meeting", "materials", "check-in", "cold"]);
 
+// Team call summaries leave out our own people, as the email overlay and the
+// timeline do. An unavailable lookup keeps every row, matching the timeline.
+async function withoutInternal(entries) {
+  let internal = new Set();
+  try { internal = (await advisors.load()).internalCrds || internal; } catch { /* keep all */ }
+  return entries.filter((entry) => !internal.has(entry[0]));
+}
+
 module.exports = async function (context, req) {
   try {
     const who = store.identity(req);
@@ -44,9 +53,11 @@ module.exports = async function (context, req) {
     if (req.method === "GET") {
       const crd = (req.query && req.query.crd) || "";
       if (!crd && String((req.query && req.query.summary) || "") === "1") {
+        const team = String((req.query && req.query.scope) || "") === "team";
         return store.ok(context, {
           generatedUtc: new Date().toISOString(),
-          entries: await store.latestCallsForUser(who),
+          entries: team ? await withoutInternal(await store.latestCallsForTeam())
+                        : await store.latestCallsForUser(who),
         });
       }
       // `since` powers cycle progress: which of this list have I already

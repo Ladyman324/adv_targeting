@@ -514,6 +514,28 @@ async function latestCallsForUser(who) {
   return [...latest];
 }
 
+/* latestCallsForUser() across the whole team: each advisor's latest outbound
+ * call from anyone, with who made it. Same exclusions -- an incoming call or a
+ * skipped queue entry is not somebody reaching out. A cross-partition scan,
+ * which is fine at a few thousand calls a year; only four columns are read,
+ * never the note. */
+async function latestCallsForTeam() {
+  const client = await table("log");
+  const latest = new Map();
+  const iter = client.listEntities({
+    queryOptions: { select: ["crd", "atUtc", "disposition", "userName"] },
+  });
+  for await (const event of iter) {
+    const crd = String(event.crd || "");
+    const disposition = String(event.disposition || "");
+    const atUtc = String(event.atUtc || "");
+    if (!crd || !atUtc || !disposition || disposition === "received" || disposition === "skipped") continue;
+    const seen = latest.get(crd);
+    if (!seen || atUtc > seen[0]) latest.set(crd, [atUtc, String(event.userName || "")]);
+  }
+  return [...latest].map(([crd, [atUtc, userName]]) => [crd, atUtc, userName]);
+}
+
 async function getAudience(who, id) {
   const client = await table("audience");
   try {
@@ -868,7 +890,7 @@ function fail(context, err) {
 }
 
 module.exports = {
-  configured, identity, appendEvent, setActStatus, eventsForCrd, recentForUser, latestCallsForUser,
+  configured, identity, appendEvent, setActStatus, eventsForCrd, recentForUser, latestCallsForUser, latestCallsForTeam,
   getQueue, putQueue, listQueues, deleteQueue, mutateQueueMember, listDnc, addDnc,
   getAudience, putAudience, listAudiences, deleteAudience,
   listFlags, setFlag,
