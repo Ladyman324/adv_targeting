@@ -67,6 +67,11 @@ class RateLimiter:
         async with self.lock:
             self.next_start = max(self.next_start, time.monotonic() + seconds)
 
+    async def cap_rate(self, requests_per_second: float) -> None:
+        """Permanently slow this run after the source proves a lower limit."""
+        async with self.lock:
+            self.interval = max(self.interval, 1.0 / requests_per_second)
+
 
 def retry_delay(response: Optional[httpx.Response], attempt: int) -> float:
     if response is not None:
@@ -126,6 +131,8 @@ async def request_with_retries(
             response = None
         if attempt < retries:
             delay = retry_delay(response, attempt)
+            if response is not None and response.status_code == 429:
+                await limiter.cap_rate(1.0)
             logging.warning("Transient request failure for %s; global backoff %.1fs (attempt %s/%s)", url, delay, attempt + 1, retries + 1)
             await limiter.penalize(delay)
     if last_error:
@@ -174,7 +181,10 @@ def load_discovery_checkpoint(path: Path, fingerprint: str) -> Tuple[Dict[int, D
 
 
 def advisor_identity(record: Dict[str, Any]) -> Optional[str]:
-    for field in ("faEntityId", "fid", "faUrl"):
+    # faEntityId is not person-unique: Edward Jones currently reuses it for
+    # Changyong/Cindy Shi and for two distinct Alex Crouch profiles. fid is
+    # the personal identifier; the personal profile URL is the next-best key.
+    for field in ("fid", "faUrl", "faEntityId"):
         value = record.get(field)
         if value is not None and str(value).strip():
             return "%s:%s" % (field, value)
@@ -424,6 +434,14 @@ async def discover_in_browser(args: argparse.Namespace) -> List[Dict[str, Any]]:
 
 async def run_all(args: argparse.Namespace) -> None:
     records = await discover_in_browser(args)
+    args.discovery_snapshot.parent.mkdir(parents=True, exist_ok=True)
+    temporary = args.discovery_snapshot.with_suffix(args.discovery_snapshot.suffix + ".tmp")
+    temporary.write_text(
+        json.dumps(records, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    temporary.replace(args.discovery_snapshot)
+    print("Saved validated discovery snapshot: %s" % args.discovery_snapshot)
     await enrich(args, records)
 
 async def discover(args: argparse.Namespace) -> None:
@@ -727,7 +745,7 @@ def assign_branches(records: List[Dict[str, Any]]) -> None:
             parent[ra] = rb
 
     for record in records:
-        me = ("advisor", str(record.get("faEntityId") or id(record)))
+        me = ("advisor", advisor_identity(record) or str(id(record)))
         for address in record.get("emails") or []:
             union(me, ("email", str(address).lower()))
         key = branch_key(record)
@@ -736,7 +754,7 @@ def assign_branches(records: List[Dict[str, Any]]) -> None:
 
     members: Dict[Any, List[Dict[str, Any]]] = {}
     for record in records:
-        root = find(("advisor", str(record.get("faEntityId") or id(record))))
+        root = find(("advisor", advisor_identity(record) or str(id(record))))
         members.setdefault(root, []).append(record)
 
     for root, group in members.items():
@@ -1011,6 +1029,9 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     combined.add_argument("--url-field", help="Dotted path of profile URL if auto-detection is wrong")
     combined.add_argument("--checkpoint", type=Path, default=DEFAULT_OUTPUT / ".edward_jones_email_checkpoint.jsonl", help=argparse.SUPPRESS)
     combined.add_argument("--discovery-checkpoint", type=Path, default=DEFAULT_OUTPUT / ".edward_jones_discovery_checkpoint.jsonl", help=argparse.SUPPRESS)
+    combined.add_argument("--discovery-snapshot", type=Path,
+                          default=scratch_path("edward_jones", "discovery"),
+                          help=argparse.SUPPRESS)
     combined.add_argument("--browser-concurrency", type=int, default=1)
     combined.add_argument("--discovery-rate", type=float, default=1.0)
     combined.add_argument("--bulk-max-results", type=int, default=500, help="Skip one-shot bulk discovery above this result count")
