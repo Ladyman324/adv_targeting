@@ -93,6 +93,8 @@ user changes it.
 - `docs/map_recommendations.md` — product review and enacted implementation record
 - `docs/trust_company_research.md` — isolated, non-production trust-company
   source-comparison pipeline and review contract
+- `docs/training_video.md` — private training-media build, access, and release
+  procedure
 ## Microsoft 365 email
 
 The authenticated web app includes a draft-first Microsoft Graph composer for

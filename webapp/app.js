@@ -4051,6 +4051,8 @@ function paintSettings(){
     + `<h3>Settings</h3>`
     + `<p>Saved to your account, so the desk and the phone agree.</p>`
 
+    + TrainingVideo.settingsCard()
+
     + `<label class="set-row"><span>Area this map opens on</span>`
     + `<select id="setScope"><option value="">Wherever I was last</option>`
     + opts.map(o => `<option value="${esc(o.value)}"`
@@ -4703,6 +4705,7 @@ const dialReady = PERF.time("dial.init", () => Dial.init()).then(() => {
   renderDialer();
   reconcileDesktopDialRoutes().catch(() => {});
   PERF.mark("dialer-usable");
+  TrainingVideo.maybePrompt();
 });
 
 // A role may be changed on the phone while the desktop tab sleeps. Refresh the

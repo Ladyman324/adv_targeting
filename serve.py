@@ -92,6 +92,7 @@ SETTING_KEYS = {
     "emailSignature": 1500,
     "autoDialOn": 8, "autoDialDelay": 8, "autoDialAnnounce": 8,
     "fieldRadius": 8,
+    "introVideoSeenVersion": 64,
 }
 
 # Dispositions that write nothing to Act!, mirroring RESULTS in api/shared/act.js.
@@ -466,6 +467,11 @@ class GzipHandler(http.server.SimpleHTTPRequestHandler):
             self._json(200, q)
         elif route == "settings" and method == "GET":
             self._json(200, {"settings": state.setdefault("settings", {}).get(uid, {})})
+        elif route == "training-video" and method == "GET":
+            # The recording is deliberately not served from the repository.
+            # Production mints a short-lived private Blob URL; local development
+            # names that boundary rather than quietly exposing the source MP4.
+            self._json(503, {"error": "The training video is available in the deployed app."})
         elif route == "settings" and method == "PUT":
             body = self._read_json()
             cur = state.setdefault("settings", {}).setdefault(uid, {})

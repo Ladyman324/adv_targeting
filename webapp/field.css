@@ -817,6 +817,35 @@ body{
   border:1px solid var(--hair);border-radius:11px;cursor:pointer}
 .set-btn:active{background:var(--hair)}
 
+/* Help stays a compact Settings row; playback expands into a full-width sheet
+   and nothing is downloaded until Watch is tapped. */
+.training-setting{padding-top:2px}
+.training-setting .set-actions{max-width:250px}
+.training-setting .set-btn{width:100%}
+.training-dialog{position:relative;width:min(960px,100%);max-height:94vh;
+  overflow:auto;box-sizing:border-box}
+.training-dialog h3{padding-right:42px;font-size:18px}
+.training-close{position:absolute;top:7px;right:8px;width:var(--tap);height:var(--tap);
+  border:0;border-radius:10px;background:transparent;color:var(--muted);
+  font:28px/1 inherit}
+.training-meta{margin-bottom:10px!important}
+.training-stage{min-height:150px}
+.training-video{display:block;width:100%;max-height:70vh;border-radius:10px;
+  background:#080b0f;border:1px solid var(--hair)}
+.training-loading,.training-error{padding:26px 10px;text-align:center}
+.training-error{color:var(--warn)!important}
+.training-open-link{display:inline-block;min-height:var(--tap);padding:12px 2px 0;
+  box-sizing:border-box;font-size:13px;color:var(--accent)}
+.training-chapters{margin:4px 0 2px;font-size:13px}
+.training-chapters summary{min-height:var(--tap);padding:13px 2px 0;box-sizing:border-box;
+  color:var(--muted);font-weight:650}
+.training-chapters>div{display:grid;grid-template-columns:1fr;gap:6px}
+.training-chapters button{min-height:var(--tap);padding:8px 10px;text-align:left;font:inherit;
+  color:var(--ink);background:var(--panel-2);border:1px solid var(--hair);border-radius:9px}
+.training-welcome{width:min(430px,100%)}
+.training-eyebrow{margin:0 0 5px!important;text-transform:uppercase;letter-spacing:.1em;
+  font-size:11px!important;font-weight:700;color:var(--accent)!important}
+
 /* See style.css -- the same disagreement, on the phone. */
 .contact-clash{margin:8px 0 0; padding:8px 10px; border-radius:8px; font-size:12.5px;
   line-height:1.5; color:var(--warn); border:1px solid var(--warn)}

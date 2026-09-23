@@ -24,13 +24,14 @@
  * VERSION is rewritten by web_assets.py from a hash of the shell files, so a
  * deploy invalidates the cache. Never edit it by hand.
  */
-const VERSION = "8ff85d86d5";
+const VERSION = "b55446e6df";
 const CACHE = `field-shell-${VERSION}`;
 
 const SHELL = [
   "field.html",
   "field.css?v=" + VERSION,
   "field.js?v=" + VERSION,
+  "training.js?v=" + VERSION,
   "manifest.webmanifest",
   "icon-192.png",
   "icon-512.png",
@@ -70,7 +71,7 @@ self.addEventListener("fetch", (e) => {
   // should not quietly become responsible for a 4,200-line application it was
   // never tested against.
   const file = url.pathname.split("/").pop() || "";
-  const isShell = ["field.html", "field.css", "field.js", "manifest.webmanifest",
+  const isShell = ["field.html", "field.css", "field.js", "training.js", "manifest.webmanifest",
                    "icon-192.png", "icon-512.png"].includes(file);
   if (!isShell) return;
 

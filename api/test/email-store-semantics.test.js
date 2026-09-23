@@ -514,12 +514,16 @@ test("projection activity is user-scoped and has no 500-row correctness cap", as
   const { store, service, restore } = loadStore();
   try {
     const table = service.table("EmailActivity");
+    // Relative rather than a fixed calendar date: this test proves pagination,
+    // and an August 2026 fixture silently stopped being inside the rolling
+    // 30-day count when the wall clock reached September 23.
+    const recent = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
     for (let i = 0; i < 510; i++) await table.createEntity({ partitionKey: "111",
       rowKey: `1000-${String(i).padStart(4, "0")}`, userId: "other",
-      direction: "outbound", classification: "sent", occurredAt: "2026-08-24T10:00:00Z" });
+      direction: "outbound", classification: "sent", occurredAt: recent });
     for (let i = 0; i < 525; i++) await table.createEntity({ partitionKey: "111",
       rowKey: `2000-${String(i).padStart(4, "0")}`, userId: "u1",
-      direction: "outbound", classification: "sent", occurredAt: "2026-08-24T11:00:00Z" });
+      direction: "outbound", classification: "sent", occurredAt: recent });
     const rows = await store.listActivityForUser("111", "u1");
     assert.equal(rows.length, 525);
     assert.ok(rows.every((row) => row.userId === "u1"));

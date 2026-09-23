@@ -155,7 +155,7 @@ class StagingSafetyTests(unittest.TestCase):
             f'const DATA_VERSION = "{expected}";', encoding="utf-8"
         )
         for name in (
-            "style.css", "field.css", "dial.js", "email.js", "email.css"
+            "style.css", "field.css", "dial.js", "training.js", "email.js", "email.css"
         ):
             (staged / name).write_text(f"/* {name} */", encoding="utf-8")
         (staged / "sw.js").write_text(

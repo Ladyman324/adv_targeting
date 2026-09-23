@@ -15,8 +15,9 @@
     default-src 'self';
     script-src 'self';
     style-src 'self' 'unsafe-inline';
-    img-src 'self' data: blob: https://*.tile.openstreetmap.org;
-    connect-src 'self';
+    img-src 'self' data: blob: https://*.tile.openstreetmap.org https://eicadvisorlog.blob.core.windows.net;
+    connect-src 'self' https://eicadvisorlog.blob.core.windows.net;
+    media-src 'self' https://eicadvisorlog.blob.core.windows.net;
     frame-src 'self' blob:;
     font-src 'self';
     base-uri 'none';
@@ -29,8 +30,8 @@
   <link rel="stylesheet" href="vendor/leaflet.css">
   <link rel="stylesheet" href="vendor/MarkerCluster.css">
   <link rel="stylesheet" href="vendor/MarkerCluster.Default.css">
-  <link rel="stylesheet" href="style.css?v=570cb7afe4">
-  <link rel="stylesheet" href="email.css?v=570cb7afe4">
+  <link rel="stylesheet" href="style.css?v=89d0b2cc8a">
+  <link rel="stylesheet" href="email.css?v=89d0b2cc8a">
 </head>
 <body>
   <div id="app">
@@ -378,8 +379,9 @@
   <script src="vendor/leaflet-heat.js"></script>
   <!-- Shared with the field view: one definition of what a call outcome is,
        one queue, one do-not-call list. Loaded before app.js, which uses it. -->
-  <script src="dial.js?v=570cb7afe4"></script>
-  <script src="app.js?v=570cb7afe4"></script>
-  <script src="email.js?v=570cb7afe4"></script>
+  <script src="dial.js?v=89d0b2cc8a"></script>
+  <script src="training.js?v=89d0b2cc8a"></script>
+  <script src="app.js?v=89d0b2cc8a"></script>
+  <script src="email.js?v=89d0b2cc8a"></script>
 </body>
 </html>

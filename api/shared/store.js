@@ -831,6 +831,10 @@ const SETTING_KEYS = {
   autoDialAnnounce: 8,
   // The field view's opening radius, by index into its own RADII table.
   fieldRadius: 8,
+  // Which onboarding recording this rep has either started or deliberately
+  // dismissed. Versioned rather than boolean so a materially updated guide can
+  // be offered once without nagging people about the same recording forever.
+  introVideoSeenVersion: 64,
 };
 
 async function getSettings(who) {

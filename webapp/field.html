@@ -13,15 +13,16 @@
   default-src 'self';
   script-src 'self';
   style-src 'self' 'unsafe-inline';
-  img-src 'self' data:;
-  connect-src 'self';
+  img-src 'self' data: https://eicadvisorlog.blob.core.windows.net;
+  connect-src 'self' https://eicadvisorlog.blob.core.windows.net;
+  media-src 'self' https://eicadvisorlog.blob.core.windows.net;
   frame-src 'self' blob:;
   base-uri 'none';
   form-action 'none';
   object-src 'none'">
 <link rel="manifest" href="manifest.webmanifest">
-<link rel="stylesheet" href="field.css?v=8ff85d86d5">
-<link rel="stylesheet" href="email.css?v=8ff85d86d5">
+<link rel="stylesheet" href="field.css?v=b55446e6df">
+<link rel="stylesheet" href="email.css?v=b55446e6df">
 </head>
 <body>
 
@@ -108,9 +109,10 @@
   <div id="workInner"></div>
 </div>
 
-<script src="dial.js?v=8ff85d86d5"></script>
-<script src="field.js?v=8ff85d86d5"></script>
-<script src="email.js?v=8ff85d86d5"></script>
+<script src="dial.js?v=b55446e6df"></script>
+<script src="training.js?v=b55446e6df"></script>
+<script src="field.js?v=b55446e6df"></script>
+<script src="email.js?v=b55446e6df"></script>
 <!-- The service-worker registration moved into field.js. Keeping it inline
      would have required either 'unsafe-inline' or a hash in the CSP above,
      and 'unsafe-inline' is not a thing to spend on eight lines. -->

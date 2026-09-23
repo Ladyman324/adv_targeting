@@ -33,7 +33,9 @@ STAGE_DIR=""
 #   47: graph-mailbox-control.test.js -- shared leases, cooldowns, and transport outcomes
 #   48: email-review.test.js -- check-only reconciliation and explicit selected retries
 #   49: email-retry-preparation.test.js -- unapproved replacement reviews and source guards
-EXPECTED_API_TEST_FILE_COUNT=49
+#   50: training-video.test.js -- authenticated, scoped, expiring media access
+#   51: training-video-ui.test.js -- opt-in loading and shared shell contract
+EXPECTED_API_TEST_FILE_COUNT=51
 
 cleanup() {
   test -z "$TEMP_ROOT" && return
@@ -408,7 +410,7 @@ cp -R "$API/test/." "$TEST_API/test/"
 # explicit so a missing production dependency fails here, before packaging.
 cp "$ROOT/webapp/app.js" "$ROOT/webapp/dial.js" "$ROOT/webapp/email.js" \
   "$ROOT/webapp/email.css" "$ROOT/webapp/field.js" "$ROOT/webapp/field.html" \
-  "$ROOT/webapp/index.html" \
+  "$ROOT/webapp/index.html" "$ROOT/webapp/training.js" \
   "$TEST_ROOT/webapp/"
 API_PACKAGE_SOURCE_ROOT="$ROOT" NODE_PATH="$API/node_modules" \
   run_api_tests "$TEST_API" "$EXPECTED_API_TEST_FILE_COUNT"

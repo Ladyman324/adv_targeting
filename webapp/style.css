@@ -1483,6 +1483,42 @@ body.scope-pending #map{cursor:progress}
   box-shadow:inset 0 0 0 1px var(--hair)}
 .set-btn:hover{color:var(--accent);box-shadow:inset 0 0 0 1px var(--accent)}
 
+/* Internal training. The player is deliberately outside the static bundle;
+   opening Settings or the welcome prompt downloads no media. */
+.training-setting{padding-top:2px}
+.training-setting .set-actions{max-width:210px}
+.training-setting .set-btn{width:100%}
+.training-dialog{position:relative;width:min(960px,94vw);max-height:92vh;
+  overflow:auto;box-sizing:border-box}
+.training-dialog h3{padding-right:34px;font-size:17px}
+.training-close{position:absolute;top:10px;right:12px;width:34px;height:34px;
+  border:0;border-radius:8px;background:transparent;color:var(--muted);
+  font:26px/1 inherit;cursor:pointer}
+.training-close:hover{color:var(--ink);background:var(--panel-2)}
+.training-meta{margin-bottom:10px!important}
+.training-stage{min-height:160px}
+.training-video{display:block;width:100%;max-height:72vh;border-radius:9px;
+  background:#080b0f;box-shadow:inset 0 0 0 1px var(--hair)}
+.training-loading,.training-error{padding:28px 12px;text-align:center}
+.training-error{color:var(--warn)!important}
+.training-open-link{display:inline-block;margin:9px 2px 2px;font-size:12px;color:var(--accent)}
+.training-chapters{margin:7px 0 2px;font-size:12px}
+.training-chapters summary{padding:5px 2px;color:var(--muted);cursor:pointer;font-weight:650}
+.training-chapters>div{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:5px}
+.training-chapters button{padding:7px 9px;text-align:left;font:inherit;color:var(--ink);
+  background:var(--panel-2);border:0;border-radius:7px;cursor:pointer;
+  box-shadow:inset 0 0 0 1px var(--hair)}
+.training-chapters button:hover{color:var(--accent)}
+.training-welcome{width:min(390px,92vw)}
+.training-eyebrow{margin:0 0 5px!important;text-transform:uppercase;letter-spacing:.1em;
+  font-size:10.5px!important;font-weight:700;color:var(--accent)!important}
+
+@media (max-width:700px){
+  .training-dialog{width:96vw;padding:12px}
+  .training-video{max-height:68vh}
+  .training-chapters>div{grid-template-columns:1fr}
+}
+
 /* The Act! record viewer. Verbatim JSON in a monospace block that scrolls in
    both directions -- reformatting or truncating it would decide for the reader
    which fields matter, and the reason they opened it is that they do not know

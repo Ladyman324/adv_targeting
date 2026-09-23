@@ -37,6 +37,10 @@ dist/
 # Legacy binary reporting prototype; the current application does not read it.
 *.pbix
 
+# Training recordings live in private Blob Storage. Keeping the source beside
+# the build scripts is convenient; shipping or committing it is not.
+*.mp4
+
 # Editor and manual backup copies can retain obsolete embedded credentials.
 *.bak
 

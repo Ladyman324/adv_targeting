@@ -1926,6 +1926,8 @@ function renderSettings(){
     <h2>Settings</h2>
     <p class="set-note">Saved to your account, so the desk and the phone agree.</p>
 
+    ${TrainingVideo.settingsCard()}
+
     <label class="set-row">
       <span>List that opens first</span>
       <select id="setList">
@@ -3483,6 +3485,7 @@ document.addEventListener("keydown", (e) => {
   console.info("[perf] list usable — run PERF.report() for the breakdown");
   await dialer;
   renderWhere();
+  TrainingVideo.maybePrompt();
 
   // A saved starting point makes the app useful on open rather than after a
   // tap. Only when nothing was resumed and nothing has been searched.
