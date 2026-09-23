@@ -3378,7 +3378,7 @@ function paintListManager(){
      */
     + flagListRows() + `</section>`
     + `<section class="lists-section"><h4>Dynamic audiences</h4><p class="lists-section-note">Saved map rules. Preview current matches before preparing a channel-specific list.</p>${dynamicAudienceRows()}</section>`
-    + `<section class="lists-section"><h4>Static contact lists</h4><p class="lists-section-note">Frozen working lists used for calls or email, limited to 500 people per list.</p>`
+    + `<section class="lists-section"><h4>Static contact lists</h4><p class="lists-section-note">Frozen working lists used for calls or email, limited to 1,000 people per list.</p>`
     + `<button type="button" class="ask-btn list-import-start" data-lists="import-open">Import email list</button>`
     + (ls.length
         ? `<ul class="lists-ul">${ls.map(listRowActions).join("")}</ul>`

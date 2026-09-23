@@ -76,15 +76,15 @@ test("atomic membership is isolated by signed-in user partition", async () => {
     (e) => e.statusCode === 404);
 });
 
-test("five-hundred-person lists round-trip in bounded properties without truncation", async () => {
+test("one-thousand-person lists round-trip in bounded properties without truncation", async () => {
   const { store, service } = loadStore();
-  const people = Array.from({ length:500 }, (_, i) => ({
+  const people = Array.from({ length:1000 }, (_, i) => ({
     ...person(String(1000000 + i), "Advisor " + i),
     email:"advisor" + i + "@example.com",
     contactRouteVersion:"20260831T110925Z-3e65e09d6f4a9d0a",
   }));
   const written = await store.putQueue(WHO, { id:"large", name:"Large", items:people });
-  assert.equal(written.count, 500);
+  assert.equal(written.count, 1000);
   assert.equal(written.dropped, 0);
   const row = await service.table("DialQueue").getEntity(WHO.id, "large");
   assert.ok(row.itemChunks > 1);
@@ -92,24 +92,28 @@ test("five-hundred-person lists round-trip in bounded properties without truncat
     assert.ok(row["items" + i].length * 2 <= 60 * 1024);
   assert.ok(Array.from({ length:row.itemChunks }, (_, i) =>
     row["items" + i].length * 2).reduce((a, b) => a + b, 0) <= 850 * 1024);
-  assert.equal((await store.getQueue(WHO, "large")).items.length, 500);
-  assert.equal((await store.listQueues(WHO)).find(x => x.id === "large").count, 500);
+  assert.equal((await store.getQueue(WHO, "large")).items.length, 1000);
+  assert.equal((await store.listQueues(WHO)).find(x => x.id === "large").count, 1000);
   await store.mutateQueueMember(WHO, "large", "remove", people[300].crd);
-  assert.equal((await store.getQueue(WHO, "large")).items.length, 499);
+  assert.equal((await store.getQueue(WHO, "large")).items.length, 999);
   await assert.rejects(() => store.putQueue(WHO, {
     id:"large", items:[...people, person("9999999", "Overflow")],
-  }), error => error.statusCode === 409 && /500/.test(error.message));
+  }), error => error.statusCode === 409 && /1000/.test(error.message));
 });
 
-test("a realistic 228-person territory list never exceeds Azure's UTF-16 property cap", async () => {
+test("a realistic 1,000-person territory list stays inside Azure Table limits", async () => {
   const { store, service } = loadStore();
-  const people = Array.from({ length:228 }, (_, i) => ({
+  const people = Array.from({ length:1000 }, (_, i) => ({
     ...person(String(2000000 + i), "Priority Advisor " + i),
     firm:"Edward Jones",
     email:"priority.advisor." + i + "@edwardjones.com",
     city:"Saint Louis",
     phone:"314-555-" + String(i).padStart(4, "0"),
     contactSource:"firm_roster",
+    emailConfirmed:true,
+    emailEligibilityKnown:true,
+    emailTierKey:"high",
+    identityApproved:true,
     contactRouteVersion:"20260831T110925Z-3e65e09d6f4a9d0a",
   }));
   await store.putQueue(WHO, { id:"priority", name:"Priority", items:people });
@@ -118,7 +122,10 @@ test("a realistic 228-person territory list never exceeds Azure's UTF-16 propert
   for (let i = 0; i < row.itemChunks; i++)
     assert.ok(row["items" + i].length * 2 <= 60 * 1024,
       "Azure Table's 64 KiB property cap is measured in UTF-16 bytes");
-  assert.equal((await store.getQueue(WHO, "priority")).items.length, 228);
+  assert.ok(row.itemChunks <= 30);
+  assert.ok(Array.from({ length:row.itemChunks }, (_, i) =>
+    row["items" + i].length * 2).reduce((a, b) => a + b, 0) <= 850 * 1024);
+  assert.equal((await store.getQueue(WHO, "priority")).items.length, 1000);
 });
 
 test("legacy single-property lists remain readable and migrate on write", async () => {
@@ -156,7 +163,7 @@ test("queue HTTP PATCH routes one member mutation and serializes the result", as
       context.res = { status: err.statusCode || 500, body: { error: err.message } };
       return context.res;
     },
-    MAX_QUEUE: 500,
+    MAX_QUEUE: 1000,
   };
   Module._load = function (request, parent) {
     if (parent && parent.filename === queuePath && request === "../shared/store") return fakeStore;
@@ -171,6 +178,6 @@ test("queue HTTP PATCH routes one member mutation and serializes the result", as
   } });
   assert.equal(context.res.status, 200);
   assert.equal(context.res.body.added, true);
-  assert.equal(context.res.body.max, 500);
+  assert.equal(context.res.body.max, 1000);
   assert.deepEqual(calls[0], [WHO, "target", "add", person("4", "Four")]);
 });

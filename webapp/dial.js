@@ -39,7 +39,7 @@
   };
 
   // Must match MAX_QUEUE in api/shared/store.js. The server rejects overflow.
-  const MAX_QUEUE = 500;
+  const MAX_QUEUE = 1000;
 
   const AUTO_KEY = "advisorMap.autoDial.v1";
 

@@ -52,9 +52,9 @@ const TABLES = { log: "CallLog", queue: "DialQueue", dnc: "DoNotCall",
 //
 // Table Storage caps EACH string property at 64 KiB and the whole entity at
 // 1 MiB. Pack snapshots into bounded properties on the same list row: this
-// keeps one ETag and one atomic replacement while allowing a 500-person
+// keeps one ETag and one atomic replacement while allowing a 1,000-person
 // audience. Older rows with a single 'items' property remain readable.
-const MAX_QUEUE = 500;
+const MAX_QUEUE = 1000;
 // Azure Table string properties are UTF-16: 64 KiB means at most 32K JS
 // code units, not 64K UTF-8 bytes. Leave room beneath both its per-property
 // and whole-entity limits for property names and other list metadata.
@@ -337,12 +337,12 @@ async function getQueue(who, id) {
 }
 
 // Summaries only -- the items are the bulk, and a picker needs a name and a
-// count, not 500 snapshots per list.
+// count, not 1,000 snapshots per list.
 async function listQueues(who) {
   const client = await table("queue");
   const out = [];
   const iter = client.listEntities({
-    // A rep can now have seven 500-person territory lists. Do not download
+    // A rep can now have seven 1,000-person territory lists. Do not download
     // every snapshot merely to populate the list picker at startup.
     queryOptions: { filter: odata`PartitionKey eq ${who.id}`,
       select:["PartitionKey", "RowKey", "name", "itemCount", "cursor",
