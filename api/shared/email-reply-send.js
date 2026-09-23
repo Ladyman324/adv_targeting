@@ -217,6 +217,10 @@ async function enforceDirectSendPolicy(who, recipients, opId, deps) {
   const st = deps.store || store;
   const limiter = deps.limitGuard || limitGuard;
   const cfg = cr.config();
+  const override = typeof st.getDailyCap === "function"
+    ? await st.getDailyCap(who.id) : null;
+  if (Number.isInteger(override) && override >= cfg.dailyExternalLimit && override <= 250)
+    cfg.rollingExternalLimit = override;
   const policy = await st.policy();
   if (!cfg.directSendEnvironmentEnabled || (policy && policy.killed)) {
     const reason = policy && policy.killed && policy.reason

@@ -76,6 +76,44 @@ test("atomic membership is isolated by signed-in user partition", async () => {
     (e) => e.statusCode === 404);
 });
 
+test("five-hundred-person lists round-trip in bounded properties without truncation", async () => {
+  const { store, service } = loadStore();
+  const people = Array.from({ length:500 }, (_, i) => ({
+    ...person(String(1000000 + i), "Advisor " + i),
+    email:"advisor" + i + "@example.com",
+    contactRouteVersion:"20260831T110925Z-3e65e09d6f4a9d0a",
+  }));
+  const written = await store.putQueue(WHO, { id:"large", name:"Large", items:people });
+  assert.equal(written.count, 500);
+  assert.equal(written.dropped, 0);
+  const row = await service.table("DialQueue").getEntity(WHO.id, "large");
+  assert.ok(row.itemChunks > 1);
+  for (let i = 0; i < row.itemChunks; i++)
+    assert.ok(Buffer.byteLength(row["items" + i], "utf8") <= 60 * 1024);
+  assert.equal((await store.getQueue(WHO, "large")).items.length, 500);
+  assert.equal((await store.listQueues(WHO)).find(x => x.id === "large").count, 500);
+  await store.mutateQueueMember(WHO, "large", "remove", people[300].crd);
+  assert.equal((await store.getQueue(WHO, "large")).items.length, 499);
+  await assert.rejects(() => store.putQueue(WHO, {
+    id:"large", items:[...people, person("9999999", "Overflow")],
+  }), error => error.statusCode === 409 && /500/.test(error.message));
+});
+
+test("legacy single-property lists remain readable and migrate on write", async () => {
+  const { store, service } = loadStore();
+  const legacy = person("42", "Legacy");
+  await service.table("DialQueue").createEntity({
+    partitionKey:WHO.id, rowKey:"legacy", name:"Legacy",
+    items:JSON.stringify([legacy]), cursor:0, cycle:1,
+  });
+  assert.equal((await store.getQueue(WHO, "legacy")).items[0].crd, "42");
+  await store.mutateQueueMember(WHO, "legacy", "add", person("43", "New"));
+  const row = await service.table("DialQueue").getEntity(WHO.id, "legacy");
+  assert.equal(row.itemCount, 2);
+  assert.ok(row.itemChunks >= 1);
+  assert.equal((await store.getQueue(WHO, "legacy")).items.length, 2);
+});
+
 test("queue HTTP PATCH routes one member mutation and serializes the result", async () => {
   const queuePath = require.resolve("../queue/index.js");
   delete require.cache[queuePath];
@@ -96,7 +134,7 @@ test("queue HTTP PATCH routes one member mutation and serializes the result", as
       context.res = { status: err.statusCode || 500, body: { error: err.message } };
       return context.res;
     },
-    MAX_QUEUE: 250,
+    MAX_QUEUE: 500,
   };
   Module._load = function (request, parent) {
     if (parent && parent.filename === queuePath && request === "../shared/store") return fakeStore;
@@ -111,6 +149,6 @@ test("queue HTTP PATCH routes one member mutation and serializes the result", as
   } });
   assert.equal(context.res.status, 200);
   assert.equal(context.res.body.added, true);
-  assert.equal(context.res.body.max, 250);
+  assert.equal(context.res.body.max, 500);
   assert.deepEqual(calls[0], [WHO, "target", "add", person("4", "Four")]);
 });

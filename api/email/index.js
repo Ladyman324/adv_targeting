@@ -8,6 +8,7 @@ const activity = require("../shared/email-activity");
 const engagement = require("../shared/email-engagement");
 const replySend = require("../shared/email-reply-send");
 const directSend = require("../shared/email-direct-send");
+const emailCore = require("../shared/email-core");
 
 function ok(context, body, status = 200) {
   context.res = { status, headers: { "Content-Type": "application/json", "Cache-Control": "no-store" }, body: JSON.stringify(body) };
@@ -33,6 +34,10 @@ module.exports = async function (context, req) {
       // this only decides what is drawn.
       if (op === "catalog") return ok(context,
         { ...await service.catalog(who, { isAdmin: isAdmin(who) }), isAdmin: isAdmin(who) });
+      if (op === "settings") return ok(context, {
+        isAdmin: isAdmin(who),
+        internalRecipients: emailCore.config().internalRecipients,
+      });
       if (op === "batch") return ok(context, await service.getBatchDetail(who, String(req.query.id || "")));
       /* Who is left to follow up, and who came off the list and why.
        *
@@ -44,6 +49,18 @@ module.exports = async function (context, req) {
       if (op === "batches") return ok(context, { batches: await store.listBatches(who.id, 30, true) });
       if (op === "connection") return ok(context, await auth.status(who.id));
       if (op === "policy") return ok(context, await store.policy());
+      if (op === "daily_caps") {
+        if (!isAdmin(who)) throw service.httpError(403, "EmailAdministrator role is required.");
+        const [connections, overrides] = await Promise.all([
+          store.listConnections(), store.listDailyCaps()]);
+        const byUser = new Map(overrides.map((entry) => [entry.userId, entry]));
+        const defaultLimit = emailCore.config().dailyExternalLimit;
+        return ok(context, { defaultLimit, maxLimit: 250,
+          reps: connections.map((entry) => ({
+            ...entry, limit: (byUser.get(entry.userId) || {}).limit || defaultLimit,
+            override: byUser.get(entry.userId) || null,
+          })).sort((a, b) => a.mailbox.localeCompare(b.mailbox)) });
+      }
       if (op === "material_routes") {
         if (!isAdmin(who)) throw service.httpError(403, "EmailAdministrator role is required.");
         return ok(context, await store.materialRoutes());
@@ -338,6 +355,18 @@ module.exports = async function (context, req) {
     if (op === "policy") {
       if (!isAdmin(who)) throw service.httpError(403, "EmailAdministrator role is required.");
       return ok(context, await store.setPolicy(who, body.killed, body.reason));
+    }
+    if (op === "set_daily_cap") {
+      if (!isAdmin(who)) throw service.httpError(403, "EmailAdministrator role is required.");
+      const userId = String(body.userId || "").trim();
+      const limit = Number(body.limit);
+      const defaultLimit = emailCore.config().dailyExternalLimit;
+      if (!Number.isInteger(limit) || limit < defaultLimit || limit > 250)
+        throw service.httpError(400, `Choose a whole-number daily limit from ${defaultLimit} to 250.`);
+      const connections = await store.listConnections();
+      if (!connections.some((entry) => entry.userId === userId))
+        throw service.httpError(404, "That salesperson has not connected a mailbox.");
+      return ok(context, await store.setDailyCap(who, userId, limit, defaultLimit));
     }
     // Template authoring. Linting is available to anyone so the editor can lint
     // as they type without a role round trip, but nothing is written without the

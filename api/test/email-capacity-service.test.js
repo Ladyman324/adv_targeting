@@ -59,3 +59,52 @@ test("a new plan finishes deferred release from a prior schedule review", async 
   assert.equal(batch.capacityReservationId, "");
   assert.equal(result.deliveryPlan.fit, true);
 });
+
+test("an individual override changes the daily plan without changing the default", async () => {
+  const cfg = { calendarCapacityEnabled: true, dailyExternalLimit: 25,
+    cancellationSeconds: 20, mailboxIntervalSeconds: 10,
+    internalDomains: new Set(["eicatlanta.com"]) };
+  const seen = [];
+  const result = await service.capacityPlan({ id: "u1" }, { batchId: "b1" }, {
+    store: {
+      getDailyCap: async (userId) => userId === "u1" ? 75 : null,
+      getBatch: async () => ({ id: "b1", status: "editing" }),
+      listMessages: async () => [{ id: "m1", recipientEmail: "advisor@ubs.com" }],
+    },
+    core: { config: () => ({ ...cfg }) },
+    limitGuard: {
+      capacitySnapshot: async (_user, options) => {
+        seen.push(options.limit); return { days: [] };
+      },
+      previewPlan: capacity.previewPlan,
+    },
+  });
+  assert.deepEqual(seen, [75]);
+  assert.equal(result.deliveryPlan.dailyLimit, 75);
+  assert.equal(cfg.dailyExternalLimit, 25);
+});
+
+test("Settings returns configured colleagues to a signed-in user without loading the email catalog", async () => {
+  const handler = require("../email/index");
+  const saved = process.env.EMAIL_INTERNAL_RECIPIENTS;
+  process.env.EMAIL_INTERNAL_RECIPIENTS = "Teammate <teammate@eicatlanta.com>";
+  const principal = Buffer.from(JSON.stringify({
+    userId: "settings-test-user", userDetails: "Rep", userRoles: ["authenticated"],
+  })).toString("base64");
+  try {
+    const context = { log: { error: () => {} } };
+    await handler(context, { method: "GET", query: { op: "settings" },
+      headers: { "x-ms-client-principal": principal } });
+    assert.equal(context.res.status, 200);
+    const body = JSON.parse(context.res.body);
+    assert.deepEqual(body.internalRecipients,
+      [{ address: "teammate@eicatlanta.com", name: "Teammate" }]);
+    assert.equal(body.isAdmin, false);
+    const anonymous = { log: { error: () => {} } };
+    await handler(anonymous, { method: "GET", query: { op: "settings" }, headers: {} });
+    assert.equal(anonymous.res.status, 401);
+  } finally {
+    if (saved === undefined) delete process.env.EMAIL_INTERNAL_RECIPIENTS;
+    else process.env.EMAIL_INTERNAL_RECIPIENTS = saved;
+  }
+});

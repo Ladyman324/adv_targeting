@@ -1055,6 +1055,35 @@ async function setPolicy(who, killed, reason) {
   return policy();
 }
 
+// Store exceptions only; an absent row inherits the centrally configured cap.
+async function getDailyCap(userId) {
+  const row = await getOptional("policy", "daily-cap", String(userId));
+  return row && Number.isInteger(Number(row.limit)) ? Number(row.limit) : null;
+}
+async function listDailyCaps() {
+  const out = [];
+  for await (const row of (await table("policy")).listEntities({
+    queryOptions: { filter: odata`PartitionKey eq ${"daily-cap"}` } })) {
+    const limit = Number(row.limit);
+    if (Number.isInteger(limit)) out.push({ userId: row.rowKey, limit,
+      updatedUtc: row.updatedUtc || "", by: row.by || "" });
+  }
+  return out;
+}
+async function setDailyCap(who, userId, limit, defaultLimit) {
+  const target = String(userId || "").trim();
+  const previous = await getDailyCap(target);
+  if (limit === defaultLimit) {
+    if (previous !== null) await (await table("policy")).deleteEntity("daily-cap", target);
+  } else {
+    await (await table("policy")).upsertEntity({ partitionKey: "daily-cap", rowKey: target,
+      limit, updatedUtc: now(), by: clean(who.name, 256), byId: who.id }, "Replace");
+  }
+  await audit(who.id, "daily-cap", "daily_cap_changed", {
+    targetUserId: target, previous, next: limit, defaultLimit });
+  return { userId: target, limit, override: limit === defaultLimit ? null : limit };
+}
+
 /* ---------- approval passcode attempts ---------------------------------
  * Server-side, because a client-side attempt counter is one page refresh away
  * from being no counter at all. Five wrong tries locks approval for fifteen
@@ -1588,5 +1617,6 @@ module.exports = {
   putTemplateImage, deleteTemplateImage, templateImageBytes,
   getSuppression, suppressEmail, listConnections, sentByInternetId,
   bounceAlreadySeen, markBounceSeen, recordDeliveryEvent, deliveryEvents,
-  audit, policy, setPolicy, rollingExternalCount, reserveExternal,
+  audit, policy, setPolicy, getDailyCap, listDailyCaps, setDailyCap,
+  rollingExternalCount, reserveExternal,
 };

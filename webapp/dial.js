@@ -38,10 +38,8 @@
     email: "/api/email",
   };
 
-  // Must match MAX_QUEUE in api/shared/store.js. The server trims silently past
-  // this; checking here means a bulk add can SAY how many did not fit rather
-  // than letting the tail disappear.
-  const MAX_QUEUE = 250;
+  // Must match MAX_QUEUE in api/shared/store.js. The server rejects overflow.
+  const MAX_QUEUE = 500;
 
   const AUTO_KEY = "advisorMap.autoDial.v1";
 

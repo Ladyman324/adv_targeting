@@ -41,6 +41,7 @@
   let deliveryPlanTimer = null;
   let deliveryPlanSequence = 0;
   let catalogLoadedAt = 0;
+  let settingsInternalRecipients = null;
   global.addEventListener("beforeunload", (event) => {
     if (!approvalPending && !approvalPreparing && !approvalSubmitting) return;
     event.preventDefault();
@@ -1193,6 +1194,34 @@
     try {
       healthView(await api(`sender_health&days=${healthDays}`, null, "GET"));
     } catch (e) { healthView(null, e.message, true); }
+  }
+
+  async function openDailyCaps(message = "", bad = false) {
+    document.getElementById("emailTitle").textContent = "Daily email limits";
+    document.getElementById("emailBody").innerHTML = `<p class="email-next">Loading...</p>`;
+    try {
+      const data = await api("daily_caps", null, "GET");
+      document.getElementById("emailBody").innerHTML = `<div class="email-health">
+        <p class="email-next">The normal limit is ${data.defaultLimit} external recipients per
+          salesperson per Eastern calendar day. Set a higher limit for a connected mailbox.
+          This does not bypass review, passcodes, suppressions, or the seven-day delivery window.</p>
+        ${message ? `<p class="${bad ? "email-error" : "email-ok"}">${esc(message)}</p>` : ""}
+        ${data.reps.length ? data.reps.map((rep) => `<section class="email-health-rep" data-cap-user="${esc(rep.userId)}">
+          <h3>${esc(rep.mailbox || rep.userId)}</h3>
+          <p class="email-fine">${rep.override ? `Custom limit set ${esc(String(rep.override.updatedUtc || "").slice(0, 10))}
+            by ${esc(rep.override.by || "administrator")}` : "Using the normal limit"}</p>
+          <label>Recipients per day
+            <input class="email-cap-input" type="number" min="${data.defaultLimit}" max="${data.maxLimit}"
+              step="1" value="${rep.limit}" required></label>
+          <button type="button" class="ask-btn" data-email="cap-save">Save limit</button>
+        </section>`).join("") : `<p class="email-doc-none">No salespeople have connected Microsoft 365 yet.</p>`}
+        <div class="email-done-actions"><button type="button" class="ask-btn"
+          data-email="docs-back">Back</button></div></div>`;
+    } catch (error) {
+      document.getElementById("emailBody").innerHTML = `<div class="email-health">
+        <p class="email-error">${esc(error.message)}</p>
+        <button type="button" class="ask-btn" data-email="docs-back">Back</button></div>`;
+    }
   }
 
   // ---- approved document management (EmailAdministrator only) --------------
@@ -2845,6 +2874,23 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
 
   async function act(button) {
     const action = button.dataset.email;
+    if (action === "cap-save") {
+      const row = button.closest("[data-cap-user]");
+      const userId = row && row.dataset.capUser;
+      const input = row && row.querySelector(".email-cap-input");
+      if (!userId || !input || !input.checkValidity()) {
+        if (input) input.reportValidity();
+        return;
+      }
+      button.disabled = true;
+      try {
+        await api("set_daily_cap", { userId, limit: Number(input.value) });
+        return openDailyCaps("Daily limit saved.");
+      } catch (error) {
+        button.disabled = false;
+        return openDailyCaps(error.message, true);
+      }
+    }
     if (action === "material-preview-close") { closeMaterialPreview(); return; }
     if (action === "material-preview-queue") {
       const row = materialQueue[Number(button.dataset.index)];
@@ -3728,6 +3774,7 @@ They stay on your call list and keep their history — this only takes them out 
       }
       detail = null; cursor = 0;
       if (which === "health") return openHealth();
+      if (which === "caps") return openDailyCaps();
       return which === "templates" ? templatesView() : docsView();
     } catch (e) {
       document.getElementById("emailTitle").textContent = "Not available";
@@ -3744,9 +3791,21 @@ They stay on your call list and keep their history — this only takes them out 
     return adminKnown;
   }
 
+  // Settings may be the first email-related screen opened in a session. Use a
+  // small authenticated response rather than making its colleague picker wait
+  // for templates, documents, mailbox status, and capacity to load.
+  async function loadSettingsData() {
+    const data = await api("settings", null, "GET");
+    adminKnown = !!data.isAdmin;
+    settingsInternalRecipients = Array.isArray(data.internalRecipients)
+      ? data.internalRecipients : [];
+    return { isAdmin: adminKnown, internalRecipients: settingsInternalRecipients };
+  }
+
   // Exposed for the Settings panel's "copy a colleague" picker: the catalog is
   // fetched here, and the list is the server's, not the client's.
-  const internalRecipients = () => (catalog && catalog.internalRecipients) || [];
+  const internalRecipients = () => settingsInternalRecipients
+    || (catalog && catalog.internalRecipients) || [];
   /* The approved document list, for the one-to-one reply and follow-up
    * composers on the advisor profile.
    *
@@ -3758,7 +3817,7 @@ They stay on your call list and keep their history — this only takes them out 
   const documents = () => (catalog && catalog.documents) || [];
   global.addEventListener("emailcapacityrequest", () => refreshCapacityStatus());
   global.EmailComposer = { open, openHistory, openAdmin, openFollowUp, openMailboxConnection,
-                           openBatch: (id) => openBatchById(id, true), isAdmin,
+                           openBatch: (id) => openBatchById(id, true), isAdmin, loadSettingsData,
                            internalRecipients, documents, refreshCapacityStatus };
   global.DirectSendOps = { accept: acceptDirect, watch: watchDirect,
                            pending: pendingDirect, resume: resumeDirect };

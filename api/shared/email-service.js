@@ -45,6 +45,19 @@ async function enqueue(work, visibilityTimeout = 0) {
   await q.sendMessage(payload, { visibilityTimeout: Math.max(0, Math.min(visibilityTimeout, 7 * 86400)) });
 }
 
+// Message rows are independent Table entities. Bounded fan-out keeps a large
+// batch responsive without flooding the storage account or relying on a
+// single serial HTTP request per recipient.
+async function mapMessagesBounded(rows, operation, width = 8) {
+  const result = new Array(rows.length);
+  for (let start = 0; start < rows.length; start += width) {
+    const group = await Promise.all(rows.slice(start, start + width)
+      .map((row, offset) => operation(row, start + offset)));
+    group.forEach((value, offset) => { result[start + offset] = value; });
+  }
+  return result;
+}
+
 
 /* Sender health for every connected rep.
  *
@@ -144,6 +157,7 @@ function recipientEvidenceSummary(records) {
 
 async function catalog(who, opts) {
   const cfg = core.config();
+  cfg.dailyExternalLimit = await dailyLimitFor(who.id, cfg, store);
   const capacityPromise = cfg.calendarCapacityEnabled
     ? limitGuard.capacitySnapshot(who.id, { limit: cfg.dailyExternalLimit, horizonDays: 7 })
         .catch(() => ({ available: false, timeZone: cfg.capacityTimeZone,
@@ -189,6 +203,13 @@ async function catalog(who, opts) {
     } };
 }
 
+async function dailyLimitFor(userId, cfg, st = store) {
+  const override = typeof st.getDailyCap === "function"
+    ? await st.getDailyCap(userId) : null;
+  return Number.isInteger(override) && override >= cfg.dailyExternalLimit
+    && override <= 250 ? override : cfg.dailyExternalLimit;
+}
+
 function capacityEntries(messages, cfg) {
   return core.interleaveByDomain(messages).map((message) => {
     // The individualized To address and explicitly selected advisor teammates
@@ -215,6 +236,7 @@ function planOptions(scheduledForUtc, dailyStartTime, cfg, nowMs = Date.now()) {
 async function capacityPlan(who, input, deps = {}) {
   const st = deps.store || store, guard = deps.limitGuard || limitGuard;
   const cfg = (deps.core || core).config();
+  cfg.dailyExternalLimit = await dailyLimitFor(who.id, cfg, st);
   if (!cfg.calendarCapacityEnabled)
     throw httpError(503, "Daily calendar capacity is not enabled for this release.",
       "capacity_not_enabled");
@@ -461,7 +483,7 @@ async function validateBatch(who, batchId, options = {}) {
   const counts = new Map();
   for (const m of messages) counts.set(m.recipientEmail, (counts.get(m.recipientEmail) || 0) + 1);
   const duplicates = new Set([...counts].filter(([, n]) => n > 1).map(([email]) => email));
-  const cfg = core.config(), updated = [];
+  const cfg = core.config();
   try {
     await recipientRegistry.load({ force: options.identityForce === true });
   } catch (error) {
@@ -477,7 +499,7 @@ async function validateBatch(who, batchId, options = {}) {
   const images = (tpl && tpl.images) || [];
   const knownImageIds = tpl ? new Set(images.map((i) => String(i.id).toLowerCase())) : null;
   const sender = (await auth.status(who.id).catch(() => null) || {}).profile || null;
-  for (const message of messages) {
+  const updated = await mapMessagesBounded(messages, async (message) => {
     const identityErrors = [];
     const identityPatch = {};
     let presentationChanged = false;
@@ -528,9 +550,9 @@ async function validateBatch(who, batchId, options = {}) {
     const candidate = { ...message, ...identityPatch, reviewed };
     const validation = await validateMessage(candidate, duplicates, cfg, currentDocsById,
       Number(batch.commonRevision) || 0, knownImageIds, identityErrors);
-    updated.push(await store.patchMessage(who.id, batchId, message.id, { ...identityPatch, reviewed, validation,
-      state: validation.errors.length ? "invalid" : (message.state === "invalid" ? "editing" : message.state) }, message.etag));
-  }
+    return store.patchMessage(who.id, batchId, message.id, { ...identityPatch, reviewed, validation,
+      state: validation.errors.length ? "invalid" : (message.state === "invalid" ? "editing" : message.state) }, message.etag);
+  });
   const errors = updated.flatMap((m) => m.validation.errors.map((v) => ({ messageId: m.id,
     recipient: m.recipientEmail, ...v })));
   const warnings = updated.flatMap((m) => m.validation.warnings.map((v) => ({ messageId: m.id,
@@ -942,8 +964,8 @@ async function createBatch(who, input) {
     followUpDays: [0, 3, 7, 14].includes(Number(input.followUpDays))
       ? Number(input.followUpDays) : 0,
     recipientRegistryHash: (kept.find((r) => r.registryHash) || {}).registryHash || "" });
-  for (let i = 0; i < kept.length; i++) {
-    const r = kept[i], subject = core.renderTemplate(template.subject, r, profile),
+  await mapMessagesBounded(kept, async (r, i) => {
+    const subject = core.renderTemplate(template.subject, r, profile),
       body = core.renderTemplate(template.bodyText, r, profile);
     await store.createMessage(who.id, batchId, { id: store.id(), ordinal: i, contactId: r.contactId,
       recipientName: r.name, recipientEmail: r.email, companyName: r.firm,
@@ -973,7 +995,7 @@ async function createBatch(who, input) {
         ...subject.missing.map((f) => ({ code: "missing_merge_value", message: `Missing ${f}.` })),
         ...body.missing.map((f) => ({ code: "missing_merge_value", message: `Missing ${f}.` })),
       ], warnings: [] } });
-  }
+  });
   await store.audit(who.id, batchId, "batch_created", { recipientCount: kept.length,
     suppressedCount: dropped.length,
     templateId: template.id, attachmentIds: batchAttachmentIds, materialFamilyIds,
@@ -1034,7 +1056,7 @@ ${bodyTemplate}`.matchAll(core.IMAGE_TOKEN)) {
 
   const revision = batch.commonRevision + 1;
   const behind = [];
-  for (const m of await store.listMessages(who.id, batch.id)) {
+  await mapMessagesBounded(await store.listMessages(who.id, batch.id), async (m) => {
     const recipient = { name: m.recipientName, firstName: m.greetingName,
       lastName: m.recipientLastName, firm: m.companyName, nameFallback: false };
     /* `overwriteAll` replaces individually edited messages too.
@@ -1067,7 +1089,7 @@ ${bodyTemplate}`.matchAll(core.IMAGE_TOKEN)) {
       if (overwrite) patch.bodyOverridden = false;
     }
     await store.patchMessage(who.id, batch.id, m.id, patch, m.etag);
-  }
+  });
   await store.patchBatch(who.id, batch.id, { commonSubject: subjectTemplate, commonBodyText: bodyTemplate,
     commonRevision: revision, status: "editing", reviewedUtc: "" }, batch.etag);
   await store.audit(who.id, batch.id, "common_content_updated",
@@ -1249,6 +1271,8 @@ async function approve(who, input) {
     { reviewed: input.reviewed === true, identityForce: true });
   const batch = validation.batch;
   const cfg = core.config(), approvalNow = Date.now();
+  cfg.dailyExternalLimit = await dailyLimitFor(who.id, cfg, store);
+  cfg.rollingExternalLimit = cfg.dailyExternalLimit;
   const scheduledForUtc = mode === "send" && input.scheduledForUtc
     ? schedule.scheduledInstant(input.scheduledForUtc, approvalNow, cfg.cancellationSeconds) : "";
   const dailyStartTime = mode === "send" && cfg.calendarCapacityEnabled

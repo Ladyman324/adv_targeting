@@ -50,11 +50,13 @@ const TABLES = { log: "CallLog", queue: "DialQueue", dnc: "DoNotCall",
 // be unopenable on a phone standing somewhere else. Carrying name, firm and
 // number means the list is dialable on any device with nothing else loaded.
 //
-// Table Storage caps a string property at 64 KB. 250 snapshots is roughly a
-// third of that; the serialized length is checked on write regardless, because
-// a cap that is only true in theory is not a cap.
-const MAX_QUEUE = 250;
-const MAX_QUEUE_BYTES = 60 * 1024;
+// Table Storage caps EACH string property at 64 KiB and the whole entity at
+// 1 MiB. Pack snapshots into bounded properties on the same list row: this
+// keeps one ETag and one atomic replacement while allowing a 500-person
+// audience. Older rows with a single 'items' property remain readable.
+const MAX_QUEUE = 500;
+const MAX_QUEUE_CHUNK_BYTES = 60 * 1024;
+const MAX_QUEUE_ENTITY_BYTES = 900 * 1024;
 
 const clients = new Map();
 let ensured = new Set();
@@ -248,8 +250,11 @@ function listId(v) {
 }
 
 function summarise(e) {
-  let n = 0;
-  try { n = JSON.parse(e.items || "[]").length; } catch { n = 0; }
+  let n = Number.isInteger(Number(e.itemCount)) && e.itemCount !== undefined
+    ? Number(e.itemCount) : 0;
+  if (e.itemCount === undefined) {
+    try { n = JSON.parse(e.items || "[]").length; } catch { n = 0; }
+  }
   return {
     id: e.rowKey,
     name: e.name || (e.rowKey === DEFAULT_LIST ? "Call list" : e.rowKey),
@@ -266,12 +271,58 @@ function summarise(e) {
   };
 }
 
+function queueItems(e) {
+  const count = Number(e.itemChunks) || 0;
+  if (!count) return JSON.parse(e.items || "[]");
+  if (!Number.isInteger(count) || count < 0 || count > 30)
+    throw new Error("Saved list storage is invalid.");
+  const out = [];
+  for (let i = 0; i < count; i++) {
+    if (typeof e["items" + i] !== "string")
+      throw new Error("Saved list storage is incomplete.");
+    out.push(...JSON.parse(e["items" + i]));
+  }
+  if (out.length !== Number(e.itemCount))
+    throw new Error("Saved list count does not match its stored members.");
+  return out;
+}
+
+function queueItemProperties(items) {
+  const result = { itemCount:items.length, itemChunks:0 };
+  if (!items.length) { result.items = "[]"; return result; }
+  let chunk = [], total = 0;
+  const flush = () => {
+    if (!chunk.length) return;
+    const payload = JSON.stringify(chunk);
+    result["items" + result.itemChunks++] = payload;
+    total += Buffer.byteLength(payload, "utf8");
+    chunk = [];
+  };
+  for (const item of items) {
+    const candidate = JSON.stringify([...chunk, item]);
+    if (Buffer.byteLength(candidate, "utf8") > MAX_QUEUE_CHUNK_BYTES) {
+      if (!chunk.length) {
+        const err = new Error("One saved contact is too large for a list.");
+        err.statusCode = 413; throw err;
+      }
+      flush();
+    }
+    chunk.push(item);
+  }
+  flush();
+  if (total > MAX_QUEUE_ENTITY_BYTES) {
+    const err = new Error("This list exceeds its storage budget; narrow the selection.");
+    err.statusCode = 413; throw err;
+  }
+  return result;
+}
+
 async function getQueue(who, id) {
   const client = await table("queue");
   const key = listId(id);
   try {
     const e = await client.getEntity(who.id, key);
-    return { ...summarise(e), items: JSON.parse(e.items || "[]") };
+    return { ...summarise(e), items: queueItems(e) };
   } catch (e) {
     if (e.statusCode === 404) {
       return { id: key, name: key === DEFAULT_LIST ? "Call list" : key,
@@ -283,14 +334,25 @@ async function getQueue(who, id) {
 }
 
 // Summaries only -- the items are the bulk, and a picker needs a name and a
-// count, not 250 snapshots per list.
+// count, not 500 snapshots per list.
 async function listQueues(who) {
   const client = await table("queue");
   const out = [];
   const iter = client.listEntities({
-    queryOptions: { filter: odata`PartitionKey eq ${who.id}` },
+    // A rep can now have seven 500-person territory lists. Do not download
+    // every snapshot merely to populate the list picker at startup.
+    queryOptions: { filter: odata`PartitionKey eq ${who.id}`,
+      select:["PartitionKey", "RowKey", "name", "itemCount", "cursor",
+        "cycle", "cycleStartedUtc", "updatedUtc"] },
   });
-  for await (const e of iter) out.push(summarise(e));
+  for await (const e of iter) {
+    if (e.itemCount === undefined) {
+      // Legacy rows predate itemCount. Fetch only these once, and migrate them
+      // on their next write instead of showing a false zero in the picker.
+      const legacy = await client.getEntity(who.id, e.rowKey);
+      out.push(summarise(legacy));
+    } else out.push(summarise(e));
+  }
   out.sort((a, b) => String(b.updatedUtc).localeCompare(String(a.updatedUtc)));
   return out;
 }
@@ -337,22 +399,20 @@ function snapshot(it) {
 async function putQueue(who, opts) {
   const client = await table("queue");
   const { id, name, items, cursor, cycle, cycleStartedUtc, etag } = opts || {};
-  let trimmed = (items || []).filter((it) => it && it.crd)
-                             .slice(0, MAX_QUEUE).map(snapshot);
-  // Shed from the tail until it fits, rather than failing the whole write and
-  // losing a queue someone spent ten minutes assembling.
-  let payload = JSON.stringify(trimmed);
-  while (Buffer.byteLength(payload, "utf8") > MAX_QUEUE_BYTES && trimmed.length) {
-    trimmed = trimmed.slice(0, -1);
-    payload = JSON.stringify(trimmed);
+  const valid = (items || []).filter((it) => it && it.crd);
+  if (valid.length > MAX_QUEUE) {
+    const err = new Error("A list can hold at most " + MAX_QUEUE + " people.");
+    err.statusCode = 409; throw err;
   }
+  const savedItems = valid.map(snapshot);
+  const itemProperties = queueItemProperties(savedItems);
   const key = listId(id);
   const entity = {
     partitionKey: who.id,
     rowKey: key,
     name: clean(name, 60) || (key === DEFAULT_LIST ? "Call list" : key),
-    items: payload,
-    cursor: Math.max(0, Math.min(Number(cursor) || 0, trimmed.length)),
+    ...itemProperties,
+    cursor: Math.max(0, Math.min(Number(cursor) || 0, savedItems.length)),
     // A cycle is one pass through a saved list. Progress is NOT stored here --
     // it is derived from the call log since cycleStartedUtc, so it stays right
     // when the list is reordered, added to, or worked from two devices.
@@ -384,8 +444,8 @@ async function putQueue(who, opts) {
     const r = await client.upsertEntity(entity, "Replace");
     written = { ...entity, etag: (r && r.etag) || "" };
   }
-  return { ...summarise(written), items: trimmed,
-           dropped: Math.max(0, (items || []).length - trimmed.length) };
+  return { ...summarise(written), items: savedItems,
+           dropped: Math.max(0, (items || []).length - savedItems.length) };
 }
 
 /* Add or remove one advisor from ANY saved list without making that list the
@@ -422,9 +482,7 @@ async function mutateQueueMember(who, id, operation, itemOrCrd) {
       if (e.statusCode !== 404) throw e;
       const err = new Error("That call list no longer exists."); err.statusCode = 404; throw err;
     }
-    let items;
-    try { items = JSON.parse(existing.items || "[]"); }
-    catch { items = []; }
+    const items = queueItems(existing);
     const index = items.findIndex((it) => String(it && it.crd) === crd);
     if ((op === "add" && index !== -1) || (op === "remove" && index === -1)) {
       return { ...summarise(existing), items, added: false, removed: false };
@@ -437,11 +495,7 @@ async function mutateQueueMember(who, id, operation, itemOrCrd) {
       const err = new Error(`A call list can hold at most ${MAX_QUEUE} people.`);
       err.statusCode = 409; throw err;
     }
-    const payload = JSON.stringify(items);
-    if (Buffer.byteLength(payload, "utf8") > MAX_QUEUE_BYTES) {
-      const err = new Error("That person would make the call list too large to save.");
-      err.statusCode = 409; throw err;
-    }
+    const itemProperties = queueItemProperties(items);
     let cursor = Math.max(0, Math.min(Number(existing.cursor) || 0, items.length));
     if (op === "remove" && anchor) {
       const anchored = items.findIndex((it) => String(it && it.crd) === String(anchor.crd));
@@ -450,7 +504,7 @@ async function mutateQueueMember(who, id, operation, itemOrCrd) {
     const entity = {
       partitionKey: who.id, rowKey: key,
       name: existing.name || (key === DEFAULT_LIST ? "Call list" : key),
-      items: payload, cursor,
+      ...itemProperties, cursor,
       cycle: Math.max(1, Number(existing.cycle) || 1),
       cycleStartedUtc: existing.cycleStartedUtc || "",
       updatedUtc: new Date().toISOString(), userName: clean(who.name),

@@ -26,6 +26,40 @@ module.exports = async function (context, req) {
       return store.ok(context, { entries, count: entries.length });
     }
     const body = req.body || {};
+    if (req.method === "POST") {
+      const entries = body.entries;
+      if (!["key", "dd", "scheduler"].includes(body.kind)
+          || !Array.isArray(entries) || !entries.length || entries.length > 200
+          || entries.some(entry => !entry || !/^\d{1,32}$/.test(String(entry.crd || ""))
+            || String(entry.name || "").length > 256
+            || !/^\d{0,32}$/.test(String(entry.firmCrd || "")))) {
+        const err = new Error("Choose one role and 1 to 200 valid advisor records.");
+        err.statusCode = 400;
+        throw err;
+      }
+      const unique = new Set(entries.map(entry => String(entry.crd)));
+      if (unique.size !== entries.length) {
+        const err = new Error("Each advisor may appear only once in a bulk role update.");
+        err.statusCode = 400;
+        throw err;
+      }
+      const failed = [];
+      let updated = 0;
+      // Bounded concurrency keeps a 200-person import responsive without
+      // flooding Table Storage. setFlag joins this rep's membership and is
+      // idempotent, so a partial result can be retried safely.
+      for (let i = 0; i < entries.length; i += 8) {
+        const chunk = entries.slice(i, i + 8);
+        const results = await Promise.allSettled(chunk.map(entry =>
+          store.setFlag(who, entry.crd, body.kind, true,
+                        entry.name, entry.firmCrd)));
+        results.forEach((result, n) => {
+          if (result.status === "fulfilled") updated++;
+          else failed.push(String(chunk[n].crd));
+        });
+      }
+      return store.ok(context, { updated, failed });
+    }
     const crd = String(body.crd || "").trim();
     if (!crd) {
       const err = new Error("An advisor CRD is required.");

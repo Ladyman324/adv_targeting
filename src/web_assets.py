@@ -174,9 +174,9 @@ WEB = ROOT / "webapp"
 #
 # training.js is shared for the same reason: a stale onboarding module can
 # disagree with the API media version and repeatedly prompt an employee.
-VERSIONED = ("app.js", "style.css", "dial.js", "training.js", "email.js", "email.css")
+VERSIONED = ("app.js", "style.css", "dial.js", "training.js", "list_import.js", "email.js", "email.css")
 _VTAG = re.compile(
-    r'(app\.js|style\.css|dial\.js|training\.js|email\.js|email\.css)\?v=([^"\']+)')
+    r'(app\.js|style\.css|dial\.js|training\.js|list_import\.js|email\.js|email\.css)\?v=([^"\']+)')
 
 # The field view is versioned SEPARATELY, from its own files. One shared tag
 # would mean every desktop tweak invalidates the phone's cached shell and every

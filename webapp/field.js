@@ -1268,7 +1268,7 @@ async function locateFlagged(crd, name){
 
 // Old saved lists are reconciled only when a rep reaches the row. This keeps
 // field startup fast: one name shard and one tile are fetched for the current
-// stale row, never the national contact file or all 250 saved rows.
+// stale row, never the national contact file or all 500 saved rows.
 const routeChecks = new Set();
 async function ensureCurrentQueueRoute(item){
   if (!item || (item.contactRouteVersion === DATA_VERSION
@@ -1966,11 +1966,12 @@ function renderSettings(){
 
     <div class="set-row set-block" id="setAdmin" hidden>
       <span>Email administration</span>
-      <p class="set-sub">Approved templates and the PDFs reps may attach.</p>
+      <p class="set-sub">Approved templates, documents, and sender controls.</p>
       <p class="set-actions">
         <button type="button" id="setTemplates" class="set-btn">Manage templates</button>
         <button type="button" id="setDocs" class="set-btn">Manage approved documents</button>
         <button type="button" id="setHealth" class="set-btn">Sender health</button>
+        <button type="button" id="setCaps" class="set-btn">Daily email limits</button>
       </p>
     </div>
 
@@ -2983,9 +2984,10 @@ document.addEventListener("click", (e) => {
   // Confirmed, because this signs out of Microsoft on the device, not just this
   // app -- a mis-tap costs a sign-in everywhere, and that is worth one question.
   if (e.target.closest("#setTemplates") || e.target.closest("#setDocs")
-      || e.target.closest("#setHealth")) {
+      || e.target.closest("#setHealth") || e.target.closest("#setCaps")) {
     const which = e.target.closest("#setTemplates") ? "templates"
-      : e.target.closest("#setHealth") ? "health" : "docs";
+      : e.target.closest("#setHealth") ? "health"
+      : e.target.closest("#setCaps") ? "caps" : "docs";
     settingsOpen = false; renderSettings();
     EmailComposer.openAdmin(which);
     return;

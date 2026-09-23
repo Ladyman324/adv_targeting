@@ -26,6 +26,14 @@ test("daily capacity is visible and described as an Eastern calendar day", () =>
   assert.doesNotMatch(bodyOf("sendBlockedReason"), /rolling|last 24|24-hour|directBatchMax|INTERNAL/);
 });
 
+test("Settings loads approved colleagues before calling a missing catalog unconfigured", () => {
+  assert.match(email, /async function loadSettingsData\(\) \{[\s\S]*?await api\("settings", null, "GET"\)/);
+  assert.match(app, /settingsCatalogState = "loading";[\s\S]*?EmailComposer\.loadSettingsData\(\)/);
+  assert.match(app, /settingsCatalogState === "loading"[\s\S]*?Loading approved colleagues/);
+  assert.match(app, /settingsCatalogState === "error"[\s\S]*?Could not load approved colleagues/);
+  assert.match(app, /request !== settingsCatalogRequest/);
+});
+
 test("the composer uses a server-authored plan and binds approval to its hash", () => {
   const request = bodyOf("requestCapacityPlan");
   assert.match(request, /api\("capacity_plan", \{[\s\S]*batchId: detail\.batch\.id, scheduledForUtc, dailyStartTime/);

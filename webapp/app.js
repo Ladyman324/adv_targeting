@@ -2874,6 +2874,7 @@ function listRowActions(l){
 let listsBack = null;
 let listsEditMode = false;   // showing who is on the open list, not every list
 let listsReturnFocus = null;
+let listImport = null;
 
 function focusListDialog(selector){
   if (!listsBack) return;
@@ -3026,8 +3027,333 @@ function flagListRows(){
   }).join("") + `</ul>`;
 }
 
+function listImportPlan(){
+  if (!listImport || !listImport.resolved) return null;
+  const base = listImport.resolved.matched;
+  const rankedIds = new Set();
+  if (listImport.ranked) {
+    for (const crd of Object.keys((BARRONS && BARRONS.advisors) || {})) rankedIds.add(crd);
+    // Forbes has inferred name matches; use its confirmed CRD rows for a
+    // cross-territory email list assembled without individual review.
+    for (const [crd, entries] of Object.entries((FORBES && FORBES.advisors) || {}))
+      if (entries.some(entry => entry[3] === "c")) rankedIds.add(crd);
+  }
+  const combined = listImport.ranked
+    ? ListImport.unionRanked(base, CONTACTS.advisors, ADV_INDEX, rankedIds,
+        state => STATE_TO_TERRITORY[state] || "",
+        contact => Dial.tierCanEmail(contact.t, contact.src),
+        listImport.ranked === "all")
+    : { people:base, added:0, unavailable:0 };
+  const policy = audienceTerritoryPolicy({
+    rows:combined.people.map(person => ({ person, owner:territoryFor(person.state) })),
+    matches:combined.people.length,
+  });
+  const allowed = new Set(policy.rows.map(row => row.person.crd));
+  const people = combined.people.filter(person =>
+    allowed.has(person.crd) && !Dial.isDnc(person.crd));
+  const groups = new Map();
+  for (const person of people) {
+    const territory = listImport.split ? person.territory : "All territories";
+    if (!groups.has(territory)) groups.set(territory, []);
+    groups.get(territory).push(person);
+  }
+  return { ...combined, people, groups, scope:policy,
+    dnc:combined.people.filter(person => Dial.isDnc(person.crd)).length,
+    added:people.filter(person => person.source === "Ranked").length };
+}
+
+function listImportName(territory, people){
+  const base = String(listImport.name || "").trim();
+  if (!listImport.split) return base;
+  const owner = territoryFor(people[0].state);
+  const code = String(owner && owner.c || "").toUpperCase();
+  if (!/^[A-Z]{2,4}$/.test(code))
+    throw new Error("The owner code for " + territory + " is unavailable.");
+  if (people.some(person => {
+    const rep = territoryFor(person.state);
+    return !rep || rep.c !== code;
+  })) throw new Error("Territory ownership changed within " + territory + ". Review assignments first.");
+  return base + "-" + code;
+}
+
+function listImportExceptions(){
+  if (!listImport || !listImport.resolved) return [];
+  const result = listImport.resolved;
+  const policy = audienceTerritoryPolicy({
+    rows:result.matched.map(person => ({ person, owner:territoryFor(person.state) })),
+    matches:result.matched.length,
+  });
+  const allowed = new Set(policy.rows.map(row => row.person.crd));
+  return [
+    ...result.unmatched.map(email => [email, "No current app contact has this email"]),
+    ...result.ambiguous.map(email => [email, "Email belongs to multiple advisor records"]),
+    ...result.ineligible.map(email => [email, "Advisor record or approved email route unavailable"]),
+    ...result.noTerritory.map(email => [email, "Mapped office territory unavailable"]),
+    ...result.matched.filter(person => !allowed.has(person.crd))
+      .map(person => [person.email, "Outside this account's territory coverage"]),
+    ...result.matched.filter(person => Dial.isDnc(person.crd))
+      .map(person => [person.email, "Firm do-not-call"]),
+  ];
+}
+
+function paintListImporter(){
+  if (!listsBack || !listImport) return;
+  const imp = listImport, result = imp.resolved, plan = listImportPlan();
+  const exceptions = listImportExceptions();
+  let groups = "";
+  if (plan) for (const [territory, people] of plan.groups) {
+    let label = territory;
+    try { label = listImportName(territory, people); } catch {}
+    groups += '<li><b>' + esc(label) + '</b><span>' + people.length
+      + ' people | ' + esc(territory) + '</span></li>';
+  }
+  listsBack.innerHTML =
+    '<div class="ask lists lists-workspace list-import-workspace" role="dialog" aria-modal="true" aria-label="Import email list">'
+    + '<div class="lists-title"><div><h3>Import email list</h3>'
+    + '<p>Match email addresses to current app contacts, then review the territory lists before saving.</p></div>'
+    + '<button type="button" class="ask-btn ghost" data-lists="import-back">Back to lists</button></div>'
+    + '<label class="list-import-field">' + (imp.parsed ? 'Add another CSV' : 'CSV file')
+    + ' <input id="listImportFile" type="file" multiple accept=".csv,.txt,text/csv,text/plain"'
+    + (imp.created.size ? ' disabled' : '') + '></label>'
+    + '<p class="lists-section-note">Excel: save the selected rows as CSV. Use a column headed Email or Email Address, or a one-column file of addresses. The file is read in this browser.</p>'
+    + (imp.fileName ? '<p class="list-import-file">Selected: ' + esc(imp.fileName) + '</p>' : '')
+    + (imp.parsed ? '<button type="button" class="ask-btn ghost" data-lists="import-reset">Start over</button>' : '')
+    + (imp.busy ? '<p class="list-import-status" role="status">Matching contacts...</p>' : '')
+    + (imp.error ? '<p class="lists-error" role="alert">' + esc(imp.error) + '</p>' : '')
+    + (result ? '<div class="list-import-summary"><b>' + result.matched.length
+        + ' matched</b><span>' + imp.parsed.duplicateRows + ' duplicate rows | '
+        + imp.parsed.invalidRows + ' invalid rows | ' + exceptions.length + ' need review</span></div>' : '')
+    + (exceptions.length ? '<button type="button" class="ask-btn" data-lists="import-exceptions">Download review CSV</button>' : '')
+    + (result ? '<div class="list-import-options">'
+        + '<label class="list-import-field">List name <input id="listImportName" class="ask-name" maxlength="55" value="'
+        + esc(imp.name) + '" placeholder="Edward Jones leadership"' + (imp.created.size ? ' disabled' : '') + '></label>'
+        + '<label class="list-import-field">Also add ranked advisors'
+        + '<select id="listImportRanked"' + (imp.created.size ? ' disabled' : '') + '>'
+        + '<option value="">No ranked additions</option>'
+        + '<option value="same"' + (imp.ranked === "same" ? ' selected' : '')
+        + '>At the imported firms</option>'
+        + '<option value="all"' + (imp.ranked === "all" ? ' selected' : '')
+        + '>Across all firms</option></select></label>'
+        + '<label><input id="listImportSplit" type="checkbox"' + (imp.split ? ' checked' : '')
+        + (imp.created.size ? ' disabled' : '')
+        + '> Split by sales territory and add the salesperson&#39;s initials to each list name</label>'
+        + '<label class="list-import-field">Also label everyone on the saved lists'
+        + '<select id="listImportRole"' + (imp.created.size ? ' disabled' : '') + '><option value="">No label</option>'
+        + '<option value="key"' + (imp.role === "key" ? ' selected' : '') + '>Key Person</option>'
+        + '<option value="dd"' + (imp.role === "dd" ? ' selected' : '') + '>Research</option>'
+        + '<option value="scheduler"' + (imp.role === "scheduler" ? ' selected' : '') + '>Scheduler</option>'
+        + '</select></label><p class="lists-section-note">Labels appear to colleagues; each person&#39;s label records who applied it. Saved lists belong to your account.</p></div>' : '')
+    + (plan ? '<div class="list-import-preview"><h4>Lists to create</h4><ul>'
+        + (groups || '<li>No eligible contacts</li>') + '</ul>'
+        + '<p>' + plan.people.length + ' unique people | ' + plan.added
+        + ' ranked advisors added | ' + plan.dnc + ' excluded by do-not-call'
+        + (plan.scope.outside ? ' | ' + plan.scope.outside + ' outside your territory' : '')
+        + (plan.unavailable ? ' | ' + plan.unavailable + ' ranked records lack an approved email or territory' : '')
+        + '</p><p class="lists-section-note">' + plan.scope.text + '</p></div>' : '')
+    + (imp.saved ? '<p class="list-import-status" role="status">' + esc(imp.saved) + '</p>' : '')
+    + (result ? '<div class="list-import-actions"><button type="button" class="ask-btn primary" data-lists="import-save"'
+        + (imp.busy || !plan || !plan.people.length ? ' disabled' : '')
+        + '>' + (imp.finished ? 'Saved' : imp.created.size ? 'Continue saving' : 'Create lists') + '</button>'
+        + '<button type="button" class="ask-btn ghost" data-lists="import-back">Done</button></div>' : '')
+    + '</div>';
+  const field = listsBack.querySelector("#listImportFile");
+  if (field) field.addEventListener("change", readListImportFile);
+  for (const selector of ["#listImportRanked", "#listImportSplit", "#listImportRole"]) {
+    const control = listsBack.querySelector(selector);
+    if (control) control.addEventListener("change", updateListImportChoice);
+  }
+  const name = listsBack.querySelector("#listImportName");
+  if (name) name.addEventListener("input", () => {
+    imp.name = name.value;
+    if (!plan) return;
+    const labels = listsBack.querySelectorAll(".list-import-preview li b");
+    [...plan.groups].forEach(([territory, people], i) => {
+      try { labels[i].textContent = listImportName(territory, people); }
+      catch { labels[i].textContent = territory; }
+    });
+  });
+}
+
+async function readListImportFile(event){
+  const files = [...(event.target.files || [])], imp = listImport;
+  if (!files.length || !imp || imp.busy || imp.created.size) return;
+  imp.busy = true; imp.error = ""; imp.saved = "";
+  paintListImporter();
+  try {
+    if (files.some(file => !/\.(csv|txt)$/i.test(file.name))
+        || files.reduce((total, file) => total + file.size, 0) > 5 * 1024 * 1024)
+      throw new Error("Choose CSV or text files under 5 MB total. Excel can export selected rows as CSV.");
+    const parts = await Promise.all(files.map(async file =>
+      ListImport.parseEmails(await file.text())));
+    const before = imp.parsed || { emails:[], rows:0, duplicateRows:0, invalidRows:0 };
+    const combined = new Set(before.emails);
+    let repeats = 0;
+    for (const part of parts) for (const email of part.emails) {
+      if (combined.has(email)) repeats++;
+      else combined.add(email);
+    }
+    const parsed = {
+      emails:[...combined], rows:before.rows + parts.reduce((n, part) => n + part.rows, 0),
+      duplicateRows:before.duplicateRows + repeats
+        + parts.reduce((n, part) => n + part.duplicateRows, 0),
+      invalidRows:before.invalidRows + parts.reduce((n, part) => n + part.invalidRows, 0),
+    };
+    await Promise.all([loadContacts(), loadAdvisorIndex(), ensureAudienceIdentity(),
+      SUPPORT.territories === "ready" ? Promise.resolve() : loadTerritories(), dialReady]);
+    if (!CONTACTS_READY || !ADV_INDEX || SUPPORT.territories !== "ready")
+      throw new Error("Current contact, advisor, or territory data could not be loaded.");
+    if (!ADMIN && window.EmailComposer && EmailComposer.isAdmin) {
+      try { ADMIN = await EmailComposer.isAdmin(); } catch {}
+    }
+    if (!ME)
+      throw new Error("Your account identity could not be checked. Reopen the importer and try again.");
+    imp.parsed = parsed;
+    imp.fileName = [imp.fileName, ...files.map(file => file.name)].filter(Boolean).join(", ");
+    if (!imp.name) imp.name = files[0].name.replace(/\.[^.]+$/, "")
+      .replace(/[_-]+/g, " ").trim().slice(0, 55);
+    imp.resolved = ListImport.resolve(parsed.emails, CONTACTS.advisors, ADV_INDEX,
+      state => STATE_TO_TERRITORY[state] || "",
+      contact => Dial.tierCanEmail(contact.t, contact.src));
+  } catch (error) {
+    imp.error = error.message || "The file could not be read.";
+  } finally {
+    imp.busy = false;
+    if (listImport === imp) paintListImporter();
+  }
+}
+
+async function updateListImportChoice(){
+  const imp = listImport;
+  if (!imp || imp.created.size) return;
+  imp.name = (listsBack.querySelector("#listImportName") || {}).value || "";
+  imp.split = !!(listsBack.querySelector("#listImportSplit") || {}).checked;
+  imp.role = (listsBack.querySelector("#listImportRole") || {}).value || "";
+  imp.ranked = (listsBack.querySelector("#listImportRanked") || {}).value || "";
+  imp.error = ""; imp.saved = "";
+  if (imp.ranked && (SUPPORT.barrons !== "ready" || SUPPORT.forbes !== "ready")) {
+    imp.busy = true; paintListImporter();
+    await Promise.all([
+      SUPPORT.barrons === "ready" ? Promise.resolve() : loadBarrons(),
+      SUPPORT.forbes === "ready" ? Promise.resolve() : loadForbes(),
+    ]);
+    imp.busy = false;
+    if (SUPPORT.barrons !== "ready" || SUPPORT.forbes !== "ready") {
+      imp.ranked = false;
+      imp.error = "Ranked advisor data is unavailable. The CSV matches are still ready.";
+    }
+  }
+  if (listImport === imp) {
+    const focus = document.activeElement && document.activeElement.id;
+    paintListImporter();
+    if (focus) (listsBack.querySelector("#" + focus) || {}).focus?.();
+  }
+}
+
+function downloadListImportExceptions(){
+  const rows = listImportExceptions();
+  if (!rows.length) return;
+  const cell = value => '"' + String(value).replace(/"/g, '""') + '"';
+  const csv = "Email,Reason\r\n" + rows.map(row => row.map(cell).join(",")).join("\r\n");
+  const url = URL.createObjectURL(new Blob(["\uFEFF" + csv], { type:"text/csv;charset=utf-8" }));
+  const link = document.createElement("a");
+  link.href = url; link.download = "list_import_review.csv"; link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function listImportSnapshot(person){
+  return {
+    crd:person.crd, name:person.name, firm:person.firm, phone:person.phone,
+    phoneKind:person.phoneKind, city:person.city, state:person.state,
+    email:person.email, unconfirmed:false, identityApproved:true,
+    emailConfirmed:true, emailEligibilityKnown:true,
+    emailTierKey:Dial.emailTierKey(), contactTier:person.contactTier,
+    contactSource:person.contactSource, contactRouteVersion:DATA_VERSION,
+  };
+}
+
+async function saveListImport(){
+  const imp = listImport, plan = listImportPlan();
+  if (!imp || !plan || imp.busy || imp.finished || !plan.people.length) return;
+  if (plan.scope.kind === "unassigned")
+    throw new Error("No sales territory is assigned to this account. Ask an administrator to assign coverage.");
+  imp.name = String((listsBack.querySelector("#listImportName") || {}).value || imp.name).trim();
+  if (!imp.name || imp.name.length > 55)
+    throw new Error("Choose a list name of 1 to 55 characters.");
+  const grouped = [...plan.groups].map(([territory, people]) =>
+    ({ territory, people, name:listImportName(territory, people) }));
+  if (grouped.some(group => group.people.length > Dial.MAX_QUEUE))
+    throw new Error("A territory exceeds the " + Dial.MAX_QUEUE
+      + "-person list limit. Narrow this selection before saving.");
+  for (const group of grouped) {
+    if (new TextEncoder().encode(JSON.stringify(group.people.map(listImportSnapshot))).length > 900 * 1024)
+      throw new Error(group.name + " exceeds the saved-list storage limit. Narrow the selection.");
+    if (!imp.created.has(group.name) && Dial.state.lists.some(row =>
+      row.name.toLowerCase() === group.name.toLowerCase()))
+      throw new Error("A list named " + group.name + " already exists. Choose another name.");
+  }
+  if (!imp.created.size && !confirm("Create " + grouped.length + " list"
+      + (grouped.length === 1 ? "" : "s") + " for " + plan.people.length
+      + " people?"
+      + (plan.scope.kind === "administrator"
+        ? "\n\nThis administrative account has no assigned territory. Have you reviewed the seven sales-territory groups and ownership?"
+        : "")
+      + (imp.role ? "\n\nThe selected role label will also be visible to colleagues." : ""))) return;
+  imp.busy = true; imp.error = ""; paintListImporter();
+  try {
+    for (const group of grouped) {
+      if (imp.created.has(group.name)) continue;
+      const id = "import-" + crypto.randomUUID();
+      // Save directly so a seven-list import does not switch or interrupt the
+      // salesperson's active calling queue on every territory.
+      const response = await fetch("/api/queue", {
+        method:"PUT", credentials:"same-origin",
+        headers:{ "Content-Type":"application/json" },
+        body:JSON.stringify({
+          id, name:group.name, items:group.people.map(listImportSnapshot),
+          cursor:0, cycle:1, cycleStartedUtc:new Date().toISOString(),
+        }),
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || "This list could not be saved.");
+      if (result.dropped || result.items.length !== group.people.length)
+        throw new Error(group.name + " saved " + result.items.length + " of "
+          + group.people.length + " people. Review this list before sending.");
+      imp.created.add(group.name);
+    }
+    if (imp.role) {
+      const entries = plan.people.map(person => ({
+        crd:person.crd, name:person.name, firmCrd:person.firmCrd,
+      }));
+      for (let i = 0; i < entries.length; i += 200) {
+        const response = await fetch("/api/flags", {
+          method:"POST", credentials:"same-origin",
+          headers:{ "Content-Type":"application/json" },
+          body:JSON.stringify({ kind:imp.role, entries:entries.slice(i, i + 200) }),
+        });
+        const body = await response.json();
+        if (!response.ok || body.failed && body.failed.length)
+          throw new Error("Lists were saved, but some role labels need retrying.");
+      }
+      await Dial.fetchFlags();
+    }
+    await Dial.loadLists();
+    renderDialer();
+    imp.saved = "Saved " + imp.created.size + " list" + (imp.created.size === 1 ? "" : "s")
+      + " with " + plan.people.length + " people"
+      + (imp.role ? " and their role labels." : ".");
+    imp.finished = true;
+  } catch (error) {
+    imp.error = error.message || "The import stopped. Lists already saved are shown above.";
+    await Dial.loadLists().catch(() => {});
+  } finally {
+    imp.busy = false;
+    if (listImport === imp) paintListImporter();
+  }
+}
+
 function paintListManager(){
   if (!listsBack) return;
+  if (listImport) return paintListImporter();
   if (listsEditMode) return paintListEdit();
   const ls = (Dial.state.lists || []).filter((list) => !standingKindOf(list.id));
   listsBack.innerHTML =
@@ -3046,7 +3372,8 @@ function paintListManager(){
      */
     + flagListRows() + `</section>`
     + `<section class="lists-section"><h4>Dynamic audiences</h4><p class="lists-section-note">Saved map rules. Preview current matches before preparing a channel-specific list.</p>${dynamicAudienceRows()}</section>`
-    + `<section class="lists-section"><h4>Static contact lists</h4><p class="lists-section-note">Frozen working lists used for calls or email, limited to 250 people.</p>`
+    + `<section class="lists-section"><h4>Static contact lists</h4><p class="lists-section-note">Frozen working lists used for calls or email, limited to 500 people per list.</p>`
+    + `<button type="button" class="ask-btn list-import-start" data-lists="import-open">Import email list</button>`
     + (ls.length
         ? `<ul class="lists-ul">${ls.map(listRowActions).join("")}</ul>`
         : `<p class="lists-none">No static contact lists of your own yet.</p>`)
@@ -3067,6 +3394,17 @@ document.addEventListener("click", async e => {
   const l = (Dial.state.lists || []).find(x => x.id === id);
   try {
     if (act === "close") { listsEditMode = false; return closeListManager(); }
+    if (act === "import-open") {
+      listImport = { name:"", split:true, ranked:false, role:"", created:new Set(), busy:false };
+      paintListImporter(); return focusListDialog("#listImportFile");
+    }
+    if (act === "import-back") { listImport = null; return paintListManager(); }
+    if (act === "import-reset") {
+      listImport = { name:"", split:true, ranked:false, role:"", created:new Set(), busy:false };
+      paintListImporter(); return focusListDialog("#listImportFile");
+    }
+    if (act === "import-save") return saveListImport();
+    if (act === "import-exceptions") return downloadListImportExceptions();
     if (act === "edit-back") { listsEditMode = false; return paintListManager(); }
     if (act === "audience-back") { audiencePreview = null; return paintListManager(); }
     if (act === "audience-open") {
@@ -3090,8 +3428,8 @@ document.addEventListener("click", async e => {
       if (policy.kind === "unassigned") return showNotice("No sales territory is assigned to this account, so this snapshot cannot be created.");
       if (policy.kind === "administrator" && !confirm("This administrative account is not assigned a sales territory. Review the advisor territory coverage above before continuing.\n\nHave you reviewed ownership and want to prepare this list?")) return;
       const eligible = policy.rows.filter(x => channel === "email" ? x.emailable : x.callable).map(x => x.item);
-      if (eligible.length > 250) {
-        showNotice(`This audience has ${eligible.length.toLocaleString()} ${channel === "email" ? "emailable" : "callable"} people in the permitted snapshot scope; a static list holds 250. Refine the saved filters so contacts are not selected arbitrarily.`);
+      if (eligible.length > Dial.MAX_QUEUE) {
+        showNotice(`This audience has ${eligible.length.toLocaleString()} ${channel === "email" ? "emailable" : "callable"} people in the permitted snapshot scope; a static list holds ${Dial.MAX_QUEUE}. Refine the saved filters so contacts are not selected arbitrarily.`);
         return;
       }
       const name = prompt(`Name this static ${channel === "email" ? "email" : "call"} list`, audiencePreview.audience.name) || "";
@@ -3257,6 +3595,9 @@ document.addEventListener("click", async e => {
  * preference already fell into.
  */
 let setBack = null;
+let settingsCatalogState = "loading";
+let settingsCatalogError = "";
+let settingsCatalogRequest = 0;
 
 
 /* ---- the work queue ------------------------------------------------------
@@ -4021,6 +4362,7 @@ function catalogInternal(){
 
 function openSettings(){
   if (setBack) return;
+  const request = ++settingsCatalogRequest;
   setBack = document.createElement("div");
   setBack.className = "ask-back";
   document.body.appendChild(setBack);
@@ -4028,14 +4370,32 @@ function openSettings(){
   document.addEventListener("keydown", onKey);
   setBack._onKey = onKey;
   setBack.addEventListener("click", (e) => { if (e.target === setBack) closeSettings(); });
+  settingsCatalogState = "loading";
+  settingsCatalogError = "";
   paintSettings();
   if (!ME) Dial.whoAmI().then((p) => { ME = p; paintSettings(); });
-  if (!ADMIN && global.EmailComposer && EmailComposer.isAdmin)
-    EmailComposer.isAdmin().then((yes) => { if (yes) { ADMIN = true; paintSettings(); } });
+  if (global.EmailComposer && EmailComposer.loadSettingsData)
+    EmailComposer.loadSettingsData().then((data) => {
+      if (!setBack || request !== settingsCatalogRequest) return;
+      ADMIN = !!data.isAdmin;
+      settingsCatalogState = "ready";
+      paintSettings();
+    }).catch((error) => {
+      if (!setBack || request !== settingsCatalogRequest) return;
+      settingsCatalogState = "error";
+      settingsCatalogError = error.message || "The email settings could not be loaded.";
+      paintSettings();
+    });
+  else {
+    settingsCatalogState = "error";
+    settingsCatalogError = "The email settings module is not available. Reload the app.";
+    paintSettings();
+  }
 }
 
 function closeSettings(){
   if (!setBack) return;
+  settingsCatalogRequest += 1;
   document.removeEventListener("keydown", setBack._onKey);
   setBack.remove();
   setBack = null;
@@ -4086,7 +4446,11 @@ function paintSettings(){
     + `</p></div>`
 
     + `<div class="set-row set-block"><span>Copy a colleague</span>`
-    + ((catalogInternal() || []).length
+    + (settingsCatalogState === "loading"
+      ? `<p class="set-sub">Loading approved colleagues...</p>`
+      : settingsCatalogState === "error"
+      ? `<p class="set-sub">Could not load approved colleagues: ${esc(settingsCatalogError)}. Close and reopen Settings to try again.</p>`
+      : catalogInternal().length
       ? `<p class="set-sub">Chosen from the approved internal list.</p>`
         + `<p class="set-actions">`
         + ["", "cc", "bcc"].map(v => `<label class="set-radio"><input type="radio" name="setCopyInternal"`
@@ -4106,11 +4470,12 @@ function paintSettings(){
 
     + `<div class="set-row set-block" id="setAdmin"${ADMIN ? "" : " hidden"}>`
     + `<span>Email administration</span>`
-    + `<p class="set-sub">Approved templates and the PDFs reps may attach.</p>`
+    + `<p class="set-sub">Approved templates, documents, and sender controls.</p>`
     + `<p class="set-actions">`
     + `<button type="button" class="set-btn" data-set="templates">Manage templates</button>`
     + `<button type="button" class="set-btn" data-set="docs">Manage approved documents</button>`
     + `<button type="button" class="set-btn" data-set="health">Sender health</button>`
+    + `<button type="button" class="set-btn" data-set="caps">Daily email limits</button>`
     + `</p></div>`
 
     + `<div class="set-row set-block"><span>Signed in as</span>`
@@ -4161,7 +4526,7 @@ document.addEventListener("click", async e => {
   if (e.target.closest("#settingsBtn")) { openSettings(); return; }
   // Confirmed, because this signs out of Microsoft in this browser, not just the
   // app -- a mis-click costs a sign-in everywhere, and that is worth one question.
-  const adm = e.target.closest('[data-set="templates"], [data-set="docs"], [data-set="health"]');
+  const adm = e.target.closest('[data-set="templates"], [data-set="docs"], [data-set="health"], [data-set="caps"]');
   // Back from an admin list returns to Settings, the panel it was opened from,
   // rather than closing outright -- otherwise Back and Close do the same thing.
   if (adm) { const which = adm.dataset.set; closeSettings();
