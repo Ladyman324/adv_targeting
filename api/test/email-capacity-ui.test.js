@@ -28,7 +28,11 @@ test("daily capacity is visible and described as an Eastern calendar day", () =>
 
 test("Settings loads approved colleagues before calling a missing catalog unconfigured", () => {
   assert.match(email, /async function loadSettingsData\(\) \{[\s\S]*?await api\("settings", null, "GET"\)/);
-  assert.match(app, /settingsCatalogState = "loading";[\s\S]*?EmailComposer\.loadSettingsData\(\)/);
+  const settingsOpen = app.slice(app.indexOf("function openSettings(){"),
+    app.indexOf("function closeSettings(){"));
+  assert.match(settingsOpen, /window\.EmailComposer && EmailComposer\.loadSettingsData/);
+  assert.doesNotMatch(settingsOpen, /\bglobal\./);
+  assert.match(settingsOpen, /settingsCatalogState = "loading";[\s\S]*?EmailComposer\.loadSettingsData\(\)/);
   assert.match(app, /settingsCatalogState === "loading"[\s\S]*?Loading approved colleagues/);
   assert.match(app, /settingsCatalogState === "error"[\s\S]*?Could not load approved colleagues/);
   assert.match(app, /request !== settingsCatalogRequest/);

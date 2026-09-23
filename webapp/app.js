@@ -4374,7 +4374,7 @@ function openSettings(){
   settingsCatalogError = "";
   paintSettings();
   if (!ME) Dial.whoAmI().then((p) => { ME = p; paintSettings(); });
-  if (global.EmailComposer && EmailComposer.loadSettingsData)
+  if (window.EmailComposer && EmailComposer.loadSettingsData)
     EmailComposer.loadSettingsData().then((data) => {
       if (!setBack || request !== settingsCatalogRequest) return;
       ADMIN = !!data.isAdmin;
