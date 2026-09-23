@@ -157,7 +157,7 @@ def main() -> None:
     # Pin rows are read positionally by the webapp's rehydrate(); a field
     # inserted mid-array rather than appended silently shifts everything after
     # it, which has happened once already.
-    PIN_WIDTH = 18
+    PIN_WIDTH = 19
     for path in sorted(WEB.glob("pins_??.json")):
         layer = json.loads(path.read_text(encoding="utf-8"))
         assert layer.get("schema") == 2, f"{path.name}: unsupported pin schema"

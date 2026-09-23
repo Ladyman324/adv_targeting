@@ -152,6 +152,12 @@ def main() -> None:
                         city[col] = None
                 source = pd.concat([source, city[list(columns) + ["city_addr_key", "city_level"]]],
                                    ignore_index=True, sort=False)
+        work_path = INTERIM / "contact_work_branches.parquet"
+        if work_path.exists():
+            work = pd.read_parquet(work_path)
+            work = work[work["branch_state"].astype(str).str.upper().str.strip() == state]
+            if len(work):
+                source = pd.concat([source, work], ignore_index=True, sort=False)
         total_rows += len(source)
         source["firm_crd"] = source["firm_crd"].astype(str)
         source["advisor_crd"] = source["advisor_crd"].astype(str)
@@ -256,12 +262,17 @@ def main() -> None:
                     "firms": Counter(),
                     "states": Counter(),
                     "cities": Counter(),
+                    "work_cities": Counter(),
+                    "work_firms": Counter(),
                 }
             record["firms"][display_firm(row.firm_display)] += 1
             record["states"][state] += 1
             city = str(row.branch_city).strip().title() if pd.notna(row.branch_city) else ""
             if city:
                 record["cities"][(state, city)] += 1
+                if str(getattr(row, "location_source", "") or "") in ("firm_roster", "ACT"):
+                    record["work_cities"][(state, city)] += 1
+                    record["work_firms"][display_firm(row.firm_display)] += 1
 
     # Biggest firm-offices last so they retain z-order in circle mode.
     feats.sort(key=lambda row: row["n"])
@@ -328,12 +339,14 @@ def main() -> None:
 
     advisor_rows = []
     for advisor_id, record in advisor_search.items():
-        firm = record["firms"].most_common(1)[0][0] if record["firms"] else ""
+        preferred_firms = record["work_firms"] or record["firms"]
+        firm = preferred_firms.most_common(1)[0][0] if preferred_firms else ""
         based = home.get(advisor_id, set())
+        working = set(record["work_cities"])
         # every (state, city) the advisor is filed at, best first
         places = sorted(
             record["cities"].items(),
-            key=lambda item: (item[0] in based, item[1]),
+            key=lambda item: (item[0] in working, item[0] in based, item[1]),
             reverse=True,
         )
         if places:

@@ -105,6 +105,10 @@ def load_positions() -> pd.DataFrame:
                                           "branch_state", "branch_postal"])
               for p in glob.glob(str(INTERIM / "branch_geocoded_*.parquet"))]
     geo = pd.concat(frames, ignore_index=True).dropna(subset=["lat", "lon"])
+    work_path = INTERIM / "contact_work_branches.parquet"
+    if work_path.exists():
+        work = pd.read_parquet(work_path)
+        geo = pd.concat([geo, work], ignore_index=True, sort=False)
     for col in ("advisor_crd", "firm_crd"):
         geo[col] = geo[col].astype(str)
 
@@ -129,7 +133,11 @@ def load_positions() -> pd.DataFrame:
     # Prefer a corroborated office over an inferred home address when someone
     # has both, then take one row per advisor.
     merged["rank"] = merged["uncertain"].fillna(False).astype(bool).astype(int)
-    merged = merged.sort_values("rank").drop_duplicates("advisor_crd", keep="first")
+    merged["work_rank"] = ~merged.get(
+        "location_source", pd.Series("", index=merged.index)
+    ).fillna("").isin(("firm_roster", "ACT"))
+    merged = merged.sort_values(["work_rank", "rank"]).drop_duplicates(
+        "advisor_crd", keep="first")
     print(f"[*] positions: {len(merged):,} advisors with a placed location")
     return merged[["advisor_crd", "lat", "lon", "branch_city", "branch_state",
                    "addr_key"]]

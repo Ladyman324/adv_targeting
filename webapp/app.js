@@ -39,7 +39,7 @@ const COMPARE = ["#12b39c", "#e0a53a", "#8079e0", "#e8615d", "#4aa3e0", "#9fc93c
 // of every deployed JSON path and byte. It changes for standalone shard
 // rebuilds too, and its leading date keeps the stale-build warning readable.
 // Do not edit it by hand.
-const DATA_VERSION = "20260831T110925Z-3e65e09d6f4a9d0a";
+const DATA_VERSION = "20260923T195616Z-6357209d7e762197";
 const dataUrl = file => `data/${file}?v=${DATA_VERSION}`;
 Dial.setContactRouteVersion(DATA_VERSION);
 // ONE scale for every mark on the map. There used to be two, and they were not
@@ -1730,7 +1730,7 @@ function contactBlock(p){
    */
   const stateClash = c.cs && p._state && String(c.cs) !== String(p._state)
     ? `<p class="contact-clash">&#9888; Our contact record puts this person in
-         <b>${esc(c.cs)}</b>, the SEC files them in <b>${esc(p._state)}</b>.
+         <b>${esc(c.cs)}</b>, the mapped working location is <b>${esc(p._state)}</b>.
          ${unconfirmed ? "On an unconfirmed match that usually means the record belongs to a different person."
                        : "Worth checking which is current."}</p>`
     : "";
@@ -2248,7 +2248,11 @@ function liveState(it){
   const f = it && it.crd != null
     ? ALL.find((x) => String(x.properties.id) === String(it.crd)) : null;
   const live = f && f.properties && f.properties._state;
-  return live || (it && it.state) || "";
+  // Saved calling-list snapshots can predate a roster-backed territory move.
+  // The rebuilt advisor index is the same working-location source as the map
+  // and can correct an out-of-scope entry without loading another state shard.
+  const indexed = it && it.crd != null ? advisorRow(it.crd) : null;
+  return live || (indexed && indexed[3]) || (it && it.state) || "";
 }
 
 function dialKindLabel(kind){
@@ -4894,6 +4898,7 @@ function rehydrate(c, sourceState=""){
         // (the firm filed a city and state but no street), 2 uncertain.
         lt: p[16] == null ? 0 : p[16],
         jd: p[17] == null ? null : Number(p[17]),
+        ls: p[18] == null ? 0 : Number(p[18]), // 0 SEC branch, 1 firm roster, 2 ACT
         dr: p[12] ? DRP_LABELS.filter((_, i) => p[12] & (1 << i)) : [],
         u: p[13] ? iapd + p[6] : "",
       },
@@ -5857,7 +5862,8 @@ function renderMetadata(){
     `${esc(META.refresh_cadence || "Refreshes with each SEC bulk-feed pipeline run")}<br>` +
     `${META.coverage_pct.toFixed(2)}% geocoded (${META.unplaced_rows.toLocaleString()} unplaced)` +
     `${META.pin_rows ? ` · ${META.pin_rows.toLocaleString()} pins after one-per-advisor placement` : ""}<br>` +
-    `${pct("rooftop")}% rooftop · ${pct("approximate")}% approximate · ${pct("neighbour")}% nearest`;
+    `${pct("rooftop")}% rooftop · ${pct("approximate")}% approximate · ${pct("neighbour")}% nearest` +
+    (META.precision?.source_published ? ` · ${pct("source_published")}% firm/ACT coordinates` : "");
 }
 
 // enable or disable the controls the current scope can actually honour. Only the
@@ -9279,7 +9285,7 @@ function openAdvisorDetails(f, detailPush=true){
       ${bl ? `<button type="button" class="detail-row" data-a="${bl.i}" data-bldg="1"><span class="detail-row-main"><b>Whole building</b>
         <small>${bl.ids.size.toLocaleString()} advisors across ${bl.lines.size} filed address line${bl.lines.size === 1 ? "" : "s"}</small></span><span class="detail-chevron">›</span></button>` : ""}
       ${otherOfficeRows(p)}
-    </div><div id="advisorElsewhere" data-for="${esc(p.id)}"></div>${remoteNote(p)}${uncertainNote(p)}</section>` : ""}
+    </div><div id="advisorElsewhere" data-for="${esc(p.id)}"></div>${workingLocationNote(p)}${remoteNote(p)}${uncertainNote(p)}</section>` : ""}
     <section class="profile-section"><h3>History${infoBox(
       "Current registration facts and registration history as filed with the SEC. Dates can differ by days from the advisor's actual start and finish.")}</h3>
       <div id="advisorHistory" data-for="${esc(p.id)}"><p class="profile-empty">Loading history…</p></div></section>
@@ -9401,6 +9407,12 @@ function remoteNote(p){
   return `<p class="remote-note"><b>Works in this area.</b> The firm filed a city and ` +
     `state for this advisor but no street address, so the pin sits at the centre of ` +
     `${esc(p.c || "the town")}. Good for territory and a phone call; not an address to visit.</p>`;
+}
+
+function workingLocationNote(p){
+  if (p.ls === 1) return `<p class="remote-note"><b>Working office from firm roster.</b> This person’s firm published this location with their contact details. The SEC-filed branch remains separate.</p>`;
+  if (p.ls === 2) return `<p class="remote-note"><b>Working office from ACT!.</b> This location comes from the approved contact record. The SEC-filed branch remains separate.</p>`;
+  return "";
 }
 
 function uncertainNote(p){

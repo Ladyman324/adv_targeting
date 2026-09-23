@@ -70,6 +70,13 @@ def load_branches() -> pd.DataFrame:
         city["advisor_crd"] = city["advisor_crd"].astype(str)
         city["firm_crd"] = city["firm_crd"].astype(str)
         br = pd.concat([br, city], ignore_index=True)
+    work_path = INTERIM / "contact_work_branches.parquet"
+    if work_path.exists():
+        work = pd.read_parquet(work_path)
+        br = pd.concat([br, work], ignore_index=True, sort=False)
+    br["location_source"] = br.get(
+        "location_source", pd.Series("", index=br.index)).fillna("").replace("", "SEC")
+    br["city_level"] = br["city_level"].fillna(False).astype(bool)
     br["city_key"] = (br["branch_state"].fillna("").str.upper().str.strip() + "|"
                       + br["branch_city"].fillna("").str.upper().str.strip())
     br["has_street"] = br["branch_street1"].fillna("").astype(str).str.strip() != ""
@@ -157,10 +164,27 @@ def main() -> None:
     # Evidence first, precision second. The old order put has_street first,
     # which let address precision decide where somebody works -- a geocoding
     # property standing in for a fact about a person.
+    br["contact_preferred"] = br["location_source"].isin(("firm_roster", "ACT"))
     eligible = br.sort_values(
-        ["advisor_crd", "firm_crd", "score", "has_street", "crowd"],
-        ascending=[True, True, False, False, True])
+        ["advisor_crd", "firm_crd", "contact_preferred", "score", "has_street", "crowd"],
+        ascending=[True, True, False, False, False, True])
     picked = eligible.drop_duplicates(pair, keep="first").copy()
+    # A territory move is material to who may call or email this person.
+    # Preserve the SEC-only choice as an audit, without keeping a second map
+    # pin or leaking contact email/phone into a CSV.
+    prior = eligible[~eligible["contact_preferred"]].drop_duplicates(
+        pair, keep="first")
+    changed = picked[picked["contact_preferred"]][
+        pair + ["branch_state", "branch_city", "branch_street1",
+                "location_source"]].merge(
+            prior[pair + ["branch_state", "branch_city", "branch_street1"]],
+            on=pair, how="left", suffixes=("_work", "_sec"))
+    changed = changed[changed["branch_state_work"].ne(
+        changed["branch_state_sec"])].copy()
+    review_path = ROOT / "data" / "output" / "contact_work_territory_moves.csv"
+    review_path.parent.mkdir(parents=True, exist_ok=True)
+    changed.to_csv(review_path, index=False)
+    print(f"  source-backed state moves: {len(changed):,} -> {review_path}")
 
     # One boolean cannot say "we know the town but not the street", which is a
     # different claim from "we do not know". Each type implies a different
@@ -173,6 +197,7 @@ def main() -> None:
     picked["location_type"] = "office"
     picked.loc[picked["city_level"], "location_type"] = "remote"
     picked.loc[picked["score"] == 0, "location_type"] = "uncertain"
+    picked.loc[picked["contact_preferred"], "location_type"] = "office"
     picked["uncertain"] = picked["location_type"] == "uncertain"
     picked["home_label"] = picked["advisor_crd"].map(home_labels).fillna("")
     picked.loc[~picked["uncertain"], "home_label"] = ""

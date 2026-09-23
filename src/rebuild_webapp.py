@@ -1,4 +1,4 @@
-"""Rebuild every state layer plus the national map/search metadata."""
+"""Rebuild desktop/field map data and stamp the static application assets."""
 from __future__ import annotations
 
 import pathlib
@@ -11,6 +11,14 @@ from export_advisor_history import main as export_advisor_history
 from export_barrons import main as export_barrons
 from export_forbes import main as export_forbes
 from validate_webapp_data import main as validate_webapp
+from contact_work_locations import main as build_work_locations
+from placement import main as choose_placements
+from verify_work_locations import main as verify_work_locations
+from reconcile_display_names import main as reconcile_display_names
+from build_field_tiles import main as build_field_tiles
+from build_name_index import main as build_name_index
+from build_advisor_search import main as build_advisor_search
+from web_assets import main as stamp_web_assets
 
 
 ROOT = pathlib.Path(__file__).parents[1]
@@ -26,10 +34,16 @@ def main() -> None:
     )
     if not states:
         raise SystemExit(f"No branch_geocoded state files found under {INTERIM}")
+    # Contacts must have been refreshed first. Use only published/cached
+    # coordinates during a routine rebuild; external geocoding is opt-in via
+    # contact_work_locations.py --census / --google-max-calls.
+    build_work_locations()
+    choose_placements()
     print(f"Rebuilding {len(states)} state layers: {' '.join(states)}")
     for state in states:
         export(state)
     export_national()
+    reconcile_display_names()
     export_firm_profiles()
     export_advisor_history()
 
@@ -44,13 +58,18 @@ def main() -> None:
         export_forbes()
     except SystemExit as exc:
         print(f"Skipping Forbes rankings: {exc}")
+    build_field_tiles()
+    build_name_index()
+    build_advisor_search()
 
     # The gate runs as part of the build, not as a file someone might remember
     # to execute. It had been failing on every rebuild since de-duplication
     # landed and nothing surfaced it, because no pipeline script called it.
     print()
     print("Validating generated artifacts...")
+    verify_work_locations()
     validate_webapp()
+    stamp_web_assets()
 
 
 if __name__ == "__main__":

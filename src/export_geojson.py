@@ -162,7 +162,12 @@ def apply_placement(p: pd.DataFrame) -> pd.DataFrame:
     # A handful of advisors are filed twice at one address for one firm --
     # usually a differing suite line on street2 -- which the join would turn
     # back into two pins. One placement means one pin.
-    p = p.drop_duplicates(["advisor_crd", "firm_crd"], keep="first")
+    p["_source_preferred"] = p.get(
+        "location_source", pd.Series("", index=p.index)
+    ).fillna("").isin(("firm_roster", "ACT"))
+    p = p.sort_values("_source_preferred", ascending=False).drop_duplicates(
+        ["advisor_crd", "firm_crd"], keep="first")
+    p = p.drop(columns="_source_preferred")
     p["uncertain"] = p["uncertain"].fillna(False)
     p["home_label"] = p["home_label"].fillna("")
     p["location_type"] = p["location_type"].fillna("office")
@@ -189,6 +194,12 @@ def load_state_branches(state: str) -> pd.DataFrame:
         city = city[city["branch_state"].astype(str).str.upper().str.strip() == state]
         if len(city):
             p = pd.concat([p, city], ignore_index=True, sort=False)
+    work_path = INTERIM / "contact_work_branches.parquet"
+    if work_path.exists():
+        work = pd.read_parquet(work_path)
+        work = work[work["branch_state"].astype(str).str.upper().str.strip() == state]
+        if len(work):
+            p = pd.concat([p, work], ignore_index=True, sort=False)
     return p
 
 
@@ -352,6 +363,7 @@ def export(state: str) -> None:
             str(r.get("home_label") or ""),                  # 15 where employment says they are
             LOCATION_CODE.get(r.get("location_type"), 0),    # 16 how the location is known
             None if pd.isna(r.get("joined_day")) else int(r["joined_day"]),       # 17 joined firm
+            {"firm_roster": 1, "ACT": 2}.get(str(r.get("location_source") or ""), 0),  # 18 working-office source
         ])
 
     out_obj = {
