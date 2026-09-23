@@ -14,6 +14,7 @@ from validate_webapp_data import main as validate_webapp
 from contact_work_locations import main as build_work_locations
 from placement import main as choose_placements
 from verify_work_locations import main as verify_work_locations
+from verify_search_shards import verify as verify_search_shards
 from reconcile_display_names import main as reconcile_display_names
 from build_field_tiles import main as build_field_tiles
 from build_name_index import main as build_name_index
@@ -68,6 +69,7 @@ def main() -> None:
     print()
     print("Validating generated artifacts...")
     verify_work_locations()
+    verify_search_shards()
     validate_webapp()
     stamp_web_assets()
 

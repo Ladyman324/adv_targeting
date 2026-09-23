@@ -270,6 +270,15 @@ def check_web_assets() -> None:
             "nothing was staged or deployed.\n"
             "    Rebuild/stamp the web assets, then rerun this deployment."
         )
+    verifier = ROOT / "src" / "verify_search_shards.py"
+    try:
+        subprocess.run([sys.executable, str(verifier)],
+                       check=True, cwd=ROOT, shell=False)
+    except subprocess.CalledProcessError as exc:
+        sys.exit(
+            f"[!] search-shard integrity check failed (exit {exc.returncode}); "
+            "nothing was staged or deployed."
+        )
 
 
 def check_staged_web_assets(folder: pathlib.Path) -> None:
