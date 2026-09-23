@@ -89,7 +89,9 @@ test("five-hundred-person lists round-trip in bounded properties without truncat
   const row = await service.table("DialQueue").getEntity(WHO.id, "large");
   assert.ok(row.itemChunks > 1);
   for (let i = 0; i < row.itemChunks; i++)
-    assert.ok(Buffer.byteLength(row["items" + i], "utf8") <= 60 * 1024);
+    assert.ok(row["items" + i].length * 2 <= 60 * 1024);
+  assert.ok(Array.from({ length:row.itemChunks }, (_, i) =>
+    row["items" + i].length * 2).reduce((a, b) => a + b, 0) <= 850 * 1024);
   assert.equal((await store.getQueue(WHO, "large")).items.length, 500);
   assert.equal((await store.listQueues(WHO)).find(x => x.id === "large").count, 500);
   await store.mutateQueueMember(WHO, "large", "remove", people[300].crd);
@@ -97,6 +99,26 @@ test("five-hundred-person lists round-trip in bounded properties without truncat
   await assert.rejects(() => store.putQueue(WHO, {
     id:"large", items:[...people, person("9999999", "Overflow")],
   }), error => error.statusCode === 409 && /500/.test(error.message));
+});
+
+test("a realistic 228-person territory list never exceeds Azure's UTF-16 property cap", async () => {
+  const { store, service } = loadStore();
+  const people = Array.from({ length:228 }, (_, i) => ({
+    ...person(String(2000000 + i), "Priority Advisor " + i),
+    firm:"Edward Jones",
+    email:"priority.advisor." + i + "@edwardjones.com",
+    city:"Saint Louis",
+    phone:"314-555-" + String(i).padStart(4, "0"),
+    contactSource:"firm_roster",
+    contactRouteVersion:"20260831T110925Z-3e65e09d6f4a9d0a",
+  }));
+  await store.putQueue(WHO, { id:"priority", name:"Priority", items:people });
+  const row = await service.table("DialQueue").getEntity(WHO.id, "priority");
+  assert.ok(row.itemChunks > 1);
+  for (let i = 0; i < row.itemChunks; i++)
+    assert.ok(row["items" + i].length * 2 <= 60 * 1024,
+      "Azure Table's 64 KiB property cap is measured in UTF-16 bytes");
+  assert.equal((await store.getQueue(WHO, "priority")).items.length, 228);
 });
 
 test("legacy single-property lists remain readable and migrate on write", async () => {

@@ -3,8 +3,18 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const path = require("node:path");
+const fs = require("node:fs");
 const Module = require("node:module");
 const importer = require("../../webapp/list_import.js");
+
+test("import controls stay themed and the review button cannot collapse", () => {
+  const css = fs.readFileSync(path.resolve(__dirname, "../../webapp/style.css"), "utf8");
+  const app = fs.readFileSync(path.resolve(__dirname, "../../webapp/app.js"), "utf8");
+  assert.match(css, /\.list-import-workspace>\*\{flex-shrink:0\}/);
+  assert.match(css, /\.list-import-field select\{[^}]*background:var\(--panel-2\)/);
+  assert.match(css, /\.list-import-review-download\{[^}]*min-height:38px/);
+  assert.match(app, /class="ask-btn list-import-review-download" data-lists="import-exceptions"/);
+});
 
 test("CSV import reads Excel-style quoting, removes duplicates, and rejects malformed rows", () => {
   const parsed = importer.parseEmails(

@@ -3123,7 +3123,7 @@ function paintListImporter(){
     + (result ? '<div class="list-import-summary"><b>' + result.matched.length
         + ' matched</b><span>' + imp.parsed.duplicateRows + ' duplicate rows | '
         + imp.parsed.invalidRows + ' invalid rows | ' + exceptions.length + ' need review</span></div>' : '')
-    + (exceptions.length ? '<button type="button" class="ask-btn" data-lists="import-exceptions">Download review CSV</button>' : '')
+    + (exceptions.length ? '<button type="button" class="ask-btn list-import-review-download" data-lists="import-exceptions">Download review CSV</button>' : '')
     + (result ? '<div class="list-import-options">'
         + '<label class="list-import-field">List name <input id="listImportName" class="ask-name" maxlength="55" value="'
         + esc(imp.name) + '" placeholder="Edward Jones leadership"' + (imp.created.size ? ' disabled' : '') + '></label>'
@@ -3285,7 +3285,9 @@ async function saveListImport(){
     throw new Error("A territory exceeds the " + Dial.MAX_QUEUE
       + "-person list limit. Narrow this selection before saving.");
   for (const group of grouped) {
-    if (new TextEncoder().encode(JSON.stringify(group.people.map(listImportSnapshot))).length > 900 * 1024)
+    // Azure Table measures strings in UTF-16, not the UTF-8 bytes TextEncoder
+    // reported. Keep the import preview below the server's entity budget.
+    if (JSON.stringify(group.people.map(listImportSnapshot)).length * 2 > 850 * 1024)
       throw new Error(group.name + " exceeds the saved-list storage limit. Narrow the selection.");
     if (!imp.created.has(group.name) && Dial.state.lists.some(row =>
       row.name.toLowerCase() === group.name.toLowerCase()))

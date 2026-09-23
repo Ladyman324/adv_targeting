@@ -410,7 +410,7 @@ cp -R "$API/test/." "$TEST_API/test/"
 # explicit so a missing production dependency fails here, before packaging.
 cp "$ROOT/webapp/app.js" "$ROOT/webapp/dial.js" "$ROOT/webapp/email.js" \
   "$ROOT/webapp/email.css" "$ROOT/webapp/field.js" "$ROOT/webapp/field.html" \
-  "$ROOT/webapp/index.html" "$ROOT/webapp/training.js" \
+  "$ROOT/webapp/index.html" "$ROOT/webapp/style.css" "$ROOT/webapp/training.js" \
   "$ROOT/webapp/list_import.js" \
   "$TEST_ROOT/webapp/"
 API_PACKAGE_SOURCE_ROOT="$ROOT" NODE_PATH="$API/node_modules" \

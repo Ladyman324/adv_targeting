@@ -55,8 +55,11 @@ const TABLES = { log: "CallLog", queue: "DialQueue", dnc: "DoNotCall",
 // keeps one ETag and one atomic replacement while allowing a 500-person
 // audience. Older rows with a single 'items' property remain readable.
 const MAX_QUEUE = 500;
-const MAX_QUEUE_CHUNK_BYTES = 60 * 1024;
-const MAX_QUEUE_ENTITY_BYTES = 900 * 1024;
+// Azure Table string properties are UTF-16: 64 KiB means at most 32K JS
+// code units, not 64K UTF-8 bytes. Leave room beneath both its per-property
+// and whole-entity limits for property names and other list metadata.
+const MAX_QUEUE_CHUNK_UTF16_BYTES = 60 * 1024;
+const MAX_QUEUE_ENTITY_UTF16_BYTES = 850 * 1024;
 
 const clients = new Map();
 let ensured = new Set();
@@ -290,17 +293,17 @@ function queueItems(e) {
 function queueItemProperties(items) {
   const result = { itemCount:items.length, itemChunks:0 };
   if (!items.length) { result.items = "[]"; return result; }
-  let chunk = [], total = 0;
+  let chunk = [], totalUtf16Bytes = 0;
   const flush = () => {
     if (!chunk.length) return;
     const payload = JSON.stringify(chunk);
     result["items" + result.itemChunks++] = payload;
-    total += Buffer.byteLength(payload, "utf8");
+    totalUtf16Bytes += payload.length * 2;
     chunk = [];
   };
   for (const item of items) {
     const candidate = JSON.stringify([...chunk, item]);
-    if (Buffer.byteLength(candidate, "utf8") > MAX_QUEUE_CHUNK_BYTES) {
+    if (candidate.length * 2 > MAX_QUEUE_CHUNK_UTF16_BYTES) {
       if (!chunk.length) {
         const err = new Error("One saved contact is too large for a list.");
         err.statusCode = 413; throw err;
@@ -310,7 +313,7 @@ function queueItemProperties(items) {
     chunk.push(item);
   }
   flush();
-  if (total > MAX_QUEUE_ENTITY_BYTES) {
+  if (totalUtf16Bytes > MAX_QUEUE_ENTITY_UTF16_BYTES) {
     const err = new Error("This list exceeds its storage budget; narrow the selection.");
     err.statusCode = 413; throw err;
   }

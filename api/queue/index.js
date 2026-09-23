@@ -56,6 +56,12 @@ module.exports = async function (context, req) {
     // the cap should be told, not left to find the tail missing.
     return store.ok(context, { ...saved, max: store.MAX_QUEUE });
   } catch (err) {
+    if (err && (err.code === "PropertyValueTooLarge"
+        || /PropertyValueTooLarge/.test(String(err.message || "")))) {
+      err.statusCode = 413;
+      err.message = "This list is too large for storage even though its person count is allowed. "
+        + "Narrow this territory's selection or split it into smaller lists, then try again.";
+    }
     return store.fail(context, err);
   }
 };
