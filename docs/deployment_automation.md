@@ -27,7 +27,7 @@ Function App setting `EMAIL_CROSS_TERRITORY_LIST_EMAILS`: a comma-separated
 allowlist of signed-in EIC email addresses. It does not grant
 `EmailAdministrator`, change territory ownership, connect a mailbox, or alter
 email sending limits. Keep current approved access for Hannah Judge, Holly
-Decker, Will Reynolds, Bo Ladyman, and Kevin Spora when replacing this setting;
+Decker, Will Reynolds, Bo Ladyman, and Kate Spora (Kate Renta) when replacing this setting;
 the last two previously had list access through the old admin fallback.
 
 Do not pass --token. The current setup stores the documented
