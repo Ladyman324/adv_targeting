@@ -35,7 +35,7 @@ STAGE_DIR=""
 #   49: email-retry-preparation.test.js -- unapproved replacement reviews and source guards
 #   50: training-video.test.js -- authenticated, scoped, expiring media access
 #   51: training-video-ui.test.js -- opt-in loading and shared shell contract
-EXPECTED_API_TEST_FILE_COUNT=52
+EXPECTED_API_TEST_FILE_COUNT=54
 
 cleanup() {
   test -z "$TEMP_ROOT" && return
