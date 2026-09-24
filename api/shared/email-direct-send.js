@@ -426,7 +426,8 @@ async function processSend(operation, deps) {
     }
     const cfg = await replyTools.enforceDirectSendPolicy({ id: claimed.userId }, recipients,
       claimed.operationId, deps);
-    await replyTools.waitForMailbox({ id: claimed.userId }, cfg, deps);
+    await replyTools.waitForMailbox({ id: claimed.userId }, cfg,
+      { ...deps, deferMailboxWait: true });
     // Gates and pacing precede the irreversible state. A crash after this ETag
     // write is ambiguous by definition and recovery must never call /send.
     const submitting = await deps.opsStore.patchOperation(claimed.userId, claimed.operationId, {
@@ -468,9 +469,12 @@ async function processSend(operation, deps) {
         { lastErrorCode: err.code }, latest.etag);
       return;
     }
-    const due = new Date(Date.now() + RETRY_SECONDS * 1000).toISOString();
-    await deps.opsStore.scheduleOperation(latest.userId, latest.operationId,
+    const seconds = err && err.code === "mailbox_busy"
+      ? Math.max(1, Math.ceil(Number(err.retryAfter) || 1)) : RETRY_SECONDS;
+    const due = new Date(Date.now() + seconds * 1000).toISOString();
+    const next = await deps.opsStore.scheduleOperation(latest.userId, latest.operationId,
       { state: "prepared", lastErrorCode: err.code || "pre_send_deferred" }, due, latest.etag);
+    await enqueueOperation(deps, "direct_send", next, seconds);
   }
 }
 

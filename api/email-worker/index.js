@@ -304,9 +304,14 @@ async function waitForPlannedTime(work, batch, message, deps) {
           ? await deps.store.getDailyCap(work.userId) : null;
         const limit = Number.isInteger(override) && override >= Number(cfg.dailyExternalLimit)
           && override <= 250 ? override : cfg.dailyExternalLimit;
+        const intervalOverride = typeof deps.store.getMailboxInterval === 'function'
+          ? await deps.store.getMailboxInterval(work.userId) : null;
+        const interval = Number.isInteger(intervalOverride)
+          && intervalOverride >= Number(cfg.mailboxIntervalSeconds)
+          && intervalOverride <= 300 ? intervalOverride : cfg.mailboxIntervalSeconds;
         const rolled = await deps.capacity.rolloverAllocation(work.userId,
           batch.capacityReservationId, message.id, batch.capacityPlanHash,
-          { nowMs, mailboxIntervalSeconds: cfg.mailboxIntervalSeconds, limit });
+          { nowMs, mailboxIntervalSeconds: interval, limit });
         if (rolled.available) {
           const assignment = rolled.assignment;
           await deps.store.patchMessage(work.userId, work.batchId, work.messageId, {
@@ -898,6 +903,33 @@ async function send(work, deps) {
         typeof deps.nowMs === 'function' ? deps.nowMs() : Date.now())) {
         const pendingAgain = await deps.store.patchMessage(work.userId, work.batchId, work.messageId,
           { state: 'send_scheduled', leaseUntilUtc: '' }, claimed.etag);
+        await waitForPlannedTime(work, batch, pendingAgain, deps);
+        return;
+      }
+      // Planned slots space one batch, but two batches (or a one-off send)
+      // can overlap. This durable, per-mailbox gate is the actual minimum
+      // immediately before the irreversible Graph send intent.
+      const gateCfg = deps.core.config();
+      const intervalOverride = typeof deps.store.getMailboxInterval === 'function'
+        ? await deps.store.getMailboxInterval(work.userId) : null;
+      const effectiveInterval = Math.max(Number(gateCfg.mailboxIntervalSeconds) || 5,
+        Number(batch.capacityPlan?.mailboxIntervalSeconds) || 0,
+        Number.isInteger(intervalOverride) && intervalOverride <= 300
+          ? intervalOverride : 0);
+      const gateWait = await deps.mailboxGate.acquire(work.userId, effectiveInterval);
+      if (gateWait > 0) {
+        const seconds = Math.max(1, Math.ceil(gateWait));
+        await deps.store.patchMessage(work.userId, work.batchId, work.messageId,
+          { state: "send_scheduled", leaseUntilUtc: "",
+            sendAttempts: Math.max(0, (Number(claimed.sendAttempts) || 1) - 1),
+            retryAfterUtc: new Date(Date.now() + seconds * 1000).toISOString() }, claimed.etag);
+        await deps.enqueue(work, seconds);
+        return;
+      }
+      if (claimed.capacityDay && !(deps.capacity.withinSendingWindow || capacity.withinSendingWindow)(
+        typeof deps.nowMs === 'function' ? deps.nowMs() : Date.now())) {
+        const pendingAgain = await deps.store.patchMessage(work.userId, work.batchId, work.messageId,
+          { state: "send_scheduled", leaseUntilUtc: "" }, claimed.etag);
         await waitForPlannedTime(work, batch, pendingAgain, deps);
         return;
       }

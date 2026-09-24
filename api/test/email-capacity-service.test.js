@@ -84,6 +84,34 @@ test("an individual override changes the daily plan without changing the default
   assert.equal(cfg.dailyExternalLimit, 25);
 });
 
+test("an individual mailbox interval spaces the plan and does not change the default", async () => {
+  const cfg = { calendarCapacityEnabled: true, dailyExternalLimit: 25,
+    cancellationSeconds: 20, mailboxIntervalSeconds: 20,
+    internalDomains: new Set(["eicatlanta.com"]) };
+  const messages = [
+    { id: "m1", recipientEmail: "a@ubs.com" },
+    { id: "m2", recipientEmail: "b@ubs.com" },
+  ];
+  async function plan(userId) {
+    return service.capacityPlan({ id: userId }, { batchId: "b1" }, {
+      store: {
+        getMailboxInterval: async (id) => id === "u1" ? 60 : null,
+        getBatch: async () => ({ id: "b1", status: "editing" }),
+        listMessages: async () => messages,
+      },
+      core: { config: () => ({ ...cfg }) },
+      limitGuard: { capacitySnapshot: async () => ({ days: [] }),
+        previewPlan: capacity.previewPlan },
+    });
+  }
+  const slower = (await plan("u1")).deliveryPlan;
+  const normal = (await plan("u2")).deliveryPlan;
+  assert.equal(slower.mailboxIntervalSeconds, 60);
+  assert.equal(normal.mailboxIntervalSeconds, 20);
+  assert.notEqual(slower.hash, normal.hash);
+  assert.equal(cfg.mailboxIntervalSeconds, 20);
+});
+
 test("a 200-recipient override does not stop a campaign at the 25-person default", async () => {
   const cfg = { calendarCapacityEnabled: true, dailyExternalLimit: 25,
     cancellationSeconds: 20, mailboxIntervalSeconds: 20,

@@ -212,6 +212,7 @@ function previewPlan(ordered, options = {}) {
   const externalUnits = entries.reduce((sum, entry) => sum + entry.units, 0);
   const scheduledUnits = assignments.reduce((sum, entry) => sum + entry.units, 0);
   const hashCore = { schemaVersion: 2, limit, ordered: entries,
+    mailboxIntervalSeconds: interval,
     assignments: assignments.map(({ key, units, day, plannedSendUtc, trancheIndex, tranchePosition }) =>
       ({ key, units, day,
         // An immediate first tranche naturally moves by the seconds spent on
@@ -222,7 +223,8 @@ function previewPlan(ordered, options = {}) {
     dailyStartTime,
     scheduledStart: options.bindStart === true ? String(options.startUtc || "") : "" };
   const planHash = digest(hashCore);
-  return { schemaVersion: 2, planHash, timeZone: TIME_ZONE, dailyStartTime, dailyLimit: limit,
+  return { schemaVersion: 2, planHash, timeZone: TIME_ZONE, dailyStartTime,
+    mailboxIntervalSeconds: interval, dailyLimit: limit,
     recipientCount: entries.length, externalUnits, scheduledCount: assignments.length,
     scheduledUnits, excessCount: entries.length - assignments.length,
     excessUnits: externalUnits - scheduledUnits, fit: assignments.length === entries.length,

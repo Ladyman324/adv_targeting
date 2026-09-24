@@ -158,6 +158,7 @@ function recipientEvidenceSummary(records) {
 async function catalog(who, opts) {
   const cfg = core.config();
   cfg.dailyExternalLimit = await dailyLimitFor(who.id, cfg, store);
+  cfg.mailboxIntervalSeconds = await mailboxIntervalFor(who.id, cfg, store);
   const capacityPromise = cfg.calendarCapacityEnabled
     ? limitGuard.capacitySnapshot(who.id, { limit: cfg.dailyExternalLimit, horizonDays: 7 })
         .catch(() => ({ available: false, timeZone: cfg.capacityTimeZone,
@@ -210,6 +211,13 @@ async function dailyLimitFor(userId, cfg, st = store) {
     && override <= 250 ? override : cfg.dailyExternalLimit;
 }
 
+async function mailboxIntervalFor(userId, cfg, st = store) {
+  const override = typeof st.getMailboxInterval === "function"
+    ? await st.getMailboxInterval(userId) : null;
+  return Number.isInteger(override) && override >= cfg.mailboxIntervalSeconds
+    && override <= 300 ? override : cfg.mailboxIntervalSeconds;
+}
+
 function capacityEntries(messages, cfg) {
   return core.interleaveByDomain(messages).map((message) => {
     // The individualized To address and explicitly selected advisor teammates
@@ -237,6 +245,7 @@ async function capacityPlan(who, input, deps = {}) {
   const st = deps.store || store, guard = deps.limitGuard || limitGuard;
   const cfg = (deps.core || core).config();
   cfg.dailyExternalLimit = await dailyLimitFor(who.id, cfg, st);
+  cfg.mailboxIntervalSeconds = await mailboxIntervalFor(who.id, cfg, st);
   if (!cfg.calendarCapacityEnabled)
     throw httpError(503, "Daily calendar capacity is not enabled for this release.",
       "capacity_not_enabled");
@@ -1272,6 +1281,7 @@ async function approve(who, input) {
   const batch = validation.batch;
   const cfg = core.config(), approvalNow = Date.now();
   cfg.dailyExternalLimit = await dailyLimitFor(who.id, cfg, store);
+  cfg.mailboxIntervalSeconds = await mailboxIntervalFor(who.id, cfg, store);
   cfg.rollingExternalLimit = cfg.dailyExternalLimit;
   const scheduledForUtc = mode === "send" && input.scheduledForUtc
     ? schedule.scheduledInstant(input.scheduledForUtc, approvalNow, cfg.cancellationSeconds) : "";

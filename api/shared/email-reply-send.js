@@ -221,6 +221,11 @@ async function enforceDirectSendPolicy(who, recipients, opId, deps) {
     ? await st.getDailyCap(who.id) : null;
   if (Number.isInteger(override) && override >= cfg.dailyExternalLimit && override <= 250)
     cfg.rollingExternalLimit = override;
+  const intervalOverride = typeof st.getMailboxInterval === "function"
+    ? await st.getMailboxInterval(who.id) : null;
+  if (Number.isInteger(intervalOverride) && intervalOverride >= cfg.mailboxIntervalSeconds
+      && intervalOverride <= 300)
+    cfg.mailboxIntervalSeconds = intervalOverride;
   const policy = await st.policy();
   if (!cfg.directSendEnvironmentEnabled || (policy && policy.killed)) {
     const reason = policy && policy.killed && policy.reason
@@ -252,6 +257,12 @@ async function waitForMailbox(who, cfg, deps) {
     const seconds = await gate.acquire(who.id, cfg.mailboxIntervalSeconds);
     if (!seconds) return;
     const delay = Math.max(1, Number(seconds) || 1);
+    if (deps.deferMailboxWait) {
+      const err = httpError(429, "This mailbox is busy sending another message.",
+        "mailbox_busy");
+      err.retryAfter = Math.ceil(delay);
+      throw err;
+    }
     if (waitedSeconds + delay > MAX_MAILBOX_WAIT_SECONDS) {
       throw httpError(429, "This mailbox is busy sending another message. The prepared Outlook "
         + "draft was not sent; try again in a moment.", "mailbox_busy");

@@ -326,6 +326,33 @@ test("connected-mailbox self-test sends without an advisor teammate record", asy
   assert.equal(f.message.state, "submitted");
 });
 
+test("a busy shared mailbox defers a campaign without spending its send retry budget", async () => {
+  const f = fixture("send", "send_scheduled");
+  f.batch.graphMailbox = "self@example.test";
+  f.batch.capacityPlan = { mailboxIntervalSeconds: 20 };
+  f.message.contactId = "";
+  f.message.recipientEmail = "self@example.test";
+  f.message.graphMessageId = "draft-self";
+  let sends = 0, interval;
+  const graph = {
+    getMessage: async () => routedDraft("draft-self", {
+      toRecipients: [{ emailAddress: { address: "self@example.test" } }],
+    }),
+    findByAppId: async () => null,
+    sendDraft: async () => { sends++; },
+  };
+  await worker.processWork({ kind: "send", userId: "user-1", batchId: "batch-1",
+    messageId: "message-1" }, { ...f, graph,
+    store: { ...f.store, getMailboxInterval: async () => 60 },
+    mailboxGate: { acquire: async (_user, seconds) => { interval = seconds; return 15; } } });
+  assert.equal(interval, 60);
+  assert.equal(sends, 0);
+  assert.equal(f.message.state, "send_scheduled");
+  assert.equal(f.message.sendAttempts, 0);
+  assert.equal(f.message.sendOutcome, undefined);
+  assert.equal(f.enqueued.at(-1).delay, 15);
+});
+
 test("a changed teammate routing hash fails before Graph send", async () => {
   const f = fixture("send", "send_scheduled");
   f.message.graphMessageId = "draft-1";

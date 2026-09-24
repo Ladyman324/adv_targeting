@@ -1197,7 +1197,7 @@
   }
 
   async function openDailyCaps(message = "", bad = false) {
-    document.getElementById("emailTitle").textContent = "Daily email limits";
+    document.getElementById("emailTitle").textContent = "Email sending limits";
     document.getElementById("emailBody").innerHTML = `<p class="email-next">Loading...</p>`;
     try {
       const data = await api("daily_caps", null, "GET");
@@ -1205,6 +1205,9 @@
         <p class="email-next">The normal limit is ${data.defaultLimit} external recipients per
           salesperson per Eastern calendar day. Set a higher limit for a connected mailbox.
           This does not bypass review, passcodes, suppressions, or the seven-day delivery window.</p>
+        <p class="email-fine">The minimum gap between sends is ${data.defaultIntervalSeconds}
+          seconds unless you set a slower pace below. This applies across that salesperson's
+          batches and one-off sends; actual delivery may be later.</p>
         ${message ? `<p class="${bad ? "email-error" : "email-ok"}">${esc(message)}</p>` : ""}
         ${data.reps.length ? data.reps.map((rep) => `<section class="email-health-rep" data-cap-user="${esc(rep.userId)}">
           <h3>${esc(rep.mailbox || rep.userId)}</h3>
@@ -1214,6 +1217,15 @@
             <input class="email-cap-input" type="number" min="${data.defaultLimit}" max="${data.maxLimit}"
               step="1" value="${rep.limit}" required></label>
           <button type="button" class="ask-btn" data-email="cap-save">Save limit</button>
+          <label>Minimum seconds between sends
+            <input class="email-interval-input" type="number"
+              min="${data.defaultIntervalSeconds}" max="${data.maxIntervalSeconds}"
+              step="1" value="${rep.intervalSeconds}" required></label>
+          <button type="button" class="ask-btn" data-email="interval-save">Save pacing</button>
+          <p class="email-fine">${rep.intervalOverride
+            ? `Custom pacing set ${esc(String(rep.intervalOverride.updatedUtc || "").slice(0, 10))}
+              by ${esc(rep.intervalOverride.by || "administrator")}`
+            : "Using the normal pacing"}</p>
         </section>`).join("") : `<p class="email-doc-none">No salespeople have connected Microsoft 365 yet.</p>`}
         <div class="email-done-actions"><button type="button" class="ask-btn"
           data-email="docs-back">Back</button></div></div>`;
@@ -2886,6 +2898,24 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
       try {
         await api("set_daily_cap", { userId, limit: Number(input.value) });
         return openDailyCaps("Daily limit saved.");
+      } catch (error) {
+        button.disabled = false;
+        return openDailyCaps(error.message, true);
+      }
+    }
+    if (action === "interval-save") {
+      const row = button.closest("[data-cap-user]");
+      const userId = row && row.dataset.capUser;
+      const input = row && row.querySelector(".email-interval-input");
+      if (!userId || !input || !input.checkValidity()) {
+        if (input) input.reportValidity();
+        return;
+      }
+      button.disabled = true;
+      try {
+        await api("set_mailbox_interval", { userId, seconds: Number(input.value) });
+        await loadCatalog();
+        return openDailyCaps("Minimum sending gap saved.");
       } catch (error) {
         button.disabled = false;
         return openDailyCaps(error.message, true);

@@ -117,6 +117,22 @@ test("shared mailbox contention safely requeues a direct send without declaring 
   assert.deepEqual(h.calls.queue, ["direct_send"]);
 }));
 
+test("per-user mailbox pacing defers a direct send without blocking the worker", () => enabled(async () => {
+  const h = harness();
+  h.deps.activityStore.getMailboxInterval = async () => 60;
+  h.deps.mailboxGate.acquire = async (_user, seconds) => {
+    assert.equal(seconds, 60);
+    return 45;
+  };
+  h.deps.wait = async () => { throw new Error("Worker must not sleep for mailbox pacing"); };
+  await direct.processWork({ v: 1, kind: "direct_send", userId: "u1", operationId: OP }, h.deps);
+  assert.equal(h.calls.send, 0);
+  assert.equal(h.current().state, "prepared");
+  assert.equal(h.current().lastErrorCode, "mailbox_busy");
+  assert.deepEqual(h.calls.queue, ["direct_send"]);
+  assert.ok(Date.parse(h.current().nextAttemptUtc) >= Date.now() + 43000);
+}));
+
 test("turning off the canary after preparation defers without Graph or poison failure", async () => {
   const before = process.env.EMAIL_DIRECT_SEND_OPS_ENABLED;
   delete process.env.EMAIL_DIRECT_SEND_OPS_ENABLED;

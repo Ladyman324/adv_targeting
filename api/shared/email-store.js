@@ -1084,6 +1084,35 @@ async function setDailyCap(who, userId, limit, defaultLimit) {
   return { userId: target, limit, override: limit === defaultLimit ? null : limit };
 }
 
+// Per-mailbox minimum; absent rows inherit the Function App default.
+async function getMailboxInterval(userId) {
+  const row = await getOptional("policy", "mailbox-interval", String(userId));
+  return row && Number.isInteger(Number(row.seconds)) ? Number(row.seconds) : null;
+}
+async function listMailboxIntervals() {
+  const out = [];
+  for await (const row of (await table("policy")).listEntities({
+    queryOptions: { filter: odata`PartitionKey eq ${"mailbox-interval"}` } })) {
+    const seconds = Number(row.seconds);
+    if (Number.isInteger(seconds)) out.push({ userId: row.rowKey, seconds,
+      updatedUtc: row.updatedUtc || "", by: row.by || "" });
+  }
+  return out;
+}
+async function setMailboxInterval(who, userId, seconds, defaultSeconds) {
+  const target = String(userId || "").trim();
+  const previous = await getMailboxInterval(target);
+  if (seconds === defaultSeconds) {
+    if (previous !== null) await (await table("policy")).deleteEntity("mailbox-interval", target);
+  } else {
+    await (await table("policy")).upsertEntity({ partitionKey: "mailbox-interval", rowKey: target,
+      seconds, updatedUtc: now(), by: clean(who.name, 256), byId: who.id }, "Replace");
+  }
+  await audit(who.id, "mailbox-interval", "mailbox_interval_changed", {
+    targetUserId: target, previous, next: seconds, defaultSeconds });
+  return { userId: target, seconds, override: seconds === defaultSeconds ? null : seconds };
+}
+
 /* ---------- approval passcode attempts ---------------------------------
  * Server-side, because a client-side attempt counter is one page refresh away
  * from being no counter at all. Five wrong tries locks approval for fifteen
@@ -1618,5 +1647,6 @@ module.exports = {
   getSuppression, suppressEmail, listConnections, sentByInternetId,
   bounceAlreadySeen, markBounceSeen, recordDeliveryEvent, deliveryEvents,
   audit, policy, setPolicy, getDailyCap, listDailyCaps, setDailyCap,
+  getMailboxInterval, listMailboxIntervals, setMailboxInterval,
   rollingExternalCount, reserveExternal,
 };

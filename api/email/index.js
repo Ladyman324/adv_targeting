@@ -51,14 +51,19 @@ module.exports = async function (context, req) {
       if (op === "policy") return ok(context, await store.policy());
       if (op === "daily_caps") {
         if (!isAdmin(who)) throw service.httpError(403, "EmailAdministrator role is required.");
-        const [connections, overrides] = await Promise.all([
-          store.listConnections(), store.listDailyCaps()]);
+        const [connections, overrides, intervals] = await Promise.all([
+          store.listConnections(), store.listDailyCaps(), store.listMailboxIntervals()]);
         const byUser = new Map(overrides.map((entry) => [entry.userId, entry]));
-        const defaultLimit = emailCore.config().dailyExternalLimit;
+        const intervalByUser = new Map(intervals.map((entry) => [entry.userId, entry]));
+        const cfg = emailCore.config(), defaultLimit = cfg.dailyExternalLimit;
         return ok(context, { defaultLimit, maxLimit: 250,
+          defaultIntervalSeconds: cfg.mailboxIntervalSeconds, maxIntervalSeconds: 300,
           reps: connections.map((entry) => ({
             ...entry, limit: (byUser.get(entry.userId) || {}).limit || defaultLimit,
             override: byUser.get(entry.userId) || null,
+            intervalSeconds: (intervalByUser.get(entry.userId) || {}).seconds
+              || cfg.mailboxIntervalSeconds,
+            intervalOverride: intervalByUser.get(entry.userId) || null,
           })).sort((a, b) => a.mailbox.localeCompare(b.mailbox)) });
       }
       if (op === "material_routes") {
@@ -367,6 +372,19 @@ module.exports = async function (context, req) {
       if (!connections.some((entry) => entry.userId === userId))
         throw service.httpError(404, "That salesperson has not connected a mailbox.");
       return ok(context, await store.setDailyCap(who, userId, limit, defaultLimit));
+    }
+    if (op === "set_mailbox_interval") {
+      if (!isAdmin(who)) throw service.httpError(403, "EmailAdministrator role is required.");
+      const userId = String(body.userId || "").trim();
+      const seconds = Number(body.seconds);
+      const defaultSeconds = emailCore.config().mailboxIntervalSeconds;
+      if (!Number.isInteger(seconds) || seconds < defaultSeconds || seconds > 300)
+        throw service.httpError(400,
+          `Choose a whole-number minimum interval from ${defaultSeconds} to 300 seconds.`);
+      const connections = await store.listConnections();
+      if (!connections.some((entry) => entry.userId === userId))
+        throw service.httpError(404, "That salesperson has not connected a mailbox.");
+      return ok(context, await store.setMailboxInterval(who, userId, seconds, defaultSeconds));
     }
     // Template authoring. Linting is available to anyone so the editor can lint
     // as they type without a role round trip, but nothing is written without the

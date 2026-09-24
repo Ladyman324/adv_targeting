@@ -55,7 +55,8 @@ safely — but treat it as set-once.
 |---|---|---|
 | `EMAIL_DIRECT_BATCH_MAX` | `1000` | Most primary recipients allowed in one **direct-send batch**. This is a batch-safety ceiling, not the daily allowance; a valid batch may be delivered over several business days. The seven-day planner must still fit every message. |
 | `EMAIL_EXTERNAL_DAILY_LIMIT` | `25` | External To/advisor-Cc recipients one user may send to in an Eastern calendar day. Capacity resets at midnight Eastern. Internal and compliance copies do not consume it. |
-| Per-person daily limit | Inherits `EMAIL_EXTERNAL_DAILY_LIMIT` | An Email Administrator can set a connected salesperson to a higher whole-number limit, up to 250, in Settings > Daily email limits. Set it back to the default to remove the exception. Changes apply to new delivery plans and one-to-one sends; they do not raise the separate 1,000-person direct-batch ceiling or extend the seven-day delivery window. |
+| Per-person daily limit | Inherits `EMAIL_EXTERNAL_DAILY_LIMIT` | An Email Administrator can set a connected salesperson to a higher whole-number limit, up to 250, in Settings > Email sending limits. Set it back to the default to remove the exception. Changes apply to new delivery plans and one-to-one sends; they do not raise the separate 1,000-person direct-batch ceiling or extend the seven-day delivery window. |
+| Per-person minimum send gap | Inherits `EMAIL_MAILBOX_INTERVAL_SECONDS` | In Settings > Email sending limits, an Email Administrator can set each connected mailbox to a slower whole-number minimum, up to 300 seconds. Set it back to the Function App default to remove the exception. New batch plans reflect the setting; a shared mailbox gate also enforces the current minimum at actual send time across overlapping batches and one-off sends. There is no random jitter. |
 | `EMAIL_EXTERNAL_24H_LIMIT` | — | Legacy compatibility alias used only when `EMAIL_EXTERNAL_DAILY_LIMIT` is absent. Treat its value as the Eastern daily limit after calendar capacity is enabled. |
 | `EMAIL_CALENDAR_CAPACITY_ENABLED` | `0` | Set to `1` only after the matching API and static client are deployed. Approval then reserves an exact, server-authored delivery plan across weekdays, up to seven Eastern calendar dates from approval. |
 | `EMAIL_REVIEW_SUMMARY_OVER` | `25` | Above this, the batch summary must be reviewed. |
@@ -171,6 +172,11 @@ The order is round-robined across recipient domains at approval time and stored
 on each message, so consecutive sends go to different organisations wherever the
 batch allows. Same total duration; spread across firms rather than in blocks.
 Deterministic, so a retry cannot reshuffle a queue already scheduled.
+The per-person override can lengthen the gap. A durable mailbox gate makes
+the gap a minimum even when two batches or a one-off send overlap; worker
+backlogs, Graph throttling and the Eastern sending window may delay delivery
+further. Changing the setting does not automatically reschedule an already
+approved batch or bypass its seven-day capacity plan.
 
 Runs every two hours (a **literal** cron in `function.json`, not a `%SETTING%` —
 an unresolved setting stops the host loading the function, which would take the
