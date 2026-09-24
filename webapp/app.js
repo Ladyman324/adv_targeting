@@ -4491,7 +4491,7 @@ function paintSettings(){
     + `<button type="button" class="set-btn" data-set="templates">Manage templates</button>`
     + `<button type="button" class="set-btn" data-set="docs">Manage approved documents</button>`
     + `<button type="button" class="set-btn" data-set="health">Sender health</button>`
-    + `<button type="button" class="set-btn" data-set="caps">Daily email limits</button>`
+    + `<button type="button" class="set-btn" data-set="caps">Email sending limits</button>`
     + `</p></div>`
 
     + `<div class="set-row set-block"><span>Signed in as</span>`

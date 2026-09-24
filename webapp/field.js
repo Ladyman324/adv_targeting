@@ -1976,7 +1976,7 @@ function renderSettings(){
         <button type="button" id="setTemplates" class="set-btn">Manage templates</button>
         <button type="button" id="setDocs" class="set-btn">Manage approved documents</button>
         <button type="button" id="setHealth" class="set-btn">Sender health</button>
-        <button type="button" id="setCaps" class="set-btn">Daily email limits</button>
+        <button type="button" id="setCaps" class="set-btn">Email sending limits</button>
       </p>
     </div>
 
