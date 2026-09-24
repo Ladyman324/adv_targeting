@@ -5,7 +5,7 @@ const sanitizeHtml = require("sanitize-html");
 
 const ABSOLUTE_BATCH_STOP = 15000;
 const DEFAULTS = {
-  directBatchMax: 250,
+  directBatchMax: 1000,
   dailyExternalLimit: 25,
   cancellationSeconds: 30,
   mailboxIntervalSeconds: 5,
@@ -18,7 +18,7 @@ const DEFAULTS = {
   reviewSummaryOver: 25,
   reviewLargeOver: 50,
   reviewElevatedOver: 100,
-  draftsOnlyOver: 250,
+  draftsOnlyOver: 1000,
   // Above this a batch cannot be approved without the shared passcode.
   passcodeOver: 10,
   // Campaign health. A batch that is bouncing this hard is working a bad list,

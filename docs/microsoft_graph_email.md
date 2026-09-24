@@ -124,7 +124,7 @@ Vault references, never source control):
 | `EMAIL_SIGNATURE_*` | Company name, address, website, and disclosure used by the modular signature generator |
 
 Configurable policy defaults are 30 seconds cancellation, one submission every
-5 seconds per mailbox across batches, 250 primary recipients per direct-send
+5 seconds per mailbox across batches, 1,000 primary recipients per direct-send
 batch, 25 external To/advisor-Cc recipients per Eastern calendar day, 15 MB per approved attachment, and
 20 MB estimated total message size. The 15,000-recipient campaign hard stop is
 not configurable downward in code and cannot be bypassed by slowing a batch.

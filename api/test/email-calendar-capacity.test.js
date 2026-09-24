@@ -217,3 +217,52 @@ test("reservation locking, replay, release, and legacy usage are durable", async
     else process.env.AZURE_STORAGE_CONNECTION_STRING = oldConnection;
   }
 });
+
+test("a 1,000-message reservation stays within Azure Table property limits", async () => {
+  const service = new FakeTableService();
+  const policy = service.table("EmailPolicy"), ledger = service.table("EmailSendLedger");
+  const oldConnection = process.env.AZURE_STORAGE_CONNECTION_STRING;
+  process.env.AZURE_STORAGE_CONNECTION_STRING =
+    "DefaultEndpointsProtocol=https;AccountName=test;AccountKey=dGVzdA==;EndpointSuffix=core.windows.net";
+  capacity.__setClientsForTest(policy, ledger);
+  const nowMs = Date.parse("2026-09-24T12:00:00Z");
+  const records = Array.from({ length: 1000 }, (_, i) =>
+    ({ key: `m${String(i).padStart(4, "0")}${"x".repeat(31)}`, units: 1 }));
+  try {
+    const plan = await capacity.reservePlan("large-sender", "large-batch", records, {
+      limit: 200, horizonDays: 7, nowMs, startUtc: "2026-09-24T12:01:00Z",
+      mailboxIntervalSeconds: 20,
+    });
+    assert.equal(plan.fit, true);
+    assert.deepEqual(plan.days.map((day) => day.messageCount), [200, 200, 200, 200, 200]);
+    const row = await ledger.getEntity("large-sender", "large-batch");
+    for (const [field, value] of Object.entries(row))
+      if (typeof value === "string" && /Part\d+$/.test(field))
+        assert.ok(value.length <= 20000, `${field} must fit one Table string property`);
+    assert.ok(Number(row.planJsonPartCount) > 1);
+    assert.ok(Number(row.allocationsJsonPartCount) > 1);
+    assert.ok(JSON.stringify(row).length < 500000, "the complete entity must fit 1 MiB UTF-16");
+    assert.equal((await capacity.assertReservation("large-sender", "large-batch",
+      plan.planHash)).assignments.length, 1000);
+    assert.equal((await capacity.capacitySnapshot("large-sender",
+      { limit: 200, horizonDays: 7, nowMs })).committedToday, 200);
+    const rolled = await capacity.rolloverAllocation("large-sender", "large-batch",
+      records[0].key, plan.planHash, {
+        nowMs: Date.parse("2026-09-24T23:31:00Z"),
+        mailboxIntervalSeconds: 20, limit: 200,
+      });
+    assert.equal(rolled.assignment.day, "2026-10-01");
+    assert.equal((await capacity.assertReservation("large-sender", "large-batch",
+      plan.planHash)).assignments[0].day, "2026-10-01");
+    const keys = records.slice(0, 900).map((entry) => entry.key);
+    assert.equal((await capacity.releaseAllocations("large-sender", "large-batch", keys)).released, 900);
+    const updated = await ledger.getEntity("large-sender", "large-batch");
+    assert.ok(Number(updated.releasedKeysJsonPartCount) > 1);
+    assert.equal((await capacity.capacitySnapshot("large-sender",
+      { limit: 200, horizonDays: 7, nowMs })).committedToday, 0);
+  } finally {
+    capacity.__setClientsForTest(null, null);
+    if (oldConnection === undefined) delete process.env.AZURE_STORAGE_CONNECTION_STRING;
+    else process.env.AZURE_STORAGE_CONNECTION_STRING = oldConnection;
+  }
+});

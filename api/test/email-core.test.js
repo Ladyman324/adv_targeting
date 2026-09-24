@@ -33,10 +33,10 @@ test("sanitizer removes scripts, event handlers, and unsafe schemes", () => {
   assert.match(html, /<p>Hi<a>x<\/a><\/p>/);
 });
 
-test("guardrails block direct sends above 250 and all campaign-sized batches", () => {
-  const cfg = { ...core.config(), directBatchMax: 250 };
-  assert.equal(core.guardrail(250, "send", cfg).blocked, false);
-  assert.equal(core.guardrail(251, "send", cfg).blocked, true);
+test("guardrails allow 1,000-person sends but block larger direct batches", () => {
+  const cfg = { ...core.config(), directBatchMax: 1000, draftsOnlyOver: 1000 };
+  assert.equal(core.guardrail(1000, "send", cfg).blocked, false);
+  assert.equal(core.guardrail(1001, "send", cfg).blocked, true);
   assert.equal(core.guardrail(15000, "drafts", cfg).level, "campaign");
 });
 

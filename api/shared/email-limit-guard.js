@@ -7,6 +7,10 @@ const TIME_ZONE = "America/New_York";
 const WINDOW_OPEN_MINUTES = 7 * 60 + 30;
 const WINDOW_CLOSE_MINUTES = 19 * 60 + 30;
 const DEFAULT_DAILY_START = "07:30";
+// Azure Tables limit a string property to 64 KiB (32K UTF-16 code units).
+// Keep every part comfortably below that limit while preserving one-row,
+// ETag-conditional reservation and rollover updates.
+const JSON_PART_CHARS = 20000;
 const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
 const formatter = new Intl.DateTimeFormat("en-CA", {
   timeZone: TIME_ZONE, year: "numeric", month: "2-digit", day: "2-digit",
@@ -30,6 +34,30 @@ const parseJson = (value, fallback) => {
   try { const parsed = JSON.parse(String(value || "")); return parsed == null ? fallback : parsed; }
   catch { return fallback; }
 };
+function readJsonField(row, field, fallback) {
+  const count = Number(row && row[`${field}PartCount`]) || 0;
+  if (!count) return parseJson(row && row[field], fallback);
+  if (count < 0 || count > 100) throw problem("Capacity record is malformed.",
+    500, "capacity_record_invalid");
+  let value = "";
+  for (let i = 0; i < count; i++) {
+    const part = row[`${field}Part${i}`];
+    if (typeof part !== "string") throw problem("Capacity record is incomplete.",
+      500, "capacity_record_invalid");
+    value += part;
+  }
+  try { return JSON.parse(value); }
+  catch { throw problem("Capacity record cannot be read.", 500, "capacity_record_invalid"); }
+}
+function jsonProperties(field, value) {
+  const raw = JSON.stringify(value);
+  if (raw.length <= JSON_PART_CHARS)
+    return { [field]: raw, [`${field}PartCount`]: 0 };
+  const parts = { [field]: "", [`${field}PartCount`]: Math.ceil(raw.length / JSON_PART_CHARS) };
+  for (let i = 0; i < parts[`${field}PartCount`]; i++)
+    parts[`${field}Part${i}`] = raw.slice(i * JSON_PART_CHARS, (i + 1) * JSON_PART_CHARS);
+  return parts;
+}
 const problem = (message, statusCode, code, extra = {}) =>
   Object.assign(new Error(message), { statusCode, code, ...extra });
 
@@ -243,8 +271,8 @@ async function releaseLock(policy, userId, owner) {
 function rowAllocations(row) {
   if (Number(row && row.schemaVersion) === 2) {
     if (row.state === "released") return [];
-    const released = new Set(parseJson(row.releasedKeysJson, []));
-    return parseJson(row.allocationsJson, []).filter((entry) => !released.has(String(entry.key)))
+    const released = new Set(readJsonField(row, "releasedKeysJson", []));
+    return readJsonField(row, "allocationsJson", []).filter((entry) => !released.has(String(entry.key)))
       .map((entry) => ({ key: String(entry.key), day: String(entry.day), units: Number(entry.units) || 0 }));
   }
   const units = Number(row && row.externalCount) || 0;
@@ -285,11 +313,11 @@ async function getOptional(ledger, userId, id) {
 }
 
 function storedPlan(row) {
-  const saved = parseJson(row && row.planJson, null);
+  const saved = readJsonField(row, "planJson", null);
   if (saved) return saved;
   return { schemaVersion: 2, planHash: row.planHash || "", timeZone: TIME_ZONE,
     dailyLimit: Number(row.limit) || 0, externalUnits: Number(row.externalCount) || 0,
-    assignments: parseJson(row.allocationsJson, []), days: [] };
+    assignments: readJsonField(row, "allocationsJson", []), days: [] };
 }
 
 async function reservePlan(userId, reservationId, ordered, options = {}) {
@@ -324,8 +352,9 @@ async function reservePlan(userId, reservationId, ordered, options = {}) {
     await ledger.createEntity({ partitionKey: userId, rowKey: reservationId,
       schemaVersion: 2, kind: options.kind || "campaign", state: "active",
       timeZone: TIME_ZONE, limit: plan.dailyLimit, planHash: plan.planHash,
-      allocationsJson: JSON.stringify(plan.assignments.map(({ key, day, units }) => ({ key, day, units }))),
-      planJson: JSON.stringify(plan), releasedKeysJson: "[]",
+      ...jsonProperties("allocationsJson", plan.assignments.map(({ key, day, units }) => ({ key, day, units }))),
+      ...jsonProperties("planJson", plan),
+      ...jsonProperties("releasedKeysJson", []),
       externalCount: plan.externalUnits, reservedUtc: at, activatedUtc: at });
     return { ...plan, alreadyReserved: false };
   } finally { await releaseLock(policy, userId, owner); }
@@ -362,7 +391,7 @@ async function rolloverAllocation(userId, reservationId, key, expectedPlanHash, 
     const index = (plan.assignments || []).findIndex((entry) => entry.key === key);
     if (index < 0) throw problem('The email has no approved capacity allocation.', 409,
       'capacity_allocation_missing');
-    const released = new Set(parseJson(row.releasedKeysJson, []));
+    const released = new Set(readJsonField(row, "releasedKeysJson", []));
     if (released.has(key)) return { available: false, reason: 'released' };
     const current = plan.assignments[index];
     const currentInstant = Date.parse(current.plannedSendUtc || '');
@@ -402,7 +431,7 @@ async function rolloverAllocation(userId, reservationId, key, expectedPlanHash, 
       released.add(key);
       await renewLock(policy, userId, owner);
       await ledger.updateEntity({ partitionKey: userId, rowKey: reservationId,
-        releasedKeysJson: JSON.stringify([...released]),
+        ...jsonProperties("releasedKeysJson", [...released]),
         state: released.size >= plan.assignments.length ? 'released' : 'active',
         rolloverHeldUtc: new Date(nowMs).toISOString() }, 'Merge', { etag: row.etag });
       return { available: false, reason: 'horizon_exceeded' };
@@ -426,8 +455,8 @@ async function rolloverAllocation(userId, reservationId, key, expectedPlanHash, 
     plan.rolloverCount = (Number(plan.rolloverCount) || 0) + 1;
     await renewLock(policy, userId, owner);
     await ledger.updateEntity({ partitionKey: userId, rowKey: reservationId,
-      allocationsJson: JSON.stringify(plan.assignments.map(({ key: id, day, units }) =>
-        ({ key: id, day, units }))), planJson: JSON.stringify(plan),
+      ...jsonProperties("allocationsJson", plan.assignments.map(({ key: id, day, units }) =>
+        ({ key: id, day, units }))), ...jsonProperties("planJson", plan),
       lastRolloverUtc: new Date(nowMs).toISOString() }, 'Merge', { etag: row.etag });
     return { available: true, moved: true, assignment: selected, plan };
   } finally { await releaseLock(policy, userId, owner); }
@@ -441,14 +470,14 @@ async function releaseAllocations(userId, reservationId, keys) {
   try {
     const row = await getOptional(ledger, userId, reservationId);
     if (!row || Number(row.schemaVersion) !== 2) return { released: 0 };
-    const allocations = parseJson(row.allocationsJson, []);
-    const released = new Set(parseJson(row.releasedKeysJson, []));
+    const allocations = readJsonField(row, "allocationsJson", []);
+    const released = new Set(readJsonField(row, "releasedKeysJson", []));
     let count = 0;
     for (const entry of allocations) if (wanted.has(String(entry.key)) && !released.has(String(entry.key))) {
       released.add(String(entry.key)); count++;
     }
     await ledger.updateEntity({ partitionKey: userId, rowKey: reservationId,
-      releasedKeysJson: JSON.stringify([...released]),
+      ...jsonProperties("releasedKeysJson", [...released]),
       state: released.size >= allocations.length ? "released" : "active",
       releasedUtc: new Date().toISOString() }, "Merge", { etag: row.etag });
     return { released: count };
