@@ -226,6 +226,53 @@ test("a recipient who opts out AFTER approval is not sent to", async () => {
   assert.equal(f.enqueued.length, 0, "must not be re-queued");
 });
 
+test("a temporary suppression-table DNS failure retries the original draft without sending open", async () => {
+  const f = fixture("send", "send_scheduled");
+  f.message.graphMessageId = "draft-1";
+  let checks = 0, sends = 0;
+  f.suppress.blockedAmong = async () => {
+    if (++checks === 1) throw Object.assign(new Error("getaddrinfo EAI_AGAIN eicadvisorlog.table.core.windows.net"),
+      { code: "EAI_AGAIN" });
+    return new Map();
+  };
+  const graph = { getMessage: async () => routedDraft(), findByAppId: async () => null,
+    sendDraft: async () => { sends++; return { requestId: "r1" }; } };
+  const work = { kind: "send", userId: "user-1", batchId: "batch-1", messageId: "message-1" };
+  await worker.processWork(work, { ...f, graph });
+  assert.equal(checks, 1);
+  assert.equal(sends, 0, "never send while the suppression list is unavailable");
+  assert.equal(f.message.state, "send_scheduled");
+  assert.equal(f.message.sendOutcome, undefined, "no Graph send intent was recorded");
+  assert.equal(f.message.graphMessageId, "draft-1", "keep the original Outlook draft");
+  assert.equal(f.enqueued.at(-1).work.kind, "send");
+  assert.ok(f.enqueued.at(-1).delay > 0, "retry uses backoff");
+  f.message.retryAfterUtc = ""; // Simulate the queued retry becoming due.
+  await worker.processWork(work, { ...f, graph });
+  assert.equal(checks, 2, "recheck the suppression list before sending");
+  assert.equal(sends, 1);
+  assert.equal(f.message.state, "submitted");
+});
+
+test("repeated suppression-table DNS failures stop safely when the send retry budget is exhausted", async () => {
+  const f = fixture("send", "send_scheduled");
+  f.message.graphMessageId = "draft-1";
+  f.message.sendAttempts = 6;
+  f.suppress.blockedAmong = async () => {
+    throw Object.assign(new Error("getaddrinfo EAI_AGAIN eicadvisorlog.table.core.windows.net"),
+      { code: "EAI_AGAIN" });
+  };
+  let sends = 0;
+  const graph = { getMessage: async () => routedDraft(), findByAppId: async () => null,
+    sendDraft: async () => { sends++; } };
+  await worker.processWork({ kind: "send", userId: "user-1", batchId: "batch-1", messageId: "message-1" },
+    { ...f, graph });
+  assert.equal(sends, 0);
+  assert.equal(f.message.state, "failed");
+  assert.equal(f.message.failureCode, "send_retryable_exhausted");
+  assert.equal(f.message.graphMessageId, "draft-1");
+  assert.equal(f.enqueued.length, 0);
+});
+
 test("the kill switch stops a batch that is already mid-flight", async () => {
   const f = fixture("send", "send_scheduled");
   f.policy.killed = true;

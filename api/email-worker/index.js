@@ -183,8 +183,11 @@ async function failOrRetry(work, claimed, err, phase, deps) {
     await deps.store.audit(work.userId, work.batchId, "microsoft_reconnect_required", { messageId: work.messageId, phase });
     return;
   }
+  // Azure Table DNS can fail temporarily during the last suppression check.
+  // No Graph send intent exists yet in that case, so retry the same draft after
+  // backoff; every attempt must repeat the suppression check and fail closed.
   const retryable = err.safeToRetry === true || err.statusCode === 429
-    || err.ambiguous || (err.statusCode >= 500);
+    || err.ambiguous || (err.statusCode >= 500) || err.code === "EAI_AGAIN";
   const uncertainSend = phase === "send"
     && (claimed.sendOutcome === "started" || claimed.sendOutcome === "accepted");
   // This phase's own budget. Sharing one counter meant several draft retries
