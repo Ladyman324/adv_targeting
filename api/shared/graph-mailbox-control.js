@@ -19,6 +19,8 @@ function deferred(code, seconds) {
   });
 }
 
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
 // A single CAS-protected row coordinates ALL Graph mail operations across hosts.
 // The lease exceeds the bounded HTTP operation, including reading its response.
 // A timed-out operation leaves a cooldown to let server-side work drain.
@@ -40,21 +42,44 @@ function createControl(table, now = Date.now) {
     throw deferred("mailbox_busy", 3);
   }
   return {
-    async acquire(key, { timeoutMs = 30000, sending = false, intervalSeconds = 10 } = {}) {
+    async acquire(key, { timeoutMs = 30000, sending = false, intervalSeconds = 10,
+      operation = "mail_other", waitMs = 0 } = {}) {
       const owner = crypto.randomUUID();
-      const at = now();
-      const patch = await change(key, row => {
-        if (Number(row.cooldownUntil) > at)
-          throw deferred("mailbox_cooldown", (row.cooldownUntil - at) / 1000);
-        if (Number(row.leaseUntil) > at)
-          throw deferred("mailbox_busy", Math.min(10, (row.leaseUntil - at) / 1000));
-        if (sending && Number(row.nextSendAt) > at)
-          throw deferred("mailbox_send_spacing", (row.nextSendAt - at) / 1000);
-        return { owner, leaseUntil: at + timeoutMs + 30000,
-          ...(sending ? { nextSendAt: at + Math.max(10, intervalSeconds) * 1000 } : {}) };
-      });
-      return { key, owner, expiresAt: patch.leaseUntil, sending,
-        intervalSeconds: Math.max(10, intervalSeconds) };
+      const started = Date.now(), budget = Math.min(10000, Math.max(0, Number(waitMs) || 0));
+      let blockedBy = "";
+      for (;;) {
+        const at = now();
+        try {
+          const patch = await change(key, row => {
+            if (Number(row.cooldownUntil) > at)
+              throw deferred("mailbox_cooldown", (row.cooldownUntil - at) / 1000);
+            if (Number(row.leaseUntil) > at) {
+              const error = deferred("mailbox_busy", Math.min(10, (row.leaseUntil - at) / 1000));
+              error.blockedBy = String(row.operation || "unknown").slice(0, 40);
+              error.leaseRemainingSeconds = Math.max(1, Math.ceil((row.leaseUntil - at) / 1000));
+              throw error;
+            }
+            if (sending && Number(row.nextSendAt) > at)
+              throw deferred("mailbox_send_spacing", (row.nextSendAt - at) / 1000);
+            return { owner, operation, leaseUntil: at + timeoutMs + 30000,
+              ...(sending ? { nextSendAt: at + Math.max(10, intervalSeconds) * 1000 } : {}) };
+          });
+          return { key, owner, expiresAt: patch.leaseUntil, sending,
+            operation, blockedBy, waitedMs: Date.now() - started,
+            intervalSeconds: Math.max(10, intervalSeconds) };
+        } catch (error) {
+          if (error.code !== "mailbox_busy") throw error;
+          blockedBy = error.blockedBy || blockedBy;
+          const remaining = budget - (Date.now() - started);
+          if (remaining <= 0) {
+            error.waitedMs = Date.now() - started;
+            throw error;
+          }
+          // Wait briefly for the actual release, rather than creating a new
+          // queue message and audit row for every short-lived Graph operation.
+          await sleep(Math.min(remaining, 150 + Math.floor(Math.random() * 350)));
+        }
+      }
     },
     async cooldown(key, seconds) {
       await change(key, row => ({ cooldownUntil: Math.max(Number(row.cooldownUntil) || 0,
@@ -62,7 +87,7 @@ function createControl(table, now = Date.now) {
     },
     async release(lease) {
       await change(lease.key, row => row.owner === lease.owner ? {
-        owner: "", leaseUntil: 0,
+        owner: "", operation: "", leaseUntil: 0,
         // Space from completion too: a slow table write cannot compress actual sends.
         ...(lease.sending ? { nextSendAt: Math.max(Number(row.nextSendAt) || 0,
           now() + lease.intervalSeconds * 1000) } : {}),

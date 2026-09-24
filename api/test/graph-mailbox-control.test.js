@@ -38,6 +38,28 @@ test("independent hosts share one mailbox lease; other mailboxes proceed", async
   await hosts[1].release(other);
 });
 
+test("a waiting operation takes over after release and records the prior holder", async () => {
+  const control = controlModule.createControl(memoryTable());
+  const held = await control.acquire("mail", { operation: "attachment_upload" });
+  const pending = control.acquire("mail", { operation: "message_read", waitMs: 1000 });
+  await new Promise(resolve => setTimeout(resolve, 40));
+  await control.release(held);
+  const acquired = await pending;
+  assert.equal(acquired.operation, "message_read");
+  assert.equal(acquired.blockedBy, "attachment_upload");
+  assert.ok(acquired.waitedMs >= 40);
+  await control.release(acquired);
+});
+
+test("an occupied mailbox reports the blocking operation without leaking a mailbox identity", async () => {
+  const control = controlModule.createControl(memoryTable());
+  const held = await control.acquire("mail", { operation: "draft_create" });
+  await assert.rejects(control.acquire("mail", { operation: "send", waitMs: 30 }), error =>
+    error.code === "mailbox_busy" && error.blockedBy === "draft_create"
+      && error.waitedMs >= 30 && error.leaseRemainingSeconds > 0);
+  await control.release(held);
+});
+
 test("send spacing is at least ten seconds while reads and drafting remain immediate", async () => {
   let clock = 100000;
   const control = controlModule.createControl(memoryTable(), () => clock);
@@ -115,6 +137,21 @@ test("mailbox busy or unavailable never dispatches a Graph request", async t => 
   }));
   await assert.rejects(graph.sendDraft(TOKEN, "draft"), e => e.deferred && e.safeToRetry && !e.ambiguous);
   assert.equal(calls, 0);
+});
+
+test("Graph passes only a safe operation label and bounded wait to the mailbox lock", async t => {
+  let args;
+  t.mock.method(controlModule, "control", () => ({
+    acquire: async (_key, options) => {
+      args = options;
+      throw Object.assign(new Error("busy"), { deferred: true, code: "mailbox_busy" });
+    },
+  }));
+  await assert.rejects(graph.sendDraft(TOKEN, "private-draft-id"), e =>
+    e.code === "mailbox_busy" && e.operation === "send");
+  assert.equal(args.operation, "send");
+  assert.equal(args.waitMs, 8000);
+  assert.equal(JSON.stringify(args).includes("private-draft-id"), false);
 });
 
 test("lease is held until the response body is consumed", async t => {

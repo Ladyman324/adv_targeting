@@ -253,6 +253,35 @@ test("a temporary suppression-table DNS failure retries the original draft witho
   assert.equal(f.message.state, "submitted");
 });
 
+test("mailbox contention defers the same draft without recording a send failure or spending an attempt", async () => {
+  const f = fixture("send", "send_scheduled");
+  f.message.graphMessageId = "draft-1";
+  let sends = 0;
+  const busy = Object.assign(new Error("Waiting for the next mailbox operation."), {
+    code: "mailbox_busy", graphCode: "mailbox_busy", deferred: true, safeToRetry: true,
+    retryAfter: 9, operation: "message_read", blockedBy: "attachment_upload",
+    waitedMs: 8000, leaseRemainingSeconds: 30,
+  });
+  const graph = { getMessage: async () => { throw busy; },
+    sendDraft: async () => { sends++; } };
+  await worker.processWork({ kind: "send", userId: "user-1", batchId: "batch-1",
+    messageId: "message-1" }, { ...f, graph });
+  assert.equal(sends, 0);
+  assert.equal(f.message.state, "send_scheduled");
+  assert.equal(f.message.sendAttempts, 0);
+  assert.equal(f.message.sendOutcome, undefined);
+  assert.equal(f.enqueued.at(-1).work.kind, "send");
+  assert.ok(f.enqueued.at(-1).delay >= 5 && f.enqueued.at(-1).delay <= 15,
+    "lease-aware retry is spread out rather than synchronized");
+  const deferred = f.audits.find((entry) => entry[2] === "send_deferred");
+  assert.ok(deferred);
+  assert.equal(deferred[3].operation, "message_read");
+  assert.equal(deferred[3].blockedBy, "attachment_upload");
+  assert.equal(deferred[3].waitedMs, 8000);
+  assert.equal(deferred[3].nextRetrySeconds, f.enqueued.at(-1).delay);
+  assert.equal(f.audits.some((entry) => entry[2] === "send_failed"), false);
+});
+
 test("repeated suppression-table DNS failures stop safely when the send retry budget is exhausted", async () => {
   const f = fixture("send", "send_scheduled");
   f.message.graphMessageId = "draft-1";

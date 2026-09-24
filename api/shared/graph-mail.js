@@ -20,23 +20,42 @@ function retrySeconds(value) {
   return Number.isFinite(date) ? Math.max(1, Math.ceil((date - Date.now()) / 1000)) : 30;
 }
 
+function mailboxOperation(method, path, options = {}) {
+  if (options.upload) return "attachment_upload";
+  if (method === "POST" && /\/send(?:\?|$)/.test(path)) return "send";
+  if (method === "POST" && (/\/me\/messages(?:\?|$)/.test(path)
+      || /\/createReply(?:All)?(?:\?|$)/.test(path))) return "draft_create";
+  if (/\/attachments(?:\?|$)/.test(path)) return "attachment_write";
+  if (method === "GET" && /\/me\/messages\?/.test(path)) return "message_search";
+  if (method === "GET") return "message_read";
+  if (method === "PATCH") return "draft_update";
+  return "mail_other";
+}
+
 async function transport(token, method, path, init, options = {}) {
   const renew = leaseContext.getStore();
   if (renew) await renew();
   const timeoutMs = options.timeoutMs || 30000;
   const sending = method === "POST" && /\/send(?:\?|$)/.test(path);
+  const operation = mailboxOperation(method, path, options);
   const key = mailboxControl.mailboxKey(token);
   const control = mailboxControl.control();
   let lease;
   try {
-    lease = await control.acquire(key, { timeoutMs, sending,
+    lease = await control.acquire(key, { timeoutMs, sending, operation, waitMs: 8000,
       intervalSeconds: Math.max(10, Number(process.env.EMAIL_MAILBOX_INTERVAL_SECONDS) || 10) });
   } catch (error) {
     // No request was dispatched, including when the coordination store is unavailable.
-    if (error.deferred) throw error;
+    if (error.deferred) {
+      error.operation = operation;
+      throw error;
+    }
     throw new GraphError("Mailbox coordination is temporarily unavailable.", {
       safeToRetry: true, deferred: true, retryAfter: 30, code: "mailbox_coordination_unavailable" });
   }
+  if (lease.waitedMs >= 1000)
+    console.info(JSON.stringify({ event: "graph_mailbox_wait", operation,
+      blockedBy: lease.blockedBy || "unknown", waitedMs: lease.waitedMs }));
   const start = Date.now();
   const clientRequestId = crypto.randomUUID();
   let response, dispatched = false;

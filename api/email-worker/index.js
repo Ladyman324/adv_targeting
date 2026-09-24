@@ -195,9 +195,18 @@ async function failOrRetry(work, claimed, err, phase, deps) {
   // failed permanently on a transient error it had never actually hit while
   // sending.
   const tries = Number(claimed[`${phase}Attempts`]) || 0;
+  let seconds = 0;
   if (uncertainSend || (retryable && (err.deferred || err.statusCode === 429 || tries < RETRY_CEILING))) {
-    const seconds = Math.max(Number(err.retryAfter) || 0, err.ambiguous ? 120 : Math.min(300, 2 ** tries * 5))
-      + Math.floor(Math.random() * 4);
+    // A contended mailbox has an expiring lease, not a failed send. Spread
+    // contenders across the remaining lease rather than waking them together
+    // every ten seconds. Do not wait for the full lease: owners usually release
+    // early, and a long sleep would waste a perfectly available mailbox.
+    const busySeconds = err.code === "mailbox_busy" && !uncertainSend
+      ? Math.max(2, Math.min(10, Math.ceil((Number(err.leaseRemainingSeconds) || 10) / 6)))
+        + Math.floor(Math.random() * 11) : 0;
+    seconds = busySeconds || (Math.max(Number(err.retryAfter) || 0,
+      err.ambiguous ? 120 : Math.min(300, 2 ** tries * 5))
+      + Math.floor(Math.random() * 4));
     await deps.store.patchMessage(work.userId, work.batchId, work.messageId, {
       state: phase === "send" && !uncertainSend ? "send_scheduled" : `${phase}_ambiguous`,
       failureCode: err.graphCode || err.code || (err.statusCode === 429 ? "throttled" : "retry_pending"),
@@ -213,12 +222,17 @@ async function failOrRetry(work, claimed, err, phase, deps) {
       failureCode: terminalCode, failureMessage: err.message,
       graphRequestId: err.requestId || "", leaseUntilUtc: "" }, claimed.etag);
   }
-  await deps.store.audit(work.userId, work.batchId, `${phase}_failed`, { messageId: work.messageId,
+  await deps.store.audit(work.userId, work.batchId,
+    err.deferred && !uncertainSend ? `${phase}_deferred` : `${phase}_failed`, { messageId: work.messageId,
     retryable, safeToRetry: retryable && !uncertainSend,
     code: err.graphCode || err.code || "", requestId: err.requestId || "",
     statusCode: Number(err.statusCode) || 0, method: err.method || "",
     operation: err.operation || "", clientRequestId: err.clientRequestId || "",
     durationMs: Number(err.durationMs) || 0, retryAfter: Number(err.retryAfter) || 0,
+    blockedBy: String(err.blockedBy || "").slice(0, 40),
+    waitedMs: Math.max(0, Number(err.waitedMs) || 0),
+    leaseRemainingSeconds: Math.max(0, Number(err.leaseRemainingSeconds) || 0),
+    nextRetrySeconds: seconds,
     sendOutcome: claimed.sendOutcome || "not_started" });
 }
 

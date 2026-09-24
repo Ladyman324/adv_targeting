@@ -113,7 +113,11 @@ sends are not territory-blocked by this setting.
    transport coordinate by tenant/mailbox in EmailPolicy. Only one request owns
    that mailbox gate at once across Azure hosts. Actual sends are at least ten
    seconds apart; reads and attachment preparation do not each wait ten seconds.
-   A busy gate defers work. Microsoft throttling honors Retry-After and establishes
+   A busy gate now waits briefly for the holder to release, then defers with a
+   lease-aware stagger if still occupied. Deferrals do not spend the send retry
+   budget or mean that Graph was asked to send. Safe operation labels and wait
+   times are logged; the batch audit records `send_deferred` or `draft_deferred`
+   rather than calling these waits failures. Microsoft throttling honors Retry-After and establishes
    a mailbox-wide cooldown; no-response requests also get a drain interval.
 9. **Send worker.** Recheck state, time, ownership and mailbox; inspect the original
    Outlook item; stop if already sent. Verify the actual recipients and approved
