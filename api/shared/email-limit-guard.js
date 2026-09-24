@@ -4,6 +4,9 @@ const crypto = require("crypto");
 const { TableClient, odata } = require("@azure/data-tables");
 
 const TIME_ZONE = "America/New_York";
+const WINDOW_OPEN_MINUTES = 7 * 60 + 30;
+const WINDOW_CLOSE_MINUTES = 19 * 60 + 30;
+const DEFAULT_DAILY_START = "07:30";
 const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
 const formatter = new Intl.DateTimeFormat("en-CA", {
   timeZone: TIME_ZONE, year: "numeric", month: "2-digit", day: "2-digit",
@@ -61,6 +64,14 @@ function isBusinessDay(day) {
   return weekday !== 0 && weekday !== 6;
 }
 
+function withinSendingWindow(value = Date.now()) {
+  const p = easternParts(value);
+  const day = `${p.year}-${pad(p.month)}-${pad(p.day)}`;
+  const minutes = p.hour * 60 + p.minute;
+  return isBusinessDay(day) && minutes >= WINDOW_OPEN_MINUTES
+    && minutes < WINDOW_CLOSE_MINUTES;
+}
+
 function easternInstant(day, hour, minute = 0, second = 0) {
   const p = dayParts(day);
   const desired = Date.UTC(p.year, p.month - 1, p.day, hour, minute, second);
@@ -98,14 +109,14 @@ function normalizeOrdered(ordered) {
 }
 
 function normalizeDailyStartTime(value) {
-  const raw = String(value || "09:00").trim();
+  const raw = String(value || DEFAULT_DAILY_START).trim();
   const match = /^(\d{2}):(\d{2})$/.exec(raw);
   if (!match) throw problem("Choose a daily delivery time in Eastern Time.", 400,
     "capacity_daily_time_invalid");
   const hour = Number(match[1]), minute = Number(match[2]);
   const total = hour * 60 + minute;
-  if (hour > 23 || minute > 59 || total < 9 * 60 || total >= 17 * 60)
-    throw problem("Choose a daily delivery time from 9:00 AM through 4:59 PM Eastern.",
+  if (hour > 23 || minute > 59 || total < WINDOW_OPEN_MINUTES || total >= WINDOW_CLOSE_MINUTES)
+    throw problem("Choose a daily delivery time from 7:30 AM through 7:29 PM Eastern.",
       400, "capacity_daily_time_invalid");
   return `${pad(hour)}:${pad(minute)}`;
 }
@@ -135,8 +146,8 @@ function previewPlan(ordered, options = {}) {
   let exactFirstUtc = new Date(requested).toISOString();
   if (day < approvalDay) { day = approvalDay; firstMinutes = dailyMinutes; exactFirstUtc = ""; }
   while (!isBusinessDay(day)) { day = addDays(day, 1); firstMinutes = dailyMinutes; exactFirstUtc = ""; }
-  if (firstMinutes < 9 * 60) { firstMinutes = 9 * 60; exactFirstUtc = ""; }
-  if (firstMinutes >= 17 * 60) {
+  if (firstMinutes < WINDOW_OPEN_MINUTES) { firstMinutes = WINDOW_OPEN_MINUTES; exactFirstUtc = ""; }
+  if (firstMinutes >= WINDOW_CLOSE_MINUTES) {
     do { day = addDays(day, 1); } while (!isBusinessDay(day));
     firstMinutes = dailyMinutes; exactFirstUtc = "";
   }
@@ -152,8 +163,9 @@ function previewPlan(ordered, options = {}) {
     // minute could silently consume most of the cancellation window.
     const startUtc = trancheIndex === 0 && exactFirstUtc
       ? exactFirstUtc : easternInstant(day, Math.floor(startMinute / 60), startMinute % 60);
-    const endUtc = Date.parse(easternInstant(day, 17, 0));
-    const maxMessages = Math.max(0, Math.floor((endUtc - Date.parse(startUtc)) / (interval * 1000)) + 1);
+    const endUtc = Date.parse(easternInstant(day, 19, 30));
+    // The close is exclusive: a 7:30 PM send belongs on another day.
+    const maxMessages = Math.max(0, Math.ceil((endUtc - Date.parse(startUtc)) / (interval * 1000)));
     let position = 0, units = 0;
     while (cursor < entries.length && position < maxMessages) {
       const entry = entries[cursor];
@@ -330,6 +342,97 @@ async function assertReservation(userId, reservationId, expectedPlanHash) {
   return Number(row.schemaVersion) === 2 ? storedPlan(row) : row;
 }
 
+/* Move an unsent message only under the same per-user lock used by approval.
+ * The original plan hash remains the approval identity; the ledger's planJson
+ * and allocationsJson move together so a crash before the message-row patch
+ * can be repaired by calling this again. No unreserved day is ever chosen. */
+async function rolloverAllocation(userId, reservationId, key, expectedPlanHash, options = {}) {
+  const { policy, ledger } = await clients(), owner = crypto.randomUUID();
+  const nowMs = Number(options.nowMs == null ? Date.now() : options.nowMs);
+  const interval = Math.max(1, Math.floor(Number(options.mailboxIntervalSeconds) || 5));
+  await acquireLock(policy, userId, owner);
+  try {
+    const row = await getOptional(ledger, userId, reservationId);
+    if (!row || Number(row.schemaVersion) !== 2 || row.state === 'released')
+      throw problem('The approved daily-capacity reservation is unavailable.', 409,
+        'capacity_reservation_missing');
+    if (expectedPlanHash && row.planHash !== expectedPlanHash)
+      throw problem('The approved daily-capacity plan changed.', 409, 'capacity_plan_changed');
+    const plan = storedPlan(row);
+    const index = (plan.assignments || []).findIndex((entry) => entry.key === key);
+    if (index < 0) throw problem('The email has no approved capacity allocation.', 409,
+      'capacity_allocation_missing');
+    const released = new Set(parseJson(row.releasedKeysJson, []));
+    if (released.has(key)) return { available: false, reason: 'released' };
+    const current = plan.assignments[index];
+    const currentInstant = Date.parse(current.plannedSendUtc || '');
+    if (currentInstant > nowMs && withinSendingWindow(currentInstant))
+      return { available: true, moved: false, assignment: current, plan };
+
+    const approvalDay = easternDay(Date.parse(row.reservedUtc));
+    const horizonDay = plan.horizonDay || addDays(approvalDay, 7);
+    const start = normalizeDailyStartTime(plan.dailyStartTime);
+    const [hour, minute] = start.split(':').map(Number);
+    const externalUsage = await readUsage(ledger, userId, reservationId);
+    const effectiveLimit = Math.min(Number(row.limit) || 0,
+      Number(options.limit) > 0 ? Number(options.limit) : Number(row.limit) || 0);
+    const today = easternDay(nowMs);
+    const active = plan.assignments.filter((entry) => entry.key !== key && !released.has(entry.key));
+    let selected = null;
+    for (let day = today; day <= horizonDay; day = addDays(day, 1)) {
+      if (!isBusinessDay(day)) continue;
+      const own = active.filter((entry) => entry.day === day);
+      const used = (externalUsage.get(day) || 0)
+        + own.reduce((sum, entry) => sum + Number(entry.units || 0), 0);
+      if (used + Number(current.units || 0) > effectiveLimit) continue;
+      const lastOwn = own.reduce((max, entry) => Math.max(max,
+        Date.parse(entry.plannedSendUtc || '') || 0), 0);
+      const startMs = Date.parse(easternInstant(day, hour, minute));
+      const candidate = Math.max(startMs, lastOwn ? lastOwn + interval * 1000 : 0,
+        day === today ? nowMs + 1000 : 0);
+      if (candidate >= Date.parse(easternInstant(day, 19, 30))) continue;
+      selected = { ...current, day, plannedSendUtc: new Date(candidate).toISOString(),
+        tranchePosition: own.reduce((max, entry) => Math.max(max,
+          Number(entry.tranchePosition) || 0), -1) + 1,
+        trancheIndex: Math.max(0, Math.round((Date.parse(day + 'T12:00:00Z')
+          - Date.parse(approvalDay + 'T12:00:00Z')) / 86400000)) };
+      break;
+    }
+    if (!selected) {
+      released.add(key);
+      await renewLock(policy, userId, owner);
+      await ledger.updateEntity({ partitionKey: userId, rowKey: reservationId,
+        releasedKeysJson: JSON.stringify([...released]),
+        state: released.size >= plan.assignments.length ? 'released' : 'active',
+        rolloverHeldUtc: new Date(nowMs).toISOString() }, 'Merge', { etag: row.etag });
+      return { available: false, reason: 'horizon_exceeded' };
+    }
+    plan.assignments[index] = selected;
+    const byDay = new Map();
+    for (const entry of plan.assignments) {
+      const summary = byDay.get(entry.day) || { day: entry.day,
+        startUtc: entry.plannedSendUtc, lastSendUtc: entry.plannedSendUtc,
+        messageCount: 0, units: 0 };
+      summary.messageCount++;
+      summary.units += Number(entry.units) || 0;
+      if (entry.plannedSendUtc < summary.startUtc) summary.startUtc = entry.plannedSendUtc;
+      if (entry.plannedSendUtc > summary.lastSendUtc) summary.lastSendUtc = entry.plannedSendUtc;
+      byDay.set(entry.day, summary);
+    }
+    plan.days = [...byDay.values()].sort((a, b) => a.day.localeCompare(b.day));
+    plan.firstSendUtc = plan.days[0]?.startUtc || '';
+    plan.lastSendUtc = plan.days.at(-1)?.lastSendUtc || '';
+    plan.multiDay = plan.days.length > 1;
+    plan.rolloverCount = (Number(plan.rolloverCount) || 0) + 1;
+    await renewLock(policy, userId, owner);
+    await ledger.updateEntity({ partitionKey: userId, rowKey: reservationId,
+      allocationsJson: JSON.stringify(plan.assignments.map(({ key: id, day, units }) =>
+        ({ key: id, day, units }))), planJson: JSON.stringify(plan),
+      lastRolloverUtc: new Date(nowMs).toISOString() }, 'Merge', { etag: row.etag });
+    return { available: true, moved: true, assignment: selected, plan };
+  } finally { await releaseLock(policy, userId, owner); }
+}
+
 async function releaseAllocations(userId, reservationId, keys) {
   const wanted = new Set((keys || []).map(String));
   if (!wanted.size) return { released: 0 };
@@ -414,6 +517,6 @@ function __setClientsForTest(policy, ledger) {
 }
 
 module.exports = { TIME_ZONE, easternDay, easternInstant, addDays, isBusinessDay,
-  normalizeDailyStartTime,
-  previewPlan, capacitySnapshot, reservePlan, assertReservation, releaseAllocations,
+  normalizeDailyStartTime, withinSendingWindow,
+  previewPlan, capacitySnapshot, reservePlan, assertReservation, rolloverAllocation, releaseAllocations,
   reserve, replayReservation, rowAllocations, __setClientsForTest };

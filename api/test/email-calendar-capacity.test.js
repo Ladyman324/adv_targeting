@@ -104,17 +104,17 @@ test("the selected Eastern time is reused on every later delivery day", () => {
 test("invalid or after-hours daily delivery times are refused", () => {
   assert.throws(() => capacity.previewPlan(entries(1), {
     limit: 25, nowMs: Date.parse("2026-08-31T13:00:00Z"),
-    startUtc: "2026-08-31T13:00:00Z", dailyStartTime: "17:00",
+    startUtc: "2026-08-31T13:00:00Z", dailyStartTime: "19:30",
   }), (error) => error.code === "capacity_daily_time_invalid");
 });
 
 test("an after-hours automatic start moves to the next business morning", () => {
   const plan = capacity.previewPlan(entries(1), {
-    limit: 25, nowMs: Date.parse("2026-09-04T22:30:00Z"),
-    startUtc: "2026-09-04T22:30:00Z",
+    limit: 25, nowMs: Date.parse("2026-09-04T23:30:00Z"),
+    startUtc: "2026-09-04T23:30:00Z",
   });
   assert.equal(plan.days[0].day, "2026-09-07");
-  assert.equal(plan.days[0].startUtc, "2026-09-07T13:00:00.000Z");
+  assert.equal(plan.days[0].startUtc, "2026-09-07T11:30:00.000Z");
 });
 
 test("the first tranche preserves seconds so cancellation time is never rounded away", () => {
@@ -123,6 +123,52 @@ test("the first tranche preserves seconds so cancellation time is never rounded 
     startUtc: "2026-08-31T13:01:10.000Z", mailboxIntervalSeconds: 10,
   });
   assert.equal(plan.firstSendUtc, "2026-08-31T13:01:10.000Z");
+});
+
+test("the 7:30 AM 7:30 PM Eastern window is DST-aware and closes exclusively", () => {
+  assert.equal(capacity.withinSendingWindow(Date.parse("2026-09-04T11:29:59Z")), false);
+  assert.equal(capacity.withinSendingWindow(Date.parse("2026-09-04T11:30:00Z")), true);
+  assert.equal(capacity.withinSendingWindow(Date.parse("2026-09-04T23:29:59Z")), true);
+  assert.equal(capacity.withinSendingWindow(Date.parse("2026-09-04T23:30:00Z")), false);
+  assert.equal(capacity.withinSendingWindow(Date.parse("2026-11-02T12:30:00Z")), true);
+  assert.equal(capacity.withinSendingWindow(Date.parse("2026-09-05T15:00:00Z")), false);
+});
+
+test("a late unsent allocation rolls to Monday under the same daily-cap lock", async () => {
+  const service = new FakeTableService();
+  const policy = service.table("EmailPolicy"), ledger = service.table("EmailSendLedger");
+  const oldConnection = process.env.AZURE_STORAGE_CONNECTION_STRING;
+  process.env.AZURE_STORAGE_CONNECTION_STRING =
+    "DefaultEndpointsProtocol=https;AccountName=test;AccountKey=dGVzdA==;EndpointSuffix=core.windows.net";
+  capacity.__setClientsForTest(policy, ledger);
+  try {
+    const plan = capacity.previewPlan(entries(2), {
+      limit: 1, nowMs: Date.parse("2026-09-04T12:00:00Z"),
+      startUtc: "2026-09-04T12:00:00Z", mailboxIntervalSeconds: 10,
+    });
+    await ledger.createEntity({ partitionKey: "u", rowKey: "batch", schemaVersion: 2,
+      state: "active", limit: 1, planHash: plan.planHash,
+      allocationsJson: JSON.stringify(plan.assignments.map(({ key, day, units }) => ({ key, day, units }))),
+      planJson: JSON.stringify(plan), releasedKeysJson: "[]",
+      reservedUtc: "2026-09-04T12:00:00Z" });
+    const result = await capacity.rolloverAllocation("u", "batch", "m1", plan.planHash, {
+      nowMs: Date.parse("2026-09-04T23:31:00Z"), mailboxIntervalSeconds: 10, limit: 1,
+    });
+    assert.equal(result.assignment.day, "2026-09-08",
+      "Monday's slot is already reserved by the second message");
+    assert.equal(result.assignment.plannedSendUtc, "2026-09-08T11:30:00.000Z");
+    const moved = await capacity.assertReservation("u", "batch", plan.planHash);
+    assert.equal(moved.assignments[0].day, "2026-09-08");
+    const replay = await capacity.rolloverAllocation("u", "batch", "m1", plan.planHash, {
+      nowMs: Date.parse("2026-09-04T23:31:01Z"), limit: 1,
+    });
+    assert.equal(replay.moved, false);
+    assert.equal(replay.assignment.day, "2026-09-08");
+  } finally {
+    capacity.__setClientsForTest(null, null);
+    if (oldConnection === undefined) delete process.env.AZURE_STORAGE_CONNECTION_STRING;
+    else process.env.AZURE_STORAGE_CONNECTION_STRING = oldConnection;
+  }
 });
 
 test("reservation locking, replay, release, and legacy usage are durable", async () => {

@@ -1276,7 +1276,7 @@ async function approve(who, input) {
   const scheduledForUtc = mode === "send" && input.scheduledForUtc
     ? schedule.scheduledInstant(input.scheduledForUtc, approvalNow, cfg.cancellationSeconds) : "";
   const dailyStartTime = mode === "send" && cfg.calendarCapacityEnabled
-    ? limitGuard.normalizeDailyStartTime(input.dailyStartTime) : "09:00";
+    ? limitGuard.normalizeDailyStartTime(input.dailyStartTime) : "07:30";
   if (!input.confirmation || Number(input.confirmation.recipientCount) !== batch.recipientCount)
     throw httpError(400, "Confirm the exact recipient count before approval.");
   const confirmedAttachments = [...new Set(input.confirmation.attachmentIds || [])].map(String).sort();
@@ -1541,6 +1541,17 @@ async function getBatchDetail(who, batchId, deps = {}) {
   const st = deps.store || store;
   const batch = await st.getBatch(who.id, batchId);
   if (!batch) throw httpError(404, "Email batch not found.");
+  // Rollover updates the capacity ledger first, so the stored approval
+  // snapshot may show yesterday's slots. Return the current plan when
+  // available without changing the immutable approval hash.
+  if (batch.capacityReservationId && batch.capacityPlanHash) {
+    try {
+      const live = await (deps.limitGuard || limitGuard).assertReservation(
+        who.id, batch.capacityReservationId, batch.capacityPlanHash);
+      batch.capacityPlan = { ...live, assignments: undefined,
+        hash: live.planHash, available: true };
+    } catch { /* Keep the stored snapshot if capacity storage is unavailable. */ }
+  }
   const messages = await st.listMessages(who.id, batchId), counts = {};
   for (const m of messages) counts[m.state] = (counts[m.state] || 0) + 1;
   /* The envelope, on EVERY read of a batch -- not only after a review pass.

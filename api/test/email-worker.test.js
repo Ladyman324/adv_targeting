@@ -660,3 +660,32 @@ test("work that missed its reserved Eastern day fails closed before Graph", asyn
   assert.equal(f.message.failureCode, "capacity_day_expired");
   assert.ok(f.audits.some((entry) => entry[2] === "capacity_day_expired"));
 });
+
+test("after-hours calendar work moves to its newly reserved slot without touching Graph", async () => {
+  const f = fixture("send", "send_scheduled");
+  f.batch.capacityReservationId = "batch-1";
+  f.batch.capacityPlanHash = "approved";
+  f.message.capacityDay = "2026-09-04";
+  f.message.plannedSendUtc = "2026-09-04T23:29:00.000Z";
+  let moved = 0, graphReads = 0;
+  await worker.processWork(
+    { kind: "send", userId: "user-1", batchId: "batch-1", messageId: "message-1" },
+    { ...f, nowMs: () => Date.parse("2026-09-04T23:31:00Z"),
+      capacity: {
+        easternDay: () => "2026-09-04", withinSendingWindow: () => false,
+        rolloverAllocation: async () => {
+          moved++;
+          return { available: true, moved: true, assignment: {
+            day: "2026-09-07", units: 1,
+            plannedSendUtc: "2026-09-07T11:30:00.000Z",
+            trancheIndex: 3, tranchePosition: 0,
+          } };
+        },
+      },
+      graph: new Proxy({}, { get() { graphReads++; throw new Error("Graph touched after hours"); } }) });
+  assert.equal(moved, 1);
+  assert.equal(graphReads, 0);
+  assert.equal(f.message.state, "send_scheduled");
+  assert.equal(f.message.capacityDay, "2026-09-07");
+  assert.equal(f.enqueued.length, 1);
+});

@@ -32,8 +32,8 @@
   let approvalIntent = null;
   let sendTiming = "now";
   let scheduleDate = "";
-  let scheduleTime = "09:00";
-  let continuationTime = "09:00";
+  let scheduleTime = "07:30";
+  let continuationTime = "07:30";
   let deliveryPlan = null;
   let deliveryPlanKey = "";
   let deliveryPlanError = "";
@@ -89,14 +89,14 @@
       scheduleDate = `${later.year}-${later.month}-${later.day}`; scheduleTime = `${later.hour}:00`;
     }
     const hour = Number(scheduleTime.slice(0, 2));
-    if (hour < 9) scheduleTime = "09:00";
-    if (hour >= 17 || /^\d{4}-\d{2}-\d{2}$/.test(scheduleDate)
+    if (hour < 7 || (hour === 7 && Number(scheduleTime.slice(3)) < 30)) scheduleTime = "07:30";
+    if (hour > 19 || (hour === 19 && Number(scheduleTime.slice(3)) >= 30) || /^\d{4}-\d{2}-\d{2}$/.test(scheduleDate)
         && [0, 6].includes(new Date(`${scheduleDate}T12:00:00Z`).getUTCDay())) {
       let day = new Date(`${scheduleDate}T12:00:00Z`);
       do { day = new Date(day.getTime() + 86400000); }
       while ([0, 6].includes(day.getUTCDay()));
       scheduleDate = day.toISOString().slice(0, 10);
-      scheduleTime = "09:00";
+      scheduleTime = "07:30";
     }
   }
   function scheduleCheck(batch) {
@@ -129,8 +129,8 @@
     const match = /^(\d{2}):(\d{2})$/.exec(String(value || ""));
     if (!match) return "Choose a daily delivery time.";
     const minutes = Number(match[1]) * 60 + Number(match[2]);
-    return minutes < 9 * 60 || minutes >= 17 * 60
-      ? "Choose a daily delivery time from 9:00 AM through 4:59 PM Eastern." : "";
+    return minutes < 7 * 60 + 30 || minutes >= 19 * 60 + 30
+      ? "Choose a daily delivery time from 7:30 AM through 7:29 PM Eastern." : "";
   }
 
   function selectedDailyStartTime() {
@@ -2434,14 +2434,14 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
           <small>Choose the first date and the Eastern start time used on every delivery day.</small></span></label>
       </div>
       <div class="email-schedule-fields email-continuation-fields" ${sendTiming === "now" ? "" : "hidden"}>
-        <label>Later-day start <input id="emailContinuationTime" type="time" min="09:00" max="16:45"
-          step="900" aria-describedby="emailScheduleHelp emailScheduleError" value="${esc(continuationTime)}"></label>
+        <label>Later-day start <input id="emailContinuationTime" type="time" min="07:30" max="19:29"
+          step="60" aria-describedby="emailScheduleHelp emailScheduleError" value="${esc(continuationTime)}"></label>
         <small id="emailScheduleHelp">Eastern Time. This time applies only if the batch continues on another weekday.</small>
       </div>
       <div class="email-schedule-fields" ${sendTiming === "later" ? "" : "hidden"}>
         <label>First date <input id="emailScheduleDate" type="date" min="${scheduleMin}" max="${scheduleMax}"
           aria-describedby="emailScheduleHelpLater emailScheduleError" value="${esc(scheduleDate)}"></label>
-        <label>Daily start <input id="emailScheduleTime" type="time" min="09:00" max="16:45" step="900"
+        <label>Daily start <input id="emailScheduleTime" type="time" min="07:30" max="19:29" step="60"
           aria-describedby="emailScheduleHelpLater emailScheduleError" value="${esc(scheduleTime)}"></label>
         <small id="emailScheduleHelpLater">Eastern Time. The same start time is used on every delivery day; weekends are skipped.</small>
       </div>
@@ -3381,7 +3381,7 @@ Generate emails for all of them?`)) return;
 
         const ccColleague = ((document.getElementById("ccColleague") || {}).value || "").trim();
         const followUpDays = Number((document.getElementById("followUpDays") || {}).value || 0);
-        sendTiming = "now"; scheduleDate = ""; scheduleTime = "09:00"; continuationTime = "09:00";
+        sendTiming = "now"; scheduleDate = ""; scheduleTime = "07:30"; continuationTime = "07:30";
         detail = await api("create_batch", { recipients: kept,
           templateId: (document.getElementById("emailTemplate") || {}).value || "",
           attachmentIds, materialFamilyIds, ccColleague, followUpDays });

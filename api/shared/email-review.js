@@ -57,8 +57,11 @@ function prepareEligibility(batch, m, now = Date.now()) {
       || ["send_outcome_unknown", "sent_item_not_confirmed", "reconciliation_failed", "reconciliation_pending"].includes(m.failureCode))
     return { reason: "Send outcome uncertain or already submitted; do not prepare another send." };
   const noSend = m.sendAttempts === 0 && !m.sendStartedUtc && !m.sendAttemptId;
-  const safeDraftFailure = ["draft_retryable_exhausted", "draft_permanent_failure", "auth_required_draft", "capacity_day_expired"].includes(m.failureCode) && noSend;
-  const safeSendFailure = ["send_retryable_exhausted", "auth_required_send", "capacity_day_expired"].includes(m.failureCode)
+  const safeCapacityHold = ["capacity_day_expired", "capacity_rollover_unavailable"].includes(m.failureCode)
+    && !m.sendStartedUtc && !m.sendAttemptId;
+  const safeDraftFailure = (["draft_retryable_exhausted", "draft_permanent_failure", "auth_required_draft"].includes(m.failureCode) && noSend)
+    || safeCapacityHold;
+  const safeSendFailure = ["send_retryable_exhausted", "auth_required_send"].includes(m.failureCode)
     && ["rejected", "not_started"].includes(m.sendOutcome);
   if (!safeDraftFailure && !safeSendFailure) return { reason: "Insufficient evidence that sending is safe to repeat." };
   const checked = Date.parse(m.outlookCheckedUtc || "");

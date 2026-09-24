@@ -286,22 +286,65 @@ function safeHold(err) {
  * duplicate deliveries can all wake work early or after its reserved day.
  * Check the durable assignment before touching Graph. */
 async function waitForPlannedTime(work, batch, message, deps) {
-  if (!message || !message.plannedSendUtc) return false;
+  if (!message || batch.mode !== 'send') return false;
+  const nowMs = typeof deps.nowMs === 'function' ? deps.nowMs() : Date.now();
   const due = Date.parse(message.plannedSendUtc);
-  if (Number.isFinite(due) && due > Date.now()) {
-    await deps.enqueue(work, Math.max(1, Math.ceil((due - Date.now()) / 1000)));
+  if (Number.isFinite(due) && due > nowMs) {
+    await deps.enqueue(work, Math.max(1, Math.ceil((due - nowMs) / 1000)));
     return true;
   }
-  if (message.capacityDay && deps.capacity.easternDay(Date.now()) !== message.capacityDay) {
+  const day = deps.capacity.easternDay(nowMs);
+  const withinWindow = (deps.capacity.withinSendingWindow || capacity.withinSendingWindow)(nowMs);
+  if (message.capacityDay && (day !== message.capacityDay || !withinWindow)) {
+    if (batch.capacityReservationId && message.capacityDay
+        && typeof deps.capacity.rolloverAllocation === 'function') {
+      try {
+        const cfg = deps.core.config();
+        const override = typeof deps.store.getDailyCap === 'function'
+          ? await deps.store.getDailyCap(work.userId) : null;
+        const limit = Number.isInteger(override) && override >= Number(cfg.dailyExternalLimit)
+          && override <= 250 ? override : cfg.dailyExternalLimit;
+        const rolled = await deps.capacity.rolloverAllocation(work.userId,
+          batch.capacityReservationId, message.id, batch.capacityPlanHash,
+          { nowMs, mailboxIntervalSeconds: cfg.mailboxIntervalSeconds, limit });
+        if (rolled.available) {
+          const assignment = rolled.assignment;
+          await deps.store.patchMessage(work.userId, work.batchId, work.messageId, {
+            capacityDay: assignment.day, capacityUnits: assignment.units,
+            plannedSendUtc: assignment.plannedSendUtc,
+            trancheIndex: assignment.trancheIndex,
+            tranchePosition: assignment.tranchePosition,
+            leaseUntilUtc: '', retryAfterUtc: '',
+          }, message.etag);
+          if (rolled.moved) await deps.store.audit(work.userId, work.batchId,
+            'capacity_rollover', { messageId: work.messageId,
+              fromDay: message.capacityDay, toDay: assignment.day });
+          await deps.enqueue(work, Math.max(1, Math.ceil(
+            (Date.parse(assignment.plannedSendUtc) - nowMs) / 1000)));
+          return true;
+        }
+      } catch (error) {
+        if (!["capacity_reservation_missing", "capacity_plan_changed",
+              "capacity_allocation_missing"].includes(error.code)) {
+          if (deps.logger?.warn) deps.logger.warn('Capacity rollover deferred: ' + error.message);
+          await deps.enqueue(work, 60);
+          return true;
+        }
+      }
+    }
     const claimed = await deps.store.claimMessage(work.userId, work.batchId, work.messageId,
       [message.state], message.state, 30);
     if (claimed) {
       await deps.store.patchMessage(work.userId, work.batchId, work.messageId, {
-        state: "failed", failureCode: "capacity_day_expired",
-        failureMessage: "This email did not start on its reserved Eastern business day. Review it in a new batch before sending.",
+        state: "failed", failureCode: batch.capacityReservationId
+          ? "capacity_rollover_unavailable" : "capacity_day_expired",
+        failureMessage: batch.capacityReservationId
+          ? "No safe capacity slot remains within the approved seven-day window. Review this unsent email in a new batch."
+          : "This email has no movable reservation for the current Eastern sending window. Review it in a new batch.",
         leaseUntilUtc: "",
       }, claimed.etag);
-      await deps.store.audit(work.userId, work.batchId, "capacity_day_expired",
+      await deps.store.audit(work.userId, work.batchId, batch.capacityReservationId
+        ? "capacity_rollover_unavailable" : "capacity_day_expired",
         { messageId: work.messageId, capacityDay: message.capacityDay });
       await refreshBatch(work.userId, work.batchId, deps);
     }
@@ -848,6 +891,16 @@ async function send(work, deps) {
       }
 
       await require("../shared/email-retry-preparation").assertOriginalUnsent(claimed, batch, token.accessToken, deps);
+      // Draft preparation, authentication, and mailbox pacing can carry a
+      // once-valid slot past closing time. Recheck immediately before the
+      // irreversible Graph send intent, then move the unsent message safely.
+      if (claimed.capacityDay && !(deps.capacity.withinSendingWindow || capacity.withinSendingWindow)(
+        typeof deps.nowMs === 'function' ? deps.nowMs() : Date.now())) {
+        const pendingAgain = await deps.store.patchMessage(work.userId, work.batchId, work.messageId,
+          { state: 'send_scheduled', leaseUntilUtc: '' }, claimed.etag);
+        await waitForPlannedTime(work, batch, pendingAgain, deps);
+        return;
+      }
       Object.assign(claimed, await deps.store.patchMessage(work.userId, work.batchId, work.messageId, {
         sendOutcome: "started", sendStartedUtc: new Date().toISOString(),
         sendAttemptId: require("node:crypto").randomUUID(),
