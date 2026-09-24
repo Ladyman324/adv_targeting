@@ -84,6 +84,35 @@ test("an individual override changes the daily plan without changing the default
   assert.equal(cfg.dailyExternalLimit, 25);
 });
 
+test("a 200-recipient override does not stop a campaign at the 25-person default", async () => {
+  const cfg = { calendarCapacityEnabled: true, dailyExternalLimit: 25,
+    cancellationSeconds: 20, mailboxIntervalSeconds: 20,
+    internalDomains: new Set(["eicatlanta.com"]) };
+  const messages = Array.from({ length: 201 }, (_, i) => ({
+    id: `m${i + 1}`, recipientEmail: `advisor${i + 1}@example.com`, teammateCc: [],
+  }));
+  const st = {
+    getDailyCap: async (userId) => userId === "high-cap" ? 200 : null,
+    getBatch: async () => ({ id: "b1", status: "editing" }),
+    listMessages: async () => messages,
+  };
+  const guard = {
+    capacitySnapshot: async () => ({ days: [] }),
+    previewPlan: (ordered, options) => capacity.previewPlan(ordered, {
+      ...options, nowMs: Date.parse("2026-09-24T12:00:00Z"),
+      startUtc: "2026-09-24T12:01:00Z",
+    }),
+  };
+  const high = await service.capacityPlan({ id: "high-cap" },
+    { batchId: "b1" }, { store: st, core: { config: () => ({ ...cfg }) }, limitGuard: guard });
+  assert.equal(high.deliveryPlan.dailyLimit, 200);
+  assert.deepEqual(high.deliveryPlan.days.map((day) => day.messageCount), [200, 1]);
+  const ordinary = await service.capacityPlan({ id: "ordinary" },
+    { batchId: "b1" }, { store: st, core: { config: () => ({ ...cfg }) }, limitGuard: guard });
+  assert.equal(ordinary.deliveryPlan.dailyLimit, 25);
+  assert.equal(ordinary.deliveryPlan.days[0].messageCount, 25);
+});
+
 test("Settings returns configured colleagues to a signed-in user without loading the email catalog", async () => {
   const handler = require("../email/index");
   const saved = process.env.EMAIL_INTERNAL_RECIPIENTS;
