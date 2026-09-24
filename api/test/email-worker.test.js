@@ -40,6 +40,47 @@ test("queued hints cannot revive a source already moved to a retry review", asyn
   assert.equal(f.message.state, "draft_pending"); assert.equal(f.message.attemptCount, 0);
 });
 
+test('ACT email mirror runs only for a confirmed sent item', async () => {
+  const f = fixture('send', 'submitted');
+  f.batch.senderMail = 'rep@eicatlanta.com';
+  f.message.graphMessageId = 'sent-1';
+  f.message.teammateCc = ['teammate@example.test'];
+  f.message.teammateCcCrds = ['456'];
+  const calls = [];
+  const graph = { getMessage: async () => ({
+    id: 'sent-1', isDraft: false, sentDateTime: '2026-08-15T12:00:00Z',
+    subject: 'Confirmed subject',
+  }), findByAppId: async () => null };
+  await worker.processWork({ kind: 'reconcile', userId: 'user-1',
+    batchId: 'batch-1', messageId: 'message-1' }, {
+    ...f, graph, actSync: { logEmail: async (...args) => {
+      calls.push(args); return 'written';
+    } },
+  });
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0][0], 'rep@eicatlanta.com');
+  assert.deepEqual(calls[0][1], {
+    crd: '123', email: 'safe@example.test', userId: 'user-1',
+    messageId: 'batch-1:message-1', sentAt: '2026-08-15T12:00:00Z',
+    subject: 'Confirmed subject',
+  });
+  assert.equal(calls[1][1].crd, '456');
+  assert.equal(calls[1][1].email, 'teammate@example.test');
+  assert.equal(f.message.state, 'sent');
+});
+
+test('ACT email mirror never runs for an uncertain or still-draft send', async () => {
+  const f = fixture('send', 'send_ambiguous');
+  f.message.graphMessageId = 'draft-1';
+  let calls = 0;
+  await worker.processWork({ kind: 'reconcile', userId: 'user-1',
+    batchId: 'batch-1', messageId: 'message-1' }, {
+    ...f, graph: { getMessage: async () => routedDraft('draft-1') },
+    actSync: { logEmail: async () => { calls++; return 'written'; } },
+  });
+  assert.equal(calls, 0);
+});
+
 function fixture(mode, state) {
   let version = 1;
   const batch = { id: "batch-1", userId: "user-1", status: mode === "send" ? "sending" : "drafting",

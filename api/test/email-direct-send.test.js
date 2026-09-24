@@ -186,10 +186,21 @@ test("canonical Graph metadata drives activity and a retry-stable actedAt", asyn
       internetMessageId: "<one@example>", conversationId: "conversation", subject: "Canonical",
       toRecipients: [{ emailAddress: { address: "advisor@example.com" } }] }),
   });
+  const mirrored = [];
+  h.deps.auth.tokenFor = async () => ({
+    accessToken: 'token', mailbox: 'rep@eicatlanta.com',
+  });
+  h.deps.actSync = { logEmail: async (...args) => {
+    mirrored.push(args); return 'written';
+  } };
   await direct.processWork({ v: 1, kind: "direct_finalize", userId: "u1", operationId: OP }, h.deps);
   assert.equal(h.calls.activity[0].occurredAt, sentAt);
   assert.equal(h.calls.activity[0].graphMessageId, "sent-immutable");
   assert.equal(h.calls.actedAt, sentAt);
+  assert.equal(mirrored.length, 1);
+  assert.equal(mirrored[0][0], 'rep@eicatlanta.com');
+  assert.equal(mirrored[0][1].email, 'advisor@example.com');
+  assert.equal(mirrored[0][1].sentAt, sentAt);
   assert.equal(h.current().state, "complete");
 });
 

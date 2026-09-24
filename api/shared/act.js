@@ -56,9 +56,21 @@ const ENABLED = process.env.ACT_SYNC === "1";
 const ONLY = new Set(
   String(process.env.ACT_ONLY_CRD || "").split(",").map((s) => s.trim()).filter(Boolean));
 
+// ACT_SYNC is already enabled in production. New email-based routes must be
+// separately enabled after a controlled live check, not by merely deploying.
+const EMAIL_ROUTE_ENABLED = process.env.ACT_ACTIVITY_EMAIL_ROUTE === '1';
+const ACTIVITY_ONLY = new Set(String(process.env.ACT_ACTIVITY_ONLY_CRD || '')
+  .split(',').map((value) => value.trim()).filter(Boolean));
+const EMAIL_HISTORY_ENABLED = process.env.ACT_EMAIL_HISTORY_SYNC === '1';
+const EMAIL_HISTORY_ONLY = new Set(String(process.env.ACT_EMAIL_HISTORY_ONLY_CRD || '')
+  .split(',').map((value) => value.trim()).filter(Boolean));
+const repSettings = require('./store');
+
 function configured() {
   return Boolean(ENABLED && USER && PASSWORD && DATABASE);
 }
+
+const crypto = require('node:crypto');
 
 /* ---------- what a disposition means to Act! ------------------------------
  * Must match Dial.OUTCOMES in webapp/dial.js; audit.py checks that it does.
@@ -117,6 +129,30 @@ function contacts() {
     CONTACTS = {};
   }
   return CONTACTS;
+}
+
+/* Activity routing is separate from SEC identity approval. The address actually
+ * used must match the unique ACT/map email in the build artifact. */
+let ACTIVITY_CONTACTS = null;
+function activityContacts() {
+  if (ACTIVITY_CONTACTS) return ACTIVITY_CONTACTS;
+  try {
+    const raw = fs.readFileSync(path.join(__dirname, 'act_contacts.json'), 'utf8');
+    ACTIVITY_CONTACTS = JSON.parse(raw).activity_contacts || {};
+  } catch { ACTIVITY_CONTACTS = {}; }
+  return ACTIVITY_CONTACTS;
+}
+
+function activityContactFor(crd, email) {
+  const route = activityContacts()[String(crd || '')];
+  const address = String(email || '').trim().toLowerCase();
+  return route && address && route.email === address ? route.id : '';
+}
+
+async function liveEmailMatches(contactId, email) {
+  const current = await call('GET', 'api/contacts/' + encodeURIComponent(contactId));
+  return String((current || {}).emailAddress || '').trim().toLowerCase()
+    === String(email || '').trim().toLowerCase();
 }
 
 /* ---------- auth ----------------------------------------------------------
@@ -239,10 +275,21 @@ async function logCall(who, body) {
 
   if (ONLY.size && !ONLY.has(String(body.crd))) return "not-in-test-allowlist";
 
-  const contactId = contacts()[String(body.crd)];
+  // When the selected card has an address, never override a conflicting or
+  // non-unique address with a CRD-only route. No address means the historical
+  // approved-CRD route remains available.
+  const crd = String(body.crd);
+  const emailRouteAllowed = EMAIL_ROUTE_ENABLED
+    && (!ACTIVITY_ONLY.size || ACTIVITY_ONLY.has(crd));
+  const emailContactId = emailRouteAllowed
+    ? activityContactFor(crd, body.email) : '';
+  const contactId = emailContactId
+    || (emailRouteAllowed && body.email ? '' : contacts()[crd]);
   if (!contactId) return "no-contact";
 
   try {
+    if (emailContactId && !(await liveEmailMatches(contactId, body.email)))
+      return 'stale-email';
     const rep = await userIdFor(who.name);
     if (!rep) return "no-act-user";
     const userId = rep.id;
@@ -348,6 +395,97 @@ async function logCall(who, body) {
     return "written";
   } catch (e) {
     return `failed: ${String(e.message || e).slice(0, 180)}`;
+  }
+}
+
+/* Mirror an Outlook-confirmed send. This route is deliberately email-address
+ * based: it identifies the ACT contact that owns the mailbox actually mailed,
+ * without asserting that an ACT CRD or the map's SEC identity is correct.
+ * A stable marker prevents retries after a worker crash from creating a second
+ * history entry. ACT failure never changes the Outlook send result. */
+async function logEmail(senderEmail, event) {
+  if (!configured()) return 'off';
+  if (!EMAIL_HISTORY_ENABLED) return 'off';
+  // Internal recipients never get email history, including internal CCs on
+  // external messages. A missing preference or storage outage fails closed.
+  const recipientEmail = String(event.email || '').trim().toLowerCase();
+  if (recipientEmail.endsWith('@eicatlanta.com')) return 'internal-recipient';
+  if (!event.userId) return 'no-sender-id';
+  let preference;
+  try { preference = await repSettings.getSettings({ id: String(event.userId) }); }
+  catch { return 'settings-unavailable'; }
+  if (preference.actEmailWrite !== '1') return 'user-opted-out';
+  const crd = String(event.crd || '');
+  if (EMAIL_HISTORY_ONLY.size && !EMAIL_HISTORY_ONLY.has(crd))
+    return 'not-in-email-canary';
+  if (ONLY.size && !ONLY.has(crd)) return 'not-in-test-allowlist';
+  const contactId = activityContactFor(crd, event.email);
+  if (!contactId) return 'no-contact';
+  const messageId = String(event.messageId || '');
+  if (!messageId) return 'no-message-id';
+  const marker = 'AdvisorMapEmail:' + crypto.createHash('sha256')
+    .update(messageId).digest('hex').slice(0, 32);
+  try {
+    if (!(await liveEmailMatches(contactId, event.email))) return 'stale-email';
+    const rep = await userIdFor(senderEmail);
+    if (!rep) return 'no-act-user';
+    const historyUrl = 'api/contacts/' + encodeURIComponent(contactId) + '/history';
+    const already = await call('GET', historyUrl);
+    const rows = Array.isArray(already) ? already : (already && already.value) || [];
+    const existing = rows.find((h) =>
+      String(h.details || h.notes || '').includes(marker));
+    if (existing) {
+      const previousType = String((existing.historyType || {}).id
+        ?? existing.historyTypeID ?? '');
+      if (previousType && previousType !== '16') return 'misclassified';
+      const previousManager = String(existing.recordManager || '');
+      if (rep.name && previousManager && previousManager !== rep.name)
+        return 'misattributed';
+      return 'written';
+    }
+    const when = new Date(event.sentAt || Date.now());
+    if (isNaN(when.getTime())) return 'invalid-sent-time';
+    const end = new Date(when.getTime() + 60000);
+    const subject = ('Email - ' + String(event.subject || '').trim()).slice(0, 160);
+    const details = [
+      'Sent through Outlook from ' + senderEmail + ' to ' + event.email + '.',
+      marker,
+    ].join('\n');
+    const task = await call('POST', 'api/organizers/' + rep.id + '/tasks', {
+      subject, details, startTime: when.toISOString(), endTime: end.toISOString(),
+      scheduledForId: rep.id, scheduledFor: rep.name,
+      activityTypeId: 0, contacts: [{ id: contactId }],
+      isPrivate: false, isTimeless: false,
+    });
+    const taskId = (task && task.id) || task;
+    if (!taskId) return 'failed: no task id returned';
+    await call('PUT', 'api/tasks/' + taskId + '/clear', {
+      result: { id: 16, name: 'E-mail Sent' },
+      history: {
+        startTime: when.toISOString(), endTime: end.toISOString(),
+        includeDetailsToHistory: true, subject, details, isPrivate: false,
+      },
+    });
+    const verify = await call('GET', historyUrl);
+    const after = Array.isArray(verify) ? verify : (verify && verify.value) || [];
+    const found = after.find((h) => String(h.details || h.notes || '').includes(marker));
+    if (!found) return 'unverified';
+    const actualType = String((found.historyType || {}).id
+      ?? found.historyTypeID ?? '');
+    if (actualType && actualType !== '16') {
+      try { await call('DELETE', 'api/History/' + found.id); }
+      catch { return 'misclassified: removal failed'; }
+      return 'misclassified';
+    }
+    const manager = String(found.recordManager || '');
+    if (rep.name && manager && manager !== rep.name) {
+      try { await call('DELETE', 'api/History/' + found.id); }
+      catch { return 'misattributed: removal failed'; }
+      return 'not-attributable';
+    }
+    return 'written';
+  } catch (error) {
+    return 'failed: ' + String(error.message || error).slice(0, 180);
   }
 }
 
@@ -742,6 +880,6 @@ async function markHardBounce(crd, address, detail, approvedContactId = "") {
   return { ok: true, mailCode };
 }
 
-module.exports = { configured, logCall, historyFor, diagnose, contactStatus,
+module.exports = { configured, logCall, logEmail, historyFor, diagnose, contactStatus,
   markDoNotEmail, markHardBounce, actFields, actContact, setMailCode, MAIL_CODE_RANK,
                    RESULTS, PURPOSES };

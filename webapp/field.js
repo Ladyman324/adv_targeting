@@ -19,7 +19,7 @@ const PAGE = 200;                  // rows added per "Show more"
 // Stamped by src/web_assets.py from metadata time plus every deployed JSON
 // byte. Field data still revalidates, but the shared build ID prevents stale
 // same-day rebuilds and keeps every first-party data request explicit.
-const DATA_VERSION = "20260923T195616Z-10486e84fa7a533c";
+const DATA_VERSION = "20260923T195616Z-b67d80e56e900963";
 const dataUrl = file => {
   const path = file.startsWith("data/") ? file : `data/${file}`;
   return `${path}${path.includes("?") ? "&" : "?"}v=${encodeURIComponent(DATA_VERSION)}`;
@@ -1959,6 +1959,11 @@ function renderSettings(){
       <p class="set-sub">Generated centrally from your Microsoft 365 profile and the approved corporate disclosure. The exact signature appears in every email preview.</p>
     </div>
 
+    ${Dial.state.settingsFeatures.actEmailWrite ? `<label class="set-row set-check">
+      <input type="checkbox" id="setActEmailWrite"${g("actEmailWrite") === "1" ? " checked" : ""}>
+      <span>Write app emails to ACT!</span>
+    </label><p class="set-sub">Off by default. Use only if your sent email is not already recorded in ACT!. EIC employees are excluded.</p>` : ""}
+
     <label class="set-row set-check">
       <input type="checkbox" id="setAuto"${S.auto.on ? " checked" : ""}>
       <span>Auto-dial the next call</span>
@@ -2976,6 +2981,7 @@ document.addEventListener("click", (e) => {
   if (e.target.closest("#settingsBtn")) {
     settingsOpen = true;
     renderSettings();
+    Dial.loadSettings().then(() => { if (settingsOpen) renderSettings(); });
     return;
   }
   if (e.target.closest("#settingsClose")) {
@@ -3350,6 +3356,10 @@ document.addEventListener("change", (e) => {
   }
   if (e.target.id === "setRadius") {
     saveSetting({ fieldRadius: e.target.value });
+    return;
+  }
+  if (e.target.id === "setActEmailWrite") {
+    saveSetting({ actEmailWrite: e.target.checked ? "1" : "0" });
     return;
   }
   if (e.target.id === "setAuto") {

@@ -23,6 +23,8 @@ const workQueue = require("./email-direct-queue");
 const replyTools = require("./email-reply-send");
 const recipientRegistry = require("./recipient-registry");
 
+const actSync = require('./act');
+
 const RETRY_SECONDS = 30;
 const RECONCILE_HORIZON_MS = 6 * 60 * 60 * 1000;
 
@@ -36,7 +38,7 @@ function httpError(statusCode, message, code) {
 function dependencies(overrides = {}) {
   const merged = {
     graph, auth, core, suppress, advisors, recipientRegistry, limitGuard, mailboxGate,
-    activityStore, engagement, opsStore, workQueue,
+    activityStore, engagement, opsStore, workQueue, actSync,
     wait: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
     ...overrides,
   };
@@ -562,6 +564,20 @@ async function processFinalize(operation, deps) {
       graphConversationId: message.conversationId || "",
       canonicalSentDateTime: message.sentDateTime, subject: message.subject || claimed.subject,
     }, claimed.etag);
+    // The Outlook operation is complete before optional CRM traffic. ACT
+    // latency or an outage must never leave the send shown as confirming.
+    try {
+      const status = await deps.actSync.logEmail(token.mailbox, {
+        userId: claimed.userId,
+        crd: claimed.advisorCrd, email: advisorEmail,
+        messageId: claimed.operationId, sentAt: message.sentDateTime,
+        subject: message.subject || claimed.subject,
+      });
+      if (status !== 'written' && status !== 'off')
+        console.warn('ACT direct email mirror: ' + status);
+    } catch (error) {
+      console.warn('ACT direct email mirror failed after confirmed send: ' + error.message);
+    }
   } catch (err) {
     const latest = await deps.opsStore.getOperation(claimed.userId, claimed.operationId).catch(() => null);
     if (!latest || latest.state !== "reconciled") throw err;

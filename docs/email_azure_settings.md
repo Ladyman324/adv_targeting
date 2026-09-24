@@ -1,5 +1,18 @@
 # Email settings in Azure
 
+## ACT! email history write-back
+
+`ACT_EMAIL_HISTORY_SYNC` on the `eic-advisors-api` Function App is the
+administrator overlay. Leave it at `0` (or unset) to hide the per-user
+**Write app emails to ACT!** setting and prevent all app email-history writes.
+Setting it to `1` reveals the control in desktop and Field Settings, but each
+rep still defaults to Off. A rep must opt in on their own signed-in account;
+the preference is stored in `RepSettings` and checked server-side after Outlook
+confirms each send, including scheduled sends. Missing preferences and storage
+failures fail closed. No `@eicatlanta.com` recipient is written to ACT!, even
+when copied on an external message. Existing Outlook/ACT! capture may create
+duplicate history if a rep also enables this app writer.
+
 Every value below is an **Application setting** on the Function App
 (`eicadvisormail` → Settings → Environment variables → App settings). Changing
 one takes effect on the next restart — Azure restarts the app automatically when

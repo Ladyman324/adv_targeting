@@ -2340,6 +2340,7 @@ def _act_lookup():
     """
     import pandas as pd                                   # noqa: PLC0415
     from collections import Counter                       # noqa: PLC0415
+    from build_act_lookup import activity_pairs             # noqa: PLC0415
     from contact_provenance import sha256_file             # noqa: PLC0415
     from identity_schema import (IDENTITY_DIRNAME, LINKS_FILENAME,
                                  MANIFEST_FILENAME, content_hash)  # noqa: PLC0415
@@ -2377,6 +2378,13 @@ def _act_lookup():
         problems.append("shipped map names a different Act source")
     if artifact.get("act_source_sha256") != (manifest.get("actSource") or {}).get("sha256"):
         problems.append("shipped map names different Act source bytes")
+
+    contact_path = ROOT / 'webapp' / 'data' / 'contacts.json'
+    if artifact.get('contact_source_sha256') != sha256_file(contact_path):
+        problems.append('activity routes use a different contacts.json')
+    expected_activity = activity_pairs(manifest, expected)
+    if artifact.get('activity_contacts') != expected_activity:
+        problems.append('exact-email activity routes differ from pinned ACT/map inputs')
 
     return (not problems,
             f"{len(shipped):,} approved Act routes of {len(links):,} ledger rows; "

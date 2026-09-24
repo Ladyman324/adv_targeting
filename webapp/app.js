@@ -39,7 +39,7 @@ const COMPARE = ["#12b39c", "#e0a53a", "#8079e0", "#e8615d", "#4aa3e0", "#9fc93c
 // of every deployed JSON path and byte. It changes for standalone shard
 // rebuilds too, and its leading date keeps the stale-build warning readable.
 // Do not edit it by hand.
-const DATA_VERSION = "20260923T195616Z-10486e84fa7a533c";
+const DATA_VERSION = "20260923T195616Z-b67d80e56e900963";
 const dataUrl = file => `data/${file}?v=${DATA_VERSION}`;
 Dial.setContactRouteVersion(DATA_VERSION);
 // ONE scale for every mark on the map. There used to be two, and they were not
@@ -2038,6 +2038,7 @@ document.addEventListener("click", async e => {
   [...grid.children].forEach(x => { x.disabled = true; });
   try {
     const res = await Dial.log({
+      email: (c && c.e) || '',
       crd, name, firm: (c && c.cn) || "", phone: (c && c.w) || "",
       phoneKind: (c && c.wk) || "", disposition, note, purpose: cardPurpose,
       kind: "outcome",
@@ -4379,6 +4380,7 @@ function openSettings(){
   settingsCatalogState = "loading";
   settingsCatalogError = "";
   paintSettings();
+  Dial.loadSettings().then(() => { if (setBack && request === settingsCatalogRequest) paintSettings(); });
   if (!ME) Dial.whoAmI().then((p) => { ME = p; paintSettings(); });
   if (window.EmailComposer && EmailComposer.loadSettingsData)
     EmailComposer.loadSettingsData().then((data) => {
@@ -4474,6 +4476,14 @@ function paintSettings(){
     + `<div class="set-row set-block"><span>Email signature</span>`
     + `<p class="set-sub">Generated centrally from your Microsoft 365 profile and the approved corporate disclosure. The exact signature appears in every email preview.</p></div>`
 
+    + (Dial.state.settingsFeatures.actEmailWrite
+      ? `<label class="set-row set-check"><input id="setActEmailWrite" type="checkbox"`
+        + `${g("actEmailWrite") === "1" ? " checked" : ""}>`
+        + `<span>Write app emails to ACT!</span></label>`
+        + `<p class="set-sub">Off by default. Turn on only if your sent email is not already recorded in ACT!. `
+        + `Only external advisor recipients are recorded; EIC employees are excluded.</p>`
+      : "")
+
     + `<div class="set-row set-block" id="setAdmin"${ADMIN ? "" : " hidden"}>`
     + `<span>Email administration</span>`
     + `<p class="set-sub">Approved templates, documents, and sender controls.</p>`
@@ -4551,6 +4561,7 @@ document.addEventListener("change", e => {
   if (e.target.name === "setCopySelf") saveSetting({ copySelf: e.target.value });
   if (e.target.name === "setCopyInternal") saveSetting({ copyInternal: e.target.value });
   if (e.target.id === "setCopyInternalTo") saveSetting({ copyInternalTo: e.target.value });
+  if (e.target.id === "setActEmailWrite") saveSetting({ actEmailWrite: e.target.checked ? "1" : "0" });
 });
 
 function defaultListName(){

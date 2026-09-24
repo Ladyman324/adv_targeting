@@ -116,7 +116,19 @@ evidence hash. Inactive records cannot be manually promoted.
    review export is research-only; no importer consumes edits to that report.
 
    The contact build validates and publishes the exact ledger/ACT provenance.
-   The ACT lookup is ledger-approved only. The email registry is bound to the
+   The ACT lookup has two separate routes: CRD-approved identity links for
+   history reads and legacy CRD write-back, and unique exact ACT/map email
+   matches for mirroring activity actually sent to or logged against that
+   address. Email activity routes do not approve SEC identity, names, assets,
+   or outbound eligibility. The API rechecks the ACT contact's live email
+   before using an email route, and refuses duplicates and shared mailboxes.
+   Both new routes are dark by default even when ACT_SYNC=1. Enable
+   ACT_ACTIVITY_EMAIL_ROUTE=1 for call outcomes and
+   ACT_EMAIL_HISTORY_SYNC=1 for confirmed Outlook sends only after a canary;
+   ACT_ACTIVITY_ONLY_CRD and ACT_EMAIL_HISTORY_ONLY_CRD can each restrict
+   that canary to a comma-separated set of advisor CRDs. Existing approved-CRD
+   call write-back is unaffected while the new flags are off.
+   The email registry is bound to the
    identity manifest, links, ACT source bytes, and contacts hash. `confirmed`
    and `high` identities enter the outbound registry by an explicit business
    authorization decision. `review` remains unresolved and is excluded from

@@ -15,6 +15,8 @@ const materials = require("../shared/email-materials");
 const schedule = require("../shared/email-schedule");
 const capacity = require("../shared/email-limit-guard");
 
+const actSync = require('../shared/act');
+
 function releaseMetadata() {
   try {
     const value = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "release.json"), "utf8"));
@@ -900,6 +902,26 @@ async function reconcile(work, deps) {
         leaseUntilUtc: "", failureCode: "", failureMessage: "" }, message.etag);
       await deps.store.audit(work.userId, work.batchId, "send_reconciled", { messageId: message.id,
         status: "no_known_failure" });
+      if (remote.sentDateTime && message.contactId) {
+        const recipients = [{ crd: message.contactId, email: message.recipientEmail }];
+        for (let index = 0; index < (message.teammateCc || []).length; index++)
+          recipients.push({ crd: (message.teammateCcCrds || [])[index] || '',
+            email: message.teammateCc[index] });
+        for (const recipient of recipients) {
+          try {
+            const status = await deps.actSync.logEmail(token.mailbox || batch.senderMail, {
+              ...recipient, userId: work.userId,
+              messageId: work.batchId + ':' + message.id,
+              sentAt: remote.sentDateTime, subject: remote.subject || message.subject,
+            });
+            if (status !== 'off') await deps.store.audit(work.userId, work.batchId,
+              'act_email_mirror', { messageId: message.id, crd: recipient.crd, status });
+          } catch (error) {
+            if (deps.logger && deps.logger.warn)
+              deps.logger.warn('ACT email mirror failed after confirmed send: ' + error.message);
+          }
+        }
+      }
     } else if (mayContinue) {
       const delay = Math.min(900, 30 * 2 ** Math.min(message.reconcileAttempts, 5));
       await deps.store.patchMessage(work.userId, work.batchId, work.messageId, {
@@ -937,6 +959,7 @@ async function processWork(raw, overrides = {}) {
   const work = parseWork(raw);
   const deps = { auth, store, graph, enqueue: service.enqueue, core, mailboxGate, suppress, capacity,
     recipientRegistry, service, ...overrides };
+  deps.actSync = deps.actSync || actSync;
   if (!work.userId || !work.batchId || (!work.messageId && !["preflight", "schedule_notify"].includes(work.kind)))
     throw new Error("Incomplete email queue message.");
   if (work.messageId) {

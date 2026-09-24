@@ -31,6 +31,7 @@ import functools
 import http.server
 import html
 import json
+import os
 import pathlib
 import socketserver
 import sys
@@ -88,6 +89,7 @@ SETTING_KEYS = {
     # compares the two lists, because a key the dev server drops is a preference
     # that saves in production and vanishes locally.
     "copySelf": 8, "copyInternal": 8, "copyInternalTo": 254,
+    "actEmailWrite": 1,
     "homeLabel": 80, "homeLat": 24, "homeLon": 24,
     "emailSignature": 1500,
     "autoDialOn": 8, "autoDialDelay": 8, "autoDialAnnounce": 8,
@@ -466,7 +468,8 @@ class GzipHandler(http.server.SimpleHTTPRequestHandler):
             _dev_save(state)
             self._json(200, q)
         elif route == "settings" and method == "GET":
-            self._json(200, {"settings": state.setdefault("settings", {}).get(uid, {})})
+            self._json(200, {"settings": state.setdefault("settings", {}).get(uid, {}),
+                             "features": {"actEmailWrite": os.environ.get("ACT_EMAIL_HISTORY_SYNC") == "1"}})
         elif route == "training-video" and method == "GET":
             # The recording is deliberately not served from the repository.
             # Production mints a short-lived private Blob URL; local development
@@ -474,6 +477,13 @@ class GzipHandler(http.server.SimpleHTTPRequestHandler):
             self._json(503, {"error": "The training video is available in the deployed app."})
         elif route == "settings" and method == "PUT":
             body = self._read_json()
+            if "actEmailWrite" in body:
+                if os.environ.get("ACT_EMAIL_HISTORY_SYNC") != "1":
+                    self._json(403, {"error": "ACT! email write-back is disabled by the administrator."})
+                    return True
+                if body["actEmailWrite"] not in ("0", "1"):
+                    self._json(400, {"error": "ACT! email write-back must be on or off."})
+                    return True
             cur = state.setdefault("settings", {}).setdefault(uid, {})
             # A MERGE of the keys sent, and unknown keys are dropped -- the same
             # two rules as api/shared/store.js. The field view saves a radius
@@ -484,6 +494,7 @@ class GzipHandler(http.server.SimpleHTTPRequestHandler):
                     cur[k] = str(body.get(k) if body.get(k) is not None else "")[:mx]
             _dev_save(state)
             self._json(200, {"ok": True, "settings": cur,
+                             "features": {"actEmailWrite": os.environ.get("ACT_EMAIL_HISTORY_SYNC") == "1"},
                              "accepts": list(SETTING_KEYS)})
         elif route == "dnc" and method == "GET":
             entries = list(state["dnc"].values())

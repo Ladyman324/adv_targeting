@@ -73,6 +73,7 @@
     // localStorage because a default that differs between the desk and the
     // phone is not a default -- it is two settings sharing a name.
     settings: {},
+    settingsFeatures: {},
     // The immutable static-data build which authorized a saved telephone
     // route. Each view supplies its generated DATA_VERSION. Queue rows from a
     // different build (and pre-proof legacy rows) remain useful as lists, but
@@ -133,7 +134,8 @@
     try {
       const d = await call(API.settings);
       state.settings = d.settings || {};
-    } catch { state.settings = {}; }
+      state.settingsFeatures = d.features || {};
+    } catch { state.settings = {}; state.settingsFeatures = {}; }
     // Auto-dial moves from localStorage to the account when a stored value
     // exists. Per-device was never a decision anybody made; it was where the
     // first version happened to put it.
@@ -153,12 +155,19 @@
     // Written through OPTIMISTICALLY so the UI reflects the choice at once,
     // then corrected from the server's own reply -- which is authoritative
     // about what it actually stored, including the keys it dropped.
+    const previous = { ...state.settings };
     state.settings = { ...state.settings, ...patch };
     emit();
-    const d = await call(API.settings, {
-      method: "PUT", body: JSON.stringify(patch),
-    });
+    let d;
+    try {
+      d = await call(API.settings, { method: "PUT", body: JSON.stringify(patch) });
+    } catch (error) {
+      state.settings = previous;
+      emit();
+      throw error;
+    }
     state.settings = d.settings || {};
+    state.settingsFeatures = d.features || {};
     emit();
     return state.settings;
   }
@@ -993,6 +1002,7 @@
       method: "POST",
       body: JSON.stringify({
         crd: String(entry.crd),
+        email: entry.email || '',
         name: entry.name || "",
         firm: entry.firm || "",
         phone: entry.phone || "",
@@ -1435,6 +1445,10 @@
    * understanding of what happened would otherwise be wrong.
    */
   function actNotice(status) {
+    if (status === 'stale-email') {
+      return 'Saved here, but ACT! now has a different email for this contact. '
+        + 'It was not copied to ACT!; ask an administrator to refresh contact data.';
+    }
     const s = String(status || "");
     if (s.startsWith("failed:")) {
       return "Saved here, but it did not reach Act!. Nothing is lost — the "
