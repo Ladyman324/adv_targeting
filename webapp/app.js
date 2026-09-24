@@ -4509,6 +4509,10 @@ async function saveSetting(patch){
     await Dial.saveSettings(patch);
     if (el) el.textContent = "Saved.";
   } catch (err) {
+    // A failed Off save must never look successful while the server still has
+    // this sender opted in. Dial rolls back its state; restore the control too.
+    const actSwitch = document.getElementById("setActEmailWrite");
+    if (actSwitch) actSwitch.checked = Dial.setting("actEmailWrite") === "1";
     // Said out loud. A preference that silently failed to save is one the rep
     // sets again next week and blames themselves for.
     if (el) { el.textContent = err.message || "That could not be saved.";

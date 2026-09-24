@@ -70,5 +70,6 @@ test('both views show the control only from the server feature flag', () => {
     const source = fs.readFileSync(path.join(__dirname, '..', '..', 'webapp', name), 'utf8');
     assert.match(source, /settingsFeatures\.actEmailWrite/);
     assert.match(source, /setActEmailWrite/);
+    assert.match(source, /actSwitch\.checked = Dial\.setting\("actEmailWrite"\) === "1"/);
   }
 });

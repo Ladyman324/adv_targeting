@@ -2006,6 +2006,8 @@ async function saveSetting(patch){
     await Dial.saveSettings(patch);
     if (el) { el.textContent = "Saved."; el.className = "set-saved"; }
   } catch (e) {
+    const actSwitch = $("setActEmailWrite");
+    if (actSwitch) actSwitch.checked = Dial.setting("actEmailWrite") === "1";
     // Said out loud. A preference that silently failed to save is one the rep
     // sets again next week and blames themselves for.
     if (el) { el.textContent = e.message || "That could not be saved.";
