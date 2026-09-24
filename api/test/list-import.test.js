@@ -6,6 +6,42 @@ const path = require("node:path");
 const fs = require("node:fs");
 const Module = require("node:module");
 const importer = require("../../webapp/list_import.js");
+const access = require("../shared/list-territory-access");
+
+test("cross-territory list access is a separate exact-email entitlement", () => {
+  const env = { EMAIL_CROSS_TERRITORY_LIST_EMAILS:
+    "hjudge@eicatlanta.com; hdecker@eicatlanta.com, wreynolds@eicatlanta.com" };
+  for (const name of ["hjudge@eicatlanta.com", "hdecker@eicatlanta.com",
+    "wreynolds@eicatlanta.com"])
+    assert.equal(access.hasCrossTerritoryListAccess({ name, roles: [] }, env), true);
+  assert.equal(access.hasCrossTerritoryListAccess({
+    name: "other@eicatlanta.com", roles: ["EmailAdministrator"] }, env), false);
+  assert.equal(access.hasCrossTerritoryListAccess({ name: "hjudge@other.com" }, env), false);
+  assert.equal(access.hasCrossTerritoryListAccess({ name: "" }, env), false);
+});
+
+test("CSV imports and dynamic audiences use the same non-admin territory policy", () => {
+  const app = fs.readFileSync(path.resolve(__dirname, "../../webapp/app.js"), "utf8");
+  const policySource = app.slice(app.indexOf("function audienceTerritoryPolicy(preview){"),
+    app.indexOf("\nfunction dynamicAudienceRows(){"));
+  const policy = new Function("ME", "SALES_TERRITORY", "Dial", "esc",
+    policySource + "\nreturn audienceTerritoryPolicy;")(
+    { userDetails: "hjudge@eicatlanta.com" },
+    { national: {}, states: { MA: { n: "Dennis", e: "dmckinney@eicatlanta.com" } } },
+    { state: { settingsFeatures: { crossTerritoryLists: true } } }, value => value);
+  const preview = { rows: [{ owner: { e: "dmckinney@eicatlanta.com" } }], matches: 1 };
+  assert.equal(policy(preview).kind, "cross_territory");
+  assert.equal(policy(preview).rows.length, 1);
+  const noAccess = new Function("ME", "SALES_TERRITORY", "Dial", "esc",
+    policySource + "\nreturn audienceTerritoryPolicy;")(
+    { userDetails: "other@eicatlanta.com" },
+    { national: {}, states: {} },
+    { state: { settingsFeatures: { crossTerritoryLists: false } } }, value => value);
+  assert.equal(noAccess(preview).kind, "unassigned");
+  assert.match(app, /function listImportPlan\(\)[\s\S]*?const policy = audienceTerritoryPolicy\(/);
+  assert.match(app, /function paintAudiencePreview\(\)[\s\S]*?const policy = audienceTerritoryPolicy\(/);
+  assert.doesNotMatch(policySource, /ADMIN/);
+});
 
 test("import controls stay themed and the review button cannot collapse", () => {
   const css = fs.readFileSync(path.resolve(__dirname, "../../webapp/style.css"), "utf8");

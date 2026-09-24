@@ -2768,9 +2768,6 @@ async function ensureAudienceIdentity(){
 async function prepareAudiencePreviewData(audience){
   const f = audience && audience.definition && audience.definition.filters || {};
   await dialReady;
-  if (!ADMIN && window.EmailComposer && EmailComposer.isAdmin) {
-    try { ADMIN = await EmailComposer.isAdmin(); } catch {}
-  }
   if ((f.roles || []).length && !Dial.state.flagsReady) await Dial.fetchFlags();
   const support = f.ownerOnly || f.rankedOnly || f.assetsOnly
     ? loadRegionalSupport()
@@ -2812,6 +2809,12 @@ function audienceTerritoryPolicy(preview){
   if (email && nationalRep)
     return { kind:"national", rows:preview.rows, outside:0,
       text:`National coverage account (${esc(nationalRep.n || email)}): all ${preview.matches.toLocaleString()} matches are within national coverage.` };
+  // This list/snapshot entitlement is separate from EmailAdministrator. It
+  // changes who may assemble a list, not the owner shown on each advisor.
+  const crossTerritory = Dial.state.settingsFeatures.crossTerritoryLists === true;
+  if (email && crossTerritory)
+    return { kind:"cross_territory", rows:preview.rows, outside:0,
+      text:`Cross-territory list access (${esc(email)}): all ${preview.matches.toLocaleString()} matches may be included. Advisors keep their assigned sales-territory owner; review or split by territory before outreach.` };
   const assigned = Object.values((SALES_TERRITORY && SALES_TERRITORY.states) || {})
     .find(rep => String(rep && rep.e || "").trim().toLowerCase() === email);
   if (email && assigned) {
@@ -2819,9 +2822,6 @@ function audienceTerritoryPolicy(preview){
     return { kind:"territory", rows, outside:preview.matches - rows.length,
       text:`${esc(assigned.n || email)}: ${rows.length.toLocaleString()} in my assigned territory; ${(preview.matches - rows.length).toLocaleString()} outside and excluded from new snapshots.` };
   }
-  if (email && ADMIN)
-    return { kind:"administrator", rows:preview.rows, outside:0,
-      text:`Administrative account (${esc(email)}): this audience is yours. Its advisors retain their normal sales-territory ownership; all matches require an explicit territory review before a snapshot is created.` };
   return { kind:"unassigned", rows:[], outside:preview.matches,
     text:`No sales territory is assigned to this account${email ? ` (${esc(email)})` : ""}. Snapshot creation is disabled; ask an administrator to assign the account before using dynamic audiences.` };
 }
@@ -2844,7 +2844,7 @@ function paintAudiencePreview(){
   listsBack.innerHTML = `<div class="ask lists lists-workspace" role="dialog" aria-modal="true" aria-label="Dynamic audience preview">
     <div class="lists-title"><div><span class="list-type dynamic">Dynamic audience</span><h3>${esc(p.audience.name)}</h3><p>${esc(p.audience.description || "Updates when source data or saved rules change.")}</p></div><button type="button" class="ask-btn ghost" data-lists="close">Close</button></div>
     <div class="audience-counts"><span><b>${p.matches.toLocaleString()}</b> matches</span><span><b>${p.callable.toLocaleString()}</b> callable</span><span><b>${p.emailable.toLocaleString()}</b> emailable</span><span class="excluded"><b>${p.excluded.toLocaleString()}</b> no usable route</span></div>
-    <p class="audience-owner"><b>${policy.text}</b><br>Advisor territory coverage: ${owners.size ? [...owners].map(([n,c]) => `${esc(n)} (${c})`).join("; ") : "assignment information unavailable"}. Raw channel counts above describe the full audience; snapshot actions below use ${policy.kind === "territory" ? "only this account's assigned territory" : policy.kind === "national" ? "national coverage" : policy.kind === "administrator" ? "all matches after an explicit administrator review" : "no matches until an account territory is assigned"}.</p>
+    <p class="audience-owner"><b>${policy.text}</b><br>Advisor territory coverage: ${owners.size ? [...owners].map(([n,c]) => `${esc(n)} (${c})`).join("; ") : "assignment information unavailable"}. Raw channel counts above describe the full audience; snapshot actions below use ${policy.kind === "territory" ? "only this account's assigned territory" : policy.kind === "national" || policy.kind === "cross_territory" ? "all matches with normal advisor ownership retained" : "no matches until list access is assigned"}.</p>
     <p class="dial-menu-note">Ready for a new snapshot: ${readyCall.toLocaleString()} callable; ${readyEmail.toLocaleString()} emailable${policy.outside ? `; ${policy.outside.toLocaleString()} outside-territory matches excluded before channel checks` : ""}.</p>
     ${p.excluded ? `<p class="dial-menu-note">Review: ${p.dnc.toLocaleString()} do-not-call; ${p.identity.toLocaleString()} with non-actionable identity evidence; ${p.excluded.toLocaleString()} with neither a callable nor emailable route. Excluded contacts remain in the match count and never enter the call snapshot.</p>` : ""}
     <div class="lists-preview-actions"><button type="button" class="ask-btn" data-lists="audience-back">Back to lists</button><button type="button" class="ask-btn" data-lists="audience-queue"${readyCall ? "" : " disabled"}>Create call list</button><button type="button" class="ask-btn primary" data-lists="audience-email"${readyEmail ? "" : " disabled"}>Prepare email batch</button></div>
@@ -3207,9 +3207,6 @@ async function readListImportFile(event){
       SUPPORT.territories === "ready" ? Promise.resolve() : loadTerritories(), dialReady]);
     if (!CONTACTS_READY || !ADV_INDEX || SUPPORT.territories !== "ready")
       throw new Error("Current contact, advisor, or territory data could not be loaded.");
-    if (!ADMIN && window.EmailComposer && EmailComposer.isAdmin) {
-      try { ADMIN = await EmailComposer.isAdmin(); } catch {}
-    }
     if (!ME)
       throw new Error("Your account identity could not be checked. Reopen the importer and try again.");
     imp.parsed = parsed;
@@ -3301,8 +3298,8 @@ async function saveListImport(){
   if (!imp.created.size && !confirm("Create " + grouped.length + " list"
       + (grouped.length === 1 ? "" : "s") + " for " + plan.people.length
       + " people?"
-      + (plan.scope.kind === "administrator"
-        ? "\n\nThis administrative account has no assigned territory. Have you reviewed the seven sales-territory groups and ownership?"
+      + (plan.scope.kind === "cross_territory"
+        ? "\n\nThis list spans sales territories. Review the territory groups and advisor ownership before outreach."
         : "")
       + (imp.role ? "\n\nThe selected role label will also be visible to colleagues." : ""))) return;
   imp.busy = true; imp.error = ""; paintListImporter();
@@ -3433,7 +3430,7 @@ document.addEventListener("click", async e => {
       const channel = act === "audience-email" ? "email" : "call";
       const policy = audienceTerritoryPolicy(audiencePreview);
       if (policy.kind === "unassigned") return showNotice("No sales territory is assigned to this account, so this snapshot cannot be created.");
-      if (policy.kind === "administrator" && !confirm("This administrative account is not assigned a sales territory. Review the advisor territory coverage above before continuing.\n\nHave you reviewed ownership and want to prepare this list?")) return;
+      if (policy.kind === "cross_territory" && !confirm("This snapshot may span sales territories. Review the advisor territory coverage above and coordinate with the assigned salespeople before outreach. Continue?")) return;
       const eligible = policy.rows.filter(x => channel === "email" ? x.emailable : x.callable).map(x => x.item);
       if (eligible.length > Dial.MAX_QUEUE) {
         showNotice(`This audience has ${eligible.length.toLocaleString()} ${channel === "email" ? "emailable" : "callable"} people in the permitted snapshot scope; a static list holds ${Dial.MAX_QUEUE}. Refine the saved filters so contacts are not selected arbitrarily.`);

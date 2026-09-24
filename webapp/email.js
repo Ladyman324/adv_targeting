@@ -1032,8 +1032,11 @@
             ? ` Use <b>Manage templates</b> below to publish one.`
             : ` An email administrator needs to publish one before you can send.`}</p>`}
       <p id="emailTplNotes" class="email-tpl-notes"></p>
+      <div class="email-docs"><b>Template preview</b>
+        <p class="email-fine">Example wording before personalized emails are generated. Attachments are chosen below and cannot be changed after generation.</p>
+        <div id="emailSetupPreview" class="email-rendered"></div></div>
       ${familyPicker}
-      <p id="emailRequirementWarning" class="email-error" hidden></p>
+      <p id="emailRequirementWarning" class="email-notice" hidden></p>
       <fieldset class="email-docs" id="emailDocs"><legend>Approved attachments</legend>${legacyDocs.length ? legacyDocs.map((d) =>
         `<label data-doc="${esc(d.id)}"><input type="checkbox" value="${esc(d.id)}"> <span>${esc(d.name)}</span><small>${bytes(d.size)}</small></label>`).join("")
         : `<p>No additional legacy attachments are available. You can continue without them.</p>`}</fieldset>
@@ -1049,61 +1052,58 @@
     // The Word templates carried instructions to the rep inside the body --
     // "INSERT LCV PERFORMANCE PAGE HERE AND ATTACH...". Those belong on screen,
     // not in the message, so they live on the template and are shown here.
-    // Material series and standalone attachments the chosen template REQUIRES
-    // are ticked and locked.
-    //
-    // Required choices must agree with createBatch, which merges the template's
-    // series and standalone requirements regardless of browser input. A rep
-    // checking their work should see exactly what the server will enforce.
-    const showRequired = () => {
+    // Existing templates store suggestions in historical required* columns.
+    // Preselect them, but the rep may remove or replace them before generation.
+    const showSuggested = () => {
       const picker = document.getElementById("emailTemplate");
       const chosen = picker && templates.find((x) => x.id === picker.value);
       const chosenRequirements = templateRequirements(chosen, docs);
-      const required = new Set(chosenRequirements.documentIds);
-      const requiredFamilies = new Set(chosenRequirements.familyIds);
-      const missing = chosenRequirements.missingDocumentIds || [];
-      const warning = document.getElementById("emailRequirementWarning");
-      if (warning) {
-        warning.textContent = missing.length
-          ? `This template still references approved material that has been removed (${missing.join(", ")}). `
-            + "An email administrator needs to replace the obsolete requirement before this template can be used."
-          : "";
-        warning.hidden = !missing.length;
-      }
-      const create = document.getElementById("emailCreateButton");
-      if (create) create.disabled = !templates.length || missing.length > 0;
+      const suggested = new Set(chosenRequirements.documentIds);
+      const suggestedFamilies = new Set(chosenRequirements.familyIds);
+      const preview = document.getElementById("emailSetupPreview");
+      if (preview) preview.innerHTML = chosen ? previewHtml(chosen, SAMPLE) : "";
       for (const label of document.querySelectorAll(".email-families label[data-family]")) {
         const box = label.querySelector("input");
-        const isRequired = requiredFamilies.has(label.dataset.family);
-        if (box.dataset.templateRequired === "1" && !isRequired) {
-          box.disabled = label.dataset.current !== "1";
-          box.checked = false; delete box.dataset.templateRequired;
-        }
-        label.classList.toggle("required", isRequired);
-        if (isRequired) {
-          box.checked = true; box.disabled = true; box.dataset.templateRequired = "1";
-        }
+        const isSuggested = suggestedFamilies.has(label.dataset.family);
+        box.disabled = label.dataset.current !== "1";
+        box.checked = isSuggested && !box.disabled;
+        label.classList.toggle("recommended", isSuggested);
         let tag = label.querySelector(".email-req-tag");
-        if (isRequired && !tag) {
-          tag = document.createElement("em");
-          tag.className = "email-req-tag";
-          tag.textContent = "required series";
-          label.appendChild(tag);
-        } else if (!isRequired && tag) tag.remove();
+        if (isSuggested && !tag) {
+          tag = document.createElement("em"); tag.className = "email-req-tag";
+          tag.textContent = "recommended"; label.appendChild(tag);
+        } else if (!isSuggested && tag) tag.remove();
       }
       for (const label of document.querySelectorAll("#emailDocs label[data-doc]")) {
         const box = label.querySelector("input");
-        const isRequired = required.has(label.dataset.doc);
-        label.classList.toggle("required", isRequired);
-        if (isRequired) { box.checked = true; box.disabled = true; }
-        else if (box.disabled) { box.disabled = false; box.checked = false; }
+        const isSuggested = suggested.has(label.dataset.doc);
+        box.checked = isSuggested;
+        label.classList.toggle("recommended", isSuggested);
         let tag = label.querySelector(".email-req-tag");
-        if (isRequired && !tag) {
-          tag = document.createElement("em");
-          tag.className = "email-req-tag";
-          tag.textContent = "required by this template";
-          label.appendChild(tag);
-        } else if (!isRequired && tag) tag.remove();
+        if (isSuggested && !tag) {
+          tag = document.createElement("em"); tag.className = "email-req-tag";
+          tag.textContent = "recommended"; label.appendChild(tag);
+        } else if (!isSuggested && tag) tag.remove();
+      }
+      showSelectionWarning();
+    };
+    const showSelectionWarning = () => {
+      const picker = document.getElementById("emailTemplate");
+      const chosen = picker && templates.find((x) => x.id === picker.value);
+      const suggestions = templateRequirements(chosen, docs);
+      const removed = [...document.querySelectorAll(".email-families label[data-family], #emailDocs label[data-doc]")]
+        .filter((label) => {
+          const id = label.dataset.family || label.dataset.doc;
+          return (label.dataset.family ? suggestions.familyIds : suggestions.documentIds).includes(id)
+            && !label.querySelector("input").checked;
+        });
+      const warning = document.getElementById("emailRequirementWarning");
+      if (warning) {
+        const notes = [];
+        if (removed.length) notes.push("You removed a recommended attachment. Double-check the email text so it accurately describes what will be sent.");
+        if (suggestions.missingDocumentIds.length) notes.push("A recommended document is no longer in the approved catalog. Ask an email administrator to update this template.");
+        warning.textContent = notes.join(" ");
+        warning.hidden = !notes.length;
       }
     };
 
@@ -1115,9 +1115,11 @@
       box.hidden = !box.textContent;
     };
     const picker = document.getElementById("emailTemplate");
-    if (picker) picker.addEventListener("change", () => { showNotes(); showRequired(); });
+    if (picker) picker.addEventListener("change", () => { showNotes(); showSuggested(); });
+    for (const box of document.querySelectorAll(".email-family, #emailDocs input[type=checkbox]"))
+      box.addEventListener("change", showSelectionWarning);
     showNotes();
-    showRequired();
+    showSuggested();
     paintMixed();
   }
 
@@ -1722,8 +1724,9 @@ function routesHtml() {
     const list = (catalog && catalog.templates) || [];
     document.getElementById("emailTitle").textContent = "Email templates";
     document.getElementById("emailBody").innerHTML = `<div class="email-docs-admin">
-      <p class="email-next">Reps choose from these and cannot write their own. Required
-        material series set here are routed to the right firm version automatically.</p>
+      <p class="email-next">Reps choose from these and cannot write their own. Recommended
+        materials start selected but can be removed before generation. Selected series route
+        to the right firm version automatically.</p>
       ${message ? `<p class="${bad ? "email-error" : "email-ok"}">${esc(message)}</p>` : ""}
       <ul class="email-doclist">${list.length ? list.map((t) => `<li>
         <span class="email-doc-main"><b>${esc(t.name)}</b>${
@@ -1765,9 +1768,9 @@ function routesHtml() {
     });
     const families = [...familyMap.values()].sort((a, b) => a.name.localeCompare(b.name));
     const standaloneDocs = docs.filter((d) => !d.familyId);
-    const requiredFamilyHtml = '<fieldset class="email-docs email-families"><legend>Required material series</legend>'
-      + '<p>Require the series. The current UBS, Morgan Stanley, Merrill Lynch, Raymond James, '
-      + 'or generic PDF is selected automatically for each recipient.</p>'
+    const requiredFamilyHtml = '<fieldset class="email-docs email-families"><legend>Recommended material series</legend>'
+      + '<p>Preselect the series. The current UBS, Morgan Stanley, Merrill Lynch, Raymond James, '
+      + 'or generic PDF is selected automatically for each recipient who keeps it.</p>'
       + (families.length ? families.map((f) =>
         '<label><input type="checkbox" class="tpl-family-req" value="' + esc(f.id) + '"'
         + (reqFamilies.has(f.id) ? ' checked' : '') + '><span><b>' + esc(f.name)
@@ -1776,15 +1779,15 @@ function routesHtml() {
         + '</small></span></label>').join('')
         : '<p>No material series have been categorized yet.</p>') + '</fieldset>';
     const requiredStandaloneHtml = standaloneDocs.length
-      ? '<fieldset class="email-docs"><legend>Required standalone attachments</legend>'
+      ? '<fieldset class="email-docs"><legend>Recommended standalone attachments</legend>'
         + standaloneDocs.map((d) => '<label><input type="checkbox" class="tpl-req" value="'
           + esc(d.id) + '"' + (req.has(d.id) ? ' checked' : '') + '><span>' + esc(d.name)
           + '</span><small>' + bytes(d.size) + '</small></label>').join('') + '</fieldset>'
       : '';
     const missingRequirementHtml = requirements.missingDocumentIds.length
-      ? '<fieldset class="email-docs"><legend>Obsolete required attachments</legend>'
-        + '<p class="email-error">This template still requires material that is no longer in the approved catalog. '
-        + 'It will block the sales team until you select the replacement series above and save. Saving removes these obsolete IDs.</p>'
+      ? '<fieldset class="email-docs"><legend>Unavailable recommendations</legend>'
+        + '<p class="email-error">This template suggests material that is no longer in the approved catalog. '
+        + 'Select a replacement series above and save. Saving removes these obsolete IDs.</p>'
         + '<ul>' + requirements.missingDocumentIds.map((id) => '<li><code>' + esc(id) + '</code></li>').join('')
         + '</ul></fieldset>'
       : '';
@@ -1852,7 +1855,8 @@ function routesHtml() {
       author: g("tplAuthor").trim(), approvalDate: g("tplApproved").trim(),
       subject: g("tplSubject"), bodyText: g("tplBody"), repNotes: g("tplNotes"),
       requiredMaterialFamilyIds: [...document.querySelectorAll(".tpl-family-req:checked")].map((x) => x.value),
-      requiredDocumentIds: [...document.querySelectorAll(".tpl-req:checked")].map((x) => x.value) };
+      requiredDocumentIds: [...document.querySelectorAll(".tpl-req:checked")].map((x) => x.value),
+      defaultAttachmentIds: [] };
   }
 
   async function runLint() {

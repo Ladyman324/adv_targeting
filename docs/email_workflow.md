@@ -73,11 +73,21 @@ capacity is best-effort after finalization; a failure conservatively leaves it c
    separate delegated Microsoft 365 connection lets the backend work in that
    representative's mailbox. Tokens stay encrypted server-side. Reconnection is
    required when Microsoft demands interaction; workers do not bypass MFA.
-2. **Compose and persist.** EmailBatches holds batch-level choices; EmailMessages
-   holds one personalized message per recipient. Templates, attachment variants,
-   and approved recipient identity/routing determine the final To/Cc/Bcc envelope.
+2. **Compose and persist.** Before generating personalized messages, the rep sees
+   a template-text preview and can keep or remove its preselected, recommended
+   materials. Removing one prompts a reminder to check the wording. Selected
+   attachments are then fixed for that batch. EmailBatches holds batch-level
+   choices; EmailMessages holds one personalized message per recipient. Templates,
+   attachment variants, and approved recipient identity/routing determine the
+   final To/Cc/Bcc envelope.
    Unsaved/unapproved editing work is not eligible for automatic sending.
-3. **Validate and preview.** The server verifies identity, required material and
+
+Cross-territory CSV imports and dynamic-audience snapshots use the separate
+`EMAIL_CROSS_TERRITORY_LIST_EMAILS` Function App allowlist. It does not change
+the state-to-salesperson ownership map, grant template administration, connect
+a mailbox, or raise email caps. Manual list additions and individual email
+sends are not territory-blocked by this setting.
+3. **Validate and preview.** The server verifies identity, selected material and
    current versions, merge fields, suppression, copies, policy, and capacity. The
    user reviews the exact content, attachment set, recipient count, and delivery plan.
 4. **Approve and reserve.** Approval persists the mode and each message's planned

@@ -382,12 +382,12 @@
   box-shadow:inset 0 0 0 1px var(--hair);cursor:default}
 .email-saved-btn:hover{color:var(--muted)}
 
-/* An attachment the template requires. Ticked, locked, and labelled as to WHY
-   it cannot be unticked -- a disabled checkbox with no explanation reads as a
-   broken control. Dimming the box while keeping the name at full strength says
-   "this is settled", not "this is unavailable". */
+/* Historical required markers remain for older forms, but template materials
+   in the composer are now recommended and removable before generation. */
 .email-docs label.required{opacity:1}
 .email-docs label.required input{opacity:.55; cursor:not-allowed}
+.email-setup #emailSetupPreview{min-height:0;max-height:240px;overflow:auto;
+  border:1px solid var(--hair);border-radius:8px;padding:10px;margin-top:8px}
 .email-req-tag{margin-left:8px; font-style:normal; font-size:11px;
   color:var(--accent); white-space:nowrap}
 

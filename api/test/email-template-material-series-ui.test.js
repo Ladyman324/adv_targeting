@@ -14,25 +14,29 @@ const css = fs.readFileSync(path.join(ROOT, "webapp/email.css"), "utf8");
 const desktopHtml = fs.readFileSync(path.join(ROOT, "webapp/index.html"), "utf8");
 const fieldHtml = fs.readFileSync(path.join(ROOT, "webapp/field.html"), "utf8");
 
-test("template authoring requires material series rather than version PDFs", () => {
-  assert.match(email, /<legend>Required material series<\/legend>/);
+test("template authoring recommends material series rather than version PDFs", () => {
+  assert.match(email, /<legend>Recommended material series<\/legend>/);
   assert.match(email, /class="tpl-family-req"/);
   assert.match(email, /requiredMaterialFamilyIds: \[\.\.\.document\.querySelectorAll\("\.tpl-family-req:checked"\)/);
   assert.match(email, /current UBS, Morgan Stanley, Merrill Lynch, Raymond James/);
   assert.doesNotMatch(email, /<legend>Required attachments<\/legend>\$\{docs\.length/);
-  assert.match(email, /<legend>Obsolete required attachments<\/legend>/);
+  assert.match(email, /<legend>Unavailable recommendations<\/legend>/);
   assert.match(email, /Saving removes these obsolete IDs/);
 });
 
-test("the composer locks template-required series and explains automatic routing", () => {
-  assert.match(email, /tag\.textContent = "required series"/);
-  assert.match(email, /box\.checked = true; box\.disabled = true; box\.dataset\.templateRequired = "1"/);
+test("the composer preselects removable materials and previews wording before generation", () => {
+  assert.match(email, /tag\.textContent = "recommended"/);
+  assert.match(email, /box\.checked = isSuggested && !box\.disabled/);
+  assert.match(email, /id="emailSetupPreview"/);
+  assert.match(email, /previewHtml\(chosen, SAMPLE\)/);
+  assert.match(email, /You removed a recommended attachment/);
   assert.match(email, /current approved client-group version is selected per recipient/);
 });
 
-test("the server merges template-required series independently of client input", () => {
-  assert.match(service, /templateRequired = materials\.templateRequirements\(template, catalogDocuments\)/);
-  assert.match(service, /\.\.\.templateRequired\.familyIds/);
+test("the server freezes only the rep's selected material, not the template suggestion", () => {
+  assert.match(service, /const selected = materials\.templateRequirements\(\{/);
+  assert.match(service, /requiredDocumentIds: \(input\.attachmentIds \|\| \[\]\)\.map\(String\)/);
+  assert.doesNotMatch(service, /\.\.\.templateRequired\.familyIds/);
   assert.match(service, /materials\.resolveFamilies\(allDocuments, materialFamilyIds, recipient\.email, routePolicy,[\s\S]*strategies: recipient\.materialStrategies/);
   assert.match(store, /requiredMaterialFamilyIdsJson/);
   assert.match(store, /normalizedRequirements = materials\.templateRequirements\(input, await listDocuments\(\)\)/);
@@ -40,11 +44,11 @@ test("the server merges template-required series independently of client input",
   assert.match(store, /document_required_by_template/);
 });
 
-test("the composer exposes hidden orphan requirements before batch creation", () => {
+test("the composer warns about unavailable suggestions without blocking generation", () => {
   assert.match(email, /id="emailRequirementWarning"/);
-  assert.match(email, /chosenRequirements\.missingDocumentIds/);
+  assert.match(email, /suggestions\.missingDocumentIds/);
   assert.match(email, /emailCreateButton/);
-  assert.match(email, /missing\.length > 0/);
+  assert.doesNotMatch(email, /missing\.length > 0/);
 });
 
 test("materials administration exposes audience, strategy and scrollable PDF preview controls", () => {

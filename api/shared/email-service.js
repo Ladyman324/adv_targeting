@@ -848,20 +848,15 @@ async function createBatch(who, input) {
   // still carry a PDF id; templateRequirements translates it to its family at
   // runtime, while preserving exact requirements for standalone documents.
   const catalogDocuments = await store.listDocuments();
-  const templateRequired = materials.templateRequirements(template, catalogDocuments);
-  if (templateRequired.missingDocumentIds.length) throw httpError(400,
-    `This template requires attachments that are no longer in the approved catalog: ${templateRequired.missingDocumentIds.join(", ")}. An email administrator needs to update it.`);
-  const required = templateRequired.documentIds;
-  const optionalRequested = materials.templateRequirements({
+  const selected = materials.templateRequirements({
     requiredDocumentIds: (input.attachmentIds || []).map(String),
   }, catalogDocuments);
-  if (optionalRequested.missingDocumentIds.length) throw httpError(400,
-    `Approved attachments are unavailable: ${optionalRequested.missingDocumentIds.join(", ")}.`);
-  const requested = [...new Set([...required, ...optionalRequested.documentIds])];
+  if (selected.missingDocumentIds.length) throw httpError(400,
+    `Approved attachments are unavailable: ${selected.missingDocumentIds.join(", ")}.`);
+  const requested = selected.documentIds;
   const documents = catalogDocuments.filter((doc) => requested.includes(doc.id));
   const materialFamilyIds = [...new Set([
-    ...templateRequired.familyIds,
-    ...optionalRequested.familyIds,
+    ...selected.familyIds,
     ...(Array.isArray(input.materialFamilyIds) ? input.materialFamilyIds : [])
       .map((x) => String(x || "").trim()).filter(Boolean),
   ])];

@@ -22,6 +22,14 @@ benchmark sequence, see [performance_profiling.md](performance_profiling.md).
 
 ## Use the saved SWA token
 
+Cross-territory CSV imports and dynamic-audience snapshots use the separate
+Function App setting `EMAIL_CROSS_TERRITORY_LIST_EMAILS`: a comma-separated
+allowlist of signed-in EIC email addresses. It does not grant
+`EmailAdministrator`, change territory ownership, connect a mailbox, or alter
+email sending limits. Keep current approved access for Hannah Judge, Holly
+Decker, Will Reynolds, Bo Ladyman, and Kevin Spora when replacing this setting;
+the last two previously had list access through the old admin fallback.
+
 Do not pass --token. The current setup stores the documented
 SWA_CLI_DEPLOYMENT_TOKEN as a user-scoped Windows environment variable. Load it
 into this process, verify that it exists, deploy, and remove the process copy:

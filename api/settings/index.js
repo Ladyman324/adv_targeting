@@ -12,6 +12,7 @@
 "use strict";
 
 const store = require("../shared/store");
+const listAccess = require("../shared/list-territory-access");
 
 module.exports = async function (context, req) {
   try {
@@ -19,7 +20,8 @@ module.exports = async function (context, req) {
 
     if (req.method === "GET") {
       return store.ok(context, { settings: await store.getSettings(who),
-        features: { actEmailWrite: process.env.ACT_EMAIL_HISTORY_SYNC === "1" } });
+        features: { actEmailWrite: process.env.ACT_EMAIL_HISTORY_SYNC === "1",
+          crossTerritoryLists: listAccess.hasCrossTerritoryListAccess(who) } });
     }
 
     const body = req.body || {};
@@ -40,7 +42,8 @@ module.exports = async function (context, req) {
     // makes that silence debuggable rather than mysterious.
     const saved = await store.putSettings(who, body);
     return store.ok(context, { ok: true, settings: saved,
-                               features: { actEmailWrite: process.env.ACT_EMAIL_HISTORY_SYNC === "1" },
+                               features: { actEmailWrite: process.env.ACT_EMAIL_HISTORY_SYNC === "1",
+                                 crossTerritoryLists: listAccess.hasCrossTerritoryListAccess(who) },
                                accepts: Object.keys(store.SETTING_KEYS) });
   } catch (err) {
     return store.fail(context, err);

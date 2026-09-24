@@ -3136,17 +3136,19 @@ def _inline_images():
     # to exist on the template, which is checked by check 50.
     token_exempt = ('/^image:/i.test(token)' in service
                     and "unresolved.push(token); continue;" in service)
-    required = (
-        "templateRequired = materials.templateRequirements(template, catalogDocuments)" in service
-        and "...templateRequired.familyIds" in service
+    selected = (
+        "const selected = materials.templateRequirements({" in service
+        and "requiredDocumentIds: (input.attachmentIds || []).map(String)" in service
+        and "...selected.familyIds" in service
+        and "...templateRequired.familyIds" not in service
         and re.search(r"materials\.resolveFamilies\(\s*allDocuments,\s*materialFamilyIds,\s*recipient\.email,\s*routePolicy,", service) is not None
     )
     api_src = text(API / "email" / "index.js")
     gated = re.search(r'"put_template".{0,200}?isAdmin\(who\)', api_src, re.S) is not None
-    ok = all([escapes_first, falls_through, cid_only, no_remote_img, token_exempt, required, gated])
+    ok = all([escapes_first, falls_through, cid_only, no_remote_img, token_exempt, selected, gated])
     return (ok, f"escape before token={escapes_first}, unknown id stays text={falls_through}, "
                 f"cid-only img scheme={cid_only}, image tokens exempt from merge check={token_exempt}, "
-                f"required material series enforced={required}, admin-gated={gated}")
+                f"selected material series enforced={selected}, admin-gated={gated}")
 
 
 # ---------------------------------------------------------------------------

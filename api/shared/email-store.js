@@ -512,9 +512,8 @@ const getTemplate = async (templateId) => (await listTemplates()).find((t) => t.
 // Approval Date. Moving templates into the application should not lose the
 // compliance record that made the Word version trustworthy.
 //
-// requiredMaterialFamilyIds is the main behavioural field: the current
-// recipient-specific PDF is mandatory. requiredDocumentIds remains for true
-// standalone attachments and for reading templates saved before families.
+// Historical required* columns now represent removable, preselected
+// suggestions. Keep them for existing template rows and clients.
 // ---------------------------------------------------------------------------
 async function putTemplate(who, input) {
   const core = require("./email-core");
@@ -541,7 +540,7 @@ async function putTemplate(who, input) {
   }
   const normalizedRequirements = materials.templateRequirements(input, await listDocuments());
   if (normalizedRequirements.missingDocumentIds.length) {
-    const err = new Error(`Required attachments are not in the approved catalog: ${normalizedRequirements.missingDocumentIds.join(", ")}.`);
+    const err = new Error(`Suggested attachments are not in the approved catalog: ${normalizedRequirements.missingDocumentIds.join(", ")}.`);
     err.statusCode = 400; err.code = "template_attachment_invalid";
     throw err;
   }
@@ -921,7 +920,7 @@ async function deleteDocument(who, rawId) {
   }
   const usedBy = materials.templatesRequiringDocument(await listTemplates(), docId);
   if (usedBy.length) {
-    const err = new Error(`That document is still required by ${usedBy.map((template) => `"${template.name}"`).join(", ")}. Update those templates before removing it.`);
+    const err = new Error(`That document is still recommended by ${usedBy.map((template) => `"${template.name}"`).join(", ")}. Update those templates before removing it.`);
     err.statusCode = 409;
     err.code = "document_required_by_template";
     throw err;

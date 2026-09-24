@@ -30,10 +30,11 @@ test("desktop role filters are multi-selectable and persist in dynamic audiences
 });
 
 test("dynamic audiences distinguish personal ownership from advisor territory coverage", () => {
-  assert.match(desk, /kind:"administrator", rows:preview\.rows/);
+  assert.match(desk, /kind:"cross_territory", rows:preview\.rows/);
   assert.match(desk, /kind:"unassigned", rows:\[\], outside:preview\.matches/);
   assert.match(desk, /Advisor territory coverage:/);
-  assert.match(desk, /explicit administrator review/);
+  assert.match(desk, /crossTerritoryLists === true/);
+  assert.doesNotMatch(desk, /kind:"administrator", rows:preview\.rows/);
   assert.doesNotMatch(desk, /Owner distribution:/);
 });
 test("building rosters can sort by team and show job titles instead of registration badges", () => {
