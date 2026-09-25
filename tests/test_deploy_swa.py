@@ -27,16 +27,15 @@ class CommandTests(unittest.TestCase):
         with mock.patch.object(deploy_swa.subprocess, "run") as run:
             deploy_swa.check_web_assets()
 
-        run.assert_called_once_with(
-            [
-                sys.executable,
-                str(ROOT / "src" / "web_assets.py"),
-                "--check",
-            ],
-            check=True,
-            cwd=ROOT,
-            shell=False,
-        )
+        self.assertEqual([
+            mock.call(
+                [sys.executable, str(ROOT / "src" / "web_assets.py"),
+                 "--check"],
+                check=True, cwd=ROOT, shell=False),
+            mock.call(
+                [sys.executable, str(ROOT / "src" / "verify_search_shards.py")],
+                check=True, cwd=ROOT, shell=False),
+        ], run.call_args_list)
 
     def test_web_asset_check_reports_fail_closed_result(self):
         failure = subprocess.CalledProcessError(7, ["python", "--check"])
@@ -155,7 +154,8 @@ class StagingSafetyTests(unittest.TestCase):
             f'const DATA_VERSION = "{expected}";', encoding="utf-8"
         )
         for name in (
-            "style.css", "field.css", "dial.js", "training.js", "email.js", "email.css"
+            "style.css", "field.css", "dial.js", "training.js",
+            "list_import.js", "email.js", "email.css"
         ):
             (staged / name).write_text(f"/* {name} */", encoding="utf-8")
         (staged / "sw.js").write_text(

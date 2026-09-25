@@ -183,7 +183,8 @@ ROSTER_COLUMNS = {
             "phone": ["LocalNumber"], "profile_url": ["Url"],
             "linkedin": ["LinkedInUrl"], "emails": ["Emails"]},
     "wells_fargo": {"address": ["address"], "profile_url": ["url"],
-                    "emails": ["emails"], "phone": ["phone_numbers"]},
+                    "emails": ["emails"], "phone": ["phone_numbers"],
+                    "team": ["team_name"], "team_url": ["team_url"]},
     "rbc": {"team": ["team_name"], "profile_url": ["profile_url"],
             # team_name is NOT a title. It was reaching the panel's title slot
             # through the generic list's `team_name` fallback, so every RBC
@@ -1240,7 +1241,13 @@ def load_rosters() -> pd.DataFrame:
         # names over 7,104 people; UBS 1,693 over 3,664) and does not simply
         # repeat the city.
         filled = rec["team"].str.strip().ne("")
-        if filled.sum() >= 50:
+        if slug == "wells_fargo":
+            # These labels are extracted from a named associate card on the
+            # firm's own team page. Repeated names reflect real team sizes,
+            # not generic departments; require the page URL as evidence.
+            rec.loc[filled & rec["team_url"].eq(""), "team"] = ""
+            filled = rec["team"].str.strip().ne("")
+        if filled.sum() >= 50 and slug != "wells_fargo":
             values = rec.loc[filled, "team"]
             variety = values.nunique() / filled.sum()
             echoes_city = (values.map(norm)

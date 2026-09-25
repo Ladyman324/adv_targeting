@@ -6,11 +6,13 @@ import sys
 import unittest
 
 import pandas as pd
+from collections import defaultdict
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from build_contacts import pick_best, score_contacts
+from build_identity_ledger import add_current_firm_names
 from identity_normalize import (given_agreement, normalize_crd,
                                 parse_full_name, preferred_name_status)
 from identity_resolver import (apply_decision, evaluate_assertion,
@@ -55,6 +57,52 @@ class NormalizationTests(unittest.TestCase):
 
 
 class ResolverTests(unittest.TestCase):
+    def test_firm_aliases_are_scoped_to_current_firm_crd(self):
+        current = defaultdict(lambda: {"firm_crds": set(), "firm_names": set()})
+        current["814059"]["firm_crds"].add("291361")
+        current["other"]["firm_crds"].add("294197")
+        firms = pd.DataFrame([
+            {"crd": "291361", "name": "Rockefeller Capital Management",
+             "legal_name": "Rockefeller Financial LLC"},
+            {"crd": "294197", "name": "Rockefeller Capital Management",
+             "legal_name": "Rockefeller & Co LLC"},
+        ])
+        aliases = pd.DataFrame([
+            {"firm_crd": "291361", "other_name": "Rockefeller Global Family Office"},
+            {"firm_crd": "294197", "other_name": "Rockefeller Global Family Office"},
+        ])
+        add_current_firm_names(current, firms, aliases)
+        self.assertIn("Rockefeller Capital Management",
+                      current["814059"]["firm_names"])
+        self.assertIn("Rockefeller Financial LLC",
+                      current["814059"]["firm_names"])
+        self.assertIn("Rockefeller Capital Management",
+                      current["other"]["firm_names"])
+        self.assertNotIn("Rockefeller Financial LLC",
+                         current["other"]["firm_names"])
+        record = prepare_act_records([{
+            **act(act_id="march", crd="814059", first="James", last="Marchetti",
+                  email="jbmarchetti@rockco.com"),
+            "company": "Rockefeller Capital Management",
+            "businessAddress": {"line1": "Two Embarcadero Center",
+                                "city": "San Francisco", "state": "CA",
+                                "postalCode": "94111"},
+        }], "act.json", "abc")[0]
+        context = {
+            "current_firms": ["291361"],
+            "current_firm_names": sorted(current["814059"]["firm_names"]),
+            "branches": [{"street": "1850 Mt Diablo Boulevard",
+                          "city": "Walnut Creek", "state": "CA",
+                          "postal": "94596"}],
+        }
+        evidence, link = evaluate_assertion(
+            record, {"advisor_crd": "814059", "first_name": "James",
+                     "middle_name": "Barry", "last_name": "Marchetti",
+                     "suffix": ""}, context)
+        self.assertEqual("approved", link["identity_status"])
+        self.assertTrue(evidence["firm_current_agrees"])
+        self.assertIn("current_address_differs", link["warnings_json"])
+
     def test_valid_one_to_one_assertion_is_approved(self):
         record = prepare_act_records([act()], "act.json", "abc")[0]
         evidence, link = evaluate_assertion(

@@ -39,7 +39,7 @@ const COMPARE = ["#12b39c", "#e0a53a", "#8079e0", "#e8615d", "#4aa3e0", "#9fc93c
 // of every deployed JSON path and byte. It changes for standalone shard
 // rebuilds too, and its leading date keeps the stale-build warning readable.
 // Do not edit it by hand.
-const DATA_VERSION = "20260923T195616Z-b67d80e56e900963";
+const DATA_VERSION = "20260923T195616Z-1c19a775c26e00be";
 const dataUrl = file => `data/${file}?v=${DATA_VERSION}`;
 Dial.setContactRouteVersion(DATA_VERSION);
 // ONE scale for every mark on the map. There used to be two, and they were not
@@ -8660,6 +8660,7 @@ function loadAdvisorIndex(){
 let SEARCH_MAN = null, SEARCH_MAN_PROMISE = null, SEARCH_MAN_ERROR = "";
 const SEARCH_SHARDS = new Map();      // prefix -> rows[], once resolved
 const SEARCH_PENDING = new Map();     // prefix -> Promise, while in flight
+const SEARCH_SHARD_ERRORS = new Map(); // transient failures must not masquerade as zero matches
 
 function loadSearchManifest(){
   if (SEARCH_MAN) return Promise.resolve(SEARCH_MAN);
@@ -8727,13 +8728,50 @@ function loadSearchShard(prefix){
   if (SEARCH_SHARDS.has(prefix)) return Promise.resolve(SEARCH_SHARDS.get(prefix));
   if (SEARCH_PENDING.has(prefix)) return SEARCH_PENDING.get(prefix);
   const p = fetch(dataUrl(`search/${prefix}.json`))
-    // A missing shard is not an error: no advisor's name starts that way.
-    .then(r => r.ok ? r.json() : { rows: [] })
-    .then(j => { const rows = j.rows || []; SEARCH_SHARDS.set(prefix, rows); return rows; })
-    .catch(() => { SEARCH_SHARDS.set(prefix, []); return []; })
+    // A genuinely absent prefix is empty. A 404 for a prefix listed in the
+    // manifest is a broken/partial release, not evidence of zero advisors.
+    // Network/authorization/server failures likewise cannot be cached as [].
+    .then(r => {
+      if (r.status === 404){
+        const expected = prefix.startsWith("crd/")
+          ? SEARCH_MAN?.crdShards?.includes(prefix.slice(4))
+          : SEARCH_MAN?.shards?.includes(prefix);
+        if (!expected) return { rows: [] };
+      }
+      if (!r.ok) throw new Error(`Search shard returned ${r.status}`);
+      return r.json();
+    })
+    .then(j => {
+      const rows = j.rows || [];
+      SEARCH_SHARDS.set(prefix, rows);
+      SEARCH_SHARD_ERRORS.delete(prefix);
+      return rows;
+    })
+    .catch(err => {
+      SEARCH_SHARD_ERRORS.set(prefix, err.message || String(err));
+      return [];
+    })
     .finally(() => SEARCH_PENDING.delete(prefix));
   SEARCH_PENDING.set(prefix, p);
   return p;
+}
+
+/* A failed CDN shard must not make a real advisor vanish. The full national
+ * index already loads in the background for cards and lists, so scan it only
+ * on the rare error path. Nickname equivalents come from the same build
+ * manifest as the shards and never alter contact authorization.
+ */
+function fallbackAdvisorSearch(q){
+  if (!ADV_INDEX?.advisors) return [];
+  const aliases = SEARCH_MAN?.nicknames || {};
+  const wants = queryTokens(q).map(t => [t, ...(aliases[t] || [])]);
+  const rows = [];
+  for (const row of ADV_INDEX.advisors){
+    const hay = `${row[1]} ${row[6] || ""}`.toLowerCase();
+    if (wants.every(forms => forms.some(t => hay.includes(t)))) rows.push(row);
+  }
+  rows.sort((a, b) => a[1].localeCompare(b[1]));
+  return rows.slice(0, 60);
 }
 
 /* Rows matching q, from whatever is already in memory.
@@ -8747,6 +8785,9 @@ function shardSearch(q){
   const numeric = /^\d+$/.test(q);
   const target = numeric ? crdShardFor(q) : shardFor(q).prefix;
   if (!target) return { rows: [], pending: "", exhausted: false };
+  if (SEARCH_SHARD_ERRORS.has(target))
+    return { rows: fallbackAdvisorSearch(q), pending: "", error: target,
+             fallback: !!ADV_INDEX, exhausted: false };
   if (!SEARCH_SHARDS.has(target)) return { rows: [], pending: target, exhausted: false };
   const lower = q.toLowerCase();
   const want = queryTokens(q);
@@ -8826,6 +8867,8 @@ function renderNationalSearch(){
   if (!SEARCH_MAN && !SEARCH_MAN_ERROR) loadSearchManifest().then(rerender).catch(rerender);
   const hits = shardSearch(q);
   if (hits.pending) loadSearchShard(hits.pending).then(rerender);
+  if (hits.error && !ADV_INDEX && !ADV_INDEX_ERROR)
+    loadAdvisorIndex().then(rerender).catch(() => {});
 
   const loose = looseName(q);
   const firmRows = NAT_DETAIL_READY ? NAT.firms.filter(f =>
@@ -8872,10 +8915,16 @@ function renderNationalSearch(){
         ? "National advisor search is unavailable."
         : (!SEARCH_MAN || hits.pending)
           ? "Loading national advisor search…"
+          : hits.error
+            ? `Advisor search could not load. <button type="button" class="ares" data-retry-advisor-search>Retry search</button>`
           : hits.exhausted
             ? `Too many advisors match “${esc(searchBox.value)}” — type one more letter.`
             : `No advisor match for “${esc(searchBox.value)}”.`}</p>`;
   advOut.innerHTML = firmsHtml + advisorsHtml;
+  advOut.querySelector('[data-retry-advisor-search]')?.addEventListener('click', () => {
+    SEARCH_SHARD_ERRORS.delete(hits.error);
+    renderNationalSearch();
+  });
   advOut.querySelectorAll("[data-national-firm]").forEach(el => el.addEventListener("click", () => {
     const firm = firmRows[+el.dataset.nationalFirm];
     clearSearch();

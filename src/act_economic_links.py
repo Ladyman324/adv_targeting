@@ -7,13 +7,14 @@ from __future__ import annotations
 
 import collections
 import json
+import re
 from typing import Iterable, Mapping
 
 from identity_normalize import (clean_text, given_agreement, is_generic_email,
                                 name_token, normalize_crd, normalize_email,
                                 normalize_suffix)
 
-RULESET_VERSION = "act-economic-v1.0"
+RULESET_VERSION = "act-economic-v1.2"
 SCHEMA_VERSION = 1
 WINNER_MARGIN = 0.12
 APPROVED_LINK_TYPES = {"identity_approved", "roster_exact", "residual_strict"}
@@ -94,6 +95,68 @@ def sec_name_agreement(record: Mapping, sec: Mapping,
     return False, "given_or_suffix_conflict"
 
 
+def exact_email_name_agreement(record: Mapping, sec: Mapping,
+                               aliases: Iterable[Mapping]) -> tuple[bool, str]:
+    """For assets only, let a unique validated roster email bridge given names.
+
+    The caller must still establish a unique personal ACT/roster email and a
+    current authoritative firm family. A matching surname is the final guard
+    against attaching one person's ACT book to another person's SEC pin.
+    """
+    names = [dict(sec or {}), *(dict(x) for x in aliases)]
+    agreed, reason = sec_name_agreement(record, sec, names)
+    if agreed:
+        return agreed, reason
+    act_suffix = normalize_suffix(record.get("raw_suffix"))
+    sec_suffix = normalize_suffix(sec.get("suffix"))
+    if act_suffix and sec_suffix and act_suffix != sec_suffix:
+        return False, "stated_suffix_conflict"
+    act_last = name_token(record.get("norm_last_name") or
+                          record.get("raw_last_name"))
+    if act_last and any(name_token(x.get("last_name")) == act_last
+                        for x in names):
+        return True, "unique_personal_email_surname"
+    return False, reason
+
+
+def residual_name_agreement(record: Mapping, sec: Mapping,
+                            aliases: Iterable[Mapping],
+                            location_strength: int, firm_reason: str,
+                            authoritative_email: bool) -> tuple[bool, str]:
+    """Allow an omitted ACT suffix only with unusually strong economic evidence.
+
+    This is for displaying assets, never for contact identity or ACT write-back.
+    A stated but conflicting suffix remains a veto. Exact paired street, ZIP,
+    city/state, current firm family, and a unique personal firm-domain email
+    compensate for ACT omitting a suffix such as "IV".
+    """
+    strict = sec_name_agreement(
+        record, sec, aliases, require_suffix_presence_match=True)
+    if strict[0] or (location_strength < 3 or
+                     firm_reason != "approved_firm_family" or
+                     not authoritative_email):
+        return strict
+    # Sandy/Sandra is a known search nickname but deliberately absent from
+    # the general identity-authorizing nickname table. Only this stronger,
+    # economic-only branch may use it.
+    if (name_token(record.get("norm_first_name")) in {"sandy", "sandi"}
+            and name_token(sec.get("first_name")) == "sandra"):
+        alternate = dict(record)
+        alternate["norm_first_name"] = "Sandra"
+        alternate["raw_first_name"] = "Sandra"
+        name_ok, _ = sec_name_agreement(
+            alternate, sec, aliases, require_suffix_presence_match=True)
+        if name_ok:
+            return True, "given_economic_nickname"
+    if (normalize_suffix(record.get("raw_suffix")) or
+            not normalize_suffix(sec.get("suffix"))):
+        return strict
+    relaxed = sec_name_agreement(record, sec, aliases)
+    if not relaxed[0]:
+        return strict
+    return True, relaxed[1] + "_act_suffix_omitted"
+
+
 def firm_agreement(record: Mapping, current: Mapping,
                    allowed_firm_crds: Iterable[str]) -> tuple[bool, str]:
     current_crds = {normalize_crd(x) for x in current.get("firm_crds", set())
@@ -116,7 +179,7 @@ def paired_location(record: Mapping, branches: Iterable[Mapping]) -> tuple[bool,
     city = name_token(record.get("raw_city"))
     state = clean_text(record.get("raw_state")).upper()
     postal = clean_text(record.get("raw_postal"))[:5]
-    street = name_token(record.get("raw_street"))
+    street = street_token(record.get("raw_street"))
     best = 0
     for branch in branches:
         if (city and state and name_token(branch.get("city")) == city and
@@ -124,10 +187,19 @@ def paired_location(record: Mapping, branches: Iterable[Mapping]) -> tuple[bool,
             strength = 1
             if postal and clean_text(branch.get("postal"))[:5] == postal:
                 strength += 1
-            if street and name_token(branch.get("street")) == street:
+            if street and street_token(branch.get("street")) == street:
                 strength += 1
             best = max(best, strength)
     return bool(best), best
+
+
+def street_token(value: object) -> str:
+    """Treat common compass abbreviations as the same written street."""
+    directions = {"n": "north", "s": "south", "e": "east", "w": "west",
+                  "ne": "northeast", "nw": "northwest",
+                  "se": "southeast", "sw": "southwest"}
+    words = re.findall(r"[a-z0-9]+", clean_text(value).lower())
+    return "".join(directions.get(word, word) for word in words)
 
 
 def choose_with_margin(scored: Iterable[tuple[float, str]],

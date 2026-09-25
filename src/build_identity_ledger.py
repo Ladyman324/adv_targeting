@@ -31,6 +31,7 @@ from roster_firm_policy import build_domain_policy
 
 RAW, INTERIM = ROOT / "data" / "raw", ROOT / "data" / "interim"
 OUT = ROOT / "data" / IDENTITY_DIRNAME
+FIRM_NAMES = ROOT / "data" / "output"
 
 
 def sha256_file(path: pathlib.Path) -> str:
@@ -125,6 +126,31 @@ def records_by_crd(frame: pd.DataFrame) -> dict[str, dict]:
     return out
 
 
+def add_current_firm_names(current: dict, firms: pd.DataFrame,
+                           other_names: pd.DataFrame) -> None:
+    """Add names filed for each current firm CRD, never by name alone.
+
+    The individual feed can use a broker-dealer legal name while the firm feed
+    and IAPD display the investment-adviser name for the same CRD. Names that
+    belong to several CRDs remain scoped to each CRD; they are not a global
+    name-to-CRD identity assertion.
+    """
+    names = defaultdict(set)
+    for row in firms.fillna("").to_dict("records"):
+        crd = normalize_crd(row.get("crd"))
+        if crd:
+            names[crd].update(filter(None, (clean_text(row.get("name")),
+                                            clean_text(row.get("legal_name")))))
+    for row in other_names.fillna("").to_dict("records"):
+        crd = normalize_crd(row.get("firm_crd"))
+        name = clean_text(row.get("other_name"))
+        if crd and name:
+            names[crd].add(name)
+    for person in current.values():
+        for crd in person["firm_crds"]:
+            person["firm_names"].update(names.get(crd, ()))
+
+
 def sec_context() -> tuple[dict, dict, dict, dict, dict]:
     advisors = pd.read_parquet(INTERIM / "advisors.parquet",
                                columns=["advisor_crd", "first_name", "middle_name",
@@ -140,6 +166,13 @@ def sec_context() -> tuple[dict, dict, dict, dict, dict]:
         if crd:
             current[crd]["firm_crds"].add(clean_text(row["firm_crd"]))
             current[crd]["firm_names"].add(clean_text(row["firm_name_on_record"]))
+    add_current_firm_names(
+        current,
+        pd.read_parquet(FIRM_NAMES / "firms.parquet",
+                        columns=["crd", "name", "legal_name"]),
+        pd.read_parquet(FIRM_NAMES / "firm_other_names.parquet",
+                        columns=["firm_crd", "other_name"]),
+    )
     hist = pd.read_parquet(INTERIM / "advisor_employment_history.parquet",
                            columns=["advisor_crd", "firm_name_on_record"]).fillna("")
     for row in hist.to_dict("records"):
@@ -343,6 +376,9 @@ def main() -> None:
             INTERIM / "advisor_employments.parquet",
             INTERIM / "advisor_employment_history.parquet",
             INTERIM / "advisor_other_names.parquet")},
+        "firmNameSources": {p.name: sha256_file(p) for p in (
+            FIRM_NAMES / "firms.parquet",
+            FIRM_NAMES / "firm_other_names.parquet")},
         "crosswalkSource": {
             "file": "act_crosswalk.parquet",
             "sha256": sha256_file(INTERIM / "act_crosswalk.parquet"),

@@ -49,7 +49,7 @@ import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
-from build_name_index import tokens_for
+from build_name_index import SEARCH_NICKNAMES, tokens_for
 from web_assets import write_json_gz
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -179,6 +179,10 @@ def main() -> None:
                    # "keep typing" rather than returning nothing.
                    "split": sorted(split),
                    "crdShards": sorted(crd_shards),
+                   # Used only if a shard request fails and the already-loaded
+                   # full advisor index must answer search temporarily.
+                   "nicknames": {k: sorted(v - {k})
+                                 for k, v in SEARCH_NICKNAMES.items()},
                    "firms": index["firms"], "cities": index["cities"],
                    "advisors": len(rows)},
                   separators=(",", ":"))

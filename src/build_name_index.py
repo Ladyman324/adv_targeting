@@ -81,6 +81,13 @@ COLUMNS = ["name", "crd", "cell", "city", "state", "alt"]
 # a shard. "jr" and "ii" are the ones that actually appear.
 SKIP = {"jr", "sr", "ii", "iii", "iv", "and", "the", "of", "de", "la"}
 
+# Search can be more inclusive than identity matching: these aliases help a
+# person find a registered advisor but never authorize a contact or asset link.
+SEARCH_NICKNAMES = {name: set(forms) for name, forms in NICKNAMES.items()}
+for group in ({"sandra", "sandy", "sandi"},):
+    for name in group:
+        SEARCH_NICKNAMES.setdefault(name, set()).update(group)
+
 
 def tokens_for(name: str) -> set:
     """Every string a human might type to find this person."""
@@ -89,7 +96,7 @@ def tokens_for(name: str) -> set:
     # Nicknames both ways: "Bill" should find William Kaiser, and someone filed
     # as Bill should be found by typing William.
     for t in list(out):
-        out |= {n for n in NICKNAMES.get(t, set()) if len(n) >= 2}
+        out |= {n for n in SEARCH_NICKNAMES.get(t, set()) if len(n) >= 2}
     return out
 
 

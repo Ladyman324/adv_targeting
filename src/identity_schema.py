@@ -5,7 +5,7 @@ import hashlib
 import json
 from typing import Any, Mapping
 
-RULESET_VERSION = "identity-v1.4"
+RULESET_VERSION = "identity-v1.5"
 REGISTRY_SCHEMA_VERSION = "1.0"
 IDENTITY_STATUSES = frozenset({"approved", "review", "quarantine", "unmatched", "rejected"})
 LINK_DECISIONS = frozenset({"approve", "reject", "replace"})

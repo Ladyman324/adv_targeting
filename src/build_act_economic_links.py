@@ -17,9 +17,11 @@ from act_book import build as build_book, slots
 from act_economic_links import (LINK_COLUMNS, RULESET_VERSION, SCHEMA_VERSION,
                                 account_bucket, approved_link_map,
                                 choose_with_margin,
-                                enforce_global_one_to_one, firm_agreement,
+                                enforce_global_one_to_one,
+                                exact_email_name_agreement, firm_agreement,
                                 json_list, paired_location, personal_email,
-                                safety_fields, sec_name_agreement,
+                                residual_name_agreement, safety_fields,
+                                sec_name_agreement,
                                 spreadsheet_safe,
                                 unique_validated_roster_email)
 from build_contacts import load_index, load_rosters, score_contacts
@@ -77,6 +79,13 @@ def validate_pinned_inputs(manifest: dict) -> None:
         path = INTERIM / pathlib.Path(name).name
         if not path.is_file() or sha256_file(path) != expected_hash:
             raise SystemExit(f"SEC source differs from identity manifest: {name}")
+    expected_firms = manifest.get("firmNameSources") or {}
+    if set(expected_firms) != {"firms.parquet", "firm_other_names.parquet"}:
+        raise SystemExit("identity manifest has an incomplete firm-name source set")
+    for name, expected_hash in expected_firms.items():
+        path = ROOT / "data" / "output" / name
+        if not path.is_file() or sha256_file(path) != expected_hash:
+            raise SystemExit(f"firm-name source differs from identity manifest: {name}")
 
     if manifest.get("rosterEvidence") is not True:
         raise SystemExit("identity manifest did not include roster evidence")
@@ -195,7 +204,7 @@ def main(argv=None) -> None:
             continue
         crd = normalize_crd(roster.get("advisor_crd"))
         allowed = crd_tuple(roster.get("allowed_firm_crds"))
-        name_ok, name_reason = sec_name_agreement(
+        name_ok, name_reason = exact_email_name_agreement(
             rec, sec.get(crd, {}), aliases.get(crd, []))
         firm_ok, firm_reason = firm_agreement(
             rec, current.get(crd, {}), allowed)
@@ -243,12 +252,14 @@ def main(argv=None) -> None:
         for crd in surname_index.get(name_token(rec.get("norm_last_name")), set()):
             if crd in claimed:
                 continue
-            name_ok, name_reason = sec_name_agreement(
-                rec, sec.get(crd, {}), aliases.get(crd, []),
-                require_suffix_presence_match=True)
             loc_ok, loc_strength = paired_location(rec, branches.get(crd, []))
             firm_ok, firm_reason = firm_agreement(
                 rec, current.get(crd, {}), allowed)
+            name_ok, name_reason = residual_name_agreement(
+                rec, sec.get(crd, {}), aliases.get(crd, []),
+                loc_strength, firm_reason,
+                bool(allowed and int(rec.get("email_claim_count") or 0) == 1
+                     and personal_email(rec.get("norm_email"))))
             if not (name_ok and loc_ok and firm_ok):
                 continue
             score = candidate_score(name_reason, loc_strength, firm_reason)

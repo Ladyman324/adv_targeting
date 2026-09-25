@@ -28,7 +28,9 @@ similarity as proof:
   company, title, full business address, tier, edited time, and relationship
   owner.
 - SEC: legal and used names, suffix, current and prior employment, firm CRDs,
-  and filed branch street/city/state/postal address.
+  filed branch street/city/state/postal address, and all current firm names
+  filed for the same firm CRD. The individual XML may use a broker-dealer legal
+  name while the firm file uses its investment-adviser/display name.
 - Scraped firm roster: exact email, name, phone, firm CRD, location, and team.
 
 Hard conflicts include duplicate GUID, duplicate CRD, duplicate email,
@@ -50,8 +52,10 @@ evidence hash. Inactive records cannot be manually promoted.
 
    `python src/build_identity_ledger.py`
 
-   The manifest hashes the ACT and SEC inputs, crosswalk, source/evidence/link
-   outputs, decisions, ruleset, row counts, and status counts.
+   The manifest hashes the ACT, SEC, and CRD-scoped firm-name inputs,
+   crosswalk, source/evidence/link outputs, decisions, ruleset, row counts,
+   and status counts. A name shared by different firm CRDs does not itself
+   identify a person or permit a cross-CRD match.
 
 4. Generate the colleague report:
 
@@ -108,6 +112,13 @@ evidence hash. Inactive records cannot be manually promoted.
    ACT-to-roster emails, and strict one-to-one SEC name/location/current-firm
    residuals. These links are economic only: they cannot authorize email,
    calls, preferred names, ACT synchronization, or a CRD write-back.
+   For a unique personal ACT/roster email, the economic-only bridge may accept
+   a different given name when the surname and current authoritative firm
+   still agree; explicit suffix conflicts remain blocked. Without exact email,
+   a missing ACT suffix or Sandy/Sandra nickname is accepted only with exact
+   paired street, ZIP, city/state, a unique personal authoritative-domain
+   email, and current firm agreement. Other name/firm/location conflicts stay
+   in the review ledger.
    `build_act_assets.py` immediately consumes that hash-bound ledger and
    publishes only approved links whose CRDs exist in the deployed advisor
    index. Its client-side account table contains only that map-addressable set;
