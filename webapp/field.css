@@ -59,6 +59,9 @@ body{
   align-items:center; justify-content:center; gap:5px; font:inherit;
   font-size:12px; font-weight:700; color:var(--accent); background:transparent;
   border:1px solid color-mix(in srgb,var(--accent) 45%,var(--hair)); border-radius:9px}
+.field-email-history{flex:none;height:36px;padding:0 7px;display:inline-flex;align-items:center;gap:4px;
+  color:var(--accent);background:transparent;border:1px solid var(--hair);border-radius:9px;font:inherit;font-size:12px}
+@media(max-width:380px){.field-email-history span{display:none}}
 #listsBtn:focus-visible,#settingsBtn:focus-visible,#workBtn:focus-visible{
   outline:2px solid var(--accent); outline-offset:2px}
 /* The count rides on the flag. Absolute so it cannot change the button's

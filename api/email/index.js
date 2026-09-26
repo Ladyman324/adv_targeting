@@ -46,7 +46,7 @@ module.exports = async function (context, req) {
        * somebody may reply in between. */
       if (op === "follow_up_candidates")
         return ok(context, await service.followUpCandidates(who, String(req.query.id || "")));
-      if (op === "batches") return ok(context, { batches: await store.listBatches(who.id, 200, true) });
+      if (op === "batches") return ok(context, { batches: await service.listBatchSummaries(who) });
       if (op === "connection") return ok(context, await auth.status(who.id));
       if (op === "policy") return ok(context, await store.policy());
       if (op === "daily_caps") {
@@ -356,7 +356,7 @@ module.exports = async function (context, req) {
     if (op === "validate") return ok(context, await service.validateBatch(who, body.batchId));
     if (op === "remove_recipient") return ok(context, await service.removeRecipient(who, body));
     if (op === "approve") return ok(context, await service.approve(who, body), 202);
-    if (["pause", "cancel", "resume", "retry", "review_schedule", "check_status", "handled_manually", "retry_selected", "prepare_retry"].includes(op)) return ok(context, await service.control(who, { ...body, action: op }));
+    if (["pause", "cancel", "discard_draft", "resume", "retry", "review_schedule", "check_status", "handled_manually", "retry_selected", "prepare_retry"].includes(op)) return ok(context, await service.control(who, { ...body, action: op }));
     if (op === "policy") {
       if (!isAdmin(who)) throw service.httpError(403, "EmailAdministrator role is required.");
       return ok(context, await store.setPolicy(who, body.killed, body.reason));

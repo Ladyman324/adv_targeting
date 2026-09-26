@@ -523,7 +523,8 @@ function corporateSignature(profile, manageUrl = "", cfg = config()) {
 function complianceBcc(message, cfg = config()) {
   const address = cfg.materialBcc;
   if (!address || !validEmail(address)) return [];
-  if (!(message && Array.isArray(message.attachments) && message.attachments.length)) return [];
+  if (!(message && ((Array.isArray(message.attachments) && message.attachments.length)
+      || (message.followUpOfGraphId && Number(message.originalAttachmentCount) > 0)))) return [];
   if (!isExternal(message.recipientEmail, cfg)) return [];
   // Never blind-copy the desk on a message addressed to the desk.
   if (String(message.recipientEmail || "").trim().toLowerCase() === address) return [];

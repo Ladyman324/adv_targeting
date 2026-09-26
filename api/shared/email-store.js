@@ -133,6 +133,8 @@ function batchFromEntity(e) {
     ? parsedCapacityPlan : null;
   return { id: e.rowKey, userId: e.partitionKey, userName: e.userName,
     status: e.status, mode: e.mode || "", name: repairLegacyText(e.name),
+    sourceListId: e.sourceListId || "", sourceListName: e.sourceListName || "",
+    sourceRecipientName: e.sourceRecipientName || "",
     templateId: e.templateId, templateName: e.templateName, templateVersion: Number(e.templateVersion) || 1,
     commonSubject: e.commonSubject || "", commonBodyText: e.commonBodyText || "",
     commonRevision: Number(e.commonRevision) || 1,
@@ -160,6 +162,7 @@ function batchFromEntity(e) {
      */
     followUpDays: Number(e.followUpDays) || 0,
     parentBatchId: e.parentBatchId || "",
+    followUpCopiesVersion: Number(e.followUpCopiesVersion) || 0,
     retrySourceBatchId: e.retrySourceBatchId || "",
     retrySourceMessageIds: parse(e.retrySourceMessageIdsJson, []),
     followUpSentUtc: e.followUpSentUtc || "",
@@ -197,6 +200,8 @@ async function createBatch(who, batch) {
   const at = now();
   const entity = { partitionKey: who.id, rowKey: batch.id, userName: clean(who.name, 256),
     status: batch.status || "editing", mode: "", name: clean(repairLegacyText(batch.name), 120),
+    sourceListId: clean(batch.sourceListId, 80), sourceListName: clean(batch.sourceListName, 160),
+    sourceRecipientName: clean(batch.sourceRecipientName, 254),
     templateId: clean(batch.templateId, 80), templateName: clean(batch.templateName, 120), templateVersion: Number(batch.templateVersion) || 1,
     commonSubject: clean(batch.commonSubject, 500), commonBodyText: clean(batch.commonBodyText, 50000),
     commonRevision: 1, attachmentIdsJson: json(batch.attachmentIds || []),
@@ -222,6 +227,7 @@ async function createBatch(who, batch) {
     // and made a derived follow-up look like another original campaign.
     followUpDays: Number(batch.followUpDays) || 0,
     parentBatchId: clean(batch.parentBatchId, 80),
+    followUpCopiesVersion: Number(batch.followUpCopiesVersion) || 0,
     retrySourceBatchId: clean(batch.retrySourceBatchId, 80),
     retrySourceMessageIdsJson: json(batch.retrySourceMessageIds || []),
     followUpSentUtc: clean(batch.followUpSentUtc, 64),
@@ -294,6 +300,7 @@ function messageFromEntity(e) {
     graphInternetMessageId: e.graphInternetMessageId || "",
     graphConversationId: e.graphConversationId || "", graphRequestId: e.graphRequestId || "",
     followUpOfGraphId: e.followUpOfGraphId || "",
+    originalAttachmentCount: Number(e.originalAttachmentCount) || 0,
     draftCreatedUtc: e.draftCreatedUtc || "", queuedUtc: e.queuedUtc || "",
     sendStartedUtc: e.sendStartedUtc || "", submittedUtc: e.submittedUtc || "",
     sendOutcome: e.sendOutcome || "", sendAttemptId: e.sendAttemptId || "",
@@ -354,6 +361,7 @@ async function createMessage(userId, batchId, message) {
     subjectOverridden: message.subjectOverridden === true, bodyOverridden: message.bodyOverridden === true, baseRevision: message.baseRevision || 1,
     retryOfBatchId: clean(message.retryOfBatchId, 80), retryOfMessageId: clean(message.retryOfMessageId, 80),
     followUpOfGraphId: clean(message.followUpOfGraphId, 2000),
+    originalAttachmentCount: Number(message.originalAttachmentCount) || 0,
     reviewed: false, validationJson: json(message.validation || { errors: [], warnings: [] }),
     attachmentsJson: json(message.attachments || []), attemptCount: 0,
     draftAttempts: 0, sendAttempts: 0, reconcileAttempts: 0, createdUtc: at, updatedUtc: at });

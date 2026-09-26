@@ -509,9 +509,11 @@ async function validateBatch(who, batchId, options = {}) {
   const images = (tpl && tpl.images) || [];
   const knownImageIds = tpl ? new Set(images.map((i) => String(i.id).toLowerCase())) : null;
   const originals = await followUpOriginals(who, batch);
+  const copyRetentionWarning = await legacyCopyWarning(who, batch, messages);
   const sender = (await auth.status(who.id).catch(() => null) || {}).profile || null;
   const updated = await mapMessagesBounded(messages, async (message) => {
-    const identityErrors = [];
+    const identityErrors = copyRetentionWarning
+      ? [{ code: "legacy_follow_up_copies", message: copyRetentionWarning }] : [];
     const identityPatch = {};
     let presentationChanged = false;
     try {
@@ -585,7 +587,7 @@ async function validateBatch(who, batchId, options = {}) {
                   copyInternalTo: b.copyInternalTo, ccColleague: b.ccColleague };
   const withCopies = updated.map((m) => ({ ...m,
     ...core.extraRecipients(m, prefs, { mail: b.senderMail }, cfg) }));
-  return { batch: b, messages: withCopies, originals,
+  return { batch: b, messages: withCopies, originals, copyRetentionWarning,
     valid: errors.length === 0, errors, warnings,
     // What "Restore approved wording" restores TO. Sent from the server so the
     // client restores the template as published rather than whatever it happens
@@ -665,11 +667,15 @@ async function followUpCandidates(who, batchId, deps = {}) {
   const brief = (m) => ({ messageId: m.id, crd: m.contactId || "",
     name: m.recipientName || "", email: m.recipientEmail || "",
     graphMessageId: m.graphMessageId || "", subject: m.subject || "",
-    bodyText: m.bodyText || "", sentUtc: m.sentUtc || "",
+    bodyText: m.bodyText || "", sentUtc: m.sentUtc || "", state: m.state || "",
+    teammateCc: m.teammateCc || [], teammateCcCrds: m.teammateCcCrds || [],
     attachments: (m.attachments || []).map((d) => ({ id: d.id, name: d.name || "Document", version: d.version, sha256: d.sha256 })) });
 
   return {
     batchId, batchName: batch.name || "", followUpDays: batch.followUpDays || 0,
+    templateName: batch.templateName || "", sourceListName: batch.sourceListName || "",
+    sourceRecipientName: batch.sourceRecipientName || "",
+    originalMessages: messages.map(brief),
     followUpBatchId: batch.followUpBatchId || "",
     followUpSentUtc: batch.followUpSentUtc || "",
     counts: { sent: sent.length, replied: replied.length, bounced: bounced.length,
@@ -716,12 +722,14 @@ async function createFollowUp(who, input, deps = {}) {
     const stale = Number.isFinite(claimedAt) && Date.now() - claimedAt > 15 * 60 * 1000;
     const claimedChild = parent.followUpBatchId
       ? await st.getBatch(who.id, parent.followUpBatchId) : null;
-    if (stale && parent.followUpBatchId
-        && (!claimedChild || claimedChild.status === "building")) {
+    const discarded = claimedChild && claimedChild.status === "canceled"
+      && safeUnapprovedDraft(claimedChild, await st.listMessages(who.id, claimedChild.id));
+    if (discarded || (stale && parent.followUpBatchId
+        && (!claimedChild || claimedChild.status === "building"))) {
       // Recovery for a Function host stopping between the parent claim and the
       // final child transition. Only a stale, never-sendable `building` child
       // is retired; an editing/sent child is evidence of a real follow-up.
-      if (claimedChild) await st.patchBatch(who.id, claimedChild.id, {
+      if (claimedChild && !discarded) await st.patchBatch(who.id, claimedChild.id, {
         status: "canceled", canceledUtc: new Date().toISOString(),
         warningMessage: "Incomplete follow-up preparation was retired." }, claimedChild.etag);
       parent = await st.patchBatch(who.id, parentId,
@@ -735,6 +743,13 @@ async function createFollowUp(who, input, deps = {}) {
   if (!connection.connected || !connection.profile)
     throw httpError(409, "Connect your Microsoft 365 mailbox first.", "graph_not_connected");
   const profile = connection.profile;
+
+  // Never silently drop an original colleague when an admin changes the allowlist.
+  const originalColleagues = [parent.ccColleague,
+    parent.copyInternal ? parent.copyInternalTo : ""].filter(Boolean);
+  if (originalColleagues.some((email) => !(cfg.internalRecipients || []).some((r) =>
+      String(r.address).toLowerCase() === String(email).toLowerCase())))
+    throw httpError(409, "An original copied colleague is no longer approved for copying. Ask an administrator to review the colleague configuration.", "original_copy_unavailable");
 
   // Recomputed HERE, not taken from the client. The rep may have been looking
   // at the review screen for an hour while somebody replied.
@@ -769,7 +784,15 @@ async function createFollowUp(who, input, deps = {}) {
         source: "connected_mailbox", registryHash: "", routingHash: "",
         matchScore: null, matchGap: null };
     } else approved = await registry.verify(row.crd, row.email);
-    verifiedRemaining.push({ row, approved });
+    const requestedCopies = (row.teammateCc || []).map((email, i) => ({
+      email, crd: (row.teammateCcCrds || [])[i] || "",
+    }));
+    const copies = requestedCopies.length ? await registry.verifyTeammates(row.crd, requestedCopies) : [];
+    if (copies.length !== requestedCopies.length)
+      throw httpError(409, "An original copied teammate is no longer eligible. Review the copied recipients.", "original_copy_unavailable");
+    if (copies.length && (await suppress.blockedAmong(copies.map((m) => ({ email: m.email, contactId: m.crd })))).size)
+      throw httpError(409, "An original copied teammate is now suppressed. Review the copied recipients before preparing this follow-up.", "copied_recipient_suppressed");
+    verifiedRemaining.push({ row, approved, copies });
   }
   const note = String(input.text == null ? FOLLOW_UP_DEFAULT_TEXT : input.text).slice(0, cfg.maxBodyChars);
   if (!note.trim()) throw httpError(400, "The follow-up needs something to say.");
@@ -810,20 +833,23 @@ async function createFollowUp(who, input, deps = {}) {
   await st.createBatch(who, { id: batchId, status: "building",
     name: `Follow-up \u2014 ${parent.name || "campaign"}`,
     templateId: parent.templateId, templateName: parent.templateName,
+    sourceListId: parent.sourceListId || "", sourceListName: parent.sourceListName || "",
+    sourceRecipientName: verifiedRemaining.length === 1 ? verifiedRemaining[0].approved.name : "",
     commonSubject: "", commonBodyText: note, commonRevision: 1,
     attachmentIds: documents.map((d) => d.id),
     attachmentSummary: documents.map((d) => ({ id: d.id, name: d.name, bytes: d.bytes })),
     recipientCount: verifiedRemaining.length, externalCount: verifiedRemaining.length,
     parentBatchId: parentId,
+    followUpCopiesVersion: 1,
     graphMailboxId: profile.id, graphMailbox: connection.mailbox,
-    ccTeammates: "", ccColleague: "",
+    ccTeammates: parent.ccTeammates ? "1" : "", ccColleague: parent.ccColleague || "",
     copySelf: String(parent.copySelf || ""), copyInternal: String(parent.copyInternal || ""),
     copyInternalTo: String(parent.copyInternalTo || ""),
     senderMail: String(profile.mail || profile.userPrincipalName || ""),
     recipientRegistryHash: (verifiedRemaining[0] && verifiedRemaining[0].approved.registryHash) || "" });
 
   for (let i = 0; i < verifiedRemaining.length; i++) {
-    const { row: r, approved } = verifiedRemaining[i];
+    const { row: r, approved, copies } = verifiedRemaining[i];
     // "RE:" and the threading both come from Graph's createReply in the worker.
     // The subject here is what the REVIEW SCREEN shows, so it has to read the
     // way the advisor will see it.
@@ -837,7 +863,8 @@ async function createFollowUp(who, input, deps = {}) {
       recipientLastName: approved.lastName,
       recipientRegistryHash: approved.registryHash,
       recipientRoutingHash: approved.routingHash,
-      teammateCcJson: "[]", teammateCcCrdsJson: "[]",
+      teammateCcJson: JSON.stringify(copies.map((m) => m.email)),
+      teammateCcCrdsJson: JSON.stringify(copies.map((m) => m.crd)),
       recipientTier: approved.tier,
       recipientSource: approved.source,
       recipientMatchScore: approved.matchScore,
@@ -849,6 +876,7 @@ async function createFollowUp(who, input, deps = {}) {
       // The sent message this replies to. The worker needs the Graph id, not
       // the conversation id, because it replies to a MESSAGE.
       followUpOfGraphId: r.graphMessageId,
+      originalAttachmentCount: (r.attachments || []).length,
       subject, bodyText, bodyOverridden: personalized,
       bodyHtml: core.plainTextToSafeHtml(bodyText, []),
       inlineImages: [],
@@ -979,6 +1007,11 @@ async function createBatch(who, input) {
   const batchDocuments = [...unionDocuments.values()];
   const batchAttachmentIds = batchDocuments.map((doc) => doc.id);
   const batch = await store.createBatch(who, { id: batchId,
+    // Display provenance only, never an authorization input. Stored once so
+    // deleting or renaming the active list cannot rewrite campaign history.
+    sourceListId: String(input.sourceListId || "").slice(0, 80),
+    sourceListName: String(input.sourceListName || "").slice(0, 160),
+    sourceRecipientName: kept.length === 1 ? (kept[0].name || kept[0].email) : "",
     name: input.name || `${template.name} \u2014 ${new Date().toLocaleDateString("en-US")}`,
     templateId: template.id, templateName: template.name, templateVersion: template.version, commonSubject: template.subject,
     commonBodyText: template.bodyText, attachmentIds: batchAttachmentIds,
@@ -1628,6 +1661,23 @@ async function followUpOriginals(who, batch, st = store) {
   }));
 }
 
+async function legacyCopyWarning(who, batch, messages, st = store) {
+  if (!batch.parentBatchId || batch.followUpCopiesVersion
+      || !["editing", "invalid"].includes(batch.status)) return "";
+  const parent = await st.getBatch(who.id, batch.parentBatchId);
+  if (!parent) return "";
+  const originals = await st.listMessages(who.id, parent.id);
+  const missingPrefs = ["ccColleague", "copySelf", "copyInternal", "copyInternalTo"]
+    .some((key) => parent[key] && parent[key] !== batch[key]);
+  const missingTeam = messages.some((m) => {
+    const original = originals.find((o) => o.graphMessageId === m.followUpOfGraphId);
+    return original && (original.teammateCc || []).some((email) => !(m.teammateCc || []).includes(email));
+  });
+  return missingPrefs || missingTeam
+    ? "This older follow-up draft is missing original copied recipients. Discard it in Email history and prepare a replacement to retain those copies."
+    : "";
+}
+
 async function getBatchDetail(who, batchId, deps = {}) {
   const st = deps.store || store;
   const batch = await st.getBatch(who.id, batchId);
@@ -1663,7 +1713,8 @@ async function getBatchDetail(who, batchId, deps = {}) {
     retryEligibility: review.eligibility(batch, m),
     prepareRetryEligibility: review.prepareEligibility(batch, m),
     ...core.extraRecipients(m, prefs, { mail: batch.senderMail }, cfg) }));
-  return { batch, messages: withCopies, counts, originals: await followUpOriginals(who, batch, st) };
+  return { batch, messages: withCopies, counts, originals: await followUpOriginals(who, batch, st),
+    copyRetentionWarning: await legacyCopyWarning(who, batch, messages, st) };
 }
 
 async function releaseCapacity(batch, messages, all = false) {
@@ -1679,9 +1730,42 @@ async function releaseCapacity(batch, messages, all = false) {
   return limitGuard.releaseAllocations(batch.userId, batch.capacityReservationId, keys);
 }
 
+function safeUnapprovedDraft(batch, messages) {
+  return !batch.mode && !batch.approvedUtc && !batch.capacityReservationId
+    && messages.every((m) => !m.graphMessageId && !m.sentUtc && !m.submittedUtc && !m.sendIntentUtc
+      && ["editing", "invalid", "canceled"].includes(m.state));
+}
+
+async function listBatchSummaries(who) {
+  const batches = await store.listBatches(who.id, 200, true);
+  // Older one-person batches can recover the actual saved recipient, but we
+  // never guess the source list of an older multi-person batch.
+  return mapMessagesBounded(batches, async (b) => {
+    if (b.recipientCount !== 1 || b.sourceRecipientName) return b;
+    try {
+      const rows = await store.listMessages(who.id, b.id);
+      return { ...b, sourceRecipientName: rows[0]?.recipientName || rows[0]?.recipientEmail || "" };
+    } catch { return b; }
+  }, 4);
+}
+
 async function control(who, input) {
   const batch = await store.getBatch(who.id, input.batchId);
   if (!batch) throw httpError(404, "Email batch not found.");
+  if (input.action === "discard_draft") {
+    const messages = await store.listMessages(who.id, batch.id);
+    if (!["editing", "invalid"].includes(batch.status) || !safeUnapprovedDraft(batch, messages))
+      throw httpError(409, "Only an unapproved draft can be discarded. Use the sending controls for an approved batch.", "not_unapproved_draft");
+    // The batch ETag prevents an approval racing this discard from winning too.
+    await store.patchBatch(who.id, batch.id, { status: "canceled", canceledUtc: new Date().toISOString() }, batch.etag);
+    if (batch.parentBatchId) {
+      const parent = await store.getBatch(who.id, batch.parentBatchId);
+      if (parent && parent.followUpBatchId === batch.id)
+        await store.patchBatch(who.id, parent.id, { followUpBatchId: "", followUpSentUtc: "" }, parent.etag);
+    }
+    await store.audit(who.id, batch.id, "draft_discarded", { parentBatchId: batch.parentBatchId || "" });
+    return getBatchDetail(who, batch.id);
+  }
   if (input.action === "prepare_retry") {
     const result = await retryPreparation.prepare(who, input);
     await require("../email-worker/index").refreshBatch(who.id, batch.id, { store, core });
@@ -1762,6 +1846,7 @@ async function control(who, input) {
 const attachmentLimit = () => core.config().maxAttachmentBytes;
 
 module.exports = {
+  listBatchSummaries,
   senderHealth, catalog, capacityPlan, createBatch, updateCommon, updateMessage, updateMessageCc,
   validateBatch, removeRecipient,
   approve, preflightScheduled, getBatchDetail, control, enqueue, httpError, attachmentLimit,

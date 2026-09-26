@@ -47,6 +47,27 @@ function connection(overrides = {}) {
   };
 }
 
+test("batch source-list names and follow-up copy provenance survive storage without the active list", async () => {
+  const { store, restore } = loadStore();
+  try {
+    await store.createBatch({ id: "u1", name: "Rep" }, { id: "source-batch",
+      sourceListId: "deleted-list", sourceListName: "Priority contacts-SH", sourceRecipientName: "Bo Ladyman",
+      recipientCount: 1 });
+    const saved = await store.getBatch("u1", "source-batch");
+    assert.equal(saved.sourceListName, "Priority contacts-SH");
+    assert.equal(saved.sourceRecipientName, "Bo Ladyman");
+    await store.patchBatch("u1", saved.id, { status: "completed" }, saved.etag);
+    assert.equal((await store.listBatches("u1"))[0].sourceListName, "Priority contacts-SH");
+    await store.createMessage("u1", "source-batch", { id: "m", ordinal: 0,
+      followUpOfGraphId: "original", originalAttachmentCount: 1,
+      teammateCcJson: '["mate@example.com"]', teammateCcCrdsJson: '["123"]' });
+    const m = await store.getMessage("u1", "source-batch", "m");
+    assert.equal(m.originalAttachmentCount, 1);
+    assert.deepEqual(m.teammateCc, ["mate@example.com"]);
+    assert.deepEqual(m.teammateCcCrds, ["123"]);
+  } finally { restore(); }
+});
+
 /* Load email-auth with deterministic MSAL, crypto and store seams. The module
  * itself remains unchanged apart from its real retry logic; only its external
  * systems are replaced. */

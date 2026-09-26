@@ -22,6 +22,8 @@ withEnv({ EMAIL_MATERIAL_BCC: undefined, EMAIL_INTERNAL_DOMAINS: undefined }, ()
 
   // No attachment: nothing left the firm that needs retaining.
   assert.deepStrictEqual(core.complianceBcc({ recipientEmail: "adv@lpl.com", attachments: [] }), []);
+  assert.deepStrictEqual(core.complianceBcc({ recipientEmail: "adv@lpl.com", attachments: [],
+    followUpOfGraphId: "original", originalAttachmentCount: 1 }), ["mktgmaterial@eicatlanta.com"]);
   assert.deepStrictEqual(core.complianceBcc({ recipientEmail: "adv@lpl.com" }), []);
 
   // Internal recipient -- this is what testing on yourself looks like.

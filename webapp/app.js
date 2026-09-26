@@ -2226,6 +2226,7 @@ window.AdvisorEmailData = {
         teammates: teammateEmails(it.crd), teammatesFull: teammatesOf(it.crd) }));
     out.eligibilitySummary = { selected: Dial.state.items.length, included: out.length,
       excluded: Dial.state.items.length - out.length };
+    out.sourceList = { id: Dial.state.listId, name: Dial.state.listName };
     return out;
   },
 };

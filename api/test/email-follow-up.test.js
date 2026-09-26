@@ -55,7 +55,7 @@ function editingFixture(followUp = true) {
   };
   const svc = load({ "email-store": st, "recipient-registry": { load: async () => {} },
     "email-auth": { status: async () => ({ profile: { mail: "rep@eicatlanta.com" } }) } });
-  return { svc, original, get message() { return message; } };
+  return { svc, original, parent, get batch() { return batch; }, get message() { return message; } };
 }
 
 test("common follow-up body edits preserve the original subject despite a blank shared subject", async () => {
@@ -92,64 +92,70 @@ test("validation repairs an older follow-up's blank subject from its saved origi
   assert.equal(r.valid, true);
 });
 
+test("older follow-up drafts missing original copies cannot validate silently", async () => {
+  const f = editingFixture();
+  f.parent.ccColleague = "holly@eicatlanta.com";
+  const r = await f.svc.validateBatch(WHO, "F");
+  assert.equal(r.valid, false);
+  assert.match(r.copyRetentionWarning, /missing original copied recipients/);
+});
+
+test("copy-aware follow-up drafts do not override deliberate copy edits", async () => {
+  const f = editingFixture();
+  f.parent.ccColleague = "holly@eicatlanta.com";
+  f.batch.followUpCopiesVersion = 1;
+  const r = await f.svc.validateBatch(WHO, "F");
+  assert.equal(r.valid, true);
+  assert.equal(r.copyRetentionWarning, "");
+});
+
 test("ordinary batch edits still require a subject", async () => {
   const f = editingFixture(false);
   await assert.rejects(() => f.svc.updateCommon(WHO, { batchId: "F", subject: "", bodyText: "Note" }),
     (e) => e.code === "common_text_invalid");
 });
 
-test("follow-up preparation does not reference composer-only delivery controls", () => {
+test("follow-up preparation is a summary; drafting uses the shared three-step editor", () => {
   const ui = fs.readFileSync(path.resolve(__dirname, "../../webapp/email.js"), "utf8");
   const view = ui.split("function followUpView()")[1].split("const FOLLOW_UP_DEFAULT")[0];
-  assert.ok(view, "follow-up view exists");
-  assert.doesNotMatch(view, /scheduleHtml/);
-  assert.match(view, /followUpDraftView\(false\)/);
-  const writeView = ui.split("function followUpDraftView(existing)")[1].split("function followUpDeliveryView")[0];
-  assert.doesNotMatch(writeView, /scheduleHtml|emailCommonSubject|emailOneSubject/);
-  assert.match(writeView, /Continue to delivery/);
-  assert.match(writeView, /originalEmailHtml/);
-  const entry = ui.split("async function openFollowUp(batchId)")[1].split("function followUpView()")[0];
-  assert.ok(entry.indexOf("await loadCatalog()") < entry.indexOf('await api('));
+  assert.doesNotMatch(view, /scheduleHtml|textarea/);
+  assert.match(view, /batchSummaryHtml/);
+  assert.match(view, /follow-up-discard/);
+  assert.match(view, /Prepare follow-up/);
+  assert.doesNotMatch(ui, /function followUpDraftView|function followUpDeliveryView/);
+  const editor = ui.split("function composerView()")[1].split("let swipeFrom")[0];
+  assert.match(editor, /Step 1/); assert.match(editor, /Step 2/); assert.match(editor, /Step 3/);
+  assert.equal((editor.match(/parentBatchId \? "readonly"/g) || []).length, 2);
+  assert.ok(editor.indexOf("originalEmailHtml(") > editor.indexOf("Step 3"));
 });
 
-test("follow-up writing view preserves personal text, selected recipients, and safely previews originals", () => {
+test("batch summaries keep source names, prefer a single person, and collapse their disclosures", () => {
   const vm = require("node:vm");
   const ui = fs.readFileSync(path.resolve(__dirname, "../../webapp/email.js"), "utf8");
-  const section = ui.slice(ui.indexOf("  let followUp = null;"), ui.indexOf("  async function openFollowUp("));
-  const nodes = new Map();
-  const node = (id) => {
-    if (!nodes.has(id)) nodes.set(id, { innerHTML: "", textContent: "", value: "", hidden: false });
-    return nodes.get(id);
-  };
-  const boxes = ["a", "b"].map((id) => ({ checked: true, dataset: { followupRecipient: id } }));
-  const context = vm.createContext({
-    document: { getElementById: node, querySelectorAll: () => boxes, activeElement: null },
-    esc: (s) => String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;"),
-    clearTimeout: () => {}, clearInterval: () => {}, pollTimer: null, tickTimer: null,
-    FOLLOW_UP_DEFAULT: "Checking in.", detail: null,
-  });
-  vm.runInContext(section + `
-    followUp = { batchId: "P", batchName: "Original batch",
-      counts: { replied: 2, bounced: 0, suppressed: 0, unthreadable: 0, notSent: 0 },
-      remaining: [{ messageId: "a", name: "Alice", email: "a@example.com", subject: "Original A", bodyText: "<script>not executable</script>" },
-        { messageId: "b", name: "Bob", email: "b@example.com", subject: "Original B", bodyText: "Bob's actual sent text" }] };
-    followUpDraftView(false);
-  `, context);
-  assert.match(node("emailBody").innerHTML, /Continue to delivery/);
-  assert.doesNotMatch(node("followUpOriginal").innerHTML, /<script>/);
-  assert.match(node("followUpPreview").innerHTML, /RE: Original A/);
-  node("followUpPersonalize").onchange({ target: { checked: true } });
-  node("followUpPersonalText").oninput({ target: { value: "Only Alice." } });
-  node("followUpText").oninput({ target: { value: "New shared note." } });
-  assert.match(node("followUpPreview").innerHTML, /Only Alice/);
-  node("followUpPreviewRecipient").onchange({ target: { value: "b" } });
-  assert.match(node("followUpPreview").innerHTML, /New shared note/);
-  assert.match(node("followUpOriginal").innerHTML, /Bob's actual sent text/);
-  boxes[1].checked = false; boxes[1].onchange();
-  assert.equal(node("followUpCount").textContent, 1);
-  assert.match(node("followUpPreview").innerHTML, /Excluded/);
-  node("followUpPreviewRecipient").onchange({ target: { value: "a" } });
-  assert.match(node("followUpPreview").innerHTML, /Only Alice/);
+  const start = ui.indexOf("  function batchAudience(");
+  const end = ui.indexOf('  document.addEventListener("toggle"', start);
+  const ctx = vm.createContext({ esc: (s) => String(s || "").replace(/</g, "&lt;").replace(/"/g, "&quot;") });
+  vm.runInContext(ui.slice(start, end), ctx);
+  const b = { id: "B", recipientCount: 40, sourceListName: "Deleted list - SH", commonSubject: "<unsafe>" };
+  ctx.b = b;
+  const html = vm.runInContext("batchSummaryHtml(b)", ctx);
+  assert.match(html, /Deleted list - SH/);
+  assert.match(html, /&lt;unsafe>/);
+  assert.doesNotMatch(html, /<details[^>]* open/);
+  assert.match(html, /Show original email/); assert.match(html, /Show list emails/);
+  ctx.b = { ...b, recipientCount: 1, sourceRecipientName: "Bo Ladyman" };
+  assert.equal(vm.runInContext("batchAudience(b)", ctx), "Bo Ladyman");
+  const row = ui.split("function historyRow(")[1].split("function historyView")[0];
+  assert.ok(row.indexOf('email-history-chip') < row.indexOf('<b>'));
+});
+
+test("desktop and Field expose email history immediately between Lists and Settings", () => {
+  for (const file of ["index.html", "field.html"]) {
+    const html = fs.readFileSync(path.resolve(__dirname, "../../webapp", file), "utf8");
+    const list = html.indexOf('id="listsBtn"'), history = html.indexOf('data-email="history"', list);
+    assert.ok(list >= 0 && history > list && history < html.indexOf('id="settingsBtn"', list));
+    assert.equal((html.match(/id="settingsBtn"/g) || []).length, 1);
+  }
 });
 
 test("history separates sent batches and editing drafts, with a linked follow-up and discard action", () => {
@@ -163,7 +169,7 @@ test("history separates sent batches and editing drafts, with a linked follow-up
   assert.match(ui, /Follow up with non-responders/);
   assert.match(ui, /data-email="history-discard"/);
   assert.match(ui, /data-email="history-toggle-discarded"/);
-  assert.match(ui, /await api\("cancel", \{ batchId: batch\.id \}\)/);
+  assert.match(ui, /await api\("discard_draft", \{ batchId: batch\.id \}\)/);
 });
 
 function build({ messages, activity = {}, blocked = [], batch = {} }) {
@@ -308,7 +314,8 @@ function creationFixture({ conflict = false, failMessage = false } = {}) {
     verify: async (crd, email) => ({ crd, email, name: "Advisor One", firm: "Firm",
       greetingName: "Advisor", lastName: "One", tier: "approved", source: "roster",
       matchScore: 100, matchGap: 100, registryHash: "rh", routingHash: "route" }),
-    allowedTeammates: async () => [], policy: () => ({ version: "v1" }),
+    allowedTeammates: async () => [], verifyTeammates: async (_crd, rows) => rows,
+    policy: () => ({ version: "v1" }),
   };
   const svc = load({
     "email-store": store,
@@ -317,7 +324,8 @@ function creationFixture({ conflict = false, failMessage = false } = {}) {
     "email-auth": { status: async () => ({ connected: true, mailbox: "rep@eicatlanta.com",
       profile: { id: "mailbox", mail: "rep@eicatlanta.com" } }) },
     "email-materials": { currentDocument: () => true },
-    "email-core": { config: () => ({ maxBodyChars: 50000 }),
+    "email-core": { config: () => ({ maxBodyChars: 50000, internalRecipients: [
+      { address: "holly@eicatlanta.com" }, { address: "hannah@eicatlanta.com" }] }),
       splitName: () => ({ first: "Rep", last: "Test" }),
       plainTextToSafeHtml: (value) => value, corporateSignature: () => "<sig>",
       extraRecipients: () => ({ cc: [], bcc: [] }) },
@@ -377,6 +385,48 @@ test("follow-up creation claims the parent before exposing an editable child", a
   assert.equal(result.batch.status, "editing");
   assert.equal(result.batch.parentBatchId, "B1");
   assert.equal(f.batches.get("B1").followUpBatchId, "F1");
+});
+
+test("follow-ups inherit the source list and all original configured colleague and teammate copies", async () => {
+  const f = creationFixture();
+  Object.assign(f.batches.get("B1"), { sourceListId: "deleted-list", sourceListName: "Leaders-SH",
+    ccColleague: "holly@eicatlanta.com", copySelf: "bcc", copyInternal: "cc",
+    copyInternalTo: "hannah@eicatlanta.com" });
+  Object.assign(f.messages.get("B1")[0], { teammateCc: ["mate@example.com"], teammateCcCrds: ["123"],
+    attachments: [{ id: "doc", name: "Original material" }] });
+  const result = await f.svc.createFollowUp(WHO, { batchId: "B1", text: "Following up." });
+  assert.equal(result.batch.sourceListName, "Leaders-SH");
+  assert.equal(result.batch.ccColleague, "holly@eicatlanta.com");
+  assert.equal(result.batch.copySelf, "bcc");
+  assert.equal(result.batch.copyInternalTo, "hannah@eicatlanta.com");
+  assert.deepEqual(JSON.parse(result.messages[0].teammateCcJson), ["mate@example.com"]);
+  assert.deepEqual(JSON.parse(result.messages[0].teammateCcCrdsJson), ["123"]);
+  assert.equal(result.messages[0].originalAttachmentCount, 1);
+});
+
+test("discarding an unapproved follow-up preserves the original and allows a replacement", async () => {
+  const f = creationFixture();
+  const first = await f.svc.createFollowUp(WHO, { batchId: "B1", text: "Draft." });
+  await f.svc.control(WHO, { batchId: first.batch.id, action: "discard_draft" });
+  assert.equal(f.batches.get(first.batch.id).status, "canceled");
+  assert.equal(f.batches.get("B1").status, "completed");
+  assert.equal(f.batches.get("B1").followUpBatchId, "");
+  const next = await f.svc.createFollowUp(WHO, { batchId: "B1", text: "Replacement." });
+  assert.notEqual(next.batch.id, first.batch.id);
+  assert.equal(next.batch.status, "editing");
+});
+
+test("draft discard refuses approved or Outlook-created follow-ups", async () => {
+  const f = creationFixture();
+  const first = await f.svc.createFollowUp(WHO, { batchId: "B1", text: "Draft." });
+  f.batches.get(first.batch.id).approvedUtc = "2026-09-26T12:00:00Z";
+  await assert.rejects(() => f.svc.control(WHO, { batchId: first.batch.id, action: "discard_draft" }),
+    (e) => e.code === "not_unapproved_draft");
+  f.batches.get(first.batch.id).approvedUtc = "";
+  f.messages.get(first.batch.id)[0].graphMessageId = "outlook-draft";
+  await assert.rejects(() => f.svc.control(WHO, { batchId: first.batch.id, action: "discard_draft" }),
+    (e) => e.code === "not_unapproved_draft");
+  assert.equal(f.batches.get("B1").followUpBatchId, first.batch.id);
 });
 
 test("connected-mailbox self-test follow-up needs no fabricated advisor CRD", async () => {
