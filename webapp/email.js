@@ -2576,8 +2576,8 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
             ? `<p><b>Bcc:</b> ${(m.bcc || []).map((a) => `${esc(a)}<span class="env-note">${
                 esc(bccReason(a, b))}</span>`).join(", ")}</p>` : ""}
           <p><b>Subject:</b> ${esc(m.subject)}</p><p><b>Attachments:</b> ${attachments.length ? attachments.map((a) => `${esc(a.name)} (${bytes(a.size)})`).join(", ") : "None"}</p></div>
-          <div class="email-rendered">${previewWithImages(m.bodyHtml, m.inlineImages, b.templateId)}${m.signatureHtml || ""}</div>
-          ${b.parentBatchId ? originalEmailHtml((detail.originals || []).find((o) => o.graphMessageId === m.followUpOfGraphId)) : ""}</section>
+          <div class="email-rendered">${previewWithImages(m.bodyHtml, m.inlineImages, b.templateId)}${m.signatureHtml || ""}
+          ${b.parentBatchId ? originalEmailHtml((detail.originals || []).find((o) => o.graphMessageId === m.followUpOfGraphId), b.graphMailbox) : ""}</div></section>
         <aside id="emailDeliveryPlan" class="email-plan${deliveryPlan && deliveryPlan.fit === false ? " cannot-fit" : ""}">
           ${capacityPlanCardHtml(deliveryPlan, b, locked)}</aside>
       </main></div>
@@ -2766,14 +2766,21 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
   let followUp = null;
   let followUpChild = null;
 
-  function originalEmailHtml(original) {
+  function originalEmailHtml(original, senderMail = "") {
     if (!original) return '<p class="email-notice bad">Original message unavailable. Open the original batch before proceeding.</p>';
-    return `<section class="email-original"><h3>Original email</h3>
-      <p><b>${esc(original.subject || "(Subject unavailable)")}</b></p>
-      <p class="email-fine">Sent to ${esc(original.name || original.email || "")}${
-        original.sentUtc ? ` on ${esc(new Date(original.sentUtc).toLocaleDateString())}` : ""}</p>
-      <blockquote class="email-followup-text">${esc(original.bodyText || "Original text unavailable.")}</blockquote>
-      <p class="email-fine">Original attachments: ${(original.attachments || []).map((d) => esc(d.name)).join(", ") || "None"}</p></section>`;
+    const sent = original.sentUtc ? new Date(original.sentUtc) : null;
+    const body = original.bodyHtml
+      ? previewWithImages(original.bodyHtml, original.inlineImages, original.templateId)
+      : `<div class="email-followup-text">${esc(original.bodyText || "Original text unavailable.")}</div>`;
+    return `<blockquote class="email-thread-quote" aria-label="Quoted original message">
+      <div class="email-thread-header">
+        <div><b>From:</b> ${esc(original.senderMail || senderMail)}</div>
+        ${sent && Number.isFinite(sent.getTime()) ? `<div><b>Sent:</b> ${esc(sent.toLocaleString())}</div>` : ""}
+        <div><b>To:</b> ${esc(original.name || original.email || "")}${original.name && original.email ? ` &lt;${esc(original.email)}&gt;` : ""}</div>
+        <div><b>Subject:</b> ${esc(original.subject || "(Subject unavailable)")}</div>
+      </div>
+      <div class="email-thread-body">${body}${original.signatureHtml || ""}</div>
+    </blockquote>`;
   }
 
 

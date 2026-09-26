@@ -1656,6 +1656,9 @@ async function followUpOriginals(who, batch, st = store) {
   if (!parent) return [];
   return (await st.listMessages(who.id, parent.id)).filter((m) => m.state === "sent").map((m) => ({
     graphMessageId: m.graphMessageId, subject: m.subject || "", bodyText: m.bodyText || "",
+    bodyHtml: m.bodyHtml || "", signatureHtml: m.signatureHtml || "",
+    inlineImages: m.inlineImages || [], templateId: parent.templateId || "",
+    senderMail: parent.senderMail || parent.graphMailbox || "",
     sentUtc: m.sentUtc || "", name: m.recipientName || "", email: m.recipientEmail || "",
     attachments: (m.attachments || []).map((d) => ({ name: d.name || "Document" })),
   }));

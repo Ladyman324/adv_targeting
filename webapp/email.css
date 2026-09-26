@@ -805,6 +805,10 @@
 .email-followup .email-footer .email-notice{flex-basis:100%}
 .email-original{border:1px solid var(--border,#d7dde5);border-radius:10px;padding:16px;background:var(--panel-2)}
 .email-followup-text{white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.55}
+.email-rendered .email-thread-quote{margin:24px 0 0;padding:12px 0 0;border:0;border-top:1px solid #b5c4df;
+  color:inherit;max-height:none;overflow:visible;font:inherit}
+.email-thread-header{margin-bottom:18px;line-height:1.5;overflow-wrap:anywhere}
+.email-thread-body{overflow-wrap:anywhere}
 .email-followup blockquote{margin:16px 0 0;padding:12px 16px;border-left:3px solid var(--border,#d7dde5);color:var(--muted);max-height:320px;overflow:auto}
 .email-followup-recipients{max-height:250px;overflow:auto;padding:8px 0}
 .email-followup-recipients small{display:block;color:var(--muted)}

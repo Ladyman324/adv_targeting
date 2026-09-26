@@ -68,6 +68,21 @@ test("common follow-up body edits preserve the original subject despite a blank 
   assert.equal(r.valid, true);
 });
 
+test("follow-up detail preserves the original sent HTML and signature for the thread preview", async () => {
+  const f = editingFixture();
+  f.parent.senderMail = "rep@eicatlanta.com";
+  f.parent.templateId = "intro";
+  f.original.bodyHtml = "<p>Saved original wording</p>";
+  f.original.signatureHtml = "<p>Original signature</p>";
+  f.original.inlineImages = [{ id: "chart", cid: "original-chart" }];
+  const r = await f.svc.validateBatch(WHO, "F");
+  assert.equal(r.originals[0].bodyHtml, f.original.bodyHtml);
+  assert.equal(r.originals[0].signatureHtml, f.original.signatureHtml);
+  assert.equal(r.originals[0].senderMail, f.parent.senderMail);
+  assert.equal(r.originals[0].templateId, "intro");
+  assert.deepEqual(r.originals[0].inlineImages, f.original.inlineImages);
+});
+
 test("individual edits and resets cannot replace or erase a follow-up's inherited subject", async () => {
   const f = editingFixture();
   await f.svc.updateMessage(WHO, { batchId: "F", messageId: "M", subject: "Wrong subject", bodyText: "Personal note." });
@@ -147,6 +162,34 @@ test("batch summaries keep source names, prefer a single person, and collapse th
   assert.equal(vm.runInContext("batchAudience(b)", ctx), "Bo Ladyman");
   const row = ui.split("function historyRow(")[1].split("function historyView")[0];
   assert.ok(row.indexOf('email-history-chip') < row.indexOf('<b>'));
+});
+
+test("Step 3 presents one continuous reply with an Outlook-style quoted original", () => {
+  const vm = require("node:vm");
+  const ui = fs.readFileSync(path.resolve(__dirname, "../../webapp/email.js"), "utf8");
+  const start = ui.indexOf("  function originalEmailHtml(");
+  const end = ui.indexOf("  async function openFollowUp(", start);
+  const ctx = vm.createContext({
+    esc: (s) => String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;"),
+    previewWithImages: (html) => html,
+    original: { senderMail: "rep@example.com", email: "advisor@example.com",
+      subject: "<Original subject>", bodyHtml: "<p>Saved message</p>",
+      signatureHtml: "<p>Saved signature</p>", sentUtc: "2026-09-25T14:00:00Z" },
+  });
+  vm.runInContext(ui.slice(start, end), ctx);
+  const html = vm.runInContext("originalEmailHtml(original)", ctx);
+  assert.match(html, /blockquote class="email-thread-quote"/);
+  for (const header of ["From:", "Sent:", "To:", "Subject:"]) assert.ok(html.includes(header));
+  assert.match(html, /&lt;Original subject>/);
+  assert.match(html, /<p>Saved message<\/p><p>Saved signature<\/p>/);
+  assert.doesNotMatch(html, /<section|<h3>|Original attachments:/);
+  ctx.original = { bodyText: "<script>old plain text</script>", sentUtc: "invalid" };
+  const legacy = vm.runInContext("originalEmailHtml(original)", ctx);
+  assert.match(legacy, /&lt;script>/);
+  assert.doesNotMatch(legacy, /Invalid Date|<script>/);
+  const preview = ui.slice(ui.indexOf('<section class="email-preview">'), ui.indexOf('<aside id="emailDeliveryPlan"'));
+  assert.match(preview, /originalEmailHtml\([\s\S]*?<\/div><\/section>/);
+  assert.doesNotMatch(preview, /signatureHtml \|\| ""\}<\/div>/);
 });
 
 test("desktop and Field expose email history immediately between Lists and Settings", () => {
