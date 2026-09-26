@@ -253,6 +253,82 @@ test("a temporary suppression-table DNS failure retries the original draft witho
   assert.equal(f.message.state, "submitted");
 });
 
+test("a reply recorded after follow-up preparation cancels only that follow-up message", async () => {
+  const f = fixture("send", "send_scheduled");
+  f.batch.parentBatchId = "original-batch";
+  f.message.graphMessageId = "draft-1";
+  f.message.followUpOfGraphId = "original-message";
+  f.store.listActivity = async () => [{ direction: "inbound", classification: "reply",
+    conversationId: "thread-1", batchId: "original-batch" }];
+  let sends = 0, liveChecks = 0;
+  const graph = { getMessage: async () => routedDraft("draft-1", { conversationId: "thread-1" }),
+    hasHumanReplyInConversation: async () => { liveChecks++; return false; },
+    sendDraft: async () => { sends++; } };
+  await worker.processWork({ kind: "send", userId: "user-1", batchId: "batch-1",
+    messageId: "message-1" }, { ...f, graph });
+  assert.equal(sends, 0);
+  assert.equal(liveChecks, 0);
+  assert.equal(f.message.state, "canceled");
+  assert.equal(f.message.failureCode, "recipient_replied_before_follow_up");
+});
+
+test("a live Outlook reply after approval cancels the follow-up even before the sweep runs", async () => {
+  const f = fixture("send", "send_scheduled");
+  f.batch.parentBatchId = "original-batch";
+  f.message.graphMessageId = "draft-1";
+  f.message.followUpOfGraphId = "original-message";
+  f.store.listActivity = async () => [];
+  let sends = 0;
+  const graph = { getMessage: async () => routedDraft("draft-1", { conversationId: "thread-1" }),
+    hasHumanReplyInConversation: async () => true,
+    sendDraft: async () => { sends++; } };
+  await worker.processWork({ kind: "send", userId: "user-1", batchId: "batch-1",
+    messageId: "message-1" }, { ...f, graph });
+  assert.equal(sends, 0);
+  assert.equal(f.message.failureCode, "recipient_replied_before_follow_up");
+});
+
+test("an unavailable live reply check cannot send a follow-up", async () => {
+  const f = fixture("send", "send_scheduled");
+  f.batch.parentBatchId = "original-batch";
+  f.message.graphMessageId = "draft-1";
+  f.message.followUpOfGraphId = "original-message";
+  f.store.listActivity = async () => [];
+  let sends = 0;
+  const graph = { getMessage: async () => routedDraft("draft-1", { conversationId: "thread-1" }),
+    hasHumanReplyInConversation: async () => { throw Object.assign(new Error("Graph unavailable"),
+      { safeToRetry: true }); },
+    sendDraft: async () => { sends++; } };
+  await worker.processWork({ kind: "send", userId: "user-1", batchId: "batch-1",
+    messageId: "message-1" }, { ...f, graph });
+  assert.equal(sends, 0);
+  assert.equal(f.message.state, "send_scheduled");
+  assert.equal(f.message.sendOutcome, undefined);
+});
+
+test("self-test follow-up excludes the original mail and still checks for a later reply", async () => {
+  const f = fixture("send", "send_scheduled");
+  f.batch.parentBatchId = "original-batch";
+  f.batch.graphMailbox = "safe@example.test";
+  f.message.contactId = "";
+  f.message.graphMessageId = "draft-1";
+  f.message.followUpOfGraphId = "original-message";
+  let opts, sends = 0;
+  const graph = {
+    getMessage: async (_token, id) => id === "original-message"
+      ? { id, isDraft: false, internetMessageId: "<original@example.test>", conversationId: "thread-1" }
+      : routedDraft("draft-1", { conversationId: "thread-1" }),
+    hasHumanReplyInConversation: async (_token, _thread, _email, options) => {
+      opts = options; return false;
+    },
+    sendDraft: async () => { sends++; return { requestId: "r1" }; },
+  };
+  await worker.processWork({ kind: "send", userId: "user-1", batchId: "batch-1",
+    messageId: "message-1" }, { ...f, graph });
+  assert.equal(opts.excludeInternetMessageId, "<original@example.test>");
+  assert.equal(sends, 1);
+});
+
 test("mailbox contention defers the same draft without recording a send failure or spending an attempt", async () => {
   const f = fixture("send", "send_scheduled");
   f.message.graphMessageId = "draft-1";

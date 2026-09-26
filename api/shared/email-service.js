@@ -626,7 +626,9 @@ async function followUpCandidates(who, batchId, deps = {}) {
     // different campaign does not silence this one.
     let answered = false;
     if (m.contactId) {
-      const rows = await st.listActivity(String(m.contactId), 200).catch(() => []);
+      // An unavailable activity table is not evidence that nobody replied.
+      // Fail closed so the rep can retry once reply history is readable.
+      const rows = await st.listActivity(String(m.contactId), 200);
       /* Matched on the CONVERSATION this message started, falling back to the
        * batch it belongs to. Either is specific enough that a reply to a
        * different campaign cannot silence this one -- which matching on the
@@ -726,10 +728,24 @@ async function createFollowUp(who, input, deps = {}) {
   if (!fresh.remaining.length)
     throw httpError(409, "Everybody has replied, bounced or opted out \u2014 there is nobody to follow up.", "nobody_to_follow_up");
 
-  await registry.load({ force: true });
+  if (fresh.remaining.some((row) => row.crd)) await registry.load({ force: true });
   const verifiedRemaining = [];
   for (const row of fresh.remaining) {
-    const approved = await registry.verify(row.crd, row.email);
+    let approved;
+    if (!row.crd) {
+      // The connected-mailbox self-test is the sole allowed CRD-less recipient
+      // in an original batch. Preserve that narrow exception for its follow-up.
+      if (String(row.email).toLowerCase() !== String(connection.mailbox).toLowerCase())
+        throw httpError(409, "A follow-up recipient without an advisor CRD is not the connected mailbox.",
+          "recipient_not_approved");
+      const split = core.splitName(profile.displayName || "");
+      approved = { email: String(connection.mailbox).toLowerCase(),
+        name: profile.displayName || connection.mailbox,
+        greetingName: profile.givenName || split.first,
+        lastName: profile.surname || split.last, firm: "", tier: "self_test",
+        source: "connected_mailbox", registryHash: "", routingHash: "",
+        matchScore: null, matchGap: null };
+    } else approved = await registry.verify(row.crd, row.email);
     verifiedRemaining.push({ row, approved });
   }
   const note = String(input.text || FOLLOW_UP_DEFAULT_TEXT).slice(0, cfg.maxBodyChars);
@@ -792,8 +808,9 @@ async function createFollowUp(who, input, deps = {}) {
       recipientMatchScore: approved.matchScore,
       recipientMatchGap: approved.matchGap,
       recipientPolicyVersion: recipientRegistry.policy().version,
-      teammatesAvailableJson: JSON.stringify((await registry.allowedTeammates(r.crd))
-        .map((mate) => ({ crd: mate.crd, name: mate.name, email: mate.email }))),
+      teammatesAvailableJson: JSON.stringify(r.crd
+        ? (await registry.allowedTeammates(r.crd))
+          .map((mate) => ({ crd: mate.crd, name: mate.name, email: mate.email })) : []),
       // The sent message this replies to. The worker needs the Graph id, not
       // the conversation id, because it replies to a MESSAGE.
       followUpOfGraphId: r.graphMessageId,
@@ -1645,6 +1662,9 @@ async function control(who, input) {
     }
     await store.audit(who.id, batch.id, "scheduled_batch_returned_to_review", { scheduleRevision: revision });
   } else if (input.action === "cancel") {
+    if (["completed", "partial_failure", "drafts_ready", "canceled"].includes(batch.status))
+      throw httpError(409, "This batch is already finished and cannot be discarded.",
+        "batch_already_finished");
     await store.patchBatch(who.id, batch.id, { status: "canceled", canceledUtc: new Date().toISOString() }, batch.etag);
     const messages = await store.listMessages(who.id, batch.id);
     for (const m of messages.filter((x) => !["sent", "submitted"].includes(x.state)))

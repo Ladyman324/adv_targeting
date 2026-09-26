@@ -448,6 +448,52 @@ async function recentInbox(token, sinceUtc, top = 100) {
   return items;
 }
 
+/* The final follow-up gate reads the live Outlook conversation, not the
+ * eventually-consistent activity sweep. A reply can arrive after the rep
+ * prepared or approved the child batch. Search the whole mailbox so rules that
+ * file replies into subfolders do not hide them. Never interpret a partial
+ * result as "no reply". */
+async function hasHumanReplyInConversation(token, conversationId, senderEmail,
+  { excludeInternetMessageId = "" } = {}) {
+  const conversation = String(conversationId || "").trim();
+  const sender = String(senderEmail || "").trim().toLowerCase();
+  const excludedId = String(excludeInternetMessageId || "").trim().toLowerCase();
+  if (!conversation || !sender) throw new GraphError(
+    "The original Outlook thread cannot be verified for this follow-up.",
+    { code: "follow_up_thread_unavailable" });
+  const reply = require("./email-reply");
+  const params = new URLSearchParams({
+    "$filter": `conversationId eq '${odataString(conversation)}'`,
+    "$select": "id,conversationId,from,isDraft,subject,internetMessageId,internetMessageHeaders,receivedDateTime",
+    "$top": "50",
+  });
+  let next = `/me/messages?${params.toString()}`;
+  for (let page = 0; next && page < 10; page++) {
+    const result = await request(token, "GET", next, undefined, { timeoutMs: 45000 });
+    if (!result.data || !Array.isArray(result.data.value)) throw new GraphError(
+      "Outlook did not return a complete conversation; this follow-up was not sent.",
+      { code: "follow_up_thread_incomplete" });
+    for (const item of result.data.value) {
+      if (String(item.conversationId || "") !== conversation) throw new GraphError(
+        "Outlook did not restrict the thread search; this follow-up was not sent.",
+        { code: "follow_up_thread_incomplete" });
+      if (item.isDraft === true) continue;
+      if (excludedId && String(item.internetMessageId || "").trim().toLowerCase() === excludedId)
+        continue; // A self-test's original sent/inbox copies are not replies.
+      if (!reply.senderOf(item)) throw new GraphError(
+        "Outlook omitted a sender in the original thread; this follow-up was not sent.",
+        { code: "follow_up_thread_incomplete" });
+      if (reply.senderOf(item) !== sender) continue;
+      if (reply.classify(item, false) === "reply") return true;
+    }
+    next = (result.data && result.data["@odata.nextLink"]) || "";
+  }
+  if (next) throw new GraphError(
+    "The Outlook conversation is too large to verify safely; this follow-up was not sent.",
+    { code: "follow_up_thread_incomplete" });
+  return false;
+}
+
 /* ONE message's readable content, fetched only when a rep asks to read it.
  *
  * The activity log stores metadata and nothing else; this is the other half of
@@ -549,4 +595,4 @@ module.exports = { GraphError, APP_PROPERTY_ID, NDR_FIELDS, ACTIVITY_FIELDS,
   findByAppId, createDraft, getMessage, getDirectMessage, getMessageContent, attachDocuments,
   attachInlineImages, attachFiles, createReply, patchDraftRecipients,
   updateDraftBody, sendDraft,
-  recentMail, recentInbox, request, attachmentFileName };
+  recentMail, recentInbox, hasHumanReplyInConversation, request, attachmentFileName };

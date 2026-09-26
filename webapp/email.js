@@ -2048,6 +2048,9 @@ ${t.bodyText}`);
         failed and why. Retrying only affects those.</p>` : ""}
       <div class="email-done-actions">
         <button type="button" class="ask-btn" data-email="details">Review messages</button>
+        ${b.status === "completed" && b.mode === "send" && !b.parentBatchId && !b.followUpSentUtc && sent
+          ? `<button type="button" class="ask-btn primary" data-email="follow-up-open" data-id="${esc(b.id)}">Follow up with non-responders</button>` : ""}
+        ${b.followUpBatchId ? `<button type="button" class="ask-btn" data-email="open-batch" data-id="${esc(b.followUpBatchId)}">Open follow-up batch</button>` : ""}
         <button type="button" class="ask-btn" data-email="review-safety">Check status &amp; retry</button>
         <button type="button" class="ask-btn primary" data-email="close">Close</button>
       </div></div>`;
@@ -2795,7 +2798,7 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
             .map(([k, label]) => (f[k] || []).length
               ? `<p class="email-fine"><b>${label}:</b> ${(f[k] || []).map((x) => esc(x.name || x.email)).join(", ")}</p>`
               : "").join("")}</div></details>` : ""}
-      <footer class="email-footer">${scheduleHtml}<p id="emailNotice" class="email-notice"></p><div>
+      <footer class="email-footer"><p id="emailNotice" class="email-notice"></p><div>
         <button type="button" class="ask-btn ghost" data-email="close">Close</button>
         <button type="button" class="ask-btn primary" data-email="follow-up-create"
           ${c.remaining ? "" : "disabled"}>Prepare ${c.remaining} follow-up${c.remaining === 1 ? "" : "s"}</button>
@@ -2859,13 +2862,96 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
     }
   }
 
+  let historyBatches = [];
+  let historyShowDiscarded = false;
+
+  function historyState(b) {
+    const sent = Number(b.sentCount) || 0;
+    if (["editing", "invalid"].includes(b.status)) return "Not sent - editing";
+    if (b.status === "drafts_ready") return "Outlook drafts created - not sent by this app";
+    if (b.status === "completed") return sent ? `${sent} sent` : "Completed - none sent";
+    if (b.status === "partial_failure") return `${sent} sent - some need review`;
+    if (b.status === "canceled") return sent ? `${sent} sent - remaining canceled` : "Discarded - none sent";
+    return sent ? `${sent} sent - ${stateLabel(b.status)}` : stateLabel(b.status);
+  }
+
+  function historyFollowUp(parent, byId) {
+    if (!parent.followUpBatchId) return "";
+    const child = byId.get(parent.followUpBatchId);
+    if (!child) return "Follow-up linked - open the original batch for details";
+    if (["editing", "invalid"].includes(child.status)) return "Follow-up prepared - awaiting review";
+    if (child.status === "completed") return Number(child.sentCount)
+      ? `Follow-up sent to ${child.sentCount}` : "Follow-up completed - none sent";
+    if (child.status === "canceled") return "Follow-up canceled";
+    return `Follow-up: ${historyState(child)}`;
+  }
+
+  function historyChip(b) {
+    const sent = Number(b.sentCount) || 0;
+    if (b.status === "completed" && sent) return ["SENT", "sent"];
+    if (b.status === "partial_failure") return ["PARTIAL", "review"];
+    if (["editing", "invalid"].includes(b.status)) return ["DRAFT", "draft"];
+    if (b.status === "drafts_ready") return ["OUTLOOK DRAFT", "draft"];
+    if (b.status === "canceled") return ["CANCELED", "muted"];
+    if (["held", "needs_review", "schedule_held", "action_required"].includes(b.status))
+      return ["NEEDS REVIEW", "review"];
+    if (["sending", "drafting", "scheduled", "paused"].includes(b.status))
+      return ["IN PROGRESS", "progress"];
+    return ["NO SEND", "muted"];
+  }
+
+  function historyRow(b, byId, child = false) {
+    const canFollow = b.status === "completed" && b.mode === "send"
+      && !b.parentBatchId && !b.followUpSentUtc && Number(b.sentCount) > 0;
+    const canDiscard = ["editing", "invalid"].includes(b.status) && !b.mode;
+    const stamp = batchScheduleText(b) || b.createdUtc || "";
+    const [chipText, chipTone] = historyChip(b);
+    return `<div class="email-history-row${child ? " is-follow-up" : ""}">
+      <button type="button" class="email-history-open" data-email="open-batch" data-id="${esc(b.id)}">
+        <span class="email-history-heading"><b>${esc(b.name || "Email batch")}</b>
+          <span class="email-history-chip ${chipTone}">${chipText}</span></span>
+        <span>${esc(historyState(b))} &middot; ${Number(b.recipientCount) || 0} recipient${Number(b.recipientCount) === 1 ? "" : "s"}</span>
+        <small>${esc(stamp)}${!child && b.followUpDays ? ` &middot; Reminder after ${b.followUpDays} days` : ""}</small>
+        ${!child && b.followUpBatchId ? `<small class="email-history-follow">${esc(historyFollowUp(b, byId))}</small>` : ""}
+      </button><div class="email-history-actions">
+        ${canFollow ? `<button type="button" class="ask-btn" data-email="follow-up-open" data-id="${esc(b.id)}">Follow up with non-responders</button>` : ""}
+        ${canDiscard ? `<button type="button" class="ask-btn ghost" data-email="history-discard" data-id="${esc(b.id)}">Discard draft</button>` : ""}
+      </div></div>`;
+  }
+
+  function historyView() {
+    const byId = new Map(historyBatches.map((b) => [b.id, b]));
+    const visible = historyBatches.filter((b) => historyShowDiscarded || b.status !== "canceled");
+    const children = new Map();
+    for (const b of visible) if (b.parentBatchId && byId.has(b.parentBatchId)) {
+      const group = children.get(b.parentBatchId) || [];
+      group.push(b); children.set(b.parentBatchId, group);
+    }
+    const originals = visible.filter((b) => !b.parentBatchId || !byId.has(b.parentBatchId));
+    const sections = [
+      ["Needs attention", originals.filter((b) => !["editing", "invalid", "completed", "partial_failure", "drafts_ready", "canceled"].includes(b.status))],
+      ["Sent batches", originals.filter((b) => ["completed", "partial_failure"].includes(b.status) && Number(b.sentCount) > 0)],
+      ["Drafts in progress", originals.filter((b) => ["editing", "invalid"].includes(b.status))],
+      ["Other activity", originals.filter((b) => ["drafts_ready", "canceled"].includes(b.status)
+        || (["completed", "partial_failure"].includes(b.status) && !Number(b.sentCount)))],
+    ];
+    document.getElementById("emailBody").innerHTML = `<div class="email-history">
+      <div class="email-history-top"><p>Recent email batches &middot; ${historyBatches.length} shown</p>
+        <button type="button" class="ask-btn ghost" data-email="history-toggle-discarded">${historyShowDiscarded ? "Hide" : "Show"} discarded</button></div>
+      ${sections.filter(([, rows]) => rows.length).map(([label, rows]) => `<section class="email-history-section">
+        <h3>${label} <span>${rows.length}</span></h3>${rows.map((b) =>
+          historyRow(b, byId) + (children.get(b.id) || []).map((item) => historyRow(item, byId, true)).join(""))
+          .join("")}</section>`).join("") || "<p>No email batches in this view.</p>"}
+    </div>`;
+  }
+
   async function openHistory() {
     const back = shell(); back.hidden = false;
     document.getElementById("emailTitle").textContent = "Email activity";
     try {
       const data = await api("batches", null, "GET");
-      document.getElementById("emailBody").innerHTML = `<div class="email-history">${data.batches.length ? data.batches.map((b) =>
-        `<button type="button" data-email="open-batch" data-id="${esc(b.id)}"><b>${esc(b.name)}</b><span>${b.recipientCount} recipients · ${esc(stateLabel(b.status))}</span><small>${esc(batchScheduleText(b) || b.createdUtc || "")}${b.followUpDays && !b.parentBatchId ? ` · Follow-up reminder ${b.followUpDays} days after the final send` : ""}</small></button>`).join("") : "<p>No email batches yet.</p>"}</div>`;
+      historyBatches = data.batches || [];
+      historyView();
     } catch (e) { document.getElementById("emailBody").innerHTML = `<p class="email-error">${esc(e.message)}</p>`; }
   }
 
@@ -3373,6 +3459,20 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
       return open(global.AdvisorEmailData ? await global.AdvisorEmailData.list() : []);
     }
     if (action === "history") { cleanEmailUrl(); return openHistory(); }
+    if (action === "history-toggle-discarded") {
+      historyShowDiscarded = !historyShowDiscarded;
+      historyView();
+      return;
+    }
+    if (action === "history-discard") {
+      const batch = historyBatches.find((b) => b.id === button.dataset.id);
+      if (!batch || !["editing", "invalid"].includes(batch.status) || batch.mode) return;
+      if (!confirm(`Discard the unapproved draft batch "${batch.name || "Email batch"}"? Nothing will be sent. The record remains under Show discarded.`)) return;
+      button.disabled = true;
+      try { await api("cancel", { batchId: batch.id }); await openHistory(); }
+      catch (e) { button.disabled = false; notice(e.message, true); }
+      return;
+    }
     if (action === "follow-up-open") { return openFollowUp(button.dataset.id); }
     if (action === "follow-up-create") {
       button.disabled = true; notice("Preparing the follow-up…");

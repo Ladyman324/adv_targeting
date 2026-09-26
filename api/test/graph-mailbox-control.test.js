@@ -139,6 +139,66 @@ test("mailbox busy or unavailable never dispatches a Graph request", async t => 
   assert.equal(calls, 0);
 });
 
+test("follow-up guard reads the whole Outlook conversation and ignores automatic replies", async t => {
+  transportFixture(t);
+  let pages = 0;
+  t.mock.method(globalThis, "fetch", async url => {
+    const parsed = new URL(url);
+    assert.match(parsed.searchParams.get("$filter") || "", /conversationId eq 'thread-1'/);
+    pages++;
+    return new Response(JSON.stringify(pages === 1 ? {
+      value: [{ conversationId: "thread-1", from: { emailAddress: { address: "advisor@example.test" } },
+        subject: "Automatic reply", internetMessageHeaders: [] }],
+      "@odata.nextLink": "https://graph.microsoft.com/v1.0/me/messages?$filter=conversationId%20eq%20%27thread-1%27&$skip=1",
+    } : { value: [{ conversationId: "thread-1",
+      from: { emailAddress: { address: "advisor@example.test" } },
+      subject: "Re: Hello", internetMessageHeaders: [] }] }), { status: 200 });
+  });
+  assert.equal(await graph.hasHumanReplyInConversation(TOKEN, "thread-1", "advisor@example.test"), true);
+  assert.equal(pages, 2);
+});
+
+test("follow-up guard fails closed on incomplete Outlook pagination", async t => {
+  transportFixture(t);
+  t.mock.method(globalThis, "fetch", async () => new Response(JSON.stringify({
+    value: [], "@odata.nextLink": "https://graph.microsoft.com/v1.0/me/messages?$skip=next",
+  }), { status: 200 }));
+  await assert.rejects(graph.hasHumanReplyInConversation(TOKEN, "thread-1", "advisor@example.test"),
+    error => error.code === "follow_up_thread_incomplete");
+});
+
+test("follow-up guard permits only a complete thread with no human reply", async t => {
+  transportFixture(t);
+  t.mock.method(globalThis, "fetch", async () => new Response(JSON.stringify({ value: [
+    { conversationId: "thread-1", from: { emailAddress: { address: "rep@eicatlanta.com" } },
+      subject: "Hello", internetMessageHeaders: [] },
+    { conversationId: "thread-1", from: { emailAddress: { address: "advisor@example.test" } },
+      subject: "Automatic reply", internetMessageHeaders: [] },
+  ] }), { status: 200 }));
+  assert.equal(await graph.hasHumanReplyInConversation(TOKEN, "thread-1", "advisor@example.test"), false);
+});
+
+test("self-test's original inbox copy is not mistaken for its reply", async t => {
+  transportFixture(t);
+  t.mock.method(globalThis, "fetch", async () => new Response(JSON.stringify({ value: [
+    { conversationId: "thread-1", internetMessageId: "<original@example.test>",
+      from: { emailAddress: { address: "rep@eicatlanta.com" } }, subject: "Hello" },
+    { conversationId: "thread-1", internetMessageId: "<reply@example.test>",
+      from: { emailAddress: { address: "rep@eicatlanta.com" } }, subject: "Re: Hello" },
+  ] }), { status: 200 }));
+  assert.equal(await graph.hasHumanReplyInConversation(TOKEN, "thread-1", "rep@eicatlanta.com",
+    { excludeInternetMessageId: "<original@example.test>" }), true);
+});
+
+test("follow-up guard refuses an unfiltered or malformed Graph response", async t => {
+  transportFixture(t);
+  t.mock.method(globalThis, "fetch", async () => new Response(JSON.stringify({ value: [
+    { conversationId: "other-thread", from: { emailAddress: { address: "advisor@example.test" } } },
+  ] }), { status: 200 }));
+  await assert.rejects(graph.hasHumanReplyInConversation(TOKEN, "thread-1", "advisor@example.test"),
+    error => error.code === "follow_up_thread_incomplete");
+});
+
 test("Graph passes only a safe operation label and bounded wait to the mailbox lock", async t => {
   let args;
   t.mock.method(controlModule, "control", () => ({

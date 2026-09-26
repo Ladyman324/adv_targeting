@@ -13,6 +13,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const path = require("path");
+const fs = require("node:fs");
 const Module = require("module");
 
 function load(stubs) {
@@ -32,6 +33,28 @@ function load(stubs) {
 }
 
 const WHO = { id: "u-1", name: "bo@eicatlanta.com" };
+
+test("follow-up preparation does not reference composer-only delivery controls", () => {
+  const ui = fs.readFileSync(path.resolve(__dirname, "../../webapp/email.js"), "utf8");
+  const view = ui.split("function followUpView()")[1].split("const FOLLOW_UP_DEFAULT")[0];
+  assert.ok(view, "follow-up view exists");
+  assert.doesNotMatch(view, /scheduleHtml/);
+  assert.match(view, /data-email="follow-up-create"/);
+});
+
+test("history separates sent batches and editing drafts, with a linked follow-up and discard action", () => {
+  const ui = fs.readFileSync(path.resolve(__dirname, "../../webapp/email.js"), "utf8");
+  const view = ui.split("function historyView()")[1].split("async function openHistory()")[0];
+  assert.match(view, /Sent batches/);
+  assert.match(view, /Drafts in progress/);
+  assert.match(ui, /function historyFollowUp\(/);
+  assert.match(ui, /b\.status === "completed" && sent\) return \["SENT", "sent"\]/);
+  assert.match(ui, /b\.status === "drafts_ready"\) return \["OUTLOOK DRAFT", "draft"\]/);
+  assert.match(ui, /Follow up with non-responders/);
+  assert.match(ui, /data-email="history-discard"/);
+  assert.match(ui, /data-email="history-toggle-discarded"/);
+  assert.match(ui, /await api\("cancel", \{ batchId: batch\.id \}\)/);
+});
 
 function build({ messages, activity = {}, blocked = [], batch = {} }) {
   const store = {
@@ -61,6 +84,15 @@ test("somebody who replied comes off the list", async () => {
   const r = await svc.followUpCandidates(WHO, "B1");
   assert.equal(r.counts.replied, 1);
   assert.equal(r.counts.remaining, 0);
+});
+
+test("an unavailable activity table does not turn an unknown reply into no reply", async () => {
+  const svc = build({ messages: [msg({})] });
+  await assert.rejects(() => svc.followUpCandidates(WHO, "B1", {
+    store: { getBatch: async () => ({ id: "B1", status: "completed", mode: "send" }),
+      listMessages: async () => [msg({})],
+      listActivity: async () => { throw new Error("activity table unavailable"); } },
+  }), /activity table unavailable/);
 });
 
 test("an OUT-OF-OFFICE is not a reply, so they stay on the list", async () => {
@@ -176,6 +208,7 @@ function creationFixture({ conflict = false, failMessage = false } = {}) {
       profile: { id: "mailbox", mail: "rep@eicatlanta.com" } }) },
     "email-materials": { currentDocument: () => true },
     "email-core": { config: () => ({ maxBodyChars: 50000 }),
+      splitName: () => ({ first: "Rep", last: "Test" }),
       plainTextToSafeHtml: (value) => value, corporateSignature: () => "<sig>",
       extraRecipients: () => ({ cc: [], bcc: [] }) },
   });
@@ -200,6 +233,30 @@ test("follow-up creation claims the parent before exposing an editable child", a
   assert.equal(result.batch.status, "editing");
   assert.equal(result.batch.parentBatchId, "B1");
   assert.equal(f.batches.get("B1").followUpBatchId, "F1");
+});
+
+test("connected-mailbox self-test follow-up needs no fabricated advisor CRD", async () => {
+  const f = creationFixture();
+  Object.assign(f.messages.get("B1")[0], { contactId: "", recipientEmail: "rep@eicatlanta.com" });
+  let verified = 0;
+  const result = await f.svc.createFollowUp(WHO, { batchId: "B1", text: "Checking in." }, {
+    store: f.store,
+    recipientRegistry: { load: async () => {}, verify: async () => { verified++; throw new Error("not an advisor"); },
+      allowedTeammates: async () => [], policy: () => ({ version: "v1" }) },
+    auth: { status: async () => ({ connected: true, mailbox: "rep@eicatlanta.com",
+      profile: { id: "mailbox", mail: "rep@eicatlanta.com", displayName: "Rep Test" } }) },
+  });
+  assert.equal(verified, 0);
+  assert.equal(result.messages[0].contactId, "");
+  assert.equal(result.messages[0].recipientEmail, "rep@eicatlanta.com");
+  assert.equal(result.batch.parentBatchId, "B1");
+});
+
+test("a finished batch cannot be relabeled canceled when tidying history", async () => {
+  const f = creationFixture();
+  await assert.rejects(() => f.svc.control(WHO, { batchId: "B1", action: "cancel" }),
+    (error) => error.code === "batch_already_finished");
+  assert.equal(f.batches.get("B1").status, "completed");
 });
 
 test("an ETag race refuses a duplicate follow-up before creating a child", async () => {

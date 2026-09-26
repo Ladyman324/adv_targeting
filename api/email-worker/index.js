@@ -943,6 +943,50 @@ async function send(work, deps) {
         await deps.enqueue(work, seconds);
         return;
       }
+      if (latestBatch.parentBatchId) {
+        // The child was prepared from the reply sweep's snapshot, which can be
+        // minutes old by send time. Check BOTH stored activity (a reply later
+        // deleted from Outlook still counts) and the live Outlook thread before
+        // the irreversible send intent. A failed read must never mean silence.
+        const selfTest = String(claimed.recipientEmail || "").toLowerCase()
+          === String(latestBatch.graphMailbox || "").toLowerCase();
+        if (!claimed.followUpOfGraphId || (!claimed.contactId && !selfTest)
+            || !remote.conversationId
+            || typeof deps.graph.hasHumanReplyInConversation !== "function"
+            || (claimed.contactId && typeof deps.store.listActivity !== "function"))
+          throw service.httpError(409,
+            "The original thread or reply history cannot be verified; this follow-up was not sent.",
+            "follow_up_reply_check_unavailable");
+        const activity = claimed.contactId
+          ? await deps.store.listActivity(String(claimed.contactId), 200) : [];
+        const answeredInActivity = activity.some((row) =>
+          String(row.direction) === "inbound" && String(row.classification) === "reply"
+          && (String(row.conversationId || "") === String(remote.conversationId)
+              || String(row.batchId || "") === String(latestBatch.parentBatchId)));
+        let excludeInternetMessageId = "";
+        if (selfTest && !answeredInActivity) {
+          const original = await deps.graph.getMessage(token.accessToken, claimed.followUpOfGraphId);
+          excludeInternetMessageId = String(original && original.internetMessageId || "");
+          if (!original || original.isDraft || !excludeInternetMessageId
+              || String(original.conversationId || "") !== String(remote.conversationId))
+            throw service.httpError(409,
+              "The original self-test message cannot be verified; this follow-up was not sent.",
+              "follow_up_reply_check_unavailable");
+        }
+        const answeredInOutlook = answeredInActivity ? false
+          : await deps.graph.hasHumanReplyInConversation(token.accessToken,
+            remote.conversationId, claimed.recipientEmail, { excludeInternetMessageId });
+        if (answeredInActivity || answeredInOutlook) {
+          await deps.store.patchMessage(work.userId, work.batchId, work.messageId,
+            { state: "canceled", leaseUntilUtc: "", failureCode: "recipient_replied_before_follow_up",
+              failureMessage: "Not sent: the advisor replied to the original thread before this follow-up." },
+            claimed.etag);
+          await deps.store.audit(work.userId, work.batchId, "follow_up_skipped_reply",
+            { messageId: work.messageId, parentBatchId: latestBatch.parentBatchId });
+          await refreshBatch(work.userId, work.batchId, deps);
+          return;
+        }
+      }
       if (claimed.capacityDay && !(deps.capacity.withinSendingWindow || capacity.withinSendingWindow)(
         typeof deps.nowMs === 'function' ? deps.nowMs() : Date.now())) {
         const pendingAgain = await deps.store.patchMessage(work.userId, work.batchId, work.messageId,

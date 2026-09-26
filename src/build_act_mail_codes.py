@@ -40,8 +40,31 @@ OUT = ROOT / "api" / "shared" / "act_mail_codes.json"
 # the same way, because the cost of wrongly suppressing a prospect is one missed
 # email while the cost of wrongly mailing an opt-out is a compliance problem.
 NO_EMAIL = {"U", "N", "NC", "BB"}
+PERSISTENT_OPT_OUT = {"U", "NC"}  # Explicit requests survive deletion from Act!.
 FIELD = "email__y_n"
 ADDRESS = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
+
+
+def addresses_on(rec):
+    cf = rec.get("customFields") or {}
+    for value in (rec.get("emailAddress"), rec.get("altEmailAddress"),
+                  rec.get("personalEmailAddress"), cf.get("email_2_email")):
+        if isinstance(value, str) and ADDRESS.match(value.strip()):
+            yield value.strip().lower()
+
+
+def deleted_preferences(previous_records, current_guids):
+    """Carry explicit U/NC requests for contacts removed from the next pull."""
+    result = {}
+    for rec in previous_records:
+        guid = str(rec.get("id") or "").strip().lower()
+        code = str((rec.get("customFields") or {}).get(FIELD) or "").strip().upper()
+        if not guid or guid in current_guids or code not in PERSISTENT_OPT_OUT:
+            continue
+        for address in addresses_on(rec):
+            if code == "U" or result.get(address) != "U":
+                result[address] = code
+    return result
 
 
 def objects(fh):
@@ -87,9 +110,13 @@ def main() -> None:
     by_guid: dict[str, str] = {}
     seen = Counter()
     total = 0
+    current_guids = set()
     with src.open(encoding="utf-8") as fh:
         for rec in objects(fh):
             total += 1
+            guid = str(rec.get("id") or "").strip().lower()
+            if guid:
+                current_guids.add(guid)
             cf = rec.get("customFields") or {}
             code = str(cf.get(FIELD) or "").strip().upper()
             seen[code or "(blank)"] += 1
@@ -101,19 +128,36 @@ def main() -> None:
             # 2026-08-13 export that pattern hid 823 people who were still
             # reachable through the address WE hold from SEC data. Matching the
             # contact itself catches them.
-            guid = str(rec.get("id") or "").strip().lower()
             if guid and by_guid.get(guid) != "U":
                 by_guid[guid] = code
             # Every address on the record, not just the primary: a contact whose
             # opt-out is recorded once should not be reachable through their
             # alternate address.
-            for value in (rec.get("emailAddress"), rec.get("altEmailAddress"),
-                          rec.get("personalEmailAddress"), cf.get("email_2_email")):
-                if isinstance(value, str) and ADDRESS.match(value.strip()):
-                    address = value.strip().lower()
-                    # Strongest code wins if two records disagree.
-                    if codes.get(address) != "U":
-                        codes[address] = code
+            for address in addresses_on(rec):
+                # Strongest code wins if two records disagree.
+                if codes.get(address) != "U":
+                    codes[address] = code
+
+    # The fresh export cannot tell us why a contact disappeared. In particular,
+    # deleting a contact must not silently erase an explicit unsubscribe or
+    # no-mail-by-request preference. Persist only U/NC, not stale bounce codes.
+    historical = {}
+    if OUT.exists():
+        prior_floor = json.loads(OUT.read_text(encoding="utf-8"))
+        historical.update({address: code for address, code in
+                           (prior_floor.get("historical_preference_addresses") or {}).items()
+                           if code in PERSISTENT_OPT_OUT})
+    snapshots = sorted((ROOT / "data" / "raw").glob("act_contacts_*.json"))
+    earlier = [path for path in snapshots if path != src and path.name < src.name]
+    prior_source = earlier[-1] if earlier else None
+    if prior_source:
+        with prior_source.open(encoding="utf-8") as fh:
+            for address, code in deleted_preferences(objects(fh), current_guids).items():
+                if code == "U" or historical.get(address) != "U":
+                    historical[address] = code
+    for address, code in historical.items():
+        if code == "U" or codes.get(address) != "U":
+            codes[address] = code
 
     # GUID -> CRD, via the same crosswalk the call logging trusts.
     xwalk_path = ROOT / "api" / "shared" / "act_contacts.json"
@@ -132,6 +176,8 @@ def main() -> None:
         "built_utc": __import__("datetime").datetime.now(
             __import__("datetime").timezone.utc).isoformat(timespec="seconds"),
         "source": src.name,
+        "prior_source_for_deleted_preferences": prior_source.name if prior_source else None,
+        "historical_preference_addresses": dict(sorted(historical.items())),
         "field": f"customFields.{FIELD}",
         "codes_treated_as_no_email": sorted(NO_EMAIL),
         "note": "Do-not-email addresses from the Act! Mail Code field. Consulted by "

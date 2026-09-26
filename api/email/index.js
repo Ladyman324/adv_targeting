@@ -46,7 +46,7 @@ module.exports = async function (context, req) {
        * somebody may reply in between. */
       if (op === "follow_up_candidates")
         return ok(context, await service.followUpCandidates(who, String(req.query.id || "")));
-      if (op === "batches") return ok(context, { batches: await store.listBatches(who.id, 30, true) });
+      if (op === "batches") return ok(context, { batches: await store.listBatches(who.id, 200, true) });
       if (op === "connection") return ok(context, await auth.status(who.id));
       if (op === "policy") return ok(context, await store.policy());
       if (op === "daily_caps") {

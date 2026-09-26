@@ -1,16 +1,16 @@
 {
-  "descriptorHash": "6f351c47728f355df0acaaae962fe7195cb3bb4c72fb1e070ef6aa926943f17a",
-  "ineligibleCount": 15047,
+  "descriptorHash": "9fc3b962d6aaaa5068fa5f431e32c1e20881cf30a41102e2284c28b88f835f3a",
+  "ineligibleCount": 15137,
   "provenance": {
-    "actSource": "act_contacts_2026-09-12T025908Z.json",
-    "actSourceSha256": "796711781e28351027904dd937fd3b7246103113dbc6b7a7975b10244da8305d",
-    "contactsSha256": "781df19a9468d90f5bb285b37ed8abd20db4622fc3b4a5a3bf6bbd54bf0969d9",
-    "identityLinksSha256": "ed7e49cb949cebce8dd00732e3aeb01709f0baf2fe11be5f2f5173dc7ac7c07c",
-    "identityManifestHash": "9847af1d3f5e7fe569c46463ce97b3d82ecac7a03a94ed8b01d2c96ed9e1995a"
+    "actSource": "act_contacts_2026-09-25T022553Z.json",
+    "actSourceSha256": "affbe686d2b6271af45dee025f9a85aff900fb0f5d0ce1b78606af5c9262c27d",
+    "contactsSha256": "63d06f46ef148f356639501f1e9641cce00ea4dd1d6acf035706f2f2d6d8bf68",
+    "identityLinksSha256": "32e2553b869d33a7bc2e16c44e8e9892584f6205f07c6e0452afcfacb2203384",
+    "identityManifestHash": "9278e9c17448771bbfa2d94313b008d38813ccd1d534eb6384321e7bb2c7263d"
   },
-  "recipientCount": 111520,
-  "registryContentHash": "104db583f4ae45860b70700043fbc9dee278aedf278861d6f76067de28aea738",
+  "recipientCount": 111590,
+  "registryContentHash": "bcddb73578c0f23a35a54ee5dde915a3d02ccc3f1af1597d10cbd94cad505b7f",
   "registrySchemaVersion": 1,
   "schemaVersion": 1,
-  "shardManifestHash": "cbe880d458996f3fb4aa7bf380eed063de73d45bb00d201f86bbf9b6524cb7b5"
+  "shardManifestHash": "52c3c6809fe691403d9e7eb6ae7d58c20392eaf07cf2c9c6c6d60cc965f6a022"
 }

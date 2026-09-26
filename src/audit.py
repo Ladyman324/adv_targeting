@@ -2713,6 +2713,20 @@ def _first_names():
     # shipped. That made the check report hundreds of disagreements that were
     # really the wrong record being read, which is its own quiet wrongness.
     by_act = {str(r.act_id): str(r.name) for r in df.itertuples()}
+    # The identity resolver also validates against SEC-filed alternate names.
+    # Check those same names here or a legitimate alias (e.g. Rocky Jones)
+    # becomes a false first-name disagreement after an asserted CRD is added.
+    aliases_by_act = {}
+    evidence_path = ROOT / "data" / "identity" / "act_identity_evidence.parquet"
+    if evidence_path.exists():
+        evidence = pd.read_parquet(evidence_path,
+                                   columns=["source_record_id", "sec_aliases_json"])
+        for r in evidence.itertuples(index=False):
+            try:
+                aliases_by_act[str(r.source_record_id)] = json.loads(
+                    r.sec_aliases_json or "[]")
+            except (TypeError, ValueError):
+                aliases_by_act[str(r.source_record_id)] = []
     # A CRD-STATED MATCH IS NOT A NAME MATCH, so a name test says nothing about
     # it. The CRM names the registration number and the SEC carries it; that the
     # contact is filed as "North Brittany" against a filed BRITTANY is a
@@ -2735,6 +2749,11 @@ def _first_names():
         # guard and its gate that ask different questions will always produce
         # findings, and every one of them is noise.
         toks = sec.split()
+        for alias in aliases_by_act.get(str(act_id), []):
+            if isinstance(alias, dict):
+                toks.extend(str(alias.get(field) or "") for field in
+                            ("first_name", "middle_name", "used_first_name"))
+        toks = [t for t in toks if t]
         # ABSTAIN ON A BARE INITIAL, exactly as the gate does.
         #
         # "J. Cummings", "T.J Weber", "H.S. Hill" carry no comparable given
