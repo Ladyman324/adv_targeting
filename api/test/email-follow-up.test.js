@@ -34,12 +34,122 @@ function load(stubs) {
 
 const WHO = { id: "u-1", name: "bo@eicatlanta.com" };
 
+function editingFixture(followUp = true) {
+  const parent = { id: "P", status: "completed" };
+  let batch = { id: "F", parentBatchId: followUp ? "P" : "", status: "editing",
+    commonSubject: followUp ? "" : "Intro", commonBodyText: "Checking in.",
+    commonRevision: 1, attachmentIds: [], graphMailbox: "rep@eicatlanta.com" };
+  let message = { id: "M", state: "editing", contactId: "", recipientEmail: "rep@eicatlanta.com",
+    subject: "RE: Sent subject", bodyText: "Checking in.", bodyHtml: "Checking in.",
+    followUpOfGraphId: "G", attachments: [], baseRevision: 1, etag: "m" };
+  const original = { id: "O", state: "sent", graphMessageId: "G", subject: "Sent subject",
+    bodyText: "Original saved wording", recipientEmail: "rep@eicatlanta.com", attachments: [] };
+  const st = {
+    getBatch: async (u, id) => { assert.equal(u, WHO.id); return id === "P" ? parent : batch; },
+    getMessage: async () => message,
+    listMessages: async (u, id) => { assert.equal(u, WHO.id); return id === "P" ? [original] : [message]; },
+    patchMessage: async (_u, _b, _m, p) => (message = { ...message, ...p }),
+    patchBatch: async (_u, _b, p) => (batch = { ...batch, ...p }),
+    getDocuments: async () => [], getTemplate: async () => null,
+    getSuppression: async () => null, audit: async () => {},
+  };
+  const svc = load({ "email-store": st, "recipient-registry": { load: async () => {} },
+    "email-auth": { status: async () => ({ profile: { mail: "rep@eicatlanta.com" } }) } });
+  return { svc, original, get message() { return message; } };
+}
+
+test("common follow-up body edits preserve the original subject despite a blank shared subject", async () => {
+  const f = editingFixture();
+  const r = await f.svc.updateCommon(WHO, { batchId: "F", subject: "", bodyText: "Another note." });
+  assert.equal(r.messages[0].subject, "RE: Sent subject");
+  assert.equal(r.messages[0].bodyText, "Another note.");
+  assert.equal(r.batch.commonSubject, "");
+  assert.equal(r.originals[0].bodyText, "Original saved wording");
+  assert.equal(r.valid, true);
+});
+
+test("individual edits and resets cannot replace or erase a follow-up's inherited subject", async () => {
+  const f = editingFixture();
+  await f.svc.updateMessage(WHO, { batchId: "F", messageId: "M", subject: "Wrong subject", bodyText: "Personal note." });
+  assert.equal(f.message.subject, "RE: Sent subject");
+  await f.svc.updateMessage(WHO, { batchId: "F", messageId: "M", resetSubject: true, resetBody: true });
+  assert.equal(f.message.subject, "RE: Sent subject");
+  assert.equal(f.message.bodyText, "Checking in.");
+  assert.equal(f.message.bodyOverridden, false);
+});
+
+test("a reply prefix alone is not accepted as an original subject", async () => {
+  const f = editingFixture(); f.original.subject = "RE: ";
+  await assert.rejects(() => f.svc.updateMessage(WHO, { batchId: "F", messageId: "M", bodyText: "Note" }),
+    (e) => e.code === "original_subject_unavailable");
+});
+
+test("validation repairs an older follow-up's blank subject from its saved original", async () => {
+  const f = editingFixture();
+  f.message.subject = "";
+  const r = await f.svc.validateBatch(WHO, "F");
+  assert.equal(r.messages[0].subject, "RE: Sent subject");
+  assert.equal(r.valid, true);
+});
+
+test("ordinary batch edits still require a subject", async () => {
+  const f = editingFixture(false);
+  await assert.rejects(() => f.svc.updateCommon(WHO, { batchId: "F", subject: "", bodyText: "Note" }),
+    (e) => e.code === "common_text_invalid");
+});
+
 test("follow-up preparation does not reference composer-only delivery controls", () => {
   const ui = fs.readFileSync(path.resolve(__dirname, "../../webapp/email.js"), "utf8");
   const view = ui.split("function followUpView()")[1].split("const FOLLOW_UP_DEFAULT")[0];
   assert.ok(view, "follow-up view exists");
   assert.doesNotMatch(view, /scheduleHtml/);
-  assert.match(view, /data-email="follow-up-create"/);
+  assert.match(view, /followUpDraftView\(false\)/);
+  const writeView = ui.split("function followUpDraftView(existing)")[1].split("function followUpDeliveryView")[0];
+  assert.doesNotMatch(writeView, /scheduleHtml|emailCommonSubject|emailOneSubject/);
+  assert.match(writeView, /Continue to delivery/);
+  assert.match(writeView, /originalEmailHtml/);
+  const entry = ui.split("async function openFollowUp(batchId)")[1].split("function followUpView()")[0];
+  assert.ok(entry.indexOf("await loadCatalog()") < entry.indexOf('await api('));
+});
+
+test("follow-up writing view preserves personal text, selected recipients, and safely previews originals", () => {
+  const vm = require("node:vm");
+  const ui = fs.readFileSync(path.resolve(__dirname, "../../webapp/email.js"), "utf8");
+  const section = ui.slice(ui.indexOf("  let followUp = null;"), ui.indexOf("  async function openFollowUp("));
+  const nodes = new Map();
+  const node = (id) => {
+    if (!nodes.has(id)) nodes.set(id, { innerHTML: "", textContent: "", value: "", hidden: false });
+    return nodes.get(id);
+  };
+  const boxes = ["a", "b"].map((id) => ({ checked: true, dataset: { followupRecipient: id } }));
+  const context = vm.createContext({
+    document: { getElementById: node, querySelectorAll: () => boxes, activeElement: null },
+    esc: (s) => String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;"),
+    clearTimeout: () => {}, clearInterval: () => {}, pollTimer: null, tickTimer: null,
+    FOLLOW_UP_DEFAULT: "Checking in.", detail: null,
+  });
+  vm.runInContext(section + `
+    followUp = { batchId: "P", batchName: "Original batch",
+      counts: { replied: 2, bounced: 0, suppressed: 0, unthreadable: 0, notSent: 0 },
+      remaining: [{ messageId: "a", name: "Alice", email: "a@example.com", subject: "Original A", bodyText: "<script>not executable</script>" },
+        { messageId: "b", name: "Bob", email: "b@example.com", subject: "Original B", bodyText: "Bob's actual sent text" }] };
+    followUpDraftView(false);
+  `, context);
+  assert.match(node("emailBody").innerHTML, /Continue to delivery/);
+  assert.doesNotMatch(node("followUpOriginal").innerHTML, /<script>/);
+  assert.match(node("followUpPreview").innerHTML, /RE: Original A/);
+  node("followUpPersonalize").onchange({ target: { checked: true } });
+  node("followUpPersonalText").oninput({ target: { value: "Only Alice." } });
+  node("followUpText").oninput({ target: { value: "New shared note." } });
+  assert.match(node("followUpPreview").innerHTML, /Only Alice/);
+  node("followUpPreviewRecipient").onchange({ target: { value: "b" } });
+  assert.match(node("followUpPreview").innerHTML, /New shared note/);
+  assert.match(node("followUpOriginal").innerHTML, /Bob's actual sent text/);
+  boxes[1].checked = false; boxes[1].onchange();
+  assert.equal(node("followUpCount").textContent, 1);
+  assert.match(node("followUpPreview").innerHTML, /Excluded/);
+  node("followUpPreviewRecipient").onchange({ target: { value: "a" } });
+  assert.match(node("followUpPreview").innerHTML, /Only Alice/);
 });
 
 test("history separates sent batches and editing drafts, with a linked follow-up and discard action", () => {
@@ -214,6 +324,40 @@ function creationFixture({ conflict = false, failMessage = false } = {}) {
   });
   return { svc, store, calls, batches, messages };
 }
+
+test("only selected still-eligible recipients are created, with their personal wording", async () => {
+  const f = creationFixture();
+  const original = f.messages.get("B1")[0];
+  f.messages.get("B1").push({ ...original, id: "other", contactId: "2", recipientEmail: "other@x.com", graphMessageId: "other-g" });
+  const r = await f.svc.createFollowUp(WHO, { batchId: "B1", text: "Shared note.",
+    messageIds: [original.id], personalized: { [original.id]: "Personal note." } });
+  assert.equal(r.messages.length, 1);
+  assert.equal(r.messages[0].bodyText, "Personal note.");
+  assert.equal(r.messages[0].bodyOverridden, true);
+  assert.equal(r.batch.mode, "", "preparation does not approve sending");
+});
+
+test("reattachment preserves each recipient's original document variant", async () => {
+  const f = creationFixture();
+  const first = f.messages.get("B1")[0];
+  const a = { id: "a", name: "UBS version", version: 1, sha256: "aaa" };
+  const b = { id: "b", name: "RJ version", version: 1, sha256: "bbb" };
+  first.attachments = [a];
+  f.messages.get("B1").push({ ...first, id: "second", graphMessageId: "second-g",
+    contactId: "2", recipientEmail: "two@x.com", attachments: [b] });
+  f.store.getDocuments = async () => [a, b];
+  const r = await f.svc.createFollowUp(WHO, { batchId: "B1", text: "Note.", includeAttachments: true });
+  assert.deepEqual(r.messages.map((m) => m.attachments.map((d) => d.id)), [["a"], ["b"]]);
+});
+
+test("changed original documents block reattachment before claiming a follow-up", async () => {
+  const f = creationFixture();
+  f.messages.get("B1")[0].attachments = [{ id: "a", version: 1, sha256: "old" }];
+  f.store.getDocuments = async () => [{ id: "a", version: 2, sha256: "new" }];
+  await assert.rejects(() => f.svc.createFollowUp(WHO, { batchId: "B1", text: "Note.", includeAttachments: true }),
+    (e) => e.code === "attachment_unavailable");
+  assert.equal(f.calls.length, 0);
+});
 
 test("follow-up creation claims the parent before exposing an editable child", async () => {
   const f = creationFixture();

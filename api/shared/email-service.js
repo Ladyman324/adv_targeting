@@ -477,7 +477,8 @@ function identityPresentationRefresh(message, approved, batch, sender, images) {
     firm: presentation.companyName,
     nameFallback: false,
   };
-  const subject = core.renderTemplate(batch.commonSubject, recipient, sender).rendered;
+  const subject = batch.parentBatchId ? message.subject
+    : core.renderTemplate(batch.commonSubject, recipient, sender).rendered;
   const bodyText = core.renderTemplate(batch.commonBodyText, recipient, sender).rendered;
   return { changed: true, blocked: false, patch: {
     ...presentation, subject, bodyText,
@@ -507,6 +508,7 @@ async function validateBatch(who, batchId, options = {}) {
   const tpl = await store.getTemplate(batch.templateId);
   const images = (tpl && tpl.images) || [];
   const knownImageIds = tpl ? new Set(images.map((i) => String(i.id).toLowerCase())) : null;
+  const originals = await followUpOriginals(who, batch);
   const sender = (await auth.status(who.id).catch(() => null) || {}).profile || null;
   const updated = await mapMessagesBounded(messages, async (message) => {
     const identityErrors = [];
@@ -554,6 +556,15 @@ async function validateBatch(who, batchId, options = {}) {
       identityErrors.push({ code: err.code || "recipient_identity_unavailable",
         message: err.message || "Recipient identity could not be verified." });
     }
+    if (batch.parentBatchId) {
+      try {
+        identityPatch.subject = originalReplySubject(message, originals);
+        identityPatch.subjectOverridden = false;
+        presentationChanged = presentationChanged || identityPatch.subject !== message.subject;
+      } catch (err) {
+        identityErrors.push({ code: err.code || "original_unavailable", message: err.message });
+      }
+    }
     const reviewed = presentationChanged ? false
       : (options.reviewed === true ? true : message.reviewed);
     const candidate = { ...message, ...identityPatch, reviewed };
@@ -574,7 +585,7 @@ async function validateBatch(who, batchId, options = {}) {
                   copyInternalTo: b.copyInternalTo, ccColleague: b.ccColleague };
   const withCopies = updated.map((m) => ({ ...m,
     ...core.extraRecipients(m, prefs, { mail: b.senderMail }, cfg) }));
-  return { batch: b, messages: withCopies,
+  return { batch: b, messages: withCopies, originals,
     valid: errors.length === 0, errors, warnings,
     // What "Restore approved wording" restores TO. Sent from the server so the
     // client restores the template as published rather than whatever it happens
@@ -653,10 +664,13 @@ async function followUpCandidates(who, batchId, deps = {}) {
 
   const brief = (m) => ({ messageId: m.id, crd: m.contactId || "",
     name: m.recipientName || "", email: m.recipientEmail || "",
-    graphMessageId: m.graphMessageId || "", subject: m.subject || "" });
+    graphMessageId: m.graphMessageId || "", subject: m.subject || "",
+    bodyText: m.bodyText || "", sentUtc: m.sentUtc || "",
+    attachments: (m.attachments || []).map((d) => ({ id: d.id, name: d.name || "Document", version: d.version, sha256: d.sha256 })) });
 
   return {
     batchId, batchName: batch.name || "", followUpDays: batch.followUpDays || 0,
+    followUpBatchId: batch.followUpBatchId || "",
     followUpSentUtc: batch.followUpSentUtc || "",
     counts: { sent: sent.length, replied: replied.length, bounced: bounced.length,
               suppressed: suppressed.length, unthreadable: unthreadable.length,
@@ -729,8 +743,17 @@ async function createFollowUp(who, input, deps = {}) {
     throw httpError(409, "Everybody has replied, bounced or opted out \u2014 there is nobody to follow up.", "nobody_to_follow_up");
 
   if (fresh.remaining.some((row) => row.crd)) await registry.load({ force: true });
+  if (input.messageIds != null && (!Array.isArray(input.messageIds)
+      || input.messageIds.some((id) => typeof id !== "string")))
+    throw httpError(400, "Selected recipients must be a list of message identifiers.");
+  if (input.personalized != null && (typeof input.personalized !== "object" || Array.isArray(input.personalized)))
+    throw httpError(400, "Personalized follow-ups must be keyed by message identifier.");
+  const selectedIds = input.messageIds == null ? null : new Set(input.messageIds);
+  const selected = fresh.remaining.filter((row) => !selectedIds || selectedIds.has(row.messageId));
+  if (!selected.length) throw httpError(409, "No selected recipients remain eligible.", "nobody_to_follow_up");
+  const overrides = input.personalized || {};
   const verifiedRemaining = [];
-  for (const row of fresh.remaining) {
+  for (const row of selected) {
     let approved;
     if (!row.crd) {
       // The connected-mailbox self-test is the sole allowed CRD-less recipient
@@ -748,11 +771,21 @@ async function createFollowUp(who, input, deps = {}) {
     } else approved = await registry.verify(row.crd, row.email);
     verifiedRemaining.push({ row, approved });
   }
-  const note = String(input.text || FOLLOW_UP_DEFAULT_TEXT).slice(0, cfg.maxBodyChars);
+  const note = String(input.text == null ? FOLLOW_UP_DEFAULT_TEXT : input.text).slice(0, cfg.maxBodyChars);
   if (!note.trim()) throw httpError(400, "The follow-up needs something to say.");
+  for (const row of selected) {
+    if (Object.prototype.hasOwnProperty.call(overrides, row.messageId)
+        && !String(overrides[row.messageId] || "").trim())
+      throw httpError(400, "A personalized follow-up is empty.");
+    replySubject(row.subject);
+  }
   const withAttachments = input.includeAttachments === true;
-  const documents = withAttachments && parent.attachmentIds.length
-    ? await st.getDocuments(parent.attachmentIds) : [];
+  const requestedDocuments = withAttachments ? selected.flatMap((r) => r.attachments || []) : [];
+  const requestedIds = [...new Set(requestedDocuments.map((d) => d.id))];
+  const documents = requestedIds.length ? await st.getDocuments(requestedIds) : [];
+  if (requestedDocuments.some((old) => !documents.some((doc) => doc.id === old.id
+      && doc.version === old.version && doc.sha256 === old.sha256)))
+    throw httpError(409, "An original document changed or is unavailable. Continue without reattaching it, or start a new batch.", "attachment_unavailable");
   const unavailableDocuments = documents.filter((doc) => !materials.currentDocument(doc));
   if (unavailableDocuments.length) throw httpError(409,
     `${unavailableDocuments[0].name || "An attachment"} is not current approved material.`, "attachment_unavailable");
@@ -794,7 +827,9 @@ async function createFollowUp(who, input, deps = {}) {
     // "RE:" and the threading both come from Graph's createReply in the worker.
     // The subject here is what the REVIEW SCREEN shows, so it has to read the
     // way the advisor will see it.
-    const subject = /^re:/i.test(r.subject) ? r.subject : `RE: ${r.subject}`;
+    const subject = replySubject(r.subject);
+    const personalized = Object.prototype.hasOwnProperty.call(overrides, r.messageId);
+    const bodyText = personalized ? String(overrides[r.messageId]).slice(0, cfg.maxBodyChars) : note;
     await st.createMessage(who.id, batchId, { id: st.id(), ordinal: i,
       contactId: r.crd, recipientName: approved.name, recipientEmail: approved.email,
       companyName: approved.firm,
@@ -814,12 +849,12 @@ async function createFollowUp(who, input, deps = {}) {
       // The sent message this replies to. The worker needs the Graph id, not
       // the conversation id, because it replies to a MESSAGE.
       followUpOfGraphId: r.graphMessageId,
-      subject, bodyText: note,
-      bodyHtml: core.plainTextToSafeHtml(note, []),
+      subject, bodyText, bodyOverridden: personalized,
+      bodyHtml: core.plainTextToSafeHtml(bodyText, []),
       inlineImages: [],
       signatureHtml: core.corporateSignature(profile,
         suppress.manageUrl(r.email, r.crd), cfg),
-      baseRevision: 1, attachments: documents,
+      baseRevision: 1, attachments: documents.filter((doc) => (r.attachments || []).some((old) => old.id === doc.id)),
       validation: { errors: r.graphMessageId ? [] : [{ code: "no_original",
         message: "The original message is no longer in the mailbox, so this cannot be threaded." }],
         warnings: [] } });
@@ -836,7 +871,7 @@ async function createFollowUp(who, input, deps = {}) {
     throw err;
   }
   await st.audit(who.id, batchId, "follow_up_created",
-    { parentBatchId: parentId, recipients: fresh.remaining.length,
+    { parentBatchId: parentId, recipients: verifiedRemaining.length,
       replied: fresh.counts.replied, bounced: fresh.counts.bounced,
       suppressed: fresh.counts.suppressed, attachments: documents.length,
       recipientIdentity: recipientEvidenceSummary(verifiedRemaining.map(({ approved }) => approved)) });
@@ -1028,7 +1063,9 @@ async function updateCommon(who, input) {
   const batch = await store.getBatch(who.id, input.batchId);
   if (!batch) throw httpError(404, "Email batch not found.");
   if (!["editing", "invalid"].includes(batch.status)) throw httpError(409, "This batch can no longer be edited.");
-  const subjectTemplate = String(input.subject == null ? batch.commonSubject : input.subject).slice(0, 500);
+  const originals = await followUpOriginals(who, batch);
+  const subjectTemplate = batch.parentBatchId ? ""
+    : String(input.subject == null ? batch.commonSubject : input.subject).slice(0, 500);
   const bodyTemplate = String(input.bodyText == null ? batch.commonBodyText : input.bodyText).slice(0, core.config().maxBodyChars);
   const template = await store.getTemplate(batch.templateId);
   const images = (template && template.images) || [];
@@ -1046,7 +1083,7 @@ async function updateCommon(who, input) {
    * brace: {first_name} is not a token, so it renders as literal text and the
    * unresolved-field check never sees it. "Hi {first_name}," goes out.
    */
-  const lint = core.lintTemplate({ subject: subjectTemplate, bodyText: bodyTemplate,
+  const lint = core.lintTemplate({ subject: batch.parentBatchId ? "Inherited thread subject" : subjectTemplate, bodyText: bodyTemplate,
     maxBodyChars: core.config().maxBodyChars });
   const knownIds = new Set(images.map((i) => String(i.id).toLowerCase()));
   for (const m of `${subjectTemplate}
@@ -1091,7 +1128,8 @@ ${bodyTemplate}`.matchAll(core.IMAGE_TOKEN)) {
      * naming how many messages it will overwrite.
      */
     const overwrite = input.overwriteAll === true;
-    const took = overwrite || !m.subjectOverridden || !m.bodyOverridden;
+    const took = batch.parentBatchId ? overwrite || !m.bodyOverridden
+      : overwrite || !m.subjectOverridden || !m.bodyOverridden;
     // baseRevision was previously stamped onto EVERY message, including the
     // individually edited ones -- which erased the only evidence that they had
     // not received the change. A message whose baseRevision trails the batch's
@@ -1100,7 +1138,10 @@ ${bodyTemplate}`.matchAll(core.IMAGE_TOKEN)) {
     const patch = { reviewed: false, state: "editing" };
     if (took) patch.baseRevision = revision;
     else behind.push({ id: m.id, name: m.recipientName || m.recipientEmail });
-    if (overwrite || !m.subjectOverridden) {
+    if (batch.parentBatchId) {
+      patch.subject = originalReplySubject(m, originals);
+      patch.subjectOverridden = false;
+    } else if (overwrite || !m.subjectOverridden) {
       patch.subject = core.renderTemplate(subjectTemplate, recipient, sender).rendered;
       if (overwrite) patch.subjectOverridden = false;
     }
@@ -1126,7 +1167,10 @@ async function updateMessage(who, input) {
   if (!batch || !message) throw httpError(404, "Email message not found.");
   if (!["editing", "invalid"].includes(batch.status)) throw httpError(409, "This batch can no longer be edited.");
   const patch = { reviewed: !!input.reviewed, state: "editing" };
-  if ("subject" in input) { patch.subject = String(input.subject || "").slice(0, 500); patch.subjectOverridden = true; }
+  if (batch.parentBatchId) {
+    patch.subject = originalReplySubject(message, await followUpOriginals(who, batch));
+    patch.subjectOverridden = false;
+  } else if ("subject" in input) { patch.subject = String(input.subject || "").slice(0, 500); patch.subjectOverridden = true; }
   const tpl = await store.getTemplate(batch.templateId);
   const tplImages = (tpl && tpl.images) || [];
   const sender = (await auth.status(who.id).catch(() => null) || {}).profile || null;
@@ -1135,7 +1179,7 @@ async function updateMessage(who, input) {
   const mergeRecipient = { name: message.recipientName, firstName: message.greetingName,
     lastName: message.recipientLastName, firm: message.companyName,
     nameFallback: false };
-  if (input.resetSubject) { patch.subject = core.renderTemplate(batch.commonSubject, mergeRecipient, sender).rendered; patch.subjectOverridden = false; }
+  if (input.resetSubject && !batch.parentBatchId) { patch.subject = core.renderTemplate(batch.commonSubject, mergeRecipient, sender).rendered; patch.subjectOverridden = false; }
   if (input.resetBody) { patch.bodyText = core.renderTemplate(batch.commonBodyText, mergeRecipient, sender).rendered;
     patch.bodyHtml = core.plainTextToSafeHtml(patch.bodyText, tplImages); patch.bodyOverridden = false; }
   await store.patchMessage(who.id, batch.id, message.id, patch, message.etag);
@@ -1559,6 +1603,31 @@ async function preflightScheduled(userId, batchId, revision, deps = {}) {
     throw error;
   }
 }
+function replySubject(subject) {
+  const value = String(subject || "").trim();
+  if (!value.replace(/^(re:\s*)+/i, "").trim())
+    throw httpError(409, "The original email subject is unavailable. Review the original batch.", "original_subject_unavailable");
+  return /^re:/i.test(value) ? value : `RE: ${value}`;
+}
+
+function originalReplySubject(message, originals) {
+  const original = originals.find((m) => m.graphMessageId === message.followUpOfGraphId);
+  if (!original) throw httpError(409, "The original email is unavailable. Review the original batch.", "original_unavailable");
+  return replySubject(original.subject);
+}
+
+async function followUpOriginals(who, batch, st = store) {
+  if (!batch.parentBatchId) return [];
+  // Always scoped to the same mailbox owner; never use today's template.
+  const parent = await st.getBatch(who.id, batch.parentBatchId);
+  if (!parent) return [];
+  return (await st.listMessages(who.id, parent.id)).filter((m) => m.state === "sent").map((m) => ({
+    graphMessageId: m.graphMessageId, subject: m.subject || "", bodyText: m.bodyText || "",
+    sentUtc: m.sentUtc || "", name: m.recipientName || "", email: m.recipientEmail || "",
+    attachments: (m.attachments || []).map((d) => ({ name: d.name || "Document" })),
+  }));
+}
+
 async function getBatchDetail(who, batchId, deps = {}) {
   const st = deps.store || store;
   const batch = await st.getBatch(who.id, batchId);
@@ -1594,7 +1663,7 @@ async function getBatchDetail(who, batchId, deps = {}) {
     retryEligibility: review.eligibility(batch, m),
     prepareRetryEligibility: review.prepareEligibility(batch, m),
     ...core.extraRecipients(m, prefs, { mail: batch.senderMail }, cfg) }));
-  return { batch, messages: withCopies, counts };
+  return { batch, messages: withCopies, counts, originals: await followUpOriginals(who, batch, st) };
 }
 
 async function releaseCapacity(batch, messages, all = false) {

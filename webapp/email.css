@@ -788,3 +788,15 @@
 .email-review-table th, .email-review-table td { padding: .65rem; text-align: left; vertical-align: top; border-bottom: 1px solid rgba(128,128,128,.3); }
 .email-review-table small { display: block; margin-top: .3rem; opacity: .8; }
 .email-review-table input[type="checkbox"] { width: 20px; height: 20px; }
+.email-followup{max-width:900px;margin:auto;width:100%;box-sizing:border-box}
+.email-followup .email-footer{position:static;flex-wrap:wrap;margin-top:18px}
+.email-followup .email-footer .email-notice{flex-basis:100%}
+.email-original{border:1px solid var(--border,#d7dde5);border-radius:10px;padding:16px;background:var(--panel-2)}
+.email-followup-text{white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.55}
+.email-followup blockquote{margin:16px 0 0;padding:12px 16px;border-left:3px solid var(--border,#d7dde5);color:var(--muted);max-height:320px;overflow:auto}
+.email-followup-recipients{max-height:250px;overflow:auto;padding:8px 0}
+.email-followup-recipients small{display:block;color:var(--muted)}
+.email-followup select{max-width:100%;padding:9px;border:1px solid var(--border,#d7dde5);border-radius:6px;background:var(--panel);color:var(--text)}
+.email-followup [hidden]{display:none!important}
+.email-common[hidden],.email-individual[hidden]{display:none!important}
+.email-followup .email-preview{margin-top:16px;padding:16px;border:1px solid var(--border,#d7dde5);border-radius:10px}

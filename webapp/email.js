@@ -322,6 +322,8 @@
   }
 
   function approvalButtonLabel(plan) {
+    if (!approvalPreparing && detail?.batch?.parentBatchId)
+      return sendTiming === "later" ? "Approve Scheduled Follow-up" : "Approve &amp; Send Follow-up";
     if (approvalPreparing) return "Preparing approval…";
     if (plan && plan.multiDay) return "Approve multi-day send";
     return sendTiming === "later" ? "Approve &amp; Schedule" : "Approve &amp; Send";
@@ -349,7 +351,9 @@
         : multi
           ? `The first available emails start after the cancellation window. Later days begin at ${esc(intent.dailyStartTime)} Eastern.`
           : `Sending starts after the ${Number((catalog.limits || {}).cancellationSeconds) || 0}-second cancellation window.`;
-    const finalLabel = intent.mode === "drafts"
+    const finalLabel = intent.followUp && intent.mode === "send"
+      ? (intent.scheduledForUtc ? "Approve Scheduled Follow-up" : "Approve &amp; Send Follow-up")
+      : intent.mode === "drafts"
       ? `Create ${intent.recipientCount} Outlook drafts`
       : multi ? `Approve & start ${days.length}-day send`
         : intent.scheduledForUtc ? `Approve & schedule ${intent.recipientCount}`
@@ -385,6 +389,7 @@
     closeApprovalReview();
     const count = tally();
     approvalIntent = {
+      followUp: !!batch.parentBatchId,
       batchId: batch.id, mode, recipientCount: batch.recipientCount,
       attachmentIds: [...batch.attachmentIds],
       attachments: [...batch.attachmentSummary],
@@ -2495,6 +2500,10 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
       editor: (document.querySelector(".email-editor") || {}).scrollTop || 0,
     };
     document.getElementById("emailTitle").textContent = b.name || "Email batch";
+    if (b.parentBatchId && !locked) {
+      if (followUpStage !== "delivery") return followUpDraftView(true);
+      return followUpDeliveryView(scheduleHtml, sendBlocked);
+    }
     document.getElementById("emailBody").innerHTML = `<div class="email-grid">
       <aside class="email-list">${b.suppressedNote
         ? `<p class="email-suppressed">${esc(b.suppressedNote)}</p>` : ""}${b.copiedInsteadNote
@@ -2516,7 +2525,7 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
           </li>`;
         }).join("")}</ol></details></aside>
       <main class="email-editor">
-        <section class="email-common"><div class="email-section-head">
+        <section class="email-common" ${b.parentBatchId ? "hidden" : ""}><div class="email-section-head">
           <div><p class="eyebrow">Step 1 &middot; edit all</p><h3>Common template</h3></div>
           ${locked ? "" : `<div class="email-head-acts">
             <button type="button" class="email-small ghost" data-email="restore-common"
@@ -2534,7 +2543,7 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
             ${(detail.templateImages || []).length ? `Charts: ${detail.templateImages.map((i) =>
               `<code>{{image:${esc(i.id)}}}</code>`).join(" ")}.` : ""}
             ${overridden ? `${overridden} email${overridden === 1 ? " keeps its" : "s keep their"} own wording and will not take this change.` : ""}</p></section>
-        <section class="email-individual${m.subjectOverridden || m.bodyOverridden ? " overridden" : ""}">
+        <section class="email-individual${m.subjectOverridden || m.bodyOverridden ? " overridden" : ""}" ${b.parentBatchId ? "hidden" : ""}>
           <div class="email-section-head">
             <div><p class="eyebrow">Step 2 &middot; edit one &middot; ${cursor + 1} of ${detail.messages.length}</p>
             <h3>${esc(m.recipientName || m.recipientEmail)}</h3>
@@ -2569,7 +2578,8 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
             ? `<p><b>Bcc:</b> ${(m.bcc || []).map((a) => `${esc(a)}<span class="env-note">${
                 esc(bccReason(a, b))}</span>`).join(", ")}</p>` : ""}
           <p><b>Subject:</b> ${esc(m.subject)}</p><p><b>Attachments:</b> ${attachments.length ? attachments.map((a) => `${esc(a.name)} (${bytes(a.size)})`).join(", ") : "None"}</p></div>
-          <div class="email-rendered">${previewWithImages(m.bodyHtml, m.inlineImages, b.templateId)}${m.signatureHtml || ""}</div></section>
+          <div class="email-rendered">${previewWithImages(m.bodyHtml, m.inlineImages, b.templateId)}${m.signatureHtml || ""}</div>
+          ${b.parentBatchId ? originalEmailHtml((detail.originals || []).find((o) => o.graphMessageId === m.followUpOfGraphId)) : ""}</section>
         <aside id="emailDeliveryPlan" class="email-plan${deliveryPlan && deliveryPlan.fit === false ? " cannot-fit" : ""}">
           ${capacityPlanCardHtml(deliveryPlan, b, locked)}</aside>
       </main></div>
@@ -2755,55 +2765,135 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
    * inspect.
    */
   let followUp = null;
+  let followUpStage = "write";
+  let followUpDraft = null;
+
+  function originalEmailHtml(original) {
+    if (!original) return '<p class="email-notice bad">Original message unavailable. Open the original batch before proceeding.</p>';
+    return `<section class="email-original"><h3>Original email</h3>
+      <p><b>${esc(original.subject || "(Subject unavailable)")}</b></p>
+      <p class="email-fine">Sent to ${esc(original.name || original.email || "")}${
+        original.sentUtc ? ` on ${esc(new Date(original.sentUtc).toLocaleDateString())}` : ""}</p>
+      <p class="email-original-excerpt">${esc(String(original.bodyText || "").slice(0, 240))}${String(original.bodyText || "").length > 240 ? "..." : ""}</p>
+      <details><summary>Show full original</summary><div class="email-followup-text">${esc(original.bodyText || "Original text unavailable.")}</div></details>
+      <p class="email-fine">Original attachments: ${(original.attachments || []).map((d) => esc(d.name)).join(", ") || "None"}</p></section>`;
+  }
+
+  function followUpDraftView(existing) {
+    clearTimeout(pollTimer); clearInterval(tickTimer);
+    const key = existing ? detail.batch.id : `new:${followUp.batchId}`;
+    if (!followUpDraft || followUpDraft.key !== key) {
+      const rows = existing ? detail.messages.map((m) => ({
+        messageId: m.id, name: m.recipientName, email: m.recipientEmail,
+        original: (detail.originals || []).find((o) => o.graphMessageId === m.followUpOfGraphId),
+      })) : followUp.remaining.map((m) => ({ ...m, original: m }));
+      followUpDraft = { key, existing, rows, text: existing ? detail.batch.commonBodyText : FOLLOW_UP_DEFAULT,
+        selected: new Set(rows.map((m) => m.messageId)), previewId: rows[0]?.messageId,
+        personalized: existing ? Object.fromEntries(detail.messages.filter((m) => m.bodyOverridden).map((m) => [m.id, m.bodyText])) : {},
+        includeAttachments: existing && !!detail.batch.attachmentIds.length };
+    }
+    const d = followUpDraft, c = existing ? null : followUp.counts;
+    document.getElementById("emailTitle").textContent = existing ? detail.batch.name : `Follow up: ${followUp.batchName}`;
+    document.getElementById("emailBody").innerHTML = `<div class="email-setup email-followup">
+      <p class="eyebrow">1. Write &amp; review &nbsp; / &nbsp; 2. Delivery &amp; approval</p>
+      <p><b id="followUpCount">${d.selected.size}</b> eligible recipients. Nothing has been sent.</p>
+      <p class="email-fine">Changes are saved when you continue to delivery.</p>
+      ${c ? `<p class="email-fine">Excluded: ${c.replied} replied, ${c.bounced} bounced, ${c.suppressed} opted out, ${c.unthreadable} original unavailable, ${c.notSent} never sent.</p>` : ""}
+      <details><summary>View recipients / remove people</summary><div class="email-followup-recipients">
+        ${d.rows.map((r) => `<label class="email-check"><input type="checkbox" data-followup-recipient="${esc(r.messageId)}" ${d.selected.has(r.messageId) ? "checked" : ""}>
+          <span>${esc(r.name || r.email)} <small>${esc(r.email)}</small></span></label>`).join("")}</div></details>
+      <label class="email-label">Preview recipient <select id="followUpPreviewRecipient">${d.rows.map((r) =>
+        `<option value="${esc(r.messageId)}" ${r.messageId === d.previewId ? "selected" : ""}>${esc(r.name || r.email)}</option>`).join("")}</select></label>
+      <p class="email-fine">Original wording and attachments may differ by recipient. This shows their saved sent message, not today's template.</p>
+      <div id="followUpOriginal"></div>
+      <label class="email-label">Your follow-up <textarea id="followUpText" rows="5" maxlength="2000">${esc(d.text)}</textarea></label>
+      <p class="email-fine">Replies stay in each recipient's original thread. Personalized emails keep their own wording.</p>
+      <label class="email-check"><input type="checkbox" id="followUpPersonalize"><span>Personalize for this person</span></label>
+      <label class="email-label" id="followUpPersonalLabel" hidden>Personalized follow-up
+        <textarea id="followUpPersonalText" rows="4" maxlength="2000"></textarea></label>
+      ${existing ? `<p class="email-fine">Attachments are fixed for this prepared draft: ${(detail.batch.attachmentSummary || []).map((a) => esc(a.name)).join(", ") || "None"}.</p>`
+        : `<label class="email-check"><input type="checkbox" id="followUpAttach" ${d.includeAttachments ? "checked" : ""}><span>Attach original documents again</span></label>
+        <p class="email-fine">Unchecked by default. The documents remain in the earlier email.</p>`}
+      <section class="email-preview"><h3>Thread preview</h3><div id="followUpPreview"></div>
+        <p class="email-fine">Your signature and unsubscribe link are included automatically. Outlook supplies the original thread's formatting.</p></section>
+      <footer class="email-footer"><p id="emailNotice" class="email-notice" role="status"></p>
+        <button type="button" class="ask-btn primary" data-email="${existing ? "follow-up-delivery" : "follow-up-create"}">Continue to delivery</button>
+      </footer></div>`;
+    let originalPreviewId = null;
+    const paint = () => {
+      const row = d.rows.find((r) => r.messageId === d.previewId), original = row?.original;
+      const personalized = Object.prototype.hasOwnProperty.call(d.personalized, d.previewId);
+      if (originalPreviewId !== d.previewId) {
+        document.getElementById("followUpOriginal").innerHTML = originalEmailHtml(original);
+        originalPreviewId = d.previewId;
+      }
+      document.getElementById("followUpPersonalize").checked = personalized;
+      document.getElementById("followUpPersonalLabel").hidden = !personalized;
+      const input = document.getElementById("followUpPersonalText");
+      if (document.activeElement !== input) input.value = personalized ? d.personalized[d.previewId] : d.text;
+      const subject = original?.subject || "(Original subject unavailable)";
+      document.getElementById("followUpPreview").innerHTML = `<p><b>To:</b> ${esc(row?.email || "")} ${d.selected.has(d.previewId) ? "" : "(Excluded)"}</p>
+        <p><b>Subject:</b> ${esc(/^re:/i.test(subject) ? subject : "RE: " + subject)}</p>
+        <div class="email-followup-text">${esc(personalized ? d.personalized[d.previewId] : d.text)}</div>
+        <blockquote class="email-followup-text">${esc(original?.bodyText || "Original text unavailable.")}</blockquote>`;
+      document.getElementById("followUpCount").textContent = d.selected.size;
+    };
+    document.getElementById("followUpPreviewRecipient").onchange = (e) => { d.previewId = e.target.value; paint(); };
+    document.getElementById("followUpText").oninput = (e) => { d.text = e.target.value; paint(); };
+    document.getElementById("followUpPersonalize").onchange = (e) => {
+      if (e.target.checked) d.personalized[d.previewId] = d.text;
+      else delete d.personalized[d.previewId];
+      paint();
+    };
+    document.getElementById("followUpPersonalText").oninput = (e) => { d.personalized[d.previewId] = e.target.value; paint(); };
+    const attach = document.getElementById("followUpAttach");
+    if (attach) attach.onchange = (e) => { d.includeAttachments = e.target.checked; };
+    for (const box of document.querySelectorAll("[data-followup-recipient]")) box.onchange = () => {
+      if (box.checked) d.selected.add(box.dataset.followupRecipient); else d.selected.delete(box.dataset.followupRecipient);
+      paint();
+    };
+    paint();
+  }
+
+  function followUpDeliveryView(scheduleHtml, sendBlocked) {
+    const b = detail.batch;
+    document.getElementById("emailTitle").textContent = b.name;
+    document.getElementById("emailBody").innerHTML = `<div class="email-setup email-followup">
+      <p class="eyebrow">1. Write &amp; review &nbsp; / &nbsp; 2. Delivery &amp; approval</p>
+      <h3>Choose delivery for ${detail.messages.length} follow-ups</h3>
+      <p>Nothing has been sent. Replies and opt-outs are checked again before each follow-up sends.</p>
+      <p><b>Attachments:</b> ${(b.attachmentSummary || []).map((a) => esc(a.name)).join(", ") || "None"}</p>
+      ${scheduleHtml}
+      <aside id="emailDeliveryPlan" class="email-plan">${capacityPlanCardHtml(deliveryPlan, b, false)}</aside>
+      <p class="email-fine">You can close the application after approval. Sending continues on the server.</p>
+      <footer class="email-footer"><p id="emailNotice" class="email-notice" role="status"></p>
+        <span id="emailCapacityCompact">${esc(compactCapacityPlan(deliveryPlan))}</span>
+        <span id="emailSendoff" ${sendBlocked ? "" : "hidden"}>${esc(sendBlocked)}</span>
+        <button type="button" class="ask-btn" data-email="follow-up-edit">Back to message</button>
+        <button type="button" class="ask-btn primary" data-email="approve-send" ${sendBlocked ? "disabled" : ""}>${approvalButtonLabel(deliveryPlan)}</button>
+      </footer></div>`;
+    commonBaseline = null; dirty = false;
+    if (!deliveryPlanLoading) scheduleCapacityPlanRefresh(0);
+  }
 
   async function openFollowUp(batchId){
+    clearTimeout(pollTimer); clearInterval(tickTimer);
+    clearTimeout(deliveryPlanTimer);
     const back = shell(); back.hidden = false;
     document.getElementById("emailTitle").textContent = "Follow up";
     document.getElementById("emailBody").innerHTML = `<p class="email-loading">Working out who never replied…</p>`;
     try {
+      await loadCatalog();
       followUp = await api(`follow_up_candidates&id=${encodeURIComponent(batchId)}`, null, "GET");
+      if (followUp.followUpBatchId) return openBatchById(followUp.followUpBatchId, true);
+      followUpDraft = null; followUpStage = "write";
       followUpView();
     } catch (e) { document.getElementById("emailBody").innerHTML =
       `<p class="email-notice bad">${esc(e.message)}</p>`; }
   }
 
   function followUpView(){
-    const f = followUp, c = f.counts;
-    const off = [
-      c.replied ? `${c.replied} replied` : "",
-      c.bounced ? `${c.bounced} bounced` : "",
-      c.suppressed ? `${c.suppressed} opted out since` : "",
-      c.unthreadable ? `${c.unthreadable} original${c.unthreadable === 1 ? "" : "s"} unavailable` : "",
-      c.notSent ? `${c.notSent} never sent` : "",
-    ].filter(Boolean);
-    document.getElementById("emailBody").innerHTML = `<div class="email-setup">
-      <p class="email-summary"><b>${c.remaining}</b> of ${c.sent} never replied${
-        off.length ? ` &middot; ${esc(off.join(", "))}` : ""}</p>
-      ${c.remaining ? "" : `<p class="email-notice">There is nobody to follow up.</p>`}
-      <label class="email-label">What to say
-        <textarea id="followUpText" rows="3" maxlength="2000">${esc(FOLLOW_UP_DEFAULT)}</textarea></label>
-      <p class="email-fine">Sent as a reply on the original thread, so it arrives under
-        the email they already have, with it quoted below. It carries its own
-        unsubscribe link, because it is outreach we started.</p>
-      <label class="email-check">
-        <input type="checkbox" id="followUpAttach">
-        <span>Attach the original documents again</span></label>
-      <p class="email-fine">Off by default: re-sending a document people already
-        have is a common way into a spam folder. Turn it on when the document is
-        the reason you are writing.</p>
-      ${off.length ? `<details class="email-mates"><summary>Who came off the list</summary>
-        <div class="email-mates-list">${
-          [["replied", "Replied"], ["bounced", "Bounced"], ["suppressed", "Opted out"],
-           ["unthreadable", "Original unavailable in Outlook"]]
-            .map(([k, label]) => (f[k] || []).length
-              ? `<p class="email-fine"><b>${label}:</b> ${(f[k] || []).map((x) => esc(x.name || x.email)).join(", ")}</p>`
-              : "").join("")}</div></details>` : ""}
-      <footer class="email-footer"><p id="emailNotice" class="email-notice"></p><div>
-        <button type="button" class="ask-btn ghost" data-email="close">Close</button>
-        <button type="button" class="ask-btn primary" data-email="follow-up-create"
-          ${c.remaining ? "" : "disabled"}>Prepare ${c.remaining} follow-up${c.remaining === 1 ? "" : "s"}</button>
-      </div></footer>
-      </div>`;
+    return followUpDraftView(false);
   }
 
   const FOLLOW_UP_DEFAULT = "Just following up on the note below in case it reached you at a busy moment.";
@@ -2853,6 +2943,7 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
       deliveryPlanKey = ""; deliveryPlanError = "";
       if (["editing", "invalid"].includes(detail.batch.status)) await requestCapacityPlan();
       cursor = 0; forceDetail = false;
+      followUpStage = "write"; followUpDraft = null;
       if (pushUrl && new URL(location.href).searchParams.get("emailBatch") !== id)
         history.pushState({ emailBatch: id }, "", emailUrl(id, false));
       composerView();
@@ -2915,6 +3006,7 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
         ${!child && b.followUpBatchId ? `<small class="email-history-follow">${esc(historyFollowUp(b, byId))}</small>` : ""}
       </button><div class="email-history-actions">
         ${canFollow ? `<button type="button" class="ask-btn" data-email="follow-up-open" data-id="${esc(b.id)}">Follow up with non-responders</button>` : ""}
+        ${!child && b.followUpBatchId ? `<button type="button" class="ask-btn" data-email="open-batch" data-id="${esc(b.followUpBatchId)}">Open follow-up</button>` : ""}
         ${canDiscard ? `<button type="button" class="ask-btn ghost" data-email="history-discard" data-id="${esc(b.id)}">Discard draft</button>` : ""}
       </div></div>`;
   }
@@ -3474,16 +3566,54 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
       return;
     }
     if (action === "follow-up-open") { return openFollowUp(button.dataset.id); }
-    if (action === "follow-up-create") {
-      button.disabled = true; notice("Preparing the follow-up…");
+    if (action === "follow-up-edit") {
+      followUpStage = "write"; followUpDraft = null; return composerView();
+    }
+    if (action === "follow-up-create" || action === "follow-up-delivery") {
+      const d = followUpDraft;
+      if (!d || !d.selected.size) return notice("Select at least one recipient.", true);
+      if (!d.text.trim()) return notice("Write a follow-up before continuing.", true);
+      if (d.rows.some((r) => d.selected.has(r.messageId) && !r.original))
+        return notice("An original message is unavailable. Review the original batch before continuing.", true);
+      if (Object.entries(d.personalized).some(([id, text]) => d.selected.has(id) && !text.trim()))
+        return notice("A personalized follow-up is empty.", true);
+      button.disabled = true; notice("Saving your unsent follow-up...");
       try {
-        detail = await api("create_follow_up", {
-          batchId: followUp.batchId,
-          text: (document.getElementById("followUpText") || {}).value || "",
-          includeAttachments: !!(document.getElementById("followUpAttach") || {}).checked,
-        });
-        cursor = 0; composerView();
-      } catch (e) { button.disabled = false; notice(e.message, true); }
+        if (action === "follow-up-create") {
+          detail = await api("create_follow_up", {
+            batchId: followUp.batchId, text: d.text, includeAttachments: d.includeAttachments,
+            messageIds: [...d.selected], personalized: d.personalized,
+          });
+          sendTiming = "now"; scheduleDate = ""; scheduleTime = "07:30"; continuationTime = "07:30";
+        } else {
+          const batchId = detail.batch.id;
+          const removed = detail.messages.filter((m) => !d.selected.has(m.id));
+          if (removed.length && !confirm(`Remove ${removed.length} recipients from this unsent follow-up?`)) {
+            button.disabled = false; notice(""); return;
+          }
+          if (d.text !== detail.batch.commonBodyText)
+            detail = await api("update_common", { batchId, bodyText: d.text });
+          for (const m of [...detail.messages]) {
+            if (!d.selected.has(m.id)) continue;
+            if (Object.prototype.hasOwnProperty.call(d.personalized, m.id)) {
+              if (!m.bodyOverridden || m.bodyText !== d.personalized[m.id])
+                detail = await api("update_message", { batchId, messageId: m.id, bodyText: d.personalized[m.id], reviewed: true });
+            } else if (m.bodyOverridden) {
+              detail = await api("update_message", { batchId, messageId: m.id, resetBody: true, resetSubject: true });
+            }
+          }
+          for (const m of removed)
+            detail = await api("remove_recipient", { batchId, messageId: m.id });
+        }
+        // All save responses include the original context. Nothing is approved here.
+        followUpStage = "delivery"; followUpDraft = null; cursor = 0;
+        deliveryPlan = null; deliveryPlanKey = ""; deliveryPlanError = "";
+        await requestCapacityPlan();
+        composerView();
+      } catch (e) {
+        button.disabled = false;
+        notice(`Nothing has been sent. ${e.message}`, true);
+      }
       return;
     }
     if (action === "connect") {
