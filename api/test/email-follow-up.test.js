@@ -383,6 +383,7 @@ test("only selected still-eligible recipients are created, with their personal w
   const r = await f.svc.createFollowUp(WHO, { batchId: "B1", text: "Shared note.",
     messageIds: [original.id], personalized: { [original.id]: "Personal note." } });
   assert.equal(r.messages.length, 1);
+  assert.equal(r.messages[0].signatureHtml, "", "follow-ups do not append a new signature or footer");
   assert.equal(r.messages[0].bodyText, "Personal note.");
   assert.equal(r.messages[0].bodyOverridden, true);
   assert.equal(r.batch.mode, "", "preparation does not approve sending");

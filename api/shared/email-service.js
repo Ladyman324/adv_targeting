@@ -880,8 +880,9 @@ async function createFollowUp(who, input, deps = {}) {
       subject, bodyText, bodyOverridden: personalized,
       bodyHtml: core.plainTextToSafeHtml(bodyText, []),
       inlineImages: [],
-      signatureHtml: core.corporateSignature(profile,
-        suppress.manageUrl(r.email, r.crd), cfg),
+      // Threaded follow-ups add only the rep's note. Outlook retains the
+      // original message, including its signature and footer, in the quote.
+      signatureHtml: "",
       baseRevision: 1, attachments: documents.filter((doc) => (r.attachments || []).some((old) => old.id === doc.id)),
       validation: { errors: r.graphMessageId ? [] : [{ code: "no_original",
         message: "The original message is no longer in the mailbox, so this cannot be threaded." }],
