@@ -201,6 +201,48 @@ test("desktop and Field expose email history immediately between Lists and Setti
   }
 });
 
+test("follow-up editor and history expose setup and draft-discard routes", () => {
+  const ui = fs.readFileSync(path.resolve(__dirname, "../../webapp/email.js"), "utf8");
+  const editor = ui.split("function composerView()")[1].split("let swipeFrom")[0];
+  assert.match(editor, /data-email="follow-up-options"/);
+  assert.match(editor, /!locked && !b.mode && !b.approvedUtc/);
+  assert.match(editor, /data-email="follow-up-discard"/);
+  const summary = ui.split("function followUpView()")[1].split("const FOLLOW_UP_DEFAULT")[0];
+  assert.match(summary, /Change attachment choice/);
+  assert.match(summary, /data-restart="1"/);
+  const history = ui.split("function historyRow(")[1].split("function historyView")[0];
+  assert.match(history, /b.parentBatchId[\s\S]*?Follow-up options/);
+});
+
+test("discard from the follow-up editor confirms, uses safe discard, and returns to attachment setup", async () => {
+  const vm = require("node:vm");
+  const ui = fs.readFileSync(path.resolve(__dirname, "../../webapp/email.js"), "utf8");
+  const start = ui.indexOf('    if (action === "follow-up-discard")');
+  const end = ui.indexOf('    if (action === "connect")', start);
+  const calls = [];
+  const ctx = vm.createContext({
+    action: "follow-up-discard", button: { dataset: { id: "CHILD", parent: "PARENT" } },
+    followUpChild: null, followUp: null, saving: false, dirty: true, commonBaseline: {},
+    batchPreviewCache: new Map([["CHILD", {}]]),
+    confirm: () => false, notice: () => {},
+    api: async (op, data) => calls.push([op, data.batchId]),
+    openFollowUp: async (id) => calls.push(["setup", id]),
+  });
+  const execute = () => vm.runInContext("(async()=>{" + ui.slice(start, end) + "})()", ctx);
+  await execute();
+  assert.deepEqual(calls, []);
+  ctx.confirm = (message) => { assert.match(message, /edits/); return true; };
+  await execute();
+  assert.deepEqual(calls, [["discard_draft", "CHILD"], ["setup", "PARENT"]]);
+  assert.equal(ctx.dirty, false);
+  assert.equal(ctx.batchPreviewCache.size, 0);
+  calls.length = 0;
+  ctx.api = async () => { throw new Error("Already approved"); };
+  await execute();
+  assert.deepEqual(calls, [], "failed discard must not show fresh attachment setup");
+  assert.equal(ctx.button.disabled, false);
+});
+
 test("history separates sent batches and editing drafts, with a linked follow-up and discard action", () => {
   const ui = fs.readFileSync(path.resolve(__dirname, "../../webapp/email.js"), "utf8");
   const view = ui.split("function historyView()")[1].split("async function openHistory()")[0];

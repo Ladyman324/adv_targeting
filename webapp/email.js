@@ -2523,6 +2523,10 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
           </li>`;
         }).join("")}</ol></details></aside>
       <main class="email-editor">
+        ${b.parentBatchId ? `<nav class="email-followup-tools" aria-label="Follow-up options">
+          <button type="button" class="ask-btn ghost" data-email="follow-up-options" data-id="${esc(b.parentBatchId)}">Follow-up options</button>
+          ${!locked && !b.mode && !b.approvedUtc ? `<button type="button" class="ask-btn ghost" data-email="follow-up-discard" data-id="${esc(b.id)}" data-parent="${esc(b.parentBatchId)}">Discard draft</button>` : ""}
+        </nav>` : ""}
         <section class="email-common"><div class="email-section-head">
           <div><p class="eyebrow">Step 1 &middot; edit all</p><h3>Common template</h3></div>
           ${locked ? "" : `<div class="email-head-acts">
@@ -2817,7 +2821,11 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
       <p class="email-fine">Only eligible non-responders are prepared. Replies and opt-outs are checked again before sending.</p>
       ${child ? `<p>Follow-up: ${esc(historyState(child))}</p>
         <button type="button" class="ask-btn primary" data-email="open-batch" data-id="${esc(child.id)}">Open follow-up</button>
-        ${canDiscard ? '<button type="button" class="ask-btn" data-email="follow-up-discard">Discard follow-up draft</button>' : ""}`
+        ${canDiscard ? `<div class="email-followup-tools">
+          <button type="button" class="ask-btn" data-email="follow-up-discard" data-restart="1">Change attachment choice</button>
+          <button type="button" class="ask-btn ghost" data-email="follow-up-discard">Discard follow-up draft</button>
+          <p class="email-fine">Changing attachments starts a new draft. You will confirm before any draft edits are discarded.</p>
+        </div>` : ""}`
         : `<label class="email-check"><input type="checkbox" id="followUpAttach"><span>Attach original documents again</span></label>
         <p class="email-fine">Original documents stay in the earlier email when unchecked.</p>
         <button type="button" class="ask-btn primary" data-email="follow-up-create" ${f.counts.remaining ? "" : "disabled"}>Prepare follow-up</button>`}
@@ -2977,7 +2985,8 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
         ${!child && b.followUpBatchId ? `<small class="email-history-follow">${esc(historyFollowUp(b, byId))}</small>` : ""}
       </button>${batchSummaryHtml(b)}<div class="email-history-actions">
         ${canFollow ? `<button type="button" class="ask-btn" data-email="follow-up-open" data-id="${esc(b.id)}">Follow up with non-responders</button>` : ""}
-        ${!child && b.followUpBatchId ? `<button type="button" class="ask-btn" data-email="open-batch" data-id="${esc(b.followUpBatchId)}">Open follow-up</button>` : ""}
+        ${!child && b.followUpBatchId ? `<button type="button" class="ask-btn" data-email="follow-up-open" data-id="${esc(b.id)}">Follow-up options</button>` : ""}
+        ${b.parentBatchId ? `<button type="button" class="ask-btn" data-email="follow-up-open" data-id="${esc(b.parentBatchId)}">Follow-up options</button>` : ""}
         ${canDiscard ? `<button type="button" class="ask-btn ghost" data-email="history-discard" data-id="${esc(b.id)}">Discard draft</button>` : ""}
       </div></div>`;
   }
@@ -3537,6 +3546,12 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
       catch (e) { button.disabled = false; notice(e.message, true); }
       return;
     }
+    if (action === "follow-up-options") {
+      if (saving) { notice("Please wait for your edit to finish saving."); return; }
+      if (commonDirty() && !confirm("The shared wording has unapplied changes. Leave without applying those changes?")) return;
+      if (!await saveOne()) return;
+      return openFollowUp(button.dataset.id);
+    }
     if (action === "follow-up-open") { return openFollowUp(button.dataset.id); }
     if (action === "follow-up-create") {
       button.disabled = true; notice("Preparing an unsent follow-up...");
@@ -3554,9 +3569,19 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
       return;
     }
     if (action === "follow-up-discard") {
-      if (!followUpChild || !confirm("Discard this unapproved follow-up draft? The original sent batch is kept, and you can prepare a replacement.")) return;
+      const childId = button.dataset.id || followUpChild?.id;
+      const parentId = button.dataset.parent || followUp?.batchId;
+      if (saving) { notice("Please wait for your edit to finish saving."); return; }
+      const message = button.dataset.restart
+        ? "Discard this unapproved follow-up and return to attachment selection? Its wording edits and recipient selections will be lost. The original sent email is kept."
+        : "Discard this unapproved follow-up draft and its edits? The original sent email is kept. You will return to attachment selection and can prepare a replacement.";
+      if (!childId || !parentId || !confirm(message)) return;
       button.disabled = true;
-      try { await api("discard_draft", { batchId: followUpChild.id }); await openFollowUp(followUp.batchId); }
+      try {
+        await api("discard_draft", { batchId: childId });
+        dirty = false; commonBaseline = null; batchPreviewCache.delete(childId);
+        await openFollowUp(parentId);
+      }
       catch (e) { button.disabled = false; notice(e.message, true); }
       return;
     }
