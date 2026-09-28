@@ -3529,7 +3529,19 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
      * may still have to fetch. The desk returns a plain array and awaiting that
      * costs nothing -- one contract, both apps. */
     if (action === "open-list") {
-      return open(global.AdvisorEmailData ? await global.AdvisorEmailData.list() : []);
+      if (button.disabled) return;
+      const label = button.textContent;
+      button.disabled = true;
+      button.textContent = "Loading contacts…";
+      try {
+        const selected = global.AdvisorEmailData ? await global.AdvisorEmailData.list() : [];
+        return await open(selected);
+      } catch (error){
+        global.alert(error.message || "Contact data is unavailable. Please click Email list again to retry.");
+      } finally {
+        button.disabled = false;
+        button.textContent = label;
+      }
     }
     if (action === "history") { cleanEmailUrl(); return openHistory(); }
     if (action === "history-toggle-discarded") {

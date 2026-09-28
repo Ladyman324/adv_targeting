@@ -34,6 +34,178 @@ function load(stubs) {
 
 const WHO = { id: "u-1", name: "bo@eicatlanta.com" };
 
+function contactLoaderFixture(fetch) {
+  const vm = require("node:vm");
+  const source = fs.readFileSync(path.join(__dirname, "../../webapp/app.js"), "utf8");
+  const start = source.indexOf("async function fetchContactJson");
+  const end = source.indexOf("\nfunction contactFor", start);
+  const notices = [];
+  const ctx = vm.createContext({
+    fetch, TypeError, DOMException, AbortController, setTimeout: (fn) => setTimeout(fn, 0), clearTimeout,
+    CONTACTS_READY: false, CONTACTS_ERROR: "", CONTACTS: null, contactsPromise: null,
+    dataUrl: (name) => name, showNotice: (text) => notices.push(text),
+    syncContactSwitches() {}, redraw() {}, ALL: [], detailsCurrent: null, advQuery: "",
+    reconcileDesktopDialRoutes: async () => {},
+  });
+  vm.runInContext(source.slice(start, end), ctx);
+  return { ctx, notices, run: (expression) => vm.runInContext(expression, ctx) };
+}
+
+test("contact loader retries a transient failed shard without refetching healthy files", async () => {
+  const calls = {};
+  const f = contactLoaderFixture(async (name) => {
+    calls[name] = (calls[name] || 0) + 1;
+    if (name === "bad.json" && calls[name] === 1) throw new TypeError("Failed to fetch");
+    return { ok: true, json: async () => name === "contacts_base.json"
+      ? { shards: ["good.json", "bad.json"] } : { advisors: { [name]: { e: "test@example.com" } } } };
+  });
+  const result = await f.run("loadContacts()");
+  assert.equal(Object.keys(result.advisors).length, 2);
+  assert.equal(f.ctx.CONTACTS_READY, true);
+  assert.equal(f.ctx.CONTACTS_ERROR, "");
+  assert.deepEqual(calls, { "contacts_base.json": 1, "good.json": 1, "bad.json": 2 });
+  assert.equal(f.notices.length, 0);
+});
+
+test("exhausted contact retries stay unready and an explicit retry can recover", async () => {
+  let down = true, calls = 0;
+  const f = contactLoaderFixture(async () => {
+    calls++;
+    if (down) throw new TypeError("Failed to fetch");
+    return { ok: true, json: async () => ({ shards: [], advisors: {} }) };
+  });
+  await f.run("loadContacts()");
+  assert.equal(calls, 3);
+  assert.equal(f.ctx.CONTACTS_READY, false);
+  assert.equal(f.ctx.contactsPromise, null);
+  assert.match(f.notices[0], /retry/i);
+  down = false;
+  await f.run("loadContacts()");
+  assert.equal(f.ctx.CONTACTS_READY, true);
+  assert.equal(f.ctx.CONTACTS_ERROR, "");
+});
+
+test("contact requests retry server errors but not missing files, bad JSON, or cancellation", async () => {
+  let calls = 0;
+  const f = contactLoaderFixture(async () => {
+    calls++;
+    return { ok: calls > 1, status: 503, json: async () => ({}) };
+  });
+  await f.run('fetchContactJson("test.json")');
+  assert.equal(calls, 2);
+  calls = 0;
+  f.ctx.fetch = async () => { calls++; return { ok: false, status: 404 }; };
+  await assert.rejects(() => f.run('fetchContactJson("test.json")'), /404/);
+  assert.equal(calls, 1);
+  calls = 0;
+  f.ctx.fetch = async () => { calls++; return { ok: true, json: async () => { throw new SyntaxError("bad JSON"); } }; };
+  await assert.rejects(() => f.run('fetchContactJson("test.json")'), /bad JSON/);
+  assert.equal(calls, 1);
+  f.ctx.controller = new AbortController();
+  f.ctx.controller.abort();
+  await assert.rejects(() => f.run('loadContacts(controller.signal)'), { name: "AbortError" });
+  assert.equal(calls, 1);
+  assert.equal(f.ctx.contactsPromise, null);
+});
+
+test("scope cancellation interrupts contact retry backoff without issuing another fetch", async () => {
+  const controller = new AbortController();
+  let calls = 0;
+  const f = contactLoaderFixture(async () => {
+    calls++;
+    queueMicrotask(() => controller.abort());
+    throw new TypeError("Failed to fetch");
+  });
+  f.ctx.controller = controller;
+  await assert.rejects(() => f.run("loadContacts(controller.signal)"), { name: "AbortError" });
+  assert.equal(calls, 1);
+  assert.equal(f.ctx.CONTACTS_READY, false);
+  assert.equal(f.notices.length, 0);
+});
+
+function desktopEmailListFixture() {
+  const vm = require("node:vm");
+  const source = fs.readFileSync(path.join(__dirname, "../../webapp/app.js"), "utf8").replace(/\r\n/g, "\n");
+  const start = source.indexOf("  list: async () => {", source.indexOf("window.AdvisorEmailData ="));
+  const end = source.indexOf("\n  },\n};", start);
+  let finishLoad, finishReconcile;
+  const ctx = vm.createContext({
+    CONTACTS_READY: false,
+    loadContacts: () => new Promise((resolve) => { finishLoad = resolve; }),
+    reconcileDesktopDialRoutes: () => new Promise((resolve) => { finishReconcile = resolve; }),
+    Dial: { state: { items: [{ crd: "1", email: "one@example.com" }], listId: "L", listName: "Leaders" },
+      emailRouteStatus: () => ({ ok: ctx.CONTACTS_READY }), identityTierLabel: () => "Approved" },
+    greetingFor: () => "One", materialStrategiesFor: () => [], teammateEmails: () => [], teammatesOf: () => [],
+  });
+  vm.runInContext("async function list() {" + source.slice(start + "  list: async () => {".length, end) + "\n}", ctx);
+  return { ctx, run: () => vm.runInContext("list()", ctx),
+    loaded: () => finishLoad(), reconciled: () => finishReconcile() };
+}
+
+test("Email list waits for loading and revalidation before counting saved recipients", async () => {
+  const f = desktopEmailListFixture();
+  let finished = false;
+  const pending = f.run().then((value) => { finished = true; return value; });
+  await Promise.resolve();
+  assert.equal(finished, false);
+  f.ctx.CONTACTS_READY = true;
+  f.loaded();
+  await new Promise(setImmediate);
+  assert.equal(finished, false);
+  f.reconciled();
+  const selected = await pending;
+  assert.equal(selected.length, 1);
+  assert.equal(selected.eligibilitySummary.excluded, 0);
+});
+
+test("Email list blocks loading/revalidation outages without inventing identity exclusions", async () => {
+  const f = desktopEmailListFixture();
+  f.ctx.loadContacts = async () => {};
+  await assert.rejects(f.run, /Contact data is unavailable.*No recipients have been excluded/);
+  f.ctx.CONTACTS_READY = true;
+  f.ctx.reconcileDesktopDialRoutes = async () => { throw new Error("Storage outage"); };
+  await assert.rejects(f.run, /saved list could not be refreshed.*No recipients have been excluded/);
+});
+
+test("Email list restarts a background contact load cancelled by a scope change", async () => {
+  const f = desktopEmailListFixture();
+  let calls = 0;
+  f.ctx.loadContacts = async () => {
+    if (++calls === 1) throw Object.assign(new Error("Cancelled"), { name: "AbortError" });
+    f.ctx.CONTACTS_READY = true;
+  };
+  f.ctx.reconcileDesktopDialRoutes = async () => {};
+  assert.equal((await f.run()).length, 1);
+  assert.equal(calls, 2);
+});
+
+test("shared Email list button exposes loading, catches failures, and restores itself", async () => {
+  const vm = require("node:vm");
+  const source = fs.readFileSync(path.join(__dirname, "../../webapp/email.js"), "utf8");
+  const start = source.indexOf('    if (action === "open-list") {');
+  const end = source.indexOf('    if (action === "history")', start);
+  const alerts = [];
+  let opens = 0, release;
+  const button = { disabled: false, textContent: "Email list" };
+  const ctx = vm.createContext({ action: "open-list", button,
+    global: { AdvisorEmailData: { list: () => new Promise((resolve) => { release = resolve; }) },
+      alert: (text) => alerts.push(text) }, open: () => { opens++; } });
+  const run = () => vm.runInContext("(async()=>{" + source.slice(start, end) + "})()", ctx);
+  const pending = run();
+  assert.equal(button.disabled, true);
+  assert.match(button.textContent, /Loading/);
+  await run();
+  release([]);
+  await pending;
+  assert.equal(opens, 1);
+  ctx.global.AdvisorEmailData.list = async () => { throw new Error("Contact data is unavailable"); };
+  await run();
+  assert.equal(opens, 1);
+  assert.deepEqual(alerts, ["Contact data is unavailable"]);
+  assert.equal(button.disabled, false);
+  assert.equal(button.textContent, "Email list");
+});
+
 test("recipient precheck reports name exclusions without creating drafts and does not skip outages", async () => {
   let failure = Object.assign(new Error("Not approved"), {
     code: "recipient_not_approved", detail: "contact_presentation_not_approved" });

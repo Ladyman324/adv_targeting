@@ -890,14 +890,47 @@ let contactsPromise = null;
  * contact file and the call log, to solve a hosting problem. Sharding keeps it
  * same-origin.
  */
+async function fetchContactJson(name, signal){
+  for (let attempt = 0; attempt < 3; attempt++){
+    if (signal && signal.aborted) throw new DOMException("Superseded", "AbortError");
+    try {
+      const response = await fetch(dataUrl(name), { signal });
+      if (!response.ok){
+        const error = new Error(`${name} ${response.status}`);
+        error.retryable = response.status === 408 || response.status === 429 || response.status >= 500;
+        throw error;
+      }
+      return await response.json();
+    } catch (error){
+      const transient = error instanceof TypeError || error.retryable === true;
+      if (error.name === "AbortError" || !transient || attempt === 2) throw error;
+      // Retry only the failed file, retaining shards already downloaded.
+      await new Promise((resolve, reject) => {
+        const abort = () => {
+          clearTimeout(timer);
+          signal.removeEventListener("abort", abort);
+          reject(new DOMException("Superseded", "AbortError"));
+        };
+        const timer = setTimeout(() => {
+          if (signal) signal.removeEventListener("abort", abort);
+          resolve();
+        }, 750 * (attempt + 1));
+        if (signal){
+          signal.addEventListener("abort", abort, { once:true });
+          if (signal.aborted) abort();
+        }
+      });
+    }
+  }
+}
+
 function loadContacts(signal=null){
   if (CONTACTS_READY) return Promise.resolve(CONTACTS);
   if (contactsPromise) return contactsPromise;
-  contactsPromise = fetch(dataUrl("contacts_base.json"), { signal })
-    .then(r => { if (!r.ok) throw new Error(`contacts_base ${r.status}`); return r.json(); })
+  CONTACTS_ERROR = "";
+  contactsPromise = fetchContactJson("contacts_base.json", signal)
     .then(base => Promise.all((base.shards || []).map(name =>
-        fetch(dataUrl(name), { signal })
-          .then(r => { if (!r.ok) throw new Error(`${name} ${r.status}`); return r.json(); })))
+        fetchContactJson(name, signal)))
       .then(parts => {
         const advisors = {};
         for (const part of parts) Object.assign(advisors, part.advisors || {});
@@ -916,7 +949,7 @@ function loadContacts(signal=null){
        * contact filters disabled and the cards honest about not knowing yet.
        */
       showNotice(`Contact details could not be loaded (${err.message}). `
-        + `Phone numbers and email addresses are missing until this is fixed.`);
+        + `Please retry. Choosing Email list will retry loading before checking recipients.`);
       CONTACTS_ERROR = err.message;
       contactsPromise = null;
       // Redraw so every card showing "Loading…" switches to saying it failed.
@@ -948,6 +981,7 @@ function loadContacts(signal=null){
       if (advQuery && advQuery.length >= 2 && !advOut.hidden)
         renderNationalSearch();
       reconcileDesktopDialRoutes().catch(() => {});
+      return CONTACTS;
     });
   return contactsPromise;
 }
@@ -2218,7 +2252,20 @@ window.AdvisorEmailData = {
       materialStrategies: materialStrategiesFor(id),
       teammates: teammateEmails(id), teammatesFull: teammatesOf(id) };
   },
-  list: () => {
+  list: async () => {
+    // A cancelled background scope load is not a failed identity check.
+    // Join it first; if it was aborted, start a foreground load once.
+    try { await loadContacts(); }
+    catch (error){
+      if (error.name !== "AbortError") throw error;
+      await loadContacts();
+    }
+    if (!CONTACTS_READY)
+      throw new Error("Contact data is unavailable. Please click Email list again to retry loading. No recipients have been excluded.");
+    try { await reconcileDesktopDialRoutes(); }
+    catch {
+      throw new Error("The saved list could not be refreshed. Please click Email list again to retry. No recipients have been excluded.");
+    }
     const out = Dial.state.items.filter((it) => Dial.emailRouteStatus(it).ok)
       .map((it) => ({ ...it, firstName: greetingFor(it.crd),
         materialStrategies: materialStrategiesFor(it.crd),
