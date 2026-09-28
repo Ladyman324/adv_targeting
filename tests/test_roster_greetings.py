@@ -5,7 +5,7 @@ import unittest
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from roster_greetings import resolve_roster_greeting
+from roster_greetings import resolve_roster_greeting, valid_greeting
 
 
 CASES = [
@@ -123,6 +123,23 @@ class RosterGreetingTests(unittest.TestCase):
         changed = self.decide(*args, unique=False)
         self.assertEqual(one.evidence_hash, two.evidence_hash)
         self.assertNotEqual(one.evidence_hash, changed.evidence_hash)
+
+    def test_matching_published_initials(self):
+        for first, surname in [("J L", "Sumpter"), ("J R", "Runyon")]:
+            d = self.decide(first + " " + surname, "jl.sumpter@edwardjones.com",
+                            first, last=surname)
+            self.assertEqual(" ".join(x + "." for x in first.split()), d.greeting)
+            self.assertEqual("roster_sec_agree_published_initials", d.reason)
+            self.assertTrue(valid_greeting(d.greeting))
+            self.assertEqual(d.greeting + " " + surname, d.presentation_name)
+
+    def test_initials_require_unique_authoritative_agreement(self):
+        for kwargs in [dict(first="K L"), dict(first="J L", unique=False),
+                       dict(first="J L", authoritative=False), dict(first="John Luke")]:
+            d = self.decide("J L Sumpter", "jl.sumpter@edwardjones.com", last="Sumpter", **kwargs)
+            self.assertNotEqual("roster_sec_agree_published_initials", d.reason)
+        self.assertFalse(valid_greeting("J."))
+        self.assertFalse(valid_greeting("J L"))
 
 
 if __name__ == "__main__":

@@ -345,6 +345,7 @@ module.exports = async function (context, req) {
     }
     if (op === "connect") return ok(context, await auth.begin(who, body.returnTo));
     if (op === "capacity_plan") return ok(context, await service.capacityPlan(who, body));
+    if (op === "check_recipients") return ok(context, await service.checkRecipients(who, body));
     if (op === "create_batch") return ok(context, await service.createBatch(who, body), 201);
     /* The bulk follow-up: a new batch derived from a campaign, holding only the
      * people who never answered it. 201 like any other batch creation, because

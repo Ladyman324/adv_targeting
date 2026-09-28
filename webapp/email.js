@@ -3592,7 +3592,7 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
       return;
     }
     if (action === "create") {
-      const kept = keptRecipients();
+      let kept = keptRecipients();
       if (!kept.length) return notice("Every recipient is excluded. Include at least one.", true);
       // Confirmed by domain, not by count. "Send to 52 people?" is answered yes
       // without reading; "morganstanley.com 52, rjf.com 8" is the moment the
@@ -3605,8 +3605,24 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
         + `
 
 Generate emails for all of them?`)) return;
-      button.disabled = true; notice("Generating one email per recipient…");
+      button.disabled = true; notice("Checking approved recipients…");
       try {
+        const eligibility = await api("check_recipients", { recipients: kept });
+        if ((eligibility.excluded || []).length) {
+          const blocked = eligibility.excluded;
+          const explanation = blocked.map((r) =>
+            `${r.name || r.crd} <${r.email}>: ${r.reason}`).join("\n");
+          if (!eligibility.eligibleCount) {
+            button.disabled = false;
+            return notice("No eligible recipients. " + explanation, true);
+          }
+          if (!confirm(`${blocked.length} contacts cannot be prepared:\n\n${explanation}\n\nContinue with the remaining ${eligibility.eligibleCount} recipients? No emails will be sent by this step.`)) {
+            button.disabled = false; return notice("Nothing was prepared. Review or exclude those contacts before continuing.");
+          }
+          const ids = new Set(blocked.map((r) => String(r.crd)));
+          kept = kept.filter((r) => !ids.has(String(r.contactId || r.crd || "")));
+        }
+        notice("Generating one email per eligible recipient…");
         // Includes the disabled ones: :checked is independent of :disabled, and
         // the required documents are checked-and-disabled by design.
         const attachmentIds = [...document.querySelectorAll("#emailDocs input:checked")].map((x) => x.value);

@@ -306,7 +306,7 @@ function recipientSnapshot(raw) {
       .filter((t) => core.validEmail(t.email)).slice(0, 25) };
 }
 
-async function canonicalRecipient(raw, connection) {
+async function canonicalRecipient(raw, connection, includeTeammates = true) {
   const crd = String(raw.contactId || raw.crd || "").trim();
   if (!crd) {
     const mailbox = String(connection.mailbox || "").trim().toLowerCase();
@@ -325,7 +325,7 @@ async function canonicalRecipient(raw, connection) {
       recipientPolicyVersion: recipientRegistry.policy().version };
   }
   const approved = await recipientRegistry.resolve(crd);
-  const mates = await recipientRegistry.allowedTeammates(crd);
+  const mates = includeTeammates ? await recipientRegistry.allowedTeammates(crd) : [];
   return { contactId: crd, name: approved.name, email: approved.email, firm: approved.firm,
     firstName: approved.greetingName, lastName: approved.lastName,
     nameFallback: false,
@@ -905,6 +905,33 @@ async function createFollowUp(who, input, deps = {}) {
       suppressed: fresh.counts.suppressed, attachments: documents.length,
       recipientIdentity: recipientEvidenceSummary(verifiedRemaining.map(({ approved }) => approved)) });
   return getBatchDetail(who, batchId, { store: st });
+}
+
+async function checkRecipients(who, input) {
+  const rows = (Array.isArray(input.recipients) ? input.recipients : []).map(recipientSnapshot);
+  if (!rows.length || rows.length >= core.ABSOLUTE_BATCH_STOP)
+    throw httpError(400, "Choose a nonempty recipient list below the campaign limit.");
+  const connection = await auth.status(who.id);
+  if (!connection.connected || !connection.profile)
+    throw httpError(409, "Connect your Microsoft 365 mailbox first.", "graph_not_connected");
+  await recipientRegistry.load();
+  const decisions = await mapMessagesBounded(rows, async (raw) => {
+    try { await canonicalRecipient(raw, connection, false); return null; }
+    catch (error) {
+      // Infrastructure and unknown failures are not permission to skip people.
+      if (error.code !== "recipient_not_approved") throw error;
+      const reasons = {
+        contact_presentation_not_approved: "A safe greeting or surname has not been established.",
+        roster_current_firm_conflict: "The roster firm conflicts with current registration.",
+        duplicate_email: "This email is linked to more than one advisor.",
+        not_in_approved_registry: "No approved email route is available.",
+      };
+      return { crd: raw.contactId, name: raw.name, email: raw.email,
+        reason: reasons[error.detail] || "This contact has not passed the approved-recipient checks." };
+    }
+  }, 4);
+  const excluded = decisions.filter(Boolean);
+  return { checkedCount: rows.length, eligibleCount: rows.length - excluded.length, excluded };
 }
 
 async function createBatch(who, input) {
@@ -1850,6 +1877,7 @@ async function control(who, input) {
 const attachmentLimit = () => core.config().maxAttachmentBytes;
 
 module.exports = {
+  checkRecipients,
   listBatchSummaries,
   senderHealth, catalog, capacityPlan, createBatch, updateCommon, updateMessage, updateMessageCc,
   validateBatch, removeRecipient,

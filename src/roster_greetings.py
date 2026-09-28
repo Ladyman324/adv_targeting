@@ -60,8 +60,16 @@ def _valid_given(value: object) -> bool:
 
 
 def valid_greeting(value: object) -> bool:
-    """Public release-gate predicate for a single spoken given name."""
-    return _valid_given(value)
+    """Release-gate syntax for a given name or normalized published initials."""
+    return _valid_given(value) or bool(re.fullmatch(
+        r"[A-Z]\. (?:[A-Z]\.)(?: [A-Z]\.)?", clean_text(value)))
+
+
+def _published_initials(value: object) -> list[str]:
+    text = clean_text(value)
+    if not re.fullmatch(r"[A-Za-z](?:\.?\s*\.?[A-Za-z]){1,2}\.?", text):
+        return []
+    return [letter.upper() for letter in re.findall(r"[A-Za-z]", text)]
 
 
 def _nickname_pair(legal: str, candidate: str) -> bool:
@@ -225,11 +233,23 @@ def resolve_roster_greeting(
             reason = ("sec_used_fallback" if fallback == sec_used
                       else "sec_legal_fallback")
 
+    # Initials are a published given name, not a guessed expansion. Accept
+    # only 2-3 matching initials from both sources on an already resolved,
+    # unique, authoritative roster route.
+    if not greeting and email_unique and authoritative_domain:
+        published = _published_initials(" ".join(given_words))
+        sec_initials = _published_initials(" ".join(
+            clean_text(value) for value in (sec_first, sec_middle) if clean_text(value)))
+        if published and published == sec_initials:
+            greeting = " ".join(letter + "." for letter in published)
+            reason = "roster_sec_agree_published_initials"
+
     formal_given = _formal_given(sec_first, sec_used)
     display_greeting = (tidy(approved_greeting)
                         if _valid_given(approved_greeting) else greeting)
     visible_given = formal_given or display_greeting
-    if (display_greeting and name_token(display_greeting) not in
+    if (display_greeting and name_token(display_greeting) != name_token(visible_given)
+            and name_token(display_greeting) not in
             {name_token(word) for word in _words(visible_given)}):
         visible_given = (f"{visible_given} ({display_greeting})"
                          if visible_given else display_greeting)

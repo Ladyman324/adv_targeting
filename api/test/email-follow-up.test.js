@@ -34,6 +34,75 @@ function load(stubs) {
 
 const WHO = { id: "u-1", name: "bo@eicatlanta.com" };
 
+test("recipient precheck reports name exclusions without creating drafts and does not skip outages", async () => {
+  let failure = Object.assign(new Error("Not approved"), {
+    code: "recipient_not_approved", detail: "contact_presentation_not_approved" });
+  const svc = load({
+    "email-auth": { status: async () => ({ connected: true, mailbox: "rep@eicatlanta.com", profile: {} }) },
+    "email-store": { createBatch: () => assert.fail("Precheck must be read-only") },
+    "recipient-registry": { load: async () => {}, policy: () => ({ version: "test" }),
+      resolve: async (id) => {
+        if (id === "BAD") throw failure;
+        return { crd: id, email: "jl.sumpter@edwardjones.com", name: "J. L. Sumpter",
+          greetingName: "J. L.", lastName: "Sumpter" };
+      },
+      allowedTeammates: () => assert.fail("Precheck does not need teammate hydration"),
+    },
+  });
+  const recipients = [{ crd: "6915922", name: "J. L. Sumpter", email: "jl.sumpter@edwardjones.com" },
+    { crd: "BAD", name: "Other Advisor", email: "other@example.com" }];
+  const r = await svc.checkRecipients(WHO, { recipients });
+  assert.equal(r.eligibleCount, 1);
+  assert.equal(r.excluded.length, 1);
+  assert.equal(r.excluded[0].crd, "BAD");
+  assert.match(r.excluded[0].reason, /greeting/);
+  const large = await svc.checkRecipients(WHO, { recipients: [
+    ...Array.from({ length: 599 }, (_, index) => ({
+      crd: String(1000000 + index), email: "test@example.com",
+    })), recipients[1],
+  ] });
+  assert.equal(large.checkedCount, 600);
+  assert.equal(large.eligibleCount, 599);
+  assert.equal(large.excluded.length, 1);
+  failure = Object.assign(new Error("Storage down"), { code: "recipient_registry_unavailable" });
+  await assert.rejects(() => svc.checkRecipients(WHO, { recipients }), /Storage down/);
+});
+
+test("batch preparation requires explicit consent before omitting rejected contacts", async () => {
+  const vm = require("node:vm");
+  const ui = fs.readFileSync(path.resolve(__dirname, "../../webapp/email.js"), "utf8");
+  const start = ui.indexOf('    if (action === "create")');
+  const end = ui.indexOf('    if (action === "pick")', start);
+  const calls = [];
+  const rows = [{ crd: "GOOD", email: "good@example.com" }, { crd: "BAD", email: "bad@example.com" }];
+  const ctx = vm.createContext({
+    action: "create", button: {}, keptRecipients: () => rows, domainGroups: () => [],
+    confirm: () => false, notice: () => {}, sourceList: null,
+    document: { querySelectorAll: () => [], getElementById: () => ({ value: "" }) },
+    requestCapacityPlan: async () => {}, composerView: () => {},
+    api: async (op, input) => {
+      calls.push([op, input]);
+      if (op === "check_recipients") return { eligibleCount: 1,
+        excluded: [{ crd: "BAD", name: "Bad Advisor", email: "bad@example.com", reason: "No safe greeting" }] };
+      return {};
+    },
+  });
+  const execute = () => vm.runInContext("(async()=>{" + ui.slice(start, end) + "})()", ctx);
+  await execute();
+  assert.deepEqual(calls.map(([op]) => op), ["check_recipients"]);
+  assert.equal(ctx.button.disabled, false);
+  calls.length = 0;
+  ctx.confirm = () => true;
+  await execute();
+  assert.deepEqual(calls.map(([op]) => op), ["check_recipients", "create_batch"]);
+  assert.equal(calls[1][1].recipients.length, 1);
+  assert.equal(calls[1][1].recipients[0].crd, "GOOD");
+  calls.length = 0;
+  ctx.api = async () => { throw new Error("Storage unavailable"); };
+  await execute();
+  assert.deepEqual(calls, [], "an outage cannot continue into creation");
+});
+
 function editingFixture(followUp = true) {
   const parent = { id: "P", status: "completed" };
   let batch = { id: "F", parentBatchId: followUp ? "P" : "", status: "editing",
