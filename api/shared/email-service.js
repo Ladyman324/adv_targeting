@@ -112,6 +112,7 @@ async function senderHealth(days = 90) {
 
   return { since, days: Number(days) || 90,
            reps: health.summarise(sends, events, optOuts),
+           domains: health.summariseByDomain(sends, events, optOuts),
            totals: { sends: sends.length, events: events.length,
                      connections: connections.length } };
 }

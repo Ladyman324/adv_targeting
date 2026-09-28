@@ -1141,10 +1141,14 @@
    * interpretation just moves the problem along.
    */
   let healthDays = 90;
+  let healthGrouping = "sender";
+  let healthData = null;
 
   function healthView(data, message = "", bad = false) {
     document.getElementById("emailTitle").textContent = "Sender health";
     const reps = (data && data.reps) || [];
+    const byDomain = healthGrouping === "domain";
+    const rows = byDomain ? (data && data.domains) || [] : reps;
     const chip = (lvl, label, value, count, total) =>
       `<div class="hz ${esc(lvl)}"><span class="hz-n">${value}</span>
         <span class="hz-l">${esc(label)}</span>
@@ -1155,17 +1159,24 @@
         landing. There is no spam-complaint figure here because the firms we email do not
         report one &mdash; these four signals are what they do send back.</p>
       ${message ? `<p class="${bad ? "email-error" : "email-ok"}">${esc(message)}</p>` : ""}
+      <div class="email-health-range" role="group" aria-label="Group sender health">
+        <span class="email-fine">View</span>
+        ${[["sender", "By sender"], ["domain", "By domain"]].map(([value, label]) =>
+          `<button type="button" class="email-small${healthGrouping === value ? " on" : ""}"
+            data-email="health-group" data-group="${value}" aria-pressed="${healthGrouping === value}">${label}</button>`).join(" ")}
+      </div>
+      ${byDomain ? '<p class="email-fine">Recipient domains across all senders. Rates use combined counts; fewer than 30 sends is a small sample.</p>' : ""}
       <p class="email-health-range">Last
         ${[30, 90, 180].map((d) => `<button type="button" class="email-small${
           d === healthDays ? " on" : ""}" data-email="health-days" data-days="${d}">${d} days</button>`).join(" ")}
         ${data ? `<span class="email-fine">${data.totals.sends.toLocaleString()} messages,
           ${data.totals.events.toLocaleString()} delivery reports</span>` : ""}</p>
 
-      ${reps.length ? reps.map((r) => `<section class="email-health-rep">
+      ${rows.length ? rows.map((r) => `<section class="email-health-rep">
         <div class="email-section-head"><div>
           <p class="eyebrow">${r.sent.toLocaleString()} sent${r.lastSentUtc
             ? ` &middot; last ${esc(String(r.lastSentUtc).slice(0, 10))}` : ""}</p>
-          <h3>${esc(r.userName)}</h3></div></div>
+          <h3>${esc(byDomain ? r.domain : r.userName)}</h3></div></div>
         <div class="hz-row">
           ${chip(r.levels.hard, "hard bounces", r.rates.hard.toFixed(1) + "%", r.hard, r.sent)}
           ${chip(r.levels.soft, "deferrals", r.rates.soft.toFixed(1) + "%", r.soft, r.sent)}
@@ -1174,12 +1185,12 @@
         </div>
         <ul class="email-advice">${(r.advice || []).map((a) =>
           `<li class="adv-${esc(a.level)}">${esc(a.text)}</li>`).join("")}</ul>
-        ${r.domains.length ? `<details class="email-jump"><summary>By recipient firm
-          (${r.domains.length})</summary>
-          <table class="email-health-table"><thead><tr><th>Domain</th><th>Sent</th>
+        ${(byDomain ? r.senders : r.domains).length ? `<details class="email-jump"><summary>${byDomain ? "By sender" : "By recipient domain"}
+          (${(byDomain ? r.senders : r.domains).length})</summary>
+          <table class="email-health-table"><thead><tr><th>${byDomain ? "Sender" : "Domain"}</th><th>Sent</th>
             <th>Hard</th><th>Deferred</th><th>Policy</th><th>Unsub</th></tr></thead><tbody>
-            ${r.domains.map((d) => `<tr>
-              <td>${esc(d.domain)}</td><td>${d.sent}</td>
+            ${(byDomain ? r.senders : r.domains).map((d) => `<tr>
+              <td>${esc(byDomain ? d.userName : d.domain)}</td><td>${d.sent}</td>
               <td class="${esc(d.levels.hard)}">${d.hard}</td>
               <td class="${esc(d.levels.soft)}">${d.soft}</td>
               <td class="${esc(d.levels.policy)}">${d.policy}</td>
@@ -1197,10 +1208,12 @@
   }
 
   async function openHealth() {
+    healthData = null;
     document.getElementById("emailTitle").textContent = "Sender health";
     document.getElementById("emailBody").innerHTML = `<p class="email-next">Loading…</p>`;
     try {
-      healthView(await api(`sender_health&days=${healthDays}`, null, "GET"));
+      healthData = await api(`sender_health&days=${healthDays}`, null, "GET");
+      healthView(healthData);
     } catch (e) { healthView(null, e.message, true); }
   }
 
@@ -3235,6 +3248,10 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
     if (action === "docs") { clearTimeout(pollTimer); return docsView(); }
     if (action === "health") { clearTimeout(pollTimer); return openHealth(); }
     if (action === "health-days") { healthDays = Number(button.dataset.days) || 90; return openHealth(); }
+    if (action === "health-group") {
+      healthGrouping = button.dataset.group === "domain" ? "domain" : "sender";
+      return healthView(healthData);
+    }
     if (action === "templates") { clearTimeout(pollTimer); return templatesView(); }
     if (action === "tpl-new") {
       editing = { id: "", name: "", subject: "", bodyText: "",

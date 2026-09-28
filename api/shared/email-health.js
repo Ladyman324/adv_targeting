@@ -192,4 +192,21 @@ function advise(r) {
   return out;
 }
 
-module.exports = { summarise, advise, level, LEVELS, MIN_SAMPLE, pct };
+function summariseByDomain(sends, events, optOuts = []) {
+  const normalise = (row) => ({ ...row,
+    domain: String(row.domain || "").trim().toLowerCase() || "(unknown)" });
+  const sendRows = sends.map(normalise), eventRows = events.map(normalise), optRows = optOuts.map(normalise);
+  const byDomain = (row) => ({ ...row, userId: row.domain, userName: row.domain });
+  const senders = summarise(sendRows, eventRows, optRows);
+  return summarise(sendRows.map(byDomain), eventRows.map(byDomain), optRows.map(byDomain))
+    .map(({ userId, userName, domains, ...row }) => ({
+      ...row, domain: userId,
+      advice: advise({ ...row, domains: [] }),
+      senders: senders.flatMap((sender) => {
+        const stats = sender.domains.find((domain) => domain.domain === userId);
+        return stats ? [{ ...stats, userId: sender.userId, userName: sender.userName }] : [];
+      }).sort((a, b) => b.sent - a.sent),
+    }));
+}
+
+module.exports = { summarise, summariseByDomain, advise, level, LEVELS, MIN_SAMPLE, pct };
