@@ -61,8 +61,8 @@ async function prepare(who, input, overrides = {}) {
   const attachmentIds = [...new Set(selected.flatMap(m => (m.attachments || []).map(a => a.id)))];
   const documents = await d.store.getDocuments(attachmentIds);
   const docs = new Map(documents.map(doc => [doc.id, doc]));
-  if (attachmentIds.some(id => !docs.has(id) || !d.materials.currentDocument(docs.get(id))))
-    throw fail("An original attachment is no longer current approved material. Update the material before preparing this retry.", "attachment_unavailable");
+  if (attachmentIds.some(id => !docs.has(id) || !d.materials.sendableDocument(docs.get(id))))
+    throw fail("An original attachment is no longer approved for sending. Update the material before preparing this retry.", "attachment_unavailable");
   const cfg = d.core.config();
   if (!child) {
     try {

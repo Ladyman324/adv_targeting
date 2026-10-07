@@ -107,7 +107,7 @@ function replacementMetadata(input = {}, existing = {}) {
 function freshnessOf(d, at = Date.now()) {
   if (!d || d.approved === false) return "withdrawn";
   const explicit = String(d.freshness || "current").toLowerCase();
-  if (["stale", "superseded", "expired", "withdrawn", "future"].includes(explicit)) return explicit;
+  if (["superseded", "expired", "withdrawn", "future"].includes(explicit)) return explicit;
   const start = Date.parse(d.effectiveFrom || ""), end = Date.parse(d.effectiveUntil || "");
   if (Number.isFinite(start) && start > at) return "future";
   if (Number.isFinite(end) && end < at) return "expired";
@@ -116,9 +116,16 @@ function freshnessOf(d, at = Date.now()) {
     if (d.periodKey < latest) return "stale";
     if (d.periodKey > latest) return "future";
   }
+  if (explicit === "stale") return "stale";
   return "current";
 }
 function currentDocument(d, at = Date.now()) { return freshnessOf(d, at) === "current"; }
+// Recency is advisory; an older, still-approved PDF remains sendable until an
+// administrator withdraws or expires it. Routing picks the newest sendable
+// edition for each client group, so a missing Q3 variant can retain Q2.
+function sendableDocument(d, at = Date.now()) {
+  return ["current", "stale"].includes(freshnessOf(d, at));
+}
 function bestDocument(documents) {
   return [...documents].sort((a, b) =>
     String(b.periodKey || b.asOfDate || "").localeCompare(String(a.periodKey || a.asOfDate || ""))
@@ -152,7 +159,7 @@ function resolveFamilies(documents, familyIds, recipientEmail, policy, options =
   const target = resolveChannel(recipientEmail, policy), chosen = [];
   const held = new Set((options.strategies || []).map(strategy).filter((value) => value === "acv" || value === "lcv"));
   for (const familyId of wanted) {
-    const candidates = documents.filter((d) => d.familyId === familyId && currentDocument(d));
+    const candidates = documents.filter((d) => d.familyId === familyId && sendableDocument(d));
     let matches = candidates.filter((d) => d.channel === target);
     let selectedTarget = target;
     if (!matches.length && target !== "generic") {
@@ -209,5 +216,5 @@ function templatesRequiringDocument(templates = [], documentId) {
 module.exports = { CHANNELS, AUDIENCES, STRATEGIES, channel, audience, strategy,
   domain, emailDomain, hash, validateRoutes, loadSeed, resolveChannel,
   normalizeMetadata, materialSlotKey, replacementMetadata, latestCompletedQuarter,
-  freshnessOf, currentDocument, resolveFamilies, templateRequirements,
+  freshnessOf, currentDocument, sendableDocument, resolveFamilies, templateRequirements,
   templatesRequiringDocument };

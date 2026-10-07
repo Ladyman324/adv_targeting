@@ -287,6 +287,7 @@ function messageFromEntity(e) {
     recipientMatchScore: Number(e.recipientMatchScore) >= 0 ? Number(e.recipientMatchScore) : null,
     recipientMatchGap: Number(e.recipientMatchGap) >= 0 ? Number(e.recipientMatchGap) : null,
     recipientPolicyVersion: e.recipientPolicyVersion || "",
+    materialStrategies: parse(e.materialStrategiesJson, []),
     teammateCc: parse(e.teammateCcJson, []),
     teammateCcCrds: parse(e.teammateCcCrdsJson, []),
     teammatesAvailable: parse(e.teammatesAvailableJson, []),
@@ -351,6 +352,7 @@ async function createMessage(userId, batchId, message) {
       || message.recipientMatchGap === undefined || message.recipientMatchGap === ""
       ? -1 : (Number.isFinite(Number(message.recipientMatchGap)) ? Number(message.recipientMatchGap) : -1),
     recipientPolicyVersion: clean(message.recipientPolicyVersion, 80),
+    materialStrategiesJson: json(message.materialStrategies || []),
     teammateCcJson: clean(message.teammateCcJson, 2000),
     teammateCcCrdsJson: clean(message.teammateCcCrdsJson, 2000),
     teammatesAvailableJson: clean(message.teammatesAvailableJson, 8000),

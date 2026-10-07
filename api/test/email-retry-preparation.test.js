@@ -46,7 +46,7 @@ function fixture() {
   const d = { store, now: () => now, auth: { status: async () => ({ connected: true, profile: { id: "mailbox" } }) },
     core: { config: () => ({}), isExternal: () => true, corporateSignature: () => "signature" },
     suppress: { blockedAmong: async () => new Map(), manageUrl: () => "" },
-    materials: { currentDocument: () => true },
+    materials: { currentDocument: () => true, sendableDocument: () => true },
     capacity: { releaseAllocations: async (...args) => releases.push(args) } };
   return { d, batches, rows, audits, releases, input: { batchId: "parent", messageIds: ["m2", "m1"], confirmNotSentElsewhere: true } };
 }
@@ -135,7 +135,7 @@ test("preparation fails closed before retirement on missing authority/evidence/m
     f => { f.d.suppress.blockedAmong = async () => new Map([["advisor", "opted out"]]); },
     f => { f.d.store.getTemplate = async () => null; },
     f => { f.d.store.getDocuments = async () => []; },
-    f => { f.d.materials.currentDocument = () => false; },
+    f => { f.d.materials.sendableDocument = () => false; },
   ];
   for (const change of cases) {
     const f = fixture(); change(f); await assert.rejects(prepare({ id: "u" }, f.input, f.d));

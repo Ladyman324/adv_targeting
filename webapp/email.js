@@ -5,6 +5,8 @@
   let detail = null;
   let recipients = [];
   let sourceList = null;
+  let materialReviewSnapshot = "";
+  let materialHoldListId = "";
   // Addresses the rep has excluded on the setup screen. A Set of lowercase
   // addresses rather than an index, so it survives the list being re-sorted or
   // re-grouped underneath it.
@@ -113,16 +115,6 @@
       Number(nowParts.day) + 7, 12)).toISOString().slice(0, 10);
     if (scheduleDate > maxDay)
       return { date, error: "Scheduled sending can begin no more than 7 days from now.", quarter: "" };
-    const now = easternParts(new Date()), then = easternParts(date);
-    const nowQuarter = `${now.year}-Q${Math.floor((+now.month - 1) / 3) + 1}`;
-    const thenQuarter = `${then.year}-Q${Math.floor((+then.month - 1) / 3) + 1}`;
-    if (nowQuarter !== thenQuarter) {
-      const ids = new Set((batch.attachmentIds || []).map(String));
-      const quarterly = ((catalog && catalog.documents) || []).filter((d) =>
-        ids.has(String(d.id)) && d.periodKind === "quarter");
-      if (quarterly.length) return { date, error: "", quarter:
-        `This schedule crosses a calendar-quarter boundary and includes quarterly material (${quarterly.map((d) => d.name).join(", ")}). After the quarter ends, select the refreshed material and schedule the batch then.` };
-    }
     return { date, error: "", quarter: "" };
   }
 
@@ -1002,16 +994,81 @@
     </fieldset>`;
   }
 
+  function materialReviewKey(preview, recipients, familyIds, attachmentIds) {
+    return JSON.stringify({
+      recipients: recipients.map((r) => String(r.email || "").toLowerCase()),
+      familyIds, attachmentIds,
+      routes: (preview.rows || []).map((r) => [r.email, r.signature, r.older,
+        (r.unavailable || []).map((item) => item.familyId)]),
+    });
+  }
+
+  function showMaterialReview(preview, key, action = "create") {
+    const panel = document.getElementById("emailMaterialReview");
+    if (!panel) return;
+    materialReviewSnapshot = key;
+    const names = new Map(((catalog && catalog.documents) || []).filter((doc) => doc.familyId)
+      .map((doc) => [doc.familyId, doc.familyName || doc.name]));
+    const held = (preview.rows || []).filter((row) => row.older || (row.unavailable || []).length);
+    const stale = (preview.rows || []).filter((row) =>
+      (row.documents || []).some((doc) => doc.freshness === "stale")).length;
+    panel.hidden = false;
+    panel.innerHTML = `<h4>Review material periods before generating</h4>
+      <p>These are the exact series periods the server would choose. Older approved material is still sendable; no PDF is swapped after generation.</p>
+      <div class="email-material-review-groups">${(preview.groups || []).map((g) =>
+        `<span><b>${esc(names.get(g.familyId) || g.familyId)}</b> · ${esc(channelLabel(g.channel))} ·
+          ${esc(g.periodKey)} · ${g.count} attachment${g.count === 1 ? "" : "s"}</span>`).join("")}</div>
+      ${stale ? `<p class="email-notice">${stale} recipient${stale === 1 ? "" : "s"} would receive an older approved edition.</p>` : ""}
+      ${preview.unavailableCount ? `<p class="email-notice bad">${preview.unavailableCount} recipient${preview.unavailableCount === 1 ? "" : "s"} have no approved version for their route and must be held.</p>` : ""}
+      ${held.length ? `<details><summary>Show ${held.length} older or unavailable recipients</summary>
+        <ul>${held.map((row) => `<li>${esc(row.name || row.email)} — ${esc(row.channel || "unknown platform")}
+          ${row.unavailable.length ? " · version unavailable" : " · older approved edition"}</li>`).join("")}</ul>
+      </details>` : ""}
+      <div class="email-material-review-actions">
+        <button type="button" class="ask-btn primary" data-email="${esc(action)}" data-material-choice="latest">Use latest approved per platform${preview.unavailableCount ? "; hold unavailable" : ""}</button>
+        ${preview.olderCount ? '<button type="button" class="ask-btn" data-email="' + esc(action) + '" data-material-choice="newer">Use only newer-period versions; save others to a list</button>' : ""}
+        <button type="button" class="ask-btn ghost" data-email="material-review-cancel">Change attachments</button>
+      </div>
+      <p class="email-fine">Any held recipients are saved to your Lists before the sendable batch is generated. Nothing is sent at this step.</p>`;
+    panel.scrollIntoView({ block: "nearest" });
+  }
+
+  async function saveMaterialHoldList(held, selected, sourceLabel = "") {
+    if (!held.length) return "";
+    const byEmail = new Map(selected.map((r) => [String(r.email || "").toLowerCase(), r]));
+    const items = held.map((row) => {
+      const source = byEmail.get(String(row.email || "").toLowerCase()) || {};
+      return { crd: String(source.contactId || source.crd || row.contactId || ""),
+        name: source.name || row.name || "", firm: source.firm || source.companyName || "",
+        email: source.email || row.email || "" };
+    });
+    if (items.some((item) => !item.crd))
+      throw new Error("A held recipient has no CRD and cannot be saved to a list. Remove that recipient and review again.");
+    materialHoldListId ||= "material-hold-" + global.crypto.randomUUID();
+    const sourceName = sourceLabel || sourceList?.name || "email batch";
+    const name = ("Awaiting material - " + sourceName).slice(0, 60);
+    const response = await fetch("/api/queue", { method: "PUT", credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: materialHoldListId, name, items, cursor: 0, cycle: 1,
+        cycleStartedUtc: new Date().toISOString() }) });
+    const result = await response.json();
+    if (!response.ok || result.dropped || (result.items || []).length !== items.length)
+      throw new Error(result.error || "The held-recipient list could not be saved. Nothing was generated.");
+    if (global.Dial && global.Dial.loadLists) await global.Dial.loadLists().catch(() => {});
+    return name;
+  }
+
 
   function setupView(){
+    materialReviewSnapshot = "";
     const templates = catalog.templates || [], docs = catalog.documents || [];
-    const legacyDocs = docs.filter((d) => !d.familyId && materialStatus(d) === "current");
+    const legacyDocs = docs.filter((d) => !d.familyId && materialSendable(d));
 
     const familyMap = new Map();
     docs.filter((d) => d.familyId).forEach((d) => {
       const family = familyMap.get(d.familyId) || { id: d.familyId, name: d.familyName || d.name, category: d.category, channels: new Set() };
       if ((d.channel || "generic") === "generic") family.name = d.familyName || d.name;
-      if (materialStatus(d) === "current") family.channels.add(d.channel || "generic");
+      if (materialSendable(d)) family.channels.add(d.channel || "generic");
       familyMap.set(d.familyId, family);
     });
     const families = [...familyMap.values()];
@@ -1026,9 +1083,9 @@
         + '"><input type="checkbox" class="email-family" value="' + esc(f.id) + '"'
         + (f.channels.size ? '' : ' disabled') + '><span><b>'
         + esc(f.name) + '</b><small>' + esc(f.category || 'Material') + ' / '
-        + (f.channels.size ? [...f.channels].map(channelLabel).map(esc).join(', ') : 'No current approved version')
+        + (f.channels.size ? [...f.channels].map(channelLabel).map(esc).join(', ') : 'No approved sendable version')
         + '</small></span></label>').join('')
-      + '<p>Choose the series once; the current approved client-group version is selected per recipient.</p></fieldset>' + preflight : '';
+      + '<p>Choose the series once; the latest approved client-group version is selected per recipient.</p></fieldset>' + preflight : '';
     document.getElementById("emailBody").innerHTML = `<div class="email-setup">
       <p class="email-summary"><b id="emailKeptCount">${keptRecipients().length}</b> recipient${keptRecipients().length === 1 ? "" : "s"} · From <b>${esc(catalog.connection.mailbox)}</b></p>
       ${setupCapacityHtml()}
@@ -1053,6 +1110,7 @@
       ${followUpPicker()}
       ${domainPicker()}
       <p id="emailNotice" class="email-notice"></p>
+      <div id="emailMaterialReview" class="email-material-review" hidden></div>
       <button type="button" id="emailCreateButton" class="ask-btn primary" data-email="create"${
         templates.length ? "" : " disabled"}>Generate personalized emails</button></div>`;
     // The Word templates carried instructions to the rep inside the body --
@@ -1279,7 +1337,7 @@
     ["mswm", "Morgan Stanley"], ["ml", "Merrill"]];
   const MATERIAL_AUDIENCES = [["client", "Client"], ["advisor_only", "Advisor Only"]];
   const MATERIAL_STRATEGIES = [["general", "General"], ["acv", "All-Cap"], ["lcv", "Large-Cap"], ["combined", "ACV/LCV combined"]];
-  const MATERIAL_CATEGORIES = ["Presentation", "Quarterly Commentary", "Update & Positioning", "Case for Value vs Growth",
+  const MATERIAL_CATEGORIES = ["Presentation", "Fact Sheet", "Quarterly Commentary", "Update & Positioning", "Case for Value vs Growth",
     "Performance", "Cash Allocation", "Periodic Table", "Standard Deviation", "Tax Policy", "Other"];
   let materialQueue = [], materialSearch = "", routeSearch = "", materialPreview = null;
 
@@ -1294,6 +1352,7 @@ function suggestMaterial(file) {
     const audience = /\bclient(?:\s+approved)?\b/i.test(raw) ? "client" : "advisor_only";
     let category = "Other";
     if (/\bcommentary\b/i.test(raw)) category = "Quarterly Commentary";
+    else if (/\bfact\s*sheet\b/i.test(raw)) category = "Fact Sheet";
     else if (/standard deviation/i.test(raw)) category = "Standard Deviation";
     else if (/periodic table/i.test(raw)) category = "Periodic Table";
     else if (/cash allocation/i.test(raw)) category = "Cash Allocation";
@@ -1374,13 +1433,16 @@ function latestEndedQuarter(now = new Date()) {
   }
   function materialStatus(doc) {
     const explicit = String(doc.freshness || "").toLowerCase();
-    if (["withdrawn", "expired", "superseded"].includes(explicit)) return explicit;
+    if (["withdrawn", "expired", "superseded", "future", "stale"].includes(explicit)) return explicit;
     const q = String(doc.periodKey || "").match(/^(\d{4})-Q([1-4])$/i);
     if (q) {
       const value = Number(q[1]) * 4 + Number(q[2]), latest = latestEndedQuarter();
       return value === latest ? "current" : value < latest ? "stale" : "future";
     }
     return ["current", "stale", "future", "missing"].includes(explicit) ? explicit : "current";
+  }
+  function materialSendable(doc) {
+    return doc && doc.approved !== false && ["current", "stale"].includes(materialStatus(doc));
   }
 
   function routeSource(rule) {
@@ -1520,29 +1582,38 @@ function materialEditFields(d) {
     });
     if (!groups.size) return '<p class="email-doc-none">No materials match this search.</p>';
     return [...groups.values()].sort((a, b) => a.category.localeCompare(b.category) || a.key.localeCompare(b.key)).map((g) => {
-      const active = g.docs.filter((d) => materialStatus(d) === 'current');
+      const libraryStatus = (doc) => {
+        const status = materialStatus(doc);
+        if (status !== 'current' || doc.periodKind !== 'month' || !/^\d{4}-\d{2}$/.test(doc.periodKey || ''))
+          return { status, label: status };
+        const newer = g.docs.some((candidate) => candidate.id !== doc.id
+          && candidate.periodKind === 'month' && /^\d{4}-\d{2}$/.test(candidate.periodKey || '')
+          && candidate.periodKey > doc.periodKey && candidate.channel === doc.channel
+          && (candidate.strategy || 'general') === (doc.strategy || 'general')
+          && materialStatus(candidate) === 'current');
+        return newer ? { status: 'older', label: 'older approved' } : { status, label: status };
+      };
+      const active = g.docs.filter(materialSendable);
       const periodOf = (d) => String(d.periodKey || (d.periodKind === 'evergreen' ? 'evergreen' : d.asOfDate || 'unspecified'));
       const targetPeriod = active.map(periodOf).sort((a, b) => b.localeCompare(a))[0] || '';
       const targetDocs = active.filter((d) => periodOf(d) === targetPeriod);
       const channels = new Set(targetDocs.map((d) => d.channel || 'generic'));
       const missing = MATERIAL_CHANNELS.filter(([key]) => !channels.has(key)).map(([, label]) => label);
-      const health = !targetPeriod ? 'No current period'
-        : missing.length ? missing.length + ' versions missing for ' + targetPeriod : 'All ' + targetPeriod + ' versions current';
+      const health = !targetPeriod ? 'No approved sendable period'
+        : missing.length ? missing.length + ' versions older or missing for ' + targetPeriod : 'All ' + targetPeriod + ' versions available';
       return '<section class="email-material-family"><header><div><span class="email-material-category">' + esc(g.category)
         + '</span><h3>' + esc(g.name || g.key) + '</h3></div><span class="email-material-health '
         + (missing.length || !targetPeriod ? 'incomplete' : 'complete') + '">' + esc(health) + '</span></header>'
         + '<div class="email-channel-badges">' + MATERIAL_CHANNELS.map(([key, label]) =>
           '<span class="' + (channels.has(key) ? 'on' : 'off') + '">' + esc(label) + '</span>').join('') + '</div>'
         + g.docs.sort((a, b) => String(b.periodKey || b.asOfDate || '').localeCompare(String(a.periodKey || a.asOfDate || ''))).map((d) =>
-          '<details class="email-material-version"><summary><b>' + esc(channelLabel(d.channel)) + '</b> / '
+          '<details class="email-material-version"><summary><span class="email-material-version-label"><b>' + esc(channelLabel(d.channel)) + '</b> / '
           + esc(audienceLabel(d.audience)) + ' / ' + esc(strategyLabel(d.strategy)) + ' / '
-          + esc(d.periodKey || d.asOfDate || 'Evergreen') + '<span class="email-fresh ' + esc(materialStatus(d)) + '">'
-          + esc(materialStatus(d)) + '</span></summary><p>' + esc(d.fileName || d.name + '.pdf') + ' / ' + bytes(d.size)
+          + esc(d.periodKey || d.asOfDate || 'Evergreen') + '</span><span class="email-material-version-actions"><span class="email-fresh ' + esc(libraryStatus(d).status) + '">'
+          + esc(libraryStatus(d).label) + '</span><button type="button" class="grave email-small" data-email="doc-delete" data-id="' + esc(d.id) + '" data-name="' + esc(d.name) + '" aria-label="Withdraw ' + esc(d.name) + ' from approved catalog">Withdraw</button></span></summary><p>' + esc(d.fileName || d.name + '.pdf') + ' / ' + bytes(d.size)
           + ' / v' + d.version + '</p>' + materialEditFields(d)
           + '<p><button type="button" class="email-small" data-email="material-preview-doc" data-id="' + esc(d.id) + '" data-name="' + esc(d.name) + '">Preview PDF</button> '
-          + '<button type="button" class="email-small" data-email="doc-replace" data-id="' + esc(d.id) + '" data-name="' + esc(d.name) + '">Replace PDF</button> '
-          + '<button type="button" class="grave email-small" data-email="doc-delete" data-id="' + esc(d.id) + '" data-name="' + esc(d.name) + '">'
-          + 'Remove' + '</button></p></details>').join('')
+          + '<button type="button" class="email-small" data-email="doc-replace" data-id="' + esc(d.id) + '" data-name="' + esc(d.name) + '">Replace PDF</button></p></details>').join('')
         + '</section>';
     }).join('');
   }
@@ -1782,7 +1853,7 @@ function routesHtml() {
         id: d.familyId, name: d.familyName || d.name, category: d.category, channels: new Set(),
       };
       if ((d.channel || "generic") === "generic") family.name = d.familyName || d.name;
-      if (materialStatus(d) === "current") family.channels.add(d.channel || "generic");
+      if (materialSendable(d)) family.channels.add(d.channel || "generic");
       familyMap.set(d.familyId, family);
     });
     const families = [...familyMap.values()].sort((a, b) => a.name.localeCompare(b.name));
@@ -1794,7 +1865,7 @@ function routesHtml() {
         '<label><input type="checkbox" class="tpl-family-req" value="' + esc(f.id) + '"'
         + (reqFamilies.has(f.id) ? ' checked' : '') + '><span><b>' + esc(f.name)
         + '</b><small>' + esc(f.category || 'Material') + ' &middot; '
-        + (f.channels.size ? [...f.channels].map(channelLabel).map(esc).join(', ') : 'No current version')
+        + (f.channels.size ? [...f.channels].map(channelLabel).map(esc).join(', ') : 'No approved sendable version')
         + '</small></span></label>').join('')
         : '<p>No material series have been categorized yet.</p>') + '</fieldset>';
     const requiredStandaloneHtml = standaloneDocs.length
@@ -2721,6 +2792,8 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
 
   async function open(selected) {
     sourceList = selected && selected.sourceList || null;
+    materialReviewSnapshot = "";
+    materialHoldListId = "";
     excluded = new Set(); openDomain = null;
     clearTimeout(deliveryPlanTimer);
     deliveryPlanSequence += 1;
@@ -2802,6 +2875,8 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
 
 
   async function openFollowUp(batchId){
+    materialReviewSnapshot = "";
+    materialHoldListId = "";
     clearTimeout(pollTimer); clearInterval(tickTimer);
     clearTimeout(deliveryPlanTimer);
     const back = shell(); back.hidden = false;
@@ -2819,6 +2894,12 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
 
   function followUpView(){
     const f = followUp, existingChild = followUpChild, rows = f.originalMessages || [];
+    const currentDocs = ((catalog && catalog.documents) || []).filter(materialSendable);
+    const families = [...new Map(currentDocs.filter((doc) => doc.familyId)
+      .map((doc) => [doc.familyId, doc.familyName || doc.name])).entries()]
+      .sort((a, b) => a[1].localeCompare(b[1]));
+    const standalone = currentDocs.filter((doc) => !doc.familyId)
+      .sort((a, b) => a.name.localeCompare(b.name));
     const child = existingChild?.status === "canceled" && !existingChild.mode && !existingChild.approvedUtc
       ? null : existingChild;
     const b = { id: f.batchId, templateName: f.templateName, name: f.batchName,
@@ -2839,8 +2920,19 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
           <button type="button" class="ask-btn ghost" data-email="follow-up-discard">Discard follow-up draft</button>
           <p class="email-fine">Changing attachments starts a new draft. You will confirm before any draft edits are discarded.</p>
         </div>` : ""}`
-        : `<label class="email-check"><input type="checkbox" id="followUpAttach"><span>Attach original documents again</span></label>
-        <p class="email-fine">Original documents stay in the earlier email when unchecked.</p>
+        : `<fieldset class="email-docs"><legend>Attachments for this follow-up</legend>
+          <label class="email-check"><input type="checkbox" id="followUpAttach"><span>Reattach the exact original PDFs</span></label>
+          <p class="email-fine">Off by default. The original files remain in the quoted thread, even if a newer edition is now available. Reattaching never replaces Q2 with Q3.</p>
+          <details class="email-followup-materials"><summary>Add currently approved material</summary>
+            <p class="email-fine">Choose a series to route the current client-group version to each recipient, or an individual PDF to attach to everyone. Exact choices appear in Step 3 before approval. For Raymond James, saved ACV/LCV strategy evidence is reused when available; otherwise the existing LCV default applies.</p>
+            ${families.length ? `<div class="email-followup-doc-list"><b>Material series</b>${families.map(([id, name]) =>
+              `<label><input type="checkbox" class="follow-up-family" value="${esc(id)}"> <span>${esc(name)}</span></label>`).join("")}</div>` : ""}
+            ${standalone.length ? `<div class="email-followup-doc-list"><b>Individual PDFs</b>${standalone.map((doc) =>
+              `<label><input type="checkbox" class="follow-up-document" value="${esc(doc.id)}"> <span>${esc(doc.name)}</span><small>${bytes(doc.size)}</small></label>`).join("")}</div>` : ""}
+            ${!families.length && !standalone.length ? '<p>No currently approved material is available to add.</p>' : ""}
+          </details>
+        </fieldset>
+        <div id="emailMaterialReview" class="email-material-review" hidden></div>
         <button type="button" class="ask-btn primary" data-email="follow-up-create" ${f.counts.remaining ? "" : "disabled"}>Prepare follow-up</button>`}
       <p id="emailNotice" class="email-notice" role="status">Preparing a draft does not send anything.</p></div>`;
   }
@@ -3494,9 +3586,9 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
     }
     if (action === "doc-delete") {
       const name = button.dataset.name || button.dataset.id;
-      if (!confirm(`Remove "${name}" from the approved catalog?\n\nReps will no longer be able to attach it. Batches already carrying it will fail validation.`)) return;
+      if (!confirm(`Withdraw "${name}" from the approved catalog?\n\nReps will no longer be able to attach it. Batches already carrying it will fail validation.`)) return;
       button.disabled = true;
-      try { const r = await api("delete_document", { id: button.dataset.id }); catalog.documents = r.documents; docsView(`Removed ${name}.`); }
+      try { const r = await api("delete_document", { id: button.dataset.id }); catalog.documents = r.documents; docsView(`Withdrew ${name}.`); }
       catch (e) { docsView(e.message, true); }
       return;
     }
@@ -3585,15 +3677,47 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
     if (action === "follow-up-create") {
       button.disabled = true; notice("Preparing an unsent follow-up...");
       try {
+        const materialFamilyIds = [...document.querySelectorAll(".follow-up-family:checked")].map((el) => el.value);
+        const attachmentIds = [...document.querySelectorAll(".follow-up-document:checked")].map((el) => el.value);
+        let messageIds, expectedMaterialSignatures = null, heldListName = "";
+        if (materialFamilyIds.length) {
+          const remaining = (followUp.remaining || []).map((row) => ({
+            ...row, materialStrategies: row.materialStrategies?.length ? row.materialStrategies
+              : (row.attachments || []).map((doc) => doc.strategy).filter((value) => value === "acv" || value === "lcv"),
+          }));
+          const preview = await api("preview_materials", { recipients: remaining, materialFamilyIds });
+          const key = materialReviewKey(preview, remaining, materialFamilyIds, attachmentIds);
+          const needsReview = preview.olderCount || preview.unavailableCount
+            || preview.rows.some((row) => row.documents.some((doc) => doc.freshness === "stale"));
+          const choice = button.dataset.materialChoice || "";
+          if (needsReview && (!choice || materialReviewSnapshot !== key)) {
+            showMaterialReview(preview, key, "follow-up-create");
+            button.disabled = false;
+            notice("Review the material periods and choose how to continue.");
+            return;
+          }
+          const held = preview.rows.filter((row) => row.unavailable.length
+            || (choice === "newer" && row.older));
+          const holdEmails = new Set(held.map((row) => row.email.toLowerCase()));
+          const ready = remaining.filter((row) => !holdEmails.has(row.email.toLowerCase()));
+          if (!ready.length) throw new Error("No non-responders have the selected material available. Nothing was prepared.");
+          messageIds = ready.map((row) => row.messageId);
+          expectedMaterialSignatures = Object.fromEntries(preview.rows
+            .filter((row) => !holdEmails.has(row.email.toLowerCase()))
+            .map((row) => [row.email.toLowerCase(), row.signature]));
+          heldListName = await saveMaterialHoldList(held, remaining, followUp.sourceListName || followUp.batchName);
+        }
         detail = await api("create_follow_up", {
           batchId: followUp.batchId, text: FOLLOW_UP_DEFAULT,
           includeAttachments: !!document.getElementById("followUpAttach")?.checked,
+          materialFamilyIds, attachmentIds, messageIds, expectedMaterialSignatures,
         });
         sendTiming = "now"; scheduleDate = ""; scheduleTime = "07:30"; continuationTime = "07:30";
         deliveryPlan = null; deliveryPlanKey = ""; deliveryPlanError = "";
         cursor = 0; forceDetail = false; commonBaseline = null; dirty = false;
         await requestCapacityPlan();
         composerView();
+        if (heldListName) notice(`Held non-responders were saved to Lists as "${heldListName}". They were not included in this follow-up.`);
       } catch (e) { button.disabled = false; notice(`Nothing has been sent. ${e.message}`, true); }
       return;
     }
@@ -3618,6 +3742,12 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
       button.disabled = true;
       try { const batchId = new URL(location.href).searchParams.get("emailBatch") || (detail && detail.batch && detail.batch.id) || ""; const r = await api("connect", { returnTo: emailUrl(batchId, true) }); location.assign(r.authorizeUrl); }
       catch (e) { connectView(e.message); }
+      return;
+    }
+    if (action === "material-review-cancel") {
+      const panel = document.getElementById("emailMaterialReview");
+      if (panel) { panel.hidden = true; panel.innerHTML = ""; }
+      materialReviewSnapshot = "";
       return;
     }
     if (action === "create") {
@@ -3656,17 +3786,43 @@ Generate emails for all of them?`)) return;
         // the required documents are checked-and-disabled by design.
         const attachmentIds = [...document.querySelectorAll("#emailDocs input:checked")].map((x) => x.value);
         const materialFamilyIds = [...document.querySelectorAll(".email-family:checked")].map((x) => x.value);
+        let prepared = kept, heldListName = "", expectedMaterialSignatures = null;
+        if (materialFamilyIds.length) {
+          const preview = await api("preview_materials", { recipients: kept, materialFamilyIds });
+          const key = materialReviewKey(preview, kept, materialFamilyIds, attachmentIds);
+          const needsReview = preview.olderCount || preview.unavailableCount
+            || preview.rows.some((row) => row.documents.some((doc) => doc.freshness === "stale"));
+          const choice = button.dataset.materialChoice || "";
+          if (needsReview && (!choice || materialReviewSnapshot !== key)) {
+            showMaterialReview(preview, key);
+            button.disabled = false;
+            notice("Review the material periods and choose how to continue.");
+            return;
+          }
+          const byEmail = new Map(preview.rows.map((row) => [row.email.toLowerCase(), row]));
+          const held = preview.rows.filter((row) => row.unavailable.length
+            || (choice === "newer" && row.older));
+          const holdEmails = new Set(held.map((row) => row.email.toLowerCase()));
+          prepared = kept.filter((row) => !holdEmails.has(String(row.email || "").toLowerCase()));
+          if (!prepared.length) throw new Error("No recipients have the selected material available. Nothing was generated.");
+          expectedMaterialSignatures = Object.fromEntries(prepared.map((row) => {
+            const email = String(row.email || "").toLowerCase();
+            return [email, byEmail.get(email)?.signature || ""];
+          }));
+          heldListName = await saveMaterialHoldList(held, kept);
+        }
 
         const ccColleague = ((document.getElementById("ccColleague") || {}).value || "").trim();
         const followUpDays = Number((document.getElementById("followUpDays") || {}).value || 0);
         sendTiming = "now"; scheduleDate = ""; scheduleTime = "07:30"; continuationTime = "07:30";
-        detail = await api("create_batch", { recipients: kept,
+        detail = await api("create_batch", { recipients: prepared,
           sourceListId: sourceList?.id || "", sourceListName: sourceList?.name || "",
           templateId: (document.getElementById("emailTemplate") || {}).value || "",
-          attachmentIds, materialFamilyIds, ccColleague, followUpDays });
+          attachmentIds, materialFamilyIds, expectedMaterialSignatures, ccColleague, followUpDays });
         deliveryPlan = null; deliveryPlanKey = ""; deliveryPlanError = "";
         await requestCapacityPlan();
         composerView();
+        if (heldListName) notice(`Held recipients were saved to Lists as "${heldListName}". They were not included in this batch.`);
       } catch (e) { button.disabled = false; notice(e.message, true); }
       return;
     }

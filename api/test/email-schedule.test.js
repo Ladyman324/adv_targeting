@@ -166,6 +166,19 @@ test("one preflight failure holds every message and queues only owner notificati
   assert.deepEqual(f.queued.map((x) => x.work.kind), ["schedule_notify"]);
 });
 
+test("newly approved material holds a scheduled batch with an actionable notice", async () => {
+  const f = scheduledFixture();
+  await worker.processWork({ kind: "preflight", userId: "u1", batchId: "b1", scheduleRevision: 4 }, {
+    ...f,
+    service: { preflightScheduled: async () => {
+      const error = new Error("Do not expose document details"); error.code = "schedule_material_changed"; throw error;
+    } },
+  });
+  assert.equal(f.batch.status, "schedule_held");
+  assert.match(f.batch.scheduleHoldMessage, /newer approved material version/i);
+  assert.deepEqual(f.queued.map((entry) => entry.work.kind), ["schedule_notify"]);
+});
+
 test("unexpected preflight failures persist a reference and emit redacted diagnostics", async () => {
   const f = scheduledFixture(), errors = [];
   const logger = () => {};

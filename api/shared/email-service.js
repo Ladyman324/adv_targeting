@@ -433,7 +433,7 @@ async function validateMessage(message, duplicateEmails, cfg, currentDocsById, c
   let attachmentBytes = 0;
   for (const doc of message.attachments || []) {
     const current = currentDocsById.get(doc.id);
-    if (!doc.approved || !doc.blobName || !current || !materials.currentDocument(current)
+    if (!doc.approved || !doc.blobName || !current || !materials.sendableDocument(current)
         || current.version !== doc.version || current.sha256 !== doc.sha256)
       errors.push({ code: "attachment_unavailable", message: `${doc.name || "An attachment"} is no longer the currently approved version.` });
     if (Number(doc.size) > cfg.maxAttachmentBytes) errors.push({ code: "attachment_too_large", message: `${doc.name} exceeds the application attachment limit.` });
@@ -670,7 +670,9 @@ async function followUpCandidates(who, batchId, deps = {}) {
     graphMessageId: m.graphMessageId || "", subject: m.subject || "",
     bodyText: m.bodyText || "", sentUtc: m.sentUtc || "", state: m.state || "",
     teammateCc: m.teammateCc || [], teammateCcCrds: m.teammateCcCrds || [],
-    attachments: (m.attachments || []).map((d) => ({ id: d.id, name: d.name || "Document", version: d.version, sha256: d.sha256 })) });
+    materialStrategies: m.materialStrategies || [],
+    attachments: (m.attachments || []).map((d) => ({ id: d.id, name: d.name || "Document", version: d.version, sha256: d.sha256,
+      strategy: d.strategy || "" })) });
 
   return {
     batchId, batchName: batch.name || "", followUpDays: batch.followUpDays || 0,
@@ -804,15 +806,52 @@ async function createFollowUp(who, input, deps = {}) {
     replySubject(row.subject);
   }
   const withAttachments = input.includeAttachments === true;
+  if (input.attachmentIds != null && (!Array.isArray(input.attachmentIds)
+      || input.attachmentIds.length > 20 || input.attachmentIds.some((id) => typeof id !== "string")))
+    throw httpError(400, "Select up to 20 approved attachments.");
+  if (input.materialFamilyIds != null && (!Array.isArray(input.materialFamilyIds)
+      || input.materialFamilyIds.length > 20 || input.materialFamilyIds.some((id) => typeof id !== "string")))
+    throw httpError(400, "Select up to 20 approved material series.");
   const requestedDocuments = withAttachments ? selected.flatMap((r) => r.attachments || []) : [];
   const requestedIds = [...new Set(requestedDocuments.map((d) => d.id))];
-  const documents = requestedIds.length ? await st.getDocuments(requestedIds) : [];
-  if (requestedDocuments.some((old) => !documents.some((doc) => doc.id === old.id
+  const originalDocuments = requestedIds.length ? await st.getDocuments(requestedIds) : [];
+  if (requestedDocuments.some((old) => !originalDocuments.some((doc) => doc.id === old.id
       && doc.version === old.version && doc.sha256 === old.sha256)))
     throw httpError(409, "An original document changed or is unavailable. Continue without reattaching it, or start a new batch.", "attachment_unavailable");
-  const unavailableDocuments = documents.filter((doc) => !materials.currentDocument(doc));
+  const addedDocumentIds = [...new Set(input.attachmentIds || [])];
+  const familyIds = [...new Set((input.materialFamilyIds || []).map((id) => String(id).trim()).filter(Boolean))];
+  const catalogDocuments = addedDocumentIds.length || familyIds.length ? await st.listDocuments() : [];
+  const exactDocuments = addedDocumentIds.map((id) => catalogDocuments.find((doc) => doc.id === id));
+  if (exactDocuments.some((doc) => !doc || doc.familyId))
+    throw httpError(409, "An added attachment is unavailable or belongs to a material series. Select its series instead.", "attachment_unavailable");
+  const unavailableDocuments = [...originalDocuments, ...exactDocuments]
+    .filter((doc) => !materials.sendableDocument(doc));
   if (unavailableDocuments.length) throw httpError(409,
     `${unavailableDocuments[0].name || "An attachment"} is not current approved material.`, "attachment_unavailable");
+  const routedDocuments = new Map();
+  if (familyIds.length) {
+    const policy = await st.materialRoutes();
+    for (const { row, approved } of verifiedRemaining) {
+      const strategies = row.materialStrategies && row.materialStrategies.length
+        ? row.materialStrategies : (row.attachments || []).map((doc) => doc.strategy)
+          .filter((value) => value === "acv" || value === "lcv");
+      const routed = materials.resolveFamilies(catalogDocuments, familyIds, approved.email, policy,
+        { strategies });
+      routedDocuments.set(row.messageId, routed.documents);
+    }
+  }
+  if (input.expectedMaterialSignatures) {
+    const expected = input.expectedMaterialSignatures;
+    if (!expected || typeof expected !== "object" || Array.isArray(expected))
+      throw httpError(400, "Material review is invalid. Review materials again.");
+    for (const { row, approved } of verifiedRemaining) {
+      if (expected[approved.email] !== materialSignature(routedDocuments.get(row.messageId) || []))
+        throw httpError(409, "Material routing changed since your review. Review the periods again before preparing a follow-up.",
+          "material_review_changed");
+    }
+  }
+  const documents = [...new Map([...originalDocuments, ...exactDocuments,
+    ...[...routedDocuments.values()].flat()].map((doc) => [doc.id, doc])).values()];
 
   const batchId = st.id();
   const claimedUtc = new Date().toISOString();
@@ -871,6 +910,7 @@ async function createFollowUp(who, input, deps = {}) {
       recipientMatchScore: approved.matchScore,
       recipientMatchGap: approved.matchGap,
       recipientPolicyVersion: recipientRegistry.policy().version,
+      materialStrategies: r.materialStrategies || [],
       teammatesAvailableJson: JSON.stringify(r.crd
         ? (await registry.allowedTeammates(r.crd))
           .map((mate) => ({ crd: mate.crd, name: mate.name, email: mate.email })) : []),
@@ -884,7 +924,10 @@ async function createFollowUp(who, input, deps = {}) {
       // Threaded follow-ups add only the rep's note. Outlook retains the
       // original message, including its signature and footer, in the quote.
       signatureHtml: "",
-      baseRevision: 1, attachments: documents.filter((doc) => (r.attachments || []).some((old) => old.id === doc.id)),
+      baseRevision: 1, attachments: [...new Map([
+        ...originalDocuments.filter((doc) => (r.attachments || []).some((old) => old.id === doc.id)),
+        ...exactDocuments, ...(routedDocuments.get(r.messageId) || []),
+      ].map((doc) => [doc.id, doc])).values()],
       validation: { errors: r.graphMessageId ? [] : [{ code: "no_original",
         message: "The original message is no longer in the mailbox, so this cannot be threaded." }],
         warnings: [] } });
@@ -935,6 +978,68 @@ async function checkRecipients(who, input) {
   return { checkedCount: rows.length, eligibleCount: rows.length - excluded.length, excluded };
 }
 
+function materialSignature(documents) {
+  return materials.hash((documents || []).map((doc) => ({
+    id: doc.id, version: doc.version, sha256: doc.sha256,
+  })).sort((a, b) => a.id.localeCompare(b.id)));
+}
+
+// Read-only routing review. An unavailable client-group variant is held, not
+// silently replaced with a generic PDF. The same resolver is used at creation.
+async function previewMaterials(who, input, deps = {}) {
+  const st = deps.store || store;
+  const recipients = (Array.isArray(input.recipients) ? input.recipients : []).map(recipientSnapshot);
+  if (!recipients.length || recipients.length >= core.ABSOLUTE_BATCH_STOP)
+    throw httpError(400, "Choose a nonempty recipient list below the campaign limit.");
+  const familyIds = [...new Set((Array.isArray(input.materialFamilyIds) ? input.materialFamilyIds : [])
+    .map((id) => String(id || "").trim()).filter(Boolean))];
+  if (familyIds.length > 20) throw httpError(400, "Select up to 20 material series.");
+  const all = familyIds.length ? await st.listDocuments() : [];
+  const policy = familyIds.length ? await st.materialRoutes() : { rules: [] };
+  const rows = recipients.map((recipient) => {
+    const documents = [], unavailable = [];
+    let channel = "";
+    for (const familyId of familyIds) {
+      try {
+        const resolved = materials.resolveFamilies(all, [familyId], recipient.email, policy,
+          { strategies: recipient.materialStrategies });
+        channel = resolved.channel;
+        documents.push(...resolved.documents);
+      } catch (error) {
+        if (error.code !== "material_variant_unavailable") throw error;
+        unavailable.push({ familyId, reason: error.message });
+      }
+    }
+    return { contactId: recipient.contactId, name: recipient.name, email: recipient.email,
+      channel, documents: documents.map((doc) => ({ id: doc.id, name: doc.name,
+        familyId: doc.familyId, periodKey: doc.periodKey || doc.asOfDate || "",
+        strategy: doc.strategy || "general", freshness: materials.freshnessOf(doc) })),
+      signature: materialSignature(documents), unavailable, older: false };
+  });
+  const newest = new Map();
+  for (const row of rows) for (const doc of row.documents) {
+    if (!doc.periodKey) continue;
+    if (!newest.has(doc.familyId) || doc.periodKey > newest.get(doc.familyId))
+      newest.set(doc.familyId, doc.periodKey);
+  }
+  for (const row of rows) row.older = row.documents.some((doc) =>
+    doc.periodKey && newest.has(doc.familyId) && doc.periodKey < newest.get(doc.familyId));
+  const groups = new Map();
+  for (const row of rows) for (const doc of row.documents) {
+    const key = [doc.familyId, row.channel, doc.periodKey || "Unspecified"].join("|");
+    const group = groups.get(key) || { familyId: doc.familyId, channel: row.channel,
+      periodKey: doc.periodKey || "Unspecified", count: 0, freshness: doc.freshness };
+    group.count++;
+    groups.set(key, group);
+  }
+  return { rows, groups: [...groups.values()].sort((a, b) =>
+    a.familyId.localeCompare(b.familyId) || a.channel.localeCompare(b.channel)
+      || b.periodKey.localeCompare(a.periodKey)),
+    newestPeriods: Object.fromEntries(newest),
+    olderCount: rows.filter((row) => row.older && !row.unavailable.length).length,
+    unavailableCount: rows.filter((row) => row.unavailable.length).length };
+}
+
 async function createBatch(who, input) {
   const requestedRecipients = (Array.isArray(input.recipients) ? input.recipients : []).map(recipientSnapshot);
   if (!requestedRecipients.length) throw httpError(400, "Select at least one recipient.");
@@ -971,7 +1076,7 @@ async function createBatch(who, input) {
   ])];
   const allDocuments = materialFamilyIds.length ? catalogDocuments : documents;
   const routePolicy = materialFamilyIds.length ? await store.materialRoutes() : { rules: [] };
-  const noncurrentDocs = documents.filter((doc) => !materials.currentDocument(doc));
+  const noncurrentDocs = documents.filter((doc) => !materials.sendableDocument(doc));
   if (noncurrentDocs.length) throw httpError(409,
     `${noncurrentDocs[0].name || "An attachment"} is not current approved material.`, "attachment_unavailable");
   // Anyone who has opted out is removed HERE, before the batch exists, rather
@@ -1010,6 +1115,17 @@ async function createBatch(who, input) {
     routedMaterials.set(recipient.email,
       materials.resolveFamilies(allDocuments, materialFamilyIds, recipient.email, routePolicy,
         { strategies: recipient.materialStrategies }));
+  }
+  if (input.expectedMaterialSignatures) {
+    const expected = input.expectedMaterialSignatures;
+    if (!expected || typeof expected !== "object" || Array.isArray(expected))
+      throw httpError(400, "Material review is invalid. Review materials again.");
+    for (const recipient of notBlocked) {
+      const actual = materialSignature((routedMaterials.get(recipient.email) || {}).documents || []);
+      if (expected[recipient.email] !== actual)
+        throw httpError(409, "Material routing changed since your review. Review the periods again before generating emails.",
+          "material_review_changed");
+    }
   }
   const teamCc = new Map();
   const { kept, removed: copiedInstead } = dropCopiedRecipients(notBlocked, teamCc);
@@ -1096,6 +1212,7 @@ async function createBatch(who, input) {
       recipientMatchScore: r.recipientMatchScore,
       recipientMatchGap: r.recipientMatchGap,
       recipientPolicyVersion: r.recipientPolicyVersion,
+      materialStrategies: r.materialStrategies || [],
       teammateCcJson: JSON.stringify(teamCc.get(r.contactId || r.email) || []),
       // The whole practice, so the review screen can offer them one at a time.
       // Stored rather than recomputed: contacts.json is a client asset, and a
@@ -1617,6 +1734,33 @@ async function preflightScheduled(userId, batchId, revision, deps = {}) {
       || String(token.mailboxId || "").toLowerCase() !== String(batch.graphMailboxId || "").toLowerCase())
     throw httpError(409, "Reconnect the scheduled batch mailbox before sending.", "schedule_mailbox_changed");
   const frozenMessages = await stage("messages", () => st.listMessages(userId, batchId));
+  if (frozenMessages.some((message) => (message.attachments || []).some((doc) => doc.familyId))) {
+    await stage("material_versions", async () => {
+      const [documents, policy] = await Promise.all([
+        st.listDocuments(), st.materialRoutes(),
+      ]);
+      for (const message of frozenMessages) {
+        const familyIds = [...new Set((message.attachments || []).map((doc) => doc.familyId).filter(Boolean))];
+        if (!familyIds.length) continue;
+        const strategies = message.materialStrategies?.length ? message.materialStrategies
+          : (message.attachments || []).map((doc) => doc.strategy)
+            .filter((value) => value === "acv" || value === "lcv");
+        const selected = (message.attachments || []).filter((doc) => familyIds.includes(doc.familyId));
+        let routed;
+        try {
+          routed = materials.resolveFamilies(documents, familyIds, message.recipientEmail, policy,
+            { strategies }).documents;
+        } catch (error) {
+          if (error.code !== "material_variant_unavailable") throw error;
+          throw httpError(409, "An approved material variant is no longer available. Review attachments before this scheduled batch can send.",
+            "schedule_material_changed");
+        }
+        if (materialSignature(selected) !== materialSignature(routed))
+          throw httpError(409, "A newer approved material version or routing change needs your review before this scheduled batch can send.",
+            "schedule_material_changed");
+      }
+    });
+  }
   currentStage = "message_snapshot";
   const frozenById = new Map(frozenMessages.map((message) => [message.id, message]));
   const validation = await stage("validation", () => validateBatch(
@@ -1878,7 +2022,7 @@ async function control(who, input) {
 const attachmentLimit = () => core.config().maxAttachmentBytes;
 
 module.exports = {
-  checkRecipients,
+  checkRecipients, previewMaterials,
   listBatchSummaries,
   senderHealth, catalog, capacityPlan, createBatch, updateCommon, updateMessage, updateMessageCc,
   validateBatch, removeRecipient,

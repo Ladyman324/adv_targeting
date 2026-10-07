@@ -281,13 +281,14 @@ function safeHold(err) {
     return { code: "schedule_capacity_changed",
       message: "The current sending allowance cannot accommodate this batch." };
   const allowed = new Set(["schedule_template_changed", "schedule_mailbox_changed",
-    "schedule_validation_changed", "schedule_recipient_suppressed", "schedule_sending_disabled",
+    "schedule_validation_changed", "schedule_material_changed", "schedule_recipient_suppressed", "schedule_sending_disabled",
     "schedule_allowlist_changed", "schedule_preflight_unavailable", "schedule_capacity_changed"]);
   const code = allowed.has(original) ? original : "schedule_preflight_failed";
   const messages = {
     schedule_template_changed: "The approved template changed.",
     schedule_mailbox_changed: "The Microsoft 365 mailbox must be reconnected.",
     schedule_validation_changed: "A recipient, attachment, or rendered message changed.",
+    schedule_material_changed: "A newer approved material version is available. Review attachments before sending.",
     schedule_recipient_suppressed: "A recipient is now suppressed.",
     schedule_sending_disabled: "Direct sending is currently disabled.",
     schedule_allowlist_changed: "A recipient is outside the current sending allowlist.",
@@ -663,7 +664,7 @@ async function draft(work, deps) {
     const currentById = new Map(currentAttachments.map((doc) => [doc.id, doc]));
     for (const frozen of claimed.attachments || []) {
       const current = currentById.get(frozen.id);
-      if (!current || !materials.currentDocument(current) || current.version !== frozen.version
+      if (!current || !materials.sendableDocument(current) || current.version !== frozen.version
           || current.sha256 !== frozen.sha256)
         throw service.httpError(409,
           `${frozen.name || "An attachment"} is no longer the currently approved version.`,

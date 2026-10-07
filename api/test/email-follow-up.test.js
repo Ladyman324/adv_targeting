@@ -385,6 +385,19 @@ test("follow-up preparation is a summary; drafting uses the shared three-step ed
   assert.ok(editor.indexOf("originalEmailHtml(") > editor.indexOf("Step 3"));
 });
 
+test("follow-up attachment picker separates old PDFs from new routed material", () => {
+  const ui = fs.readFileSync(path.resolve(__dirname, "../../webapp/email.js"), "utf8");
+  const screen = ui.slice(ui.indexOf("  function followUpView()"), ui.indexOf("  const FOLLOW_UP_DEFAULT"));
+  const create = ui.slice(ui.indexOf('    if (action === "follow-up-create")'),
+    ui.indexOf('    if (action === "follow-up-discard")'));
+  assert.match(screen, /Reattach the exact original PDFs/);
+  assert.match(screen, /follow-up-family/);
+  assert.match(screen, /follow-up-document/);
+  assert.match(create, /materialFamilyIds = .*follow-up-family:checked/);
+  assert.match(create, /attachmentIds = .*follow-up-document:checked/);
+  assert.match(create, /materialFamilyIds, attachmentIds, messageIds, expectedMaterialSignatures/);
+});
+
 test("batch summaries keep source names, prefer a single person, and collapse their disclosures", () => {
   const vm = require("node:vm");
   const ui = fs.readFileSync(path.resolve(__dirname, "../../webapp/email.js"), "utf8");
@@ -649,7 +662,7 @@ function creationFixture({ conflict = false, failMessage = false } = {}) {
     "recipient-registry": registry,
     "email-auth": { status: async () => ({ connected: true, mailbox: "rep@eicatlanta.com",
       profile: { id: "mailbox", mail: "rep@eicatlanta.com" } }) },
-    "email-materials": { currentDocument: () => true },
+    "email-materials": { currentDocument: () => true, sendableDocument: () => true },
     "email-core": { config: () => ({ maxBodyChars: 50000, internalRecipients: [
       { address: "holly@eicatlanta.com" }, { address: "hannah@eicatlanta.com" }] }),
       splitName: () => ({ first: "Rep", last: "Test" }),
@@ -691,6 +704,68 @@ test("changed original documents block reattachment before claiming a follow-up"
   f.store.getDocuments = async () => [{ id: "a", version: 2, sha256: "new" }];
   await assert.rejects(() => f.svc.createFollowUp(WHO, { batchId: "B1", text: "Note.", includeAttachments: true }),
     (e) => e.code === "attachment_unavailable");
+  assert.equal(f.calls.length, 0);
+});
+
+test("follow-up adds a newly selected approved standalone PDF without reattaching the original", async () => {
+  const f = creationFixture();
+  f.messages.get("B1")[0].attachments = [{ id: "old", name: "Q2", version: 1, sha256: "old" }];
+  const newer = { id: "new", name: "Q3", approved: true, familyId: "", version: 1 };
+  f.store.listDocuments = async () => [newer];
+  const result = await f.svc.createFollowUp(WHO, {
+    batchId: "B1", text: "The new report is attached.", attachmentIds: ["new"],
+  });
+  assert.deepEqual(result.messages[0].attachments.map((doc) => doc.id), ["new"]);
+  assert.deepEqual(result.batch.attachmentIds, ["new"]);
+});
+
+test("follow-up material series routes the current variant for each advisor", async () => {
+  const f = creationFixture();
+  const first = f.messages.get("B1")[0];
+  first.materialStrategies = ["acv"];
+  f.messages.get("B1").push({ ...first, id: "second", graphMessageId: "second-g",
+    contactId: "2", recipientEmail: "two@x.com", materialStrategies: ["lcv"] });
+  const docs = [
+    { id: "acv", name: "Q3 ACV", familyId: "commentary", strategy: "acv", approved: true },
+    { id: "lcv", name: "Q3 LCV", familyId: "commentary", strategy: "lcv", approved: true },
+  ];
+  f.store.listDocuments = async () => docs;
+  f.store.materialRoutes = async () => ({ rules: [] });
+  const svc = load({
+    "email-store": f.store,
+    "email-suppress": { blockedAmong: async () => new Set(), manageUrl: () => "https://x/manage" },
+    "recipient-registry": {
+      load: async () => {}, verify: async (crd, email) => ({ crd, email, name: "Advisor",
+        firm: "Firm", tier: "approved", source: "roster", registryHash: "rh", routingHash: "route" }),
+      allowedTeammates: async () => [], verifyTeammates: async () => [],
+      policy: () => ({ version: "v1" }),
+    },
+    "email-auth": { status: async () => ({ connected: true, mailbox: "rep@eicatlanta.com",
+      profile: { id: "mailbox", mail: "rep@eicatlanta.com" } }) },
+    "email-materials": {
+      currentDocument: () => true, sendableDocument: () => true,
+      resolveFamilies: (_docs, _families, _email, _policy, options) => ({
+        documents: [docs.find((doc) => doc.strategy === options.strategies[0])],
+      }),
+    },
+    "email-core": { config: () => ({ maxBodyChars: 50000, internalRecipients: [] }),
+      splitName: () => ({ first: "Rep", last: "Test" }),
+      plainTextToSafeHtml: (value) => value, corporateSignature: () => "<sig>",
+      extraRecipients: () => ({ cc: [], bcc: [] }) },
+  });
+  const result = await svc.createFollowUp(WHO, {
+    batchId: "B1", text: "New commentary attached.", materialFamilyIds: ["commentary"],
+  });
+  assert.deepEqual(result.messages.map((m) => m.attachments.map((doc) => doc.id)), [["acv"], ["lcv"]]);
+  assert.deepEqual(result.batch.attachmentIds, ["acv", "lcv"]);
+});
+
+test("unavailable follow-up attachment is rejected before parent claim", async () => {
+  const f = creationFixture();
+  f.store.listDocuments = async () => [];
+  await assert.rejects(() => f.svc.createFollowUp(WHO, {
+    batchId: "B1", text: "Report attached.", attachmentIds: ["withdrawn"],
+  }), (error) => error.code === "attachment_unavailable");
   assert.equal(f.calls.length, 0);
 });
 

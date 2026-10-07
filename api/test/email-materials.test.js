@@ -206,3 +206,57 @@ test("legacy unperioded documents remain current but every noncurrent state is b
   for (const freshness of ["stale", "superseded", "expired", "withdrawn", "future"])
     assert.equal(m.currentDocument({ approved: true, freshness }), false);
 });
+
+test("older approved quarter stays sendable while withdrawal and expiry still block", () => {
+  const q2 = { id: "q2", familyId: "commentary", channel: "generic", periodKind: "quarter",
+    periodKey: "2026-Q2", freshness: "current", approved: true };
+  const october = Date.parse("2026-10-07T12:00:00Z");
+  assert.equal(m.freshnessOf(q2, october), "stale");
+  assert.equal(m.sendableDocument(q2, october), true);
+  for (const freshness of ["withdrawn", "expired", "superseded", "future"])
+    assert.equal(m.sendableDocument({ ...q2, freshness }, october), false);
+  assert.equal(m.sendableDocument({ ...q2, freshness: "stale",
+    effectiveUntil: "2026-09-30T23:59:59Z" }, october), false);
+  assert.equal(m.sendableDocument({ ...q2, periodKey: "2026-Q4",
+    freshness: "stale" }, october), false);
+  assert.equal(m.sendableDocument({ ...q2, approved: false }, october), false);
+});
+
+test("routing picks a new quarter where available and retains older approved platform variant", () => {
+  const docs = [
+    { id: "generic-q3", familyId: "commentary", channel: "generic", strategy: "general",
+      periodKind: "quarter", periodKey: "2026-Q3", freshness: "current", approved: true },
+    { id: "ubs-q2", familyId: "commentary", channel: "ubs", strategy: "combined",
+      periodKind: "quarter", periodKey: "2026-Q2", freshness: "stale", approved: true },
+  ];
+  const policy = { rules: [{ domain: "ubs.com", channel: "ubs" }] };
+  assert.equal(m.resolveFamilies(docs, ["commentary"], "a@example.com", policy).documents[0].id, "generic-q3");
+  assert.equal(m.resolveFamilies(docs, ["commentary"], "a@ubs.com", policy).documents[0].id, "ubs-q2");
+});
+
+test("material preflight identifies mixed periods and missing platform variants", async () => {
+  const svc = require("../shared/email-service");
+  const docs = [
+    { id: "generic-q3", familyId: "commentary", channel: "generic", strategy: "general",
+      periodKind: "quarter", periodKey: "2026-Q3", freshness: "current", approved: true, version: 1 },
+    { id: "ubs-q2", familyId: "commentary", channel: "ubs", strategy: "combined",
+      periodKind: "quarter", periodKey: "2026-Q2", freshness: "stale", approved: true, version: 1 },
+  ];
+  const result = await svc.previewMaterials({ id: "u" }, { recipients: [
+    { crd: "1", name: "Generic", email: "one@example.com" },
+    { crd: "2", name: "UBS", email: "two@ubs.com" },
+    { crd: "3", name: "RJ", email: "three@rjf.com" },
+  ], materialFamilyIds: ["commentary"] }, { store: {
+    listDocuments: async () => docs,
+    materialRoutes: async () => ({ rules: [
+      { domain: "ubs.com", channel: "ubs" }, { domain: "rjf.com", channel: "rj" },
+    ] }),
+  } });
+  assert.deepEqual(result.rows.map((row) => row.documents.map((doc) => doc.id)),
+    [["generic-q3"], ["ubs-q2"], []]);
+  assert.equal(result.olderCount, 1);
+  assert.equal(result.unavailableCount, 1);
+  assert.equal(result.rows[1].older, true);
+  assert.equal(result.rows[2].unavailable[0].familyId, "commentary");
+  assert.ok(result.rows[0].signature);
+});
