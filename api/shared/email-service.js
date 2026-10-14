@@ -209,7 +209,7 @@ async function dailyLimitFor(userId, cfg, st = store) {
   const override = typeof st.getDailyCap === "function"
     ? await st.getDailyCap(userId) : null;
   return Number.isInteger(override) && override >= cfg.dailyExternalLimit
-    && override <= 250 ? override : cfg.dailyExternalLimit;
+    && override <= 300 ? override : cfg.dailyExternalLimit;
 }
 
 async function mailboxIntervalFor(userId, cfg, st = store) {

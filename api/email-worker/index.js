@@ -321,7 +321,7 @@ async function waitForPlannedTime(work, batch, message, deps) {
         const override = typeof deps.store.getDailyCap === 'function'
           ? await deps.store.getDailyCap(work.userId) : null;
         const limit = Number.isInteger(override) && override >= Number(cfg.dailyExternalLimit)
-          && override <= 250 ? override : cfg.dailyExternalLimit;
+          && override <= 300 ? override : cfg.dailyExternalLimit;
         const intervalOverride = typeof deps.store.getMailboxInterval === 'function'
           ? await deps.store.getMailboxInterval(work.userId) : null;
         const interval = Number.isInteger(intervalOverride)

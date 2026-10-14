@@ -112,15 +112,15 @@ test("an individual mailbox interval spaces the plan and does not change the def
   assert.equal(cfg.mailboxIntervalSeconds, 20);
 });
 
-test("a 200-recipient override does not stop a campaign at the 25-person default", async () => {
+for (const limit of [200, 300]) test(`a ${limit}-recipient override does not stop a campaign at the 25-person default`, async () => {
   const cfg = { calendarCapacityEnabled: true, dailyExternalLimit: 25,
     cancellationSeconds: 20, mailboxIntervalSeconds: 20,
     internalDomains: new Set(["eicatlanta.com"]) };
-  const messages = Array.from({ length: 201 }, (_, i) => ({
+  const messages = Array.from({ length: limit + 1 }, (_, i) => ({
     id: `m${i + 1}`, recipientEmail: `advisor${i + 1}@example.com`, teammateCc: [],
   }));
   const st = {
-    getDailyCap: async (userId) => userId === "high-cap" ? 200 : null,
+    getDailyCap: async (userId) => userId === "high-cap" ? limit : null,
     getBatch: async () => ({ id: "b1", status: "editing" }),
     listMessages: async () => messages,
   };
@@ -133,12 +133,43 @@ test("a 200-recipient override does not stop a campaign at the 25-person default
   };
   const high = await service.capacityPlan({ id: "high-cap" },
     { batchId: "b1" }, { store: st, core: { config: () => ({ ...cfg }) }, limitGuard: guard });
-  assert.equal(high.deliveryPlan.dailyLimit, 200);
-  assert.deepEqual(high.deliveryPlan.days.map((day) => day.messageCount), [200, 1]);
+  assert.equal(high.deliveryPlan.dailyLimit, limit);
+  assert.deepEqual(high.deliveryPlan.days.map((day) => day.messageCount), [limit, 1]);
   const ordinary = await service.capacityPlan({ id: "ordinary" },
     { batchId: "b1" }, { store: st, core: { config: () => ({ ...cfg }) }, limitGuard: guard });
   assert.equal(ordinary.deliveryPlan.dailyLimit, 25);
   assert.equal(ordinary.deliveryPlan.days[0].messageCount, 25);
+});
+
+test("administrators can save a 300-person cap, but 301 and non-admin changes are refused", async () => {
+  const handler = require("../email/index");
+  const store = require("../shared/email-store");
+  const saved = Object.fromEntries(["listConnections", "listDailyCaps", "listMailboxIntervals", "setDailyCap"]
+    .map((key) => [key, store[key]]));
+  const writes = [];
+  store.listConnections = async () => [{ userId: "rep", mailbox: "rep@eicatlanta.com" }];
+  store.listDailyCaps = async () => [];
+  store.listMailboxIntervals = async () => [];
+  store.setDailyCap = async (_who, userId, limit) => {
+    writes.push({ userId, limit }); return { userId, limit };
+  };
+  async function request(method, op, body, admin = true) {
+    const context = { log: { error: () => {} } };
+    const principal = Buffer.from(JSON.stringify({ userId: "admin", userDetails: "Admin",
+      userRoles: admin ? ["authenticated", "EmailAdministrator"] : ["authenticated"] })).toString("base64");
+    await handler(context, { method, query: { op }, body,
+      headers: { "x-ms-client-principal": principal } });
+    return { status: context.res.status, body: JSON.parse(context.res.body) };
+  }
+  try {
+    const settings = await request("GET", "daily_caps");
+    assert.equal(settings.status, 200);
+    assert.equal(settings.body.maxLimit, 300);
+    assert.equal((await request("POST", "set_daily_cap", { userId: "rep", limit: 300 })).status, 200);
+    assert.equal((await request("POST", "set_daily_cap", { userId: "rep", limit: 301 })).status, 400);
+    assert.equal((await request("POST", "set_daily_cap", { userId: "rep", limit: 300 }, false)).status, 403);
+    assert.deepEqual(writes, [{ userId: "rep", limit: 300 }]);
+  } finally { Object.assign(store, saved); }
 });
 
 test("Settings returns configured colleagues to a signed-in user without loading the email catalog", async () => {

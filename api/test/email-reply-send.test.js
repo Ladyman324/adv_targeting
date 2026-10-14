@@ -245,6 +245,18 @@ test("internal compliance BCC does not have to duplicate an external canary allo
   assert.equal(d.calls.sent.length, 1);
 });
 
+test("one-off policy honors a 300-person allowance and rejects an out-of-range stored override", async () => {
+  for (const [override, expected] of [[300, 300], [301, 25], [null, 25]]) {
+    const d = deps({
+      core: { config: () => directCfg({ dailyExternalLimit: 25, rollingExternalLimit: 25 }) },
+      store: { getDailyCap: async () => override },
+    });
+    await send.enforceDirectSendPolicy(BO, ["advisor@ml.com"], "cap-test", d);
+    assert.equal(d.calls.reservations[0][3], expected);
+    assert.equal(d.calls.sent.length, 0);
+  }
+});
+
 test("rolling external limit refusal stops both paths before a draft", async () => {
   for (const [name, invoke] of [
     ["reply", (d) => send.reply(BO, REPLY, d)],

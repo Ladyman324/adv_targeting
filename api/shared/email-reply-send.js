@@ -219,7 +219,7 @@ async function enforceDirectSendPolicy(who, recipients, opId, deps) {
   const cfg = cr.config();
   const override = typeof st.getDailyCap === "function"
     ? await st.getDailyCap(who.id) : null;
-  if (Number.isInteger(override) && override >= cfg.dailyExternalLimit && override <= 250)
+  if (Number.isInteger(override) && override >= cfg.dailyExternalLimit && override <= 300)
     cfg.rollingExternalLimit = override;
   const intervalOverride = typeof st.getMailboxInterval === "function"
     ? await st.getMailboxInterval(who.id) : null;

@@ -56,7 +56,7 @@ module.exports = async function (context, req) {
         const byUser = new Map(overrides.map((entry) => [entry.userId, entry]));
         const intervalByUser = new Map(intervals.map((entry) => [entry.userId, entry]));
         const cfg = emailCore.config(), defaultLimit = cfg.dailyExternalLimit;
-        return ok(context, { defaultLimit, maxLimit: 250,
+        return ok(context, { defaultLimit, maxLimit: 300,
           defaultIntervalSeconds: cfg.mailboxIntervalSeconds, maxIntervalSeconds: 300,
           reps: connections.map((entry) => ({
             ...entry, limit: (byUser.get(entry.userId) || {}).limit || defaultLimit,
@@ -368,8 +368,8 @@ module.exports = async function (context, req) {
       const userId = String(body.userId || "").trim();
       const limit = Number(body.limit);
       const defaultLimit = emailCore.config().dailyExternalLimit;
-      if (!Number.isInteger(limit) || limit < defaultLimit || limit > 250)
-        throw service.httpError(400, `Choose a whole-number daily limit from ${defaultLimit} to 250.`);
+      if (!Number.isInteger(limit) || limit < defaultLimit || limit > 300)
+        throw service.httpError(400, `Choose a whole-number daily limit from ${defaultLimit} to 300.`);
       const connections = await store.listConnections();
       if (!connections.some((entry) => entry.userId === userId))
         throw service.httpError(404, "That salesperson has not connected a mailbox.");

@@ -846,13 +846,16 @@ test("after-hours calendar work moves to its newly reserved slot without touchin
   f.batch.capacityPlanHash = "approved";
   f.message.capacityDay = "2026-09-04";
   f.message.plannedSendUtc = "2026-09-04T23:29:00.000Z";
+  f.store.getDailyCap = async () => 300;
+  f.core.config = () => ({ dailyExternalLimit: 25, mailboxIntervalSeconds: 5 });
   let moved = 0, graphReads = 0;
   await worker.processWork(
     { kind: "send", userId: "user-1", batchId: "batch-1", messageId: "message-1" },
     { ...f, nowMs: () => Date.parse("2026-09-04T23:31:00Z"),
       capacity: {
         easternDay: () => "2026-09-04", withinSendingWindow: () => false,
-        rolloverAllocation: async () => {
+        rolloverAllocation: async (_user, _reservation, _key, _hash, options) => {
+          assert.equal(options.limit, 300);
           moved++;
           return { available: true, moved: true, assignment: {
             day: "2026-09-07", units: 1,
