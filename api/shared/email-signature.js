@@ -24,13 +24,18 @@ function descriptor(who, photo) {
   return { kind: "signature-photo", id: `sender-photo-${photo.sha256.slice(0, 24)}`,
     name: `sender-photo-${photo.sha256.slice(0, 24)}.${photo.contentType === "image/png" ? "png" : "jpg"}`,
     cid: `sender-photo-${photo.sha256}@eicadvisormap`, blobName: blobName(who, photo.sha256),
-    sha256: photo.sha256, contentType: photo.contentType, size: photo.size };
+    sha256: photo.sha256, contentType: photo.contentType, size: photo.size,
+    width: photo.width, height: photo.height };
 }
 
 async function selected(who, deps = {}) {
   const custom = await (deps.store || store).getSignaturePhoto(who.id);
   const photo = custom || seed[who.id] || null;
-  return photo ? { ...descriptor(who, photo), custom: !!custom } : null;
+  if (!photo) return null;
+  // Website inventory predates dimension metadata. Read its small, packaged
+  // JPEG (or the account's legacy upload), rather than guessing its aspect.
+  const dimensions = photo.width && photo.height ? photo : validatePhoto(await bytes(who, photo.sha256, deps));
+  return { ...descriptor(who, { ...photo, width: dimensions.width, height: dimensions.height }), custom: !!custom };
 }
 
 function seedBytes(photo) {
@@ -85,7 +90,9 @@ async function settings(who) {
     crop: custom && custom.crop || null,
     cropImages: photo ? [photo] : [],
     previewHtml: profile ? core.corporateSignature(profile, "", core.config(), enabled ? photo : null) : "",
-    cropPreviewHtml: profile && photo ? core.corporateSignature(profile, "", core.config(), photo) : "",
+    // The editor's output is always 264x336, which can differ from the current
+    // uncropped website photo. Preview the shape that Save crop will produce.
+    cropPreviewHtml: profile && photo ? core.corporateSignature(profile, "", core.config(), { ...photo, width: 264, height: 336 }) : "",
     images: enabled && photo ? [photo] : [] };
 }
 

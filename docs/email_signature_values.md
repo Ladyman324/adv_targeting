@@ -2,6 +2,12 @@
 
 ### Photo framing
 
+For new signatures the image height matches the contact block's explicit
+16-pixel lines, including address line breaks but excluding disclosures.
+Its width scales proportionally to the selected photo/crop, without distortion.
+The crop preview uses the editor's output aspect ratio, not the old photo's.
+Recipient-side text wrapping or accessibility overrides can still alter alignment.
+
 Settings → Email signature → Adjust photo provides drag/keyboard positioning,
 1–3× zoom, and an actual signature-size preview. Save crop keeps the original
 website/uploaded photo and framing metadata, so reopening the editor does not

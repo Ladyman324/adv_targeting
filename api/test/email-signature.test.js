@@ -78,7 +78,10 @@ test("opt-in snapshots the photo to an immutable private blob while contact text
   assert.equal(hash(saved[0].bytes), photo.sha256);
   assert.equal(saved[0].options.conditions.ifNoneMatch, "*");
   assert.match(result.signatureHtml, /<table/);
-  assert.match(result.signatureHtml, /width="88"/);
+  const dimensions = signature.validatePhoto(content);
+  assert.equal(result.photo.width, dimensions.width);
+  assert.equal(result.photo.height, dimensions.height);
+  assert.match(result.signatureHtml, /height="\d+"/);
   assert.match(result.signatureHtml, /vertical-align:top/);
   assert.match(result.signatureHtml, new RegExp(`href="mailto:${profile.mail}"`));
   assert.match(result.signatureHtml, new RegExp(`src="cid:${result.photo.cid}"`));
@@ -124,12 +127,58 @@ test("invalid, executable, oversized and dimension-bomb photo uploads are refuse
 });
 
 test("a replaced photo does not change a previously generated signature or its immutable reference", async () => {
-  let selected = { ...photo };
+  const dimensions = signature.validatePhoto(content);
+  let selected = { ...photo, ...dimensions };
   const store = { getSignaturePhoto: async () => selected };
   const original = await signature.bundle(who, profile, { prefs: { signaturePhotoEnabled: "1" }, store });
-  selected = { ...photo, sha256: "a".repeat(64) };
+  selected = { ...photo, ...dimensions, sha256: "a".repeat(64) };
   const next = await signature.bundle(who, profile, { prefs: { signaturePhotoEnabled: "1" }, store });
   assert.notEqual(original.photo.sha256, next.photo.sha256);
   assert.match(original.signatureHtml, new RegExp(photo.sha256));
   assert.equal(original.images[0].sha256, photo.sha256);
+});
+
+test("photo matches each sender's contact lines while retaining the selected aspect ratio", () => {
+  const keys = ["EMAIL_SIGNATURE_ADDRESS", "EMAIL_SIGNATURE_COMPANY_NAME", "EMAIL_SIGNATURE_WEBSITE", "EMAIL_SIGNATURE_DISCLOSURE"];
+  const before = Object.fromEntries(keys.map(key => [key, process.env[key]]));
+  try {
+    process.env.EMAIL_SIGNATURE_ADDRESS = "Suite 600\\nAtlanta, GA";
+    process.env.EMAIL_SIGNATURE_COMPANY_NAME = "EIC";
+    process.env.EMAIL_SIGNATURE_WEBSITE = "https://www.eicatlanta.com";
+    process.env.EMAIL_SIGNATURE_DISCLOSURE = "Disclosure\\nMore disclosure";
+    for (const [person, lines] of [[profile, 8], [{ ...profile, jobTitle: "", businessPhones: [] }, 6], [{ displayName: "Rep" }, 5]]) {
+      for (const dimensions of [{ width: 256, height: 384 }, { width: 264, height: 336 }, { width: 320, height: 320 }]) {
+        const image = { ...signature.descriptor(who, photo), ...dimensions };
+        const html = core.corporateSignature(person, "", core.config(), image);
+        const height = lines * 16, width = Math.round(height * dimensions.width / dimensions.height);
+        assert.match(html, new RegExp(`width="${width}" height="${height}"`));
+        assert.match(html, new RegExp(`width:${width}px;height:${height}px;display:block`));
+        assert.match(html, /padding:0;font-family:Arial,sans-serif;font-size:10pt;color:#333;line-height:16px;mso-line-height-rule:exactly/);
+        assert.match(html, /Disclosure/, "disclosures remain outside the contact-height calculation");
+      }
+    }
+    process.env.EMAIL_SIGNATURE_ADDRESS = "Suite 600\nAtlanta, GA";
+    assert.match(core.corporateSignature(profile, "", core.config(), { ...signature.descriptor(who, photo), width: 264, height: 336 }), /height="128"/);
+    process.env.EMAIL_SIGNATURE_ADDRESS = "Atlanta <br> GA";
+    const escaped = core.corporateSignature(profile, "", core.config(), { ...signature.descriptor(who, photo), width: 264, height: 336 });
+    assert.match(escaped, /height="112"/);
+    assert.match(escaped, /Atlanta &lt;br&gt; GA/);
+  } finally {
+    for (const key of keys) { if (before[key] === undefined) delete process.env[key]; else process.env[key] = before[key]; }
+  }
+});
+
+test("seed and uploaded dimensions survive selection and generated messages freeze their layout", async () => {
+  const dimensions = signature.validatePhoto(content);
+  const selected = await signature.selected(who, { store: { getSignaturePhoto: async () => null } });
+  assert.equal(selected.width, dimensions.width);
+  assert.equal(selected.height, dimensions.height);
+  const uploaded = { ...photo, width: 264, height: 336 };
+  const st = { getSignaturePhoto: async () => uploaded };
+  const before = await signature.bundle(who, profile, { prefs: { signaturePhotoEnabled: "1" }, store: st });
+  uploaded.width = 320; uploaded.height = 320;
+  const after = await signature.bundle(who, { ...profile, jobTitle: "" }, { prefs: { signaturePhotoEnabled: "1" }, store: st });
+  assert.notEqual(before.signatureHtml, after.signatureHtml);
+  assert.equal(before.images[0].width, 264);
+  assert.equal(before.images[0].height, 336);
 });

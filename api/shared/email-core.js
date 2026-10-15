@@ -380,7 +380,7 @@ function sanitizeEmailHtml(html) {
     // in Word was gone by the time the advisor read it.
     allowedTags: ["p", "br", "b", "strong", "i", "em", "u", "a", "table", "tbody", "tr", "td",
                   "span", "div", "img", "ul", "ol", "li"],
-    allowedAttributes: { a: ["href"], img: ["src", "alt", "style", "width"], "*": ["style"] },
+    allowedAttributes: { a: ["href"], img: ["src", "alt", "style", "width", "height"], "*": ["style"] },
     allowedSchemes: ["http", "https", "mailto", "tel"],
     // cid: only, and only on images -- a part already attached to this message.
     // http(s) image sources are deliberately absent: Outlook blocks remote
@@ -393,6 +393,7 @@ function sanitizeEmailHtml(html) {
         "font-size": [/^\d+(\.\d+)?(px|pt|em|rem|%)$/],
         "font-weight": [/^(normal|bold|[1-9]00)$/],
         "line-height": [/^[0-9.]+(px|em|%)?$/],
+        "mso-line-height-rule": [/^exactly$/],
         margin: [/^(-?\d+(\.\d+)?(px|pt|em|rem|%)?\s*){1,4}$/], "margin-top": [/^(-?\d+(\.\d+)?(px|pt|em|rem|%)?\s*){1,4}$/],
         "margin-bottom": [/^(-?\d+(\.\d+)?(px|pt|em|rem|%)?\s*){1,4}$/], padding: [/^(-?\d+(\.\d+)?(px|pt|em|rem|%)?\s*){1,4}$/],
         // padding-left carries the list indent. Without it the bullets render
@@ -501,11 +502,19 @@ function corporateSignature(profile, manageUrl = "", cfg = config(), photo = nul
     ? paras(process.env.EMAIL_FORESIDE_DISCLOSURE || FORESIDE_DEFAULT) : "";
   const compliance = paras(disclosure) + foreside;
 
+  // Match the contact block, not the disclosures below it. Explicit dimensions
+  // and line spacing also work in classic Outlook, without object-fit or JS.
+  // Scale the selected framing proportionally; never stretch a headshot.
+  const photoHeight = rows.split("<br>").length * 16;
+  const ratio = Number.isFinite(photo?.width) && Number.isFinite(photo?.height)
+    && photo.width > 0 && photo.height > 0 ? photo.width / photo.height : 88 / 112;
+  const photoWidth = Math.max(1, Math.round(photoHeight * ratio));
   const card = photo && /^sender-photo-[a-f0-9]{64}@eicadvisormap$/.test(String(photo.cid || ""))
     ? `<table style="border-collapse:collapse;font-family:Arial,sans-serif;font-size:10pt;color:#333"><tbody><tr>`
-      + `<td style="vertical-align:top;padding:0 14px 0 0;width:88px"><img src="cid:${photo.cid}"`
-      + ` alt="${inline(p.displayName || "Sender")} photo" width="88" style="width:88px;max-width:88px;height:auto;display:block"></td>`
-      + `<td style="vertical-align:top;font-family:Arial,sans-serif;font-size:10pt;color:#333">${rows}</td></tr></tbody></table>` : rows;
+      + `<td style="vertical-align:top;padding:0 14px 0 0;width:${photoWidth}px"><img src="cid:${photo.cid}"`
+      + ` alt="${inline(p.displayName || "Sender")} photo" width="${photoWidth}" height="${photoHeight}"`
+      + ` style="width:${photoWidth}px;height:${photoHeight}px;display:block"></td>`
+      + `<td style="vertical-align:top;padding:0;font-family:Arial,sans-serif;font-size:10pt;color:#333;line-height:16px;mso-line-height-rule:exactly">${rows}</td></tr></tbody></table>` : rows;
   return sanitizeEmailHtml(`<div style="font-family:Arial,sans-serif;font-size:10pt;color:#333;margin-top:18px">${card}`
     // Matched to archiveFooter() below -- same size and colour. These are all
     // small print doing the same job, and two nearly-but-not-quite identical
