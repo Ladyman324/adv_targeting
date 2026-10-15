@@ -1,5 +1,14 @@
 # Email signature — app settings values
 
+### Photo framing
+
+Settings → Email signature → Adjust photo provides drag/keyboard positioning,
+1–3× zoom, and an actual signature-size preview. Save crop keeps the original
+website/uploaded photo and framing metadata, so reopening the editor does not
+progressively degrade the image. Reset to original resets framing; Cancel makes
+no changes. Replacing a photo starts a new original. Cropping does not enable
+photos or change signatures already frozen into generated/scheduled messages.
+
 These go in the Function App's environment variables. They are **firm-wide
 constants**, identical for every rep. The per-rep half of the signature (name,
 title, phone, email) is generated from each rep's Microsoft Entra profile when

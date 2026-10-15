@@ -4254,10 +4254,12 @@ They stay on your call list and keep their history — this only takes them out 
         <div class="signature-photo-controls">
           ${data.photoAvailable ? `<img class="signature-photo-thumbnail" src="${esc(data.photoUrl)}" alt="Your selected signature photo">` : ""}
           <div><button type="button" class="set-btn" data-signature-upload>${data.photoAvailable ? "Replace photo" : "Choose photo"}</button>
+          ${data.photoAvailable ? '<button type="button" class="set-btn" data-signature-adjust>Adjust photo</button>' : ""}
           ${data.custom ? `<button type="button" class="set-btn" data-signature-reset>${data.websitePhotoAvailable ? "Use website photo" : "Remove uploaded photo"}</button>` : ""}
           <input type="file" data-signature-file accept="image/jpeg,image/png,image/webp" hidden>
           <p class="set-sub">${data.custom ? "Your uploaded photo" : data.photoAvailable ? "Photo supplied from the EIC website" : "No website photo is available for your account"}.</p></div>
         </div>
+        <div class="signature-crop" hidden></div>
         ${data.connected ? `<details class="signature-preview"${previewOpen ? " open" : ""}><summary>Preview signature</summary>
           <div>${previewWithImages(data.previewHtml, data.images)}</div></details>`
           : '<p class="set-sub">Connect Microsoft 365 to preview your name and contact details.</p>'}
@@ -4309,6 +4311,71 @@ They stay on your call list and keep their history — this only takes them out 
       };
       const reset = host.querySelector("[data-signature-reset]");
       if (reset) reset.onclick = () => run(() => api("reset_signature_photo", {}));
+      const adjust = host.querySelector("[data-signature-adjust]");
+      if (adjust) adjust.onclick = async () => {
+        adjust.disabled = true;
+        const editor = host.querySelector(".signature-crop");
+        editor.hidden = false;
+        editor.innerHTML = '<p class="set-sub" role="status">Loading original photo...</p>';
+        try {
+          const image = await new Promise((resolve, reject) => {
+            const img = new Image();
+            img.onload = () => resolve(img);
+            img.onerror = () => reject(new Error("The original photo could not be loaded. Please try again."));
+            img.src = data.originalPhotoUrl;
+          });
+          if (!host.isConnected || editor.hidden) return;
+          editor.innerHTML = `<p class="set-sub">Drag to position your photo, or focus it and use the arrow keys.</p>
+            <canvas width="264" height="336" tabindex="0" role="img" aria-label="Photo crop. Use arrow keys to reposition."></canvas>
+            <label class="signature-crop-zoom">Zoom <input type="range" min="1" max="3" step="0.01" value="1" aria-label="Photo zoom"></label>
+            <p class="set-sub">Signature-size preview</p>
+            <div class="signature-crop-preview">${data.cropPreviewHtml ? previewWithImages(data.cropPreviewHtml, data.cropImages) : '<img width="88" alt="Cropped signature photo">'}</div>
+            <p class="set-sub">Saving does not turn your photo on or change existing batches.</p>
+            <div><button type="button" class="set-btn" data-crop-save>Save crop</button>
+            <button type="button" class="set-btn" data-crop-reset>Reset to original</button>
+            <button type="button" class="set-btn" data-crop-cancel>Cancel</button></div>`;
+          const canvas = editor.querySelector("canvas"), ctx = canvas.getContext("2d");
+          const slider = editor.querySelector("input"), preview = editor.querySelector(".signature-crop-preview img");
+          const base = Math.max(canvas.width / image.naturalWidth, canvas.height / image.naturalHeight);
+          let zoom = data.crop?.zoom || 1, x = data.crop?.x || 0, y = data.crop?.y || 0, pointer = null;
+          slider.value = String(zoom);
+          const draw = () => {
+            const width = image.naturalWidth * base * zoom, height = image.naturalHeight * base * zoom;
+            x = Math.max(-(width - canvas.width) / 2, Math.min((width - canvas.width) / 2, x));
+            y = Math.max(-(height - canvas.height) / 2, Math.min((height - canvas.height) / 2, y));
+            ctx.fillStyle = "#ffffff"; ctx.fillRect(0, 0, canvas.width, canvas.height);
+            ctx.drawImage(image, (canvas.width - width) / 2 + x, (canvas.height - height) / 2 + y, width, height);
+            if (preview) preview.src = canvas.toDataURL("image/jpeg", 0.9);
+          };
+          slider.oninput = () => { zoom = Number(slider.value); draw(); };
+          canvas.onpointerdown = (event) => {
+            if (event.button !== 0) return;
+            pointer = { id: event.pointerId, x: event.clientX, y: event.clientY };
+            canvas.setPointerCapture(event.pointerId); canvas.focus();
+          };
+          canvas.onpointermove = (event) => {
+            if (!pointer || pointer.id !== event.pointerId) return;
+            const rect = canvas.getBoundingClientRect();
+            x += (event.clientX - pointer.x) * canvas.width / rect.width;
+            y += (event.clientY - pointer.y) * canvas.height / rect.height;
+            pointer.x = event.clientX; pointer.y = event.clientY; draw();
+          };
+          canvas.onpointerup = canvas.onpointercancel = canvas.onlostpointercapture = () => { pointer = null; };
+          canvas.onkeydown = (event) => {
+            const moves = { ArrowLeft: [-8, 0], ArrowRight: [8, 0], ArrowUp: [0, -8], ArrowDown: [0, 8] };
+            if (!moves[event.key]) return;
+            event.preventDefault(); x += moves[event.key][0]; y += moves[event.key][1]; draw();
+          };
+          editor.querySelector("[data-crop-reset]").onclick = () => { zoom = 1; x = y = 0; slider.value = "1"; draw(); };
+          editor.querySelector("[data-crop-cancel]").onclick = () => { editor.hidden = true; adjust.focus(); };
+          editor.querySelector("[data-crop-save]").onclick = () => run(() => api("put_signature_photo", {
+            dataBase64: canvas.toDataURL("image/jpeg", 0.9).split(",")[1], sourceHash: data.originalPhotoHash,
+            crop: { zoom, x, y },
+          }));
+          draw();
+        } catch (error) { editor.textContent = error.message || "The photo editor could not be opened."; }
+        finally { adjust.disabled = false; }
+      };
     } catch (error) {
       if (host.isConnected) host.innerHTML = `<p class="set-sub bad">Could not load your signature: ${esc(error.message)}.</p>`;
     }

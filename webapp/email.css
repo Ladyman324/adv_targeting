@@ -851,3 +851,12 @@
 .signature-preview summary { cursor:pointer; color:var(--accent, #286c9b); }
 .signature-preview > div { margin-top:8px; padding:10px; max-height:240px; overflow:auto; background:#fff; border:1px solid #ddd; border-radius:6px; }
 .signature-photo-status.bad { color:#a83232; }
+.signature-crop[hidden] { display:none; }
+.signature-crop { margin-top:12px; padding:12px; border:1px solid var(--border,#ddd); border-radius:6px; }
+.signature-crop canvas { display:block; width:176px; height:224px; max-width:100%; touch-action:none; cursor:grab; border-radius:4px; }
+.signature-crop canvas:active { cursor:grabbing; }
+.signature-crop canvas:focus-visible { outline:2px solid var(--accent,#286c9b); outline-offset:3px; }
+.signature-crop-zoom { display:flex; align-items:center; gap:10px; margin:12px 0; font-size:12px; }
+.signature-crop-zoom input { width:180px; max-width:75%; }
+.signature-crop-preview { background:#fff; padding:10px; border:1px solid #ddd; border-radius:4px; overflow:auto; }
+.signature-crop .set-btn { margin:6px 6px 0 0; }

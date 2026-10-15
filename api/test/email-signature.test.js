@@ -13,6 +13,39 @@ const profile = { displayName: photo.name, mail: photo.emails[0], jobTitle: "Sal
 const content = fs.readFileSync(path.join(__dirname, "../shared/signature-photos", photo.sha256 + ".jpg"));
 const hash = (bytes) => crypto.createHash("sha256").update(bytes).digest("hex");
 
+test("crop retains original metadata across repeated edits without changing opt-in", async () => {
+  let saved = null;
+  const st = {
+    getSignaturePhoto: async () => saved,
+    putSignaturePhoto: async (_owner, value) => { saved = value; },
+    signatureImageContainer: async () => ({ getBlockBlobClient: () => ({ uploadData: async () => {} }) }),
+  };
+  const crop = { zoom: 2, x: 10, y: -15 };
+  await signature.upload(who, content.toString("base64"), { store: st }, photo.sha256, crop);
+  assert.equal(saved.original.sha256, photo.sha256);
+  assert.deepEqual(saved.crop, crop);
+  assert.equal(saved.signaturePhotoEnabled, undefined);
+  await signature.upload(who, content.toString("base64"), { store: st }, photo.sha256, { zoom: 1, x: 0, y: 0 });
+  assert.equal(saved.original.sha256, photo.sha256);
+  assert.equal(saved.original.original, undefined);
+  await signature.upload(who, content.toString("base64"), { store: st });
+  assert.equal(saved.original, undefined, "replacement starts a new original");
+});
+
+test("crop rejects stale or foreign originals and invalid framing before any storage write", async () => {
+  let writes = 0;
+  const st = { getSignaturePhoto: async () => null,
+    signatureImageContainer: async () => { writes++; throw new Error("must not write"); } };
+  await assert.rejects(() => signature.upload(who, content.toString("base64"), { store: st }, "a".repeat(64),
+    { zoom: 1, x: 0, y: 0 }), error => error.statusCode === 409);
+  for (const crop of [null, {}, { zoom: 4, x: 0, y: 0 }, { zoom: 2, x: Infinity, y: 0 },
+    { zoom: 2, x: 0, y: 100001 }, { zoom: "2", x: 0, y: 0 }]) {
+    await assert.rejects(() => signature.upload(who, content.toString("base64"), { store: st }, photo.sha256, crop),
+      error => error.statusCode === 400);
+  }
+  assert.equal(writes, 0);
+});
+
 test("website inventory contains compact, integrity-checked photos bound to specific accounts", () => {
   assert.ok(Object.keys(seed).length >= 26);
   let size = 0;

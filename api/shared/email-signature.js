@@ -72,15 +72,20 @@ async function bundle(who, profile, options = {}) {
 }
 
 async function settings(who) {
-  const [connection, prefs, photo] = await Promise.all([
-    require("./email-auth").status(who.id), appStore.getSettings(who), selected(who),
+  const [connection, prefs, photo, custom] = await Promise.all([
+    require("./email-auth").status(who.id), appStore.getSettings(who), selected(who), store.getSignaturePhoto(who.id),
   ]);
   const enabled = prefs.signaturePhotoEnabled === "1";
   const profile = connection.profile;
   return { enabled, photoAvailable: !!photo, websitePhotoAvailable: !!seed[who.id],
     custom: !!(photo && photo.custom), connected: !!profile,
     photoUrl: photo ? `/api/email?op=signature_photo&sha=${photo.sha256}` : "",
+    originalPhotoUrl: photo ? `/api/email?op=signature_photo&sha=${(custom && custom.original || photo).sha256}` : "",
+    originalPhotoHash: photo ? (custom && custom.original || photo).sha256 : "",
+    crop: custom && custom.crop || null,
+    cropImages: photo ? [photo] : [],
     previewHtml: profile ? core.corporateSignature(profile, "", core.config(), enabled ? photo : null) : "",
+    cropPreviewHtml: profile && photo ? core.corporateSignature(profile, "", core.config(), photo) : "",
     images: enabled && photo ? [photo] : [] };
 }
 
@@ -126,13 +131,25 @@ function validatePhoto(content) {
   return { contentType, width, height };
 }
 
-async function upload(who, dataBase64, deps = {}) {
+async function upload(who, dataBase64, deps = {}, sourceHash = "", crop = null) {
   if (typeof dataBase64 !== "string" || dataBase64.length > Math.ceil(MAX_PHOTO_BYTES / 3) * 4
       || !/^[A-Za-z0-9+/]+={0,2}$/.test(dataBase64)) throw problem("Choose a valid JPEG or PNG photo smaller than 512 KB.");
   const content = Buffer.from(dataBase64, "base64");
   const info = validatePhoto(content), sha256 = digest(content);
   const photo = { ...info, sha256, size: content.length };
   const st = deps.store || store;
+  if (sourceHash) {
+    const current = await st.getSignaturePhoto(who.id);
+    const original = current && (current.original || current) || seed[who.id];
+    if (!original || original.sha256 !== sourceHash)
+      throw problem("Your photo changed. Reopen Adjust photo and try again.", 409);
+    // Keep the original available without changing immutable message images.
+    photo.original = { sha256: original.sha256, contentType: original.contentType, size: original.size };
+    if (!crop || ![crop.zoom, crop.x, crop.y].every(Number.isFinite)
+        || crop.zoom < 1 || crop.zoom > 3 || Math.abs(crop.x) > 100000 || Math.abs(crop.y) > 100000)
+      throw problem("The photo crop is invalid. Reopen Adjust photo and try again.");
+    photo.crop = { zoom: crop.zoom, x: crop.x, y: crop.y };
+  }
   const container = await st.signatureImageContainer();
   const key = blobName(who, sha256);
   try {

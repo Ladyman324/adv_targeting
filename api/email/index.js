@@ -243,7 +243,7 @@ module.exports = async function (context, req) {
     }
     const body = req.body || {};
     if (op === "put_signature_photo") return ok(context,
-      await require("../shared/email-signature").upload(who, body.dataBase64));
+      await require("../shared/email-signature").upload(who, body.dataBase64, {}, body.sourceHash || "", body.crop));
     if (op === "reset_signature_photo") {
       await require("../shared/email-signature").reset(who);
       return ok(context, { ok: true });
