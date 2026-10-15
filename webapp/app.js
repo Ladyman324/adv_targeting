@@ -4519,7 +4519,8 @@ function paintSettings(){
     + `</div>`
 
     + `<div class="set-row set-block"><span>Email signature</span>`
-    + `<p class="set-sub">Generated centrally from your Microsoft 365 profile and the approved corporate disclosure. The exact signature appears in every email preview.</p></div>`
+    + `<p class="set-sub">Your Microsoft 365 contact details and the corporate disclosure are included automatically.</p>`
+    + `<div data-signature-settings></div></div>`
 
     + (Dial.state.settingsFeatures.actEmailWrite
       ? `<label class="set-row set-check"><input id="setActEmailWrite" type="checkbox"`
@@ -4545,6 +4546,7 @@ function paintSettings(){
 
     + `<p class="set-saved" id="setSaved"></p>`
     + `<button type="button" class="ask-btn ghost" data-set="close">Close</button></div>`;
+  if (window.EmailComposer) EmailComposer.mountSignatureSettings(setBack.querySelector("[data-signature-settings]"));
 }
 
 async function saveSetting(patch){

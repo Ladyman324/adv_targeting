@@ -843,3 +843,11 @@
 .email-followup [hidden]{display:none!important}
 .email-common[hidden],.email-individual[hidden]{display:none!important}
 .email-followup .email-preview{margin-top:16px;padding:16px;border:1px solid var(--border,#d7dde5);border-radius:10px}
+.signature-photo-toggle { display:flex; align-items:center; gap:8px; margin-top:10px; }
+.signature-photo-controls { display:flex; align-items:center; gap:12px; margin-top:10px; }
+.signature-photo-controls .set-btn { margin:0 6px 5px 0; }
+.signature-photo-thumbnail { width:48px; max-height:72px; object-fit:contain; border-radius:4px; }
+.signature-preview { margin-top:12px; font-size:12px; }
+.signature-preview summary { cursor:pointer; color:var(--accent, #286c9b); }
+.signature-preview > div { margin-top:8px; padding:10px; max-height:240px; overflow:auto; background:#fff; border:1px solid #ddd; border-radius:6px; }
+.signature-photo-status.bad { color:#a83232; }

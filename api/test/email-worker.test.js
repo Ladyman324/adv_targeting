@@ -150,6 +150,32 @@ test("draft retry reconciles the application property before creating anything",
   assert.equal(f.batch.status, "drafts_ready");
 });
 
+test("resumed drafting attaches the frozen sender photo without reading current settings", async () => {
+  const signatures = require("../shared/email-signature");
+  const inventory = require("../shared/signature-photos/seed.json").photos;
+  const [userId, photo] = Object.entries(inventory)[0];
+  const image = signatures.descriptor({ id: userId }, photo);
+  const f = fixture("drafts", "draft_pending");
+  f.batch.userId = userId; f.batch.graphMailboxId = userId; f.message.userId = userId;
+  f.message.inlineImages = [image];
+  f.store.getSignaturePhoto = async () => { throw new Error("Current preferences must not be read"); };
+  const attached = [];
+  await worker.processWork({ kind: "draft", userId, batchId: "batch-1", messageId: "message-1" }, {
+    ...f, auth: { tokenFor: async () => ({ accessToken: "mock", mailboxId: userId }) },
+    graph: { findByAppId: async () => routedDraft("existing-draft"), getMessage: async () => routedDraft("existing-draft"),
+      attachDocuments: async () => {},
+      attachInlineImages: async (_token, id, images, load) => {
+        attached.push({ id, images });
+        const bytes = await load(images[0]);
+        assert.equal(require("node:crypto").createHash("sha256").update(bytes).digest("hex"), photo.sha256);
+      },
+    },
+  });
+  assert.equal(f.message.state, "draft_ready");
+  assert.equal(attached.length, 1);
+  assert.equal(attached[0].images[0].sha256, photo.sha256);
+});
+
 test("send retry treats a non-draft immutable message as already sent", async () => {
   const f = fixture("send", "send_scheduled");
   f.message.graphMessageId = "immutable-1";

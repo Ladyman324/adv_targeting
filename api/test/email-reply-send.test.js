@@ -257,6 +257,21 @@ test("one-off policy honors a 300-person allowance and rejects an out-of-range s
   }
 });
 
+test("one-off replies prepare and attach the selected signature photo before submitting", async () => {
+  const d = deps();
+  const photo = { kind: "signature-photo", cid: "sender-photo-test", sha256: "a".repeat(64) };
+  const order = [];
+  d.signature = { bundle: async () => ({ photo, images: [photo] }) };
+  d.core.corporateSignature = (_profile, _url, _cfg, selected) => {
+    assert.equal(selected, photo); return "<div>Photo signature</div>";
+  };
+  d.graph.attachInlineImages = async (_token, _draft, images) => { assert.deepEqual(images, [photo]); order.push("photo"); };
+  d.graph.sendDraft = async () => { order.push("send"); };
+  await send.reply(BO, REPLY, d);
+  assert.deepEqual(order, ["photo", "send"]);
+  assert.match(d.calls.bodies[0].html, /Photo signature/);
+});
+
 test("rolling external limit refusal stops both paths before a draft", async () => {
   for (const [name, invoke] of [
     ["reply", (d) => send.reply(BO, REPLY, d)],

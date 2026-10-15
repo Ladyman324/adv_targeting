@@ -2327,13 +2327,16 @@ ${t.bodyText}`);
    * markup, and an unknown cid is left alone rather than pointed somewhere.
    */
   function previewWithImages(html, images, templateId) {
-    if (!html || !(images || []).length || !templateId) return html || "";
+    if (!html || !(images || []).length) return html || "";
     const byCid = new Map((images || []).map((i) => [String(i.cid || "").toLowerCase(), i]));
     return String(html).replace(/src="cid:([^"]+)"/gi, (whole, cid) => {
       const image = byCid.get(String(cid).toLowerCase());
       if (!image) return whole;
-      const url = `/api/email?op=template_image&templateId=${encodeURIComponent(templateId)}`
-        + `&imageId=${encodeURIComponent(image.id)}`;
+      if (image.kind !== "signature-photo" && !templateId) return whole;
+      const url = image.kind === "signature-photo"
+        ? `/api/email?op=signature_photo&sha=${encodeURIComponent(image.sha256)}`
+        : `/api/email?op=template_image&templateId=${encodeURIComponent(templateId)}`
+          + `&imageId=${encodeURIComponent(image.id)}`;
       return `src="${url}"`;
     });
   }
@@ -2664,7 +2667,7 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
             ? `<p><b>Bcc:</b> ${(m.bcc || []).map((a) => `${esc(a)}<span class="env-note">${
                 esc(bccReason(a, b))}</span>`).join(", ")}</p>` : ""}
           <p><b>Subject:</b> ${esc(m.subject)}</p><p><b>Attachments:</b> ${attachments.length ? attachments.map((a) => `${esc(a.name)} (${bytes(a.size)})`).join(", ") : "None"}</p></div>
-          <div class="email-rendered">${previewWithImages(m.bodyHtml, m.inlineImages, b.templateId)}${m.signatureHtml || ""}
+          <div class="email-rendered">${previewWithImages((m.bodyHtml || "") + (m.signatureHtml || ""), m.inlineImages, b.templateId)}
           ${b.parentBatchId ? originalEmailHtml((detail.originals || []).find((o) => o.graphMessageId === m.followUpOfGraphId), b.graphMailbox) : ""}</div></section>
         <aside id="emailDeliveryPlan" class="email-plan${deliveryPlan && deliveryPlan.fit === false ? " cannot-fit" : ""}">
           ${capacityPlanCardHtml(deliveryPlan, b, locked)}</aside>
@@ -2859,9 +2862,9 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
   function originalEmailHtml(original, senderMail = "") {
     if (!original) return '<p class="email-notice bad">Original message unavailable. Open the original batch before proceeding.</p>';
     const sent = original.sentUtc ? new Date(original.sentUtc) : null;
-    const body = original.bodyHtml
-      ? previewWithImages(original.bodyHtml, original.inlineImages, original.templateId)
-      : `<div class="email-followup-text">${esc(original.bodyText || "Original text unavailable.")}</div>`;
+    const body = previewWithImages((original.bodyHtml
+      || `<div class="email-followup-text">${esc(original.bodyText || "Original text unavailable.")}</div>`)
+      + (original.signatureHtml || ""), original.inlineImages, original.templateId);
     return `<blockquote class="email-thread-quote" aria-label="Quoted original message">
       <div class="email-thread-header">
         <div><b>From:</b> ${esc(original.senderMail || senderMail)}</div>
@@ -2869,7 +2872,7 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
         <div><b>To:</b> ${esc(original.name || original.email || "")}${original.name && original.email ? ` &lt;${esc(original.email)}&gt;` : ""}</div>
         <div><b>Subject:</b> ${esc(original.subject || "(Subject unavailable)")}</div>
       </div>
-      <div class="email-thread-body">${body}${original.signatureHtml || ""}</div>
+      <div class="email-thread-body">${body}</div>
     </blockquote>`;
   }
 
@@ -4237,6 +4240,80 @@ They stay on your call list and keep their history — this only takes them out 
     return { isAdmin: adminKnown, internalRecipients: settingsInternalRecipients };
   }
 
+  async function mountSignatureSettings(host) {
+    if (!host) return;
+    const previewOpen = !!host.querySelector(".signature-preview")?.open;
+    host.innerHTML = '<p class="set-sub">Loading signature...</p>';
+    try {
+      const data = await api("signature_settings", null, "GET");
+      if (!host.isConnected) return;
+      host.innerHTML = `<label class="set-radio signature-photo-toggle"><input type="checkbox"
+          data-signature-toggle${data.enabled ? " checked" : ""}${!data.photoAvailable && !data.enabled ? " disabled" : ""}>
+          Include my photo</label>
+        <p class="set-sub">Off by default. Applies to new emails; existing batches keep their signature.</p>
+        <div class="signature-photo-controls">
+          ${data.photoAvailable ? `<img class="signature-photo-thumbnail" src="${esc(data.photoUrl)}" alt="Your selected signature photo">` : ""}
+          <div><button type="button" class="set-btn" data-signature-upload>${data.photoAvailable ? "Replace photo" : "Choose photo"}</button>
+          ${data.custom ? `<button type="button" class="set-btn" data-signature-reset>${data.websitePhotoAvailable ? "Use website photo" : "Remove uploaded photo"}</button>` : ""}
+          <input type="file" data-signature-file accept="image/jpeg,image/png,image/webp" hidden>
+          <p class="set-sub">${data.custom ? "Your uploaded photo" : data.photoAvailable ? "Photo supplied from the EIC website" : "No website photo is available for your account"}.</p></div>
+        </div>
+        ${data.connected ? `<details class="signature-preview"${previewOpen ? " open" : ""}><summary>Preview signature</summary>
+          <div>${previewWithImages(data.previewHtml, data.images)}</div></details>`
+          : '<p class="set-sub">Connect Microsoft 365 to preview your name and contact details.</p>'}
+        <p class="set-sub signature-photo-status" role="status"></p>`;
+      const status = host.querySelector(".signature-photo-status");
+      const run = async (action) => {
+        host.querySelectorAll("button,input").forEach((el) => { el.disabled = true; });
+        status.textContent = "Saving...";
+        try {
+          await action();
+          await mountSignatureSettings(host);
+          if (host.isConnected) host.querySelector(".signature-photo-status").textContent = "Saved.";
+        } catch (error) {
+          if (!host.isConnected) return;
+          host.querySelectorAll("button,input").forEach((el) => { el.disabled = false; });
+          const toggle = host.querySelector("[data-signature-toggle]");
+          toggle.checked = data.enabled; toggle.disabled = !data.photoAvailable && !data.enabled;
+          status.textContent = error.message || "The signature could not be saved.";
+          status.classList.add("bad");
+        }
+      };
+      host.querySelector("[data-signature-toggle]").onchange = (event) => {
+        const enabled = event.target.checked;
+        run(() => global.Dial.saveSettings({ signaturePhotoEnabled: enabled ? "1" : "0" }));
+      };
+      const fileInput = host.querySelector("[data-signature-file]");
+      host.querySelector("[data-signature-upload]").onclick = () => fileInput.click();
+      fileInput.onchange = () => {
+        const file = fileInput.files[0];
+        if (!file) return;
+        run(async () => {
+          if (!/^image\/(jpeg|png|webp)$/.test(file.type) || file.size > 10 * 1024 * 1024)
+            throw new Error("Choose a JPEG, PNG, or WebP photo smaller than 10 MB.");
+          const image = await new Promise((resolve, reject) => {
+            const element = new Image(), url = URL.createObjectURL(file);
+            element.onload = () => { URL.revokeObjectURL(url); resolve(element); };
+            element.onerror = () => { URL.revokeObjectURL(url); reject(new Error("That photo could not be opened.")); };
+            element.src = url;
+          });
+          const scale = Math.min(1, 320 / Math.max(image.naturalWidth, image.naturalHeight));
+          const canvas = document.createElement("canvas");
+          canvas.width = Math.round(image.naturalWidth * scale); canvas.height = Math.round(image.naturalHeight * scale);
+          const context = canvas.getContext("2d");
+          context.fillStyle = "#ffffff"; context.fillRect(0, 0, canvas.width, canvas.height);
+          context.drawImage(image, 0, 0, canvas.width, canvas.height);
+          const dataBase64 = canvas.toDataURL("image/jpeg", 0.9).split(",")[1];
+          await api("put_signature_photo", { dataBase64 });
+        });
+      };
+      const reset = host.querySelector("[data-signature-reset]");
+      if (reset) reset.onclick = () => run(() => api("reset_signature_photo", {}));
+    } catch (error) {
+      if (host.isConnected) host.innerHTML = `<p class="set-sub bad">Could not load your signature: ${esc(error.message)}.</p>`;
+    }
+  }
+
   // Exposed for the Settings panel's "copy a colleague" picker: the catalog is
   // fetched here, and the list is the server's, not the client's.
   const internalRecipients = () => settingsInternalRecipients
@@ -4253,7 +4330,7 @@ They stay on your call list and keep their history — this only takes them out 
   global.addEventListener("emailcapacityrequest", () => refreshCapacityStatus());
   global.EmailComposer = { open, openHistory, openAdmin, openFollowUp, openMailboxConnection,
                            openBatch: (id) => openBatchById(id, true), isAdmin, loadSettingsData,
-                           internalRecipients, documents, refreshCapacityStatus };
+                           internalRecipients, documents, refreshCapacityStatus, mountSignatureSettings };
   global.DirectSendOps = { accept: acceptDirect, watch: watchDirect,
                            pending: pendingDirect, resume: resumeDirect };
   setTimeout(resumeDirect, 0);

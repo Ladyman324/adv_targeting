@@ -12,7 +12,7 @@ const message = (id = "m1") => ({ id, state: "failed", sendAttempts: 0,
   failureCode: "draft_permanent_failure", capacityDay: "2026-09-18",
   outlookCheckStatus: "not_found", outlookCheckedUtc: new Date(now).toISOString(),
   subject: "Personal subject", subjectOverridden: true, bodyText: "Personal wording",
-  bodyHtml: "<p>Personal wording</p>", bodyOverridden: true, graphMessageId: "old-draft",
+  bodyHtml: "<p>Personal wording</p>", signatureHtml: "<div>Original signature</div>", bodyOverridden: true, graphMessageId: "old-draft",
   recipientEmail: "advisor@example.test", contactId: "123", attachments: [{ id: "doc", version: 1 }],
   teammateCc: ["mate@example.test"], teammateCcCrds: ["456"], inlineImages: [{ id: "image" }],
   reviewed: true, draftAttempts: 6, etag: "v1" });
@@ -80,6 +80,8 @@ test("preparation preserves content/copies, retires sources and creates no appro
   for (const m of ms) {
     assert.equal(m.state, "editing"); assert.equal(m.subject, "Personal subject");
     assert.equal(m.bodyText, "Personal wording"); assert.equal(m.bodyOverridden, true);
+    assert.equal(m.signatureHtml, "<div>Original signature</div>");
+    assert.deepEqual(m.inlineImages, [{ id: "image" }]);
     assert.equal(m.subjectOverridden, true); assert.equal(m.reviewed, false);
     assert.equal(m.graphMessageId, undefined); assert.equal(m.sendAttempts, 0);
     assert.equal(m.capacityDay, undefined); assert.equal(m.retryOfBatchId, "parent");

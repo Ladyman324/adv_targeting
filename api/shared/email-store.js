@@ -682,6 +682,22 @@ async function templateImageBytes(image) {
   return bytes;
 }
 
+async function getSignaturePhoto(userId) {
+  const row = await getOptional("policy", "signature-photo", String(userId));
+  const photo = row ? parse(row.photoJson, {}) : {};
+  return photo.sha256 ? photo : null;
+}
+
+async function putSignaturePhoto(who, photo) {
+  await (await table("policy")).upsertEntity({ partitionKey: "signature-photo", rowKey: who.id,
+    photoJson: json(photo), updatedUtc: now() }, "Replace");
+}
+
+async function resetSignaturePhoto(who) {
+  const row = await getOptional("policy", "signature-photo", who.id);
+  if (row) await (await table("policy")).deleteEntity("signature-photo", who.id, { etag: row.etag });
+}
+
 async function listDocuments() {
   const out = [];
   for await (const e of (await table("documents")).listEntities({ queryOptions: { filter: odata`PartitionKey eq ${"approved"}` } })) {
@@ -1653,6 +1669,7 @@ module.exports = {
   patchMessage, deleteMessage, reserveRetryMessages, claimMessage, listTemplates, getTemplate, setTemplatePublished, listDocuments, getDocuments,
   putDocument, updateDocument, documentPreview, deleteDocument, materialRoutes, putMaterialRoutes, putTemplate, deleteTemplate,
   putTemplateImage, deleteTemplateImage, templateImageBytes,
+  getSignaturePhoto, putSignaturePhoto, resetSignaturePhoto, signatureImageContainer: imageContainer,
   getSuppression, suppressEmail, listConnections, sentByInternetId,
   bounceAlreadySeen, markBounceSeen, recordDeliveryEvent, deliveryEvents,
   audit, policy, setPolicy, getDailyCap, listDailyCaps, setDailyCap,

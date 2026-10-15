@@ -439,6 +439,7 @@ async function validateMessage(message, duplicateEmails, cfg, currentDocsById, c
     if (Number(doc.size) > cfg.maxAttachmentBytes) errors.push({ code: "attachment_too_large", message: `${doc.name} exceeds the application attachment limit.` });
     attachmentBytes += Number(doc.size) || 0;
   }
+  attachmentBytes += (message.inlineImages || []).reduce((sum, image) => sum + (Number(image.size) || 0), 0);
   const estimated = Buffer.byteLength(message.subject || "") + Buffer.byteLength(message.bodyHtml || "")
     + Buffer.byteLength(message.signatureHtml || "") + Math.ceil(attachmentBytes * 4 / 3) + 4096;
   if (estimated > cfg.maxMessageBytes) errors.push({ code: "message_too_large", message: "Estimated message size exceeds the configured application limit; the Exchange tenant may be lower still." });
@@ -1145,7 +1146,8 @@ async function createBatch(who, input) {
   // Read ONCE, here, so every message in the batch is copied the same way even
   // if the rep edits the setting while the batch is being built.
   const prefs = await appStore.getSettings(who).catch(() => ({}));
-  const signatureHtml = core.corporateSignature(profile, "", cfg);
+  const signature = await require("./email-signature").bundle(who, profile, { prefs, cfg });
+  const signatureHtml = signature.signatureHtml;
   const unionDocuments = new Map(documents.map((doc) => [doc.id, doc]));
   for (const routed of routedMaterials.values()) for (const doc of routed.documents)
     unionDocuments.set(doc.id, doc);
@@ -1222,10 +1224,10 @@ async function createBatch(who, input) {
       teammateCcCrdsJson: "[]",
       subject: subject.rendered, bodyText: body.rendered,
       bodyHtml: core.plainTextToSafeHtml(body.rendered, template.images || []),
-      inlineImages: template.images || [],
+      inlineImages: [...(template.images || []), ...signature.images],
       // Per-recipient: the footer's preference link is signed for THIS address.
       signatureHtml: core.corporateSignature(profile,
-        suppress.manageUrl(r.email, r.contactId), cfg),
+        suppress.manageUrl(r.email, r.contactId), cfg, signature.photo),
       baseRevision: 1, attachments: [...new Map([...documents, ...(routedMaterials.get(r.email) || { documents: [] }).documents].map((doc) => [doc.id, doc])).values()], validation: { errors: [
         ...subject.missing.map((f) => ({ code: "missing_merge_value", message: `Missing ${f}.` })),
         ...body.missing.map((f) => ({ code: "missing_merge_value", message: `Missing ${f}.` })),

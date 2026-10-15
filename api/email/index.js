@@ -38,6 +38,15 @@ module.exports = async function (context, req) {
         isAdmin: isAdmin(who),
         internalRecipients: emailCore.config().internalRecipients,
       });
+      if (op === "signature_settings") return ok(context, await require("../shared/email-signature").settings(who));
+      if (op === "signature_photo") {
+        const bytes = await require("../shared/email-signature").bytes(who, String(req.query.sha || ""));
+        context.res = { status: 200, isRaw: true, body: bytes, headers: {
+          "Content-Type": bytes[0] === 137 ? "image/png" : "image/jpeg",
+          "Cache-Control": "private, max-age=86400, immutable", "X-Content-Type-Options": "nosniff",
+        } };
+        return;
+      }
       if (op === "batch") return ok(context, await service.getBatchDetail(who, String(req.query.id || "")));
       /* Who is left to follow up, and who came off the list and why.
        *
@@ -233,6 +242,12 @@ module.exports = async function (context, req) {
         + `This usually means the API needs redeploying to match the app.`);
     }
     const body = req.body || {};
+    if (op === "put_signature_photo") return ok(context,
+      await require("../shared/email-signature").upload(who, body.dataBase64));
+    if (op === "reset_signature_photo") {
+      await require("../shared/email-signature").reset(who);
+      return ok(context, { ok: true });
+    }
     /* A rep marking where they have got to on a reply.
      *
      * This is what stops the queue becoming a list of eight hundred people who

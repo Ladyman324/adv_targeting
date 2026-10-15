@@ -763,7 +763,9 @@ async function draft(work, deps) {
     // would reach the advisor with a broken image where the chart should be.
     if ((claimed.inlineImages || []).length) {
       await deps.graph.attachInlineImages(token.accessToken, found.id, claimed.inlineImages,
-        (image) => deps.store.templateImageBytes(image));
+        (image) => image.kind === "signature-photo"
+          ? require("../shared/email-signature").bytes({ id: work.userId }, image.sha256)
+          : deps.store.templateImageBytes(image));
     }
     const latest = await deps.store.getMessage(work.userId, work.batchId, work.messageId);
     const latestBatch = await deps.store.getBatch(work.userId, work.batchId);

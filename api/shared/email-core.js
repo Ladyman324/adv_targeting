@@ -380,7 +380,7 @@ function sanitizeEmailHtml(html) {
     // in Word was gone by the time the advisor read it.
     allowedTags: ["p", "br", "b", "strong", "i", "em", "u", "a", "table", "tbody", "tr", "td",
                   "span", "div", "img", "ul", "ol", "li"],
-    allowedAttributes: { a: ["href"], img: ["src", "alt", "style"], "*": ["style"] },
+    allowedAttributes: { a: ["href"], img: ["src", "alt", "style", "width"], "*": ["style"] },
     allowedSchemes: ["http", "https", "mailto", "tel"],
     // cid: only, and only on images -- a part already attached to this message.
     // http(s) image sources are deliberately absent: Outlook blocks remote
@@ -402,6 +402,9 @@ function sanitizeEmailHtml(html) {
         // runs off the side of a phone. They were being stripped silently.
         "max-width": [/^\d+(px|%)$/], height: [/^(auto|\d+(px|%))$/],
         display: [/^(block|inline|inline-block)$/],
+        width: [/^\d+(px|%)$/],
+        "vertical-align": [/^(top|middle|bottom)$/],
+        "border-collapse": [/^(collapse|separate)$/],
       },
     },
     disallowedTagsMode: "discard",
@@ -441,7 +444,7 @@ function archiveFooter(manageUrl) {
     + `<p style="margin:0">${esc(text)}${link}. Thank you.</p></div>`;
 }
 
-function corporateSignature(profile, manageUrl = "", cfg = config()) {
+function corporateSignature(profile, manageUrl = "", cfg = config(), photo = null) {
   const p = profile || {};
   const inline = (value) => String(value || "").replace(/&/g, "&amp;")
     .replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
@@ -498,7 +501,12 @@ function corporateSignature(profile, manageUrl = "", cfg = config()) {
     ? paras(process.env.EMAIL_FORESIDE_DISCLOSURE || FORESIDE_DEFAULT) : "";
   const compliance = paras(disclosure) + foreside;
 
-  return sanitizeEmailHtml(`<div style="font-family:Arial,sans-serif;font-size:10pt;color:#333;margin-top:18px">${rows}`
+  const card = photo && /^sender-photo-[a-f0-9]{64}@eicadvisormap$/.test(String(photo.cid || ""))
+    ? `<table style="border-collapse:collapse;font-family:Arial,sans-serif;font-size:10pt;color:#333"><tbody><tr>`
+      + `<td style="vertical-align:top;padding:0 14px 0 0;width:88px"><img src="cid:${photo.cid}"`
+      + ` alt="${inline(p.displayName || "Sender")} photo" width="88" style="width:88px;max-width:88px;height:auto;display:block"></td>`
+      + `<td style="vertical-align:top;font-family:Arial,sans-serif;font-size:10pt;color:#333">${rows}</td></tr></tbody></table>` : rows;
+  return sanitizeEmailHtml(`<div style="font-family:Arial,sans-serif;font-size:10pt;color:#333;margin-top:18px">${card}`
     // Matched to archiveFooter() below -- same size and colour. These are all
     // small print doing the same job, and two nearly-but-not-quite identical
     // sizes stacked on top of each other reads as a formatting accident rather

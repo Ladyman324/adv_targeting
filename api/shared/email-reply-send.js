@@ -337,6 +337,8 @@ async function attachAll(token, draftId, resolved, deps) {
   const gr = deps.graph || graph;
   if (resolved.documents.length) await gr.attachDocuments(token.accessToken, draftId, resolved.documents);
   if (resolved.files.length) await gr.attachFiles(token.accessToken, draftId, resolved.files);
+  if ((token.signatureImages || []).length) await gr.attachInlineImages(token.accessToken, draftId,
+    token.signatureImages, (image) => require("./email-signature").bytes(token.signatureOwner, image.sha256));
 }
 
 /* Has this exact send already happened?
@@ -388,7 +390,16 @@ async function alreadySent(token, operationId, deps) {
 
 function signatureFor(token, deps) {
   const cr = deps.core || core;
-  return cr.corporateSignature ? cr.corporateSignature(token.profile || {}) : "";
+  return cr.corporateSignature ? cr.corporateSignature(token.profile || {}, "",
+    typeof cr.config === "function" ? cr.config() : undefined, token.signaturePhoto) : "";
+}
+
+async function prepareSignature(who, token, deps = {}) {
+  const result = await (deps.signature || require("./email-signature")).bundle(who, token.profile || {},
+    { core: deps.core || core });
+  token.signaturePhoto = result.photo;
+  token.signatureImages = result.images;
+  token.signatureOwner = { id: who.id };
 }
 
 /* Reply to a message already on this advisor's timeline. */
@@ -447,6 +458,7 @@ async function reply(who, input, deps = {}) {
   // submission, so a kill switch changed during this request still wins.
   const cfg = await enforceDirectSendPolicy(who, recipients, opId, deps);
 
+  await prepareSignature(who, token, deps);
   const draft = await gr.createReply(token.accessToken, messageId, input.replyAll === true);
   if (!draft || !draft.id) throw httpError(502, "Microsoft did not return a reply draft.");
 
@@ -581,6 +593,7 @@ async function followUp(who, input, deps = {}) {
   const recipients = uniqueAddresses([to, ...compliance]);
   const cfg = await enforceDirectSendPolicy(who, recipients, opId, deps);
 
+  await prepareSignature(who, token, deps);
   const draft = await gr.createDraft(token.accessToken, {
     // createDraft stamps this as both the EICMessageId extended property and an
     // X-EIC-Message-Id header, which is what makes the retry check above work.
@@ -667,5 +680,5 @@ module.exports = { reply, followUp, replyAllAudience, audienceFor, textToHtml,
                    resolveAttachments, guard, stampOperation, alreadySent,
                    operationId, uniqueAddresses, effectiveReplyRecipients,
                    complianceAddresses, enforceDirectSendPolicy, waitForMailbox,
-                   refuseInternal, applyCompliance, attachAll, signatureFor,
+                   refuseInternal, applyCompliance, attachAll, signatureFor, prepareSignature,
                    MAX_CHARS, MAX_SUBJECT, MAX_FILES };

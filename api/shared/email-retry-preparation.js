@@ -75,7 +75,7 @@ async function prepare(who, input, overrides = {}) {
         attachmentIds, attachmentSummary: documents.map(({ id, name, size, contentType, version }) => ({ id, name, size, contentType, version })),
         graphMailboxId: parent.graphMailboxId, graphMailbox: parent.graphMailbox,
         senderMail: connection.profile.mail || connection.profile.userPrincipalName || parent.senderMail,
-        signatureHtml: d.core.corporateSignature(connection.profile, "", cfg),
+        signatureHtml: selected[0].signatureHtml || "",
         copySelf: parent.copySelf, copyInternal: parent.copyInternal,
         copyInternalTo: parent.copyInternalTo, ccColleague: parent.ccColleague,
         warningMessage: "Prepared for retry. Nothing has been sent. Review preserved wording, current attachments, and a new delivery plan before approval.",
@@ -116,7 +116,7 @@ async function prepare(who, input, overrides = {}) {
         teammatesAvailableJson: JSON.stringify(m.teammatesAvailable || []),
         subject: m.subject, bodyText: m.bodyText, bodyHtml: m.bodyHtml, inlineImages: m.inlineImages,
         subjectOverridden: m.subjectOverridden, bodyOverridden: m.bodyOverridden, baseRevision: 1,
-        signatureHtml: d.core.corporateSignature(connection.profile, d.suppress.manageUrl(m.recipientEmail, m.contactId), cfg),
+        signatureHtml: m.signatureHtml || "",
         attachments: (m.attachments || []).map(a => docs.get(a.id)),
         retryOfBatchId: parent.id, retryOfMessageId: m.id, followUpOfGraphId: m.followUpOfGraphId,
       });

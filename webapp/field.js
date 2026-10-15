@@ -1957,7 +1957,8 @@ function renderSettings(){
 
     <div class="set-row set-block">
       <span>Email signature</span>
-      <p class="set-sub">Generated centrally from your Microsoft 365 profile and the approved corporate disclosure. The exact signature appears in every email preview.</p>
+      <p class="set-sub">Your Microsoft 365 contact details and the corporate disclosure are included automatically.</p>
+      <div data-signature-settings></div>
     </div>
 
     ${Dial.state.settingsFeatures.actEmailWrite ? `<label class="set-row set-check">
@@ -1988,6 +1989,8 @@ function renderSettings(){
     </div>
 
     <p class="set-saved" id="setSaved"></p>`;
+
+  if (global.EmailComposer) EmailComposer.mountSignatureSettings($("settingsInner").querySelector("[data-signature-settings]"));
 
   // Asked after the panel is painted so opening Settings never blocks on a
   // round trip. Every write is re-checked server-side; this only decides

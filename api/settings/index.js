@@ -25,6 +25,12 @@ module.exports = async function (context, req) {
     }
 
     const body = req.body || {};
+    if (Object.prototype.hasOwnProperty.call(body, "signaturePhotoEnabled")
+        && body.signaturePhotoEnabled !== "0" && body.signaturePhotoEnabled !== "1") {
+      const err = new Error("Include my photo must be on or off.");
+      err.statusCode = 400;
+      throw err;
+    }
     if (Object.prototype.hasOwnProperty.call(body, "actEmailWrite")) {
       if (process.env.ACT_EMAIL_HISTORY_SYNC !== "1") {
         const err = new Error("ACT! email write-back is disabled by the administrator.");

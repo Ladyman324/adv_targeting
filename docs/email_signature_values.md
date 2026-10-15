@@ -7,6 +7,26 @@ they connect their mailbox — nothing to configure there.
 
 Built by `corporateSignature()` in `api/shared/email-core.js`.
 
+## Optional sender photos
+
+Settings on desktop and Field include an **Include my photo** control, off by
+default, and a signature preview. The current EIC website's 26 headshots are
+mapped to exact enabled Microsoft account IDs in
+`api/shared/signature-photos/seed.json`. This inventory does not update M365
+profile photos or require directory-admin permissions.
+
+Users can replace their own photo with a JPEG, PNG, or WebP. The browser
+resizes uploads to 320 pixels and encodes JPEG; the API validates JPEG/PNG
+bytes, dimensions, and a 512 KB maximum. Uploading does not opt the user in.
+The photo sits beside clickable Microsoft 365 contact details; corporate
+disclosures and preference links remain below it.
+
+Generated messages freeze the chosen image hash and signature HTML. Images
+are embedded as CID attachments from immutable private blobs in the existing
+email image container. Replacing or restoring a photo retains old blobs for
+scheduled work and historical previews. Retry reviews preserve that same
+snapshot. Batch follow-ups continue without a new signature or photo.
+
 ---
 
 ## `EMAIL_SIGNATURE_COMPANY_NAME`

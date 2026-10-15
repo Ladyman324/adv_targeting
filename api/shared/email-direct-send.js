@@ -261,6 +261,7 @@ async function start(who, input, kind, overrides = {}) {
       return publicStatus(next);
     }
     if (!draft) {
+      await replyTools.prepareSignature(who, prepared.token, deps);
       draft = kind === "reply"
         ? await deps.graph.createReply(prepared.token.accessToken, prepared.messageId,
           input.replyAll === true)
