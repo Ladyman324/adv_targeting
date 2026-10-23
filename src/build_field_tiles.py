@@ -85,7 +85,7 @@ COLUMNS = ["crd", "name", "title", "firm", "city", "state", "lat", "lon",
            # differs for about 2,550 people, so the column is empty almost
            # everywhere and costs a comma. Those 2,550 are precisely the ones
            # being greeted wrongly today -- Christopher Tolman, who is Chris.
-           "sal"]
+           "sal", "ranked_year"]
 
 
 def cell_of(lat: float, lon: float) -> str:
@@ -159,6 +159,27 @@ def load_ranked() -> set:
     return out
 
 
+def load_ranked_years() -> dict:
+    """Latest known recognition, not an assumption that every badge is current."""
+    years = {}
+    for name in ("barrons.json", "forbes.json"):
+        path = WEB / name
+        if not path.exists():
+            continue
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        for crd, value in payload.get("latestYear", {}).items():
+            if isinstance(value, int) and not isinstance(value, bool):
+                years[crd] = max(years.get(crd, 0), value)
+        # Legacy Barron's already carried years before latestYear existed.
+        if name == "barrons.json":
+            for crd, entries in payload.get("advisors", {}).items():
+                for entry in entries:
+                    value = entry[3] if len(entry) > 3 else None
+                    if isinstance(value, int) and not isinstance(value, bool):
+                        years[crd] = max(years.get(crd, 0), value)
+    return years
+
+
 def main() -> None:
     contacts = json.loads((WEB / "contacts.json").read_text(encoding="utf-8"))
     advisors = contacts["advisors"]
@@ -168,6 +189,7 @@ def main() -> None:
     index_names = {str(r[0]): r[1] for r in
                    json.loads((WEB / "advisor_index.json").read_text(encoding="utf-8"))["advisors"]}
     ranked = load_ranked()
+    ranked_years = load_ranked_years()
     print(f"[*] contacts.json: {len(advisors):,} advisors")
     print(f"[*] ranked by Barron's or Forbes: {len(ranked & set(advisors)):,}")
 
@@ -244,6 +266,7 @@ def main() -> None:
             (lambda g, n: g if g and g.split()[0].lower() != n.split()[0].lower() else "")(
                 str(c.get("sal", "") or "").strip(),
                 formal_name or "x"),
+            ranked_years.get(crd),
         ])
 
     if TILES.exists():

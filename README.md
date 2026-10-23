@@ -5,11 +5,14 @@ a CRD-keyed prospect dataset and interactive map for selling EIC equity SMAs
 and the EIC mutual fund.
 
 ```powershell
-python run.py
-python src\export.py
-python src\rebuild_webapp.py
-python src\validate_webapp_data.py
+python src/refresh_data.py plan --mode act-only
 ```
+
+[The data refresh runbook](docs/data_refresh.md) covers ACT-only, selected-firm,
+SEC-only, rankings-only and full refreshes, isolated builds, validation and release
+preparation. Rebuilding or deploying code does not obtain fresh source data.
+Individual analytical builders remain available but are not the complete refresh
+and release workflow.
 
 The pipeline writes all firms to `data/output/firms.csv` and `firms.parquet`.
 Nothing is silently discarded: every legal firm keeps its CRD, firm type,

@@ -231,7 +231,8 @@ def free_geocode(candidates: pd.DataFrame, *, allow_network: bool = False) -> pd
     if len(cached):
         all_cache = pd.concat([cached, pd.DataFrame(fresh)], ignore_index=True)
         all_cache = all_cache.drop_duplicates("_loc_key", keep="last")
-        all_cache.to_csv(CACHE, index=False)
+        if fresh:
+            all_cache.to_csv(CACHE, index=False)
     else:
         all_cache = pd.DataFrame(fresh)
     if len(all_cache):

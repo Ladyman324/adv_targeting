@@ -97,6 +97,7 @@ def load(path: pathlib.Path) -> pd.DataFrame:
     for row in rows:
         state, market, segment = split_category(row.get("category"))
         records.append({
+            "year": row.get("year"),
             "source_list": row.get("list"),
             "rank": row.get("rank"),
             "category": row.get("category"),
@@ -125,11 +126,12 @@ def load(path: pathlib.Path) -> pd.DataFrame:
     # `uri` on both lists, so the state is inherited from their best-in-state
     # placement. In the 2026 harvest that covers 253 of 253 national rows;
     # anything left stateless is reported rather than quietly dropped.
-    known_state = (table.dropna(subset=["rank_state"])
-                        .drop_duplicates("forbes_uri")
-                        .set_index("forbes_uri")["rank_state"])
     missing = table["rank_state"].isna() & table["forbes_uri"].notna()
-    table.loc[missing, "rank_state"] = table.loc[missing, "forbes_uri"].map(known_state)
+    known_state = {(str(row.forbes_uri), None if pd.isna(row.year) else int(row.year)): row.rank_state
+                   for row in table.dropna(subset=["rank_state"]).itertuples()}
+    table.loc[missing, "rank_state"] = [
+        known_state.get((str(row.forbes_uri), None if pd.isna(row.year) else int(row.year)))
+        for row in table.loc[missing].itertuples()]
     table["state_inherited"] = missing & table["rank_state"].notna()
     return table
 

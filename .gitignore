@@ -48,4 +48,5 @@ dist/
 # contain internal record identifiers and must not become permanent Git history.
 api/shared/act_contacts.json
 api/shared/act_mail_codes.json
+api/shared/data-freshness.json
 

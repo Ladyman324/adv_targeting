@@ -49,7 +49,8 @@ def main() -> None:
     table = table[table["advisor_crd"].notna()].copy()
     table["advisor_crd"] = table["advisor_crd"].astype(str).str.strip()
     table["order"] = table["ranking"].map(LIST_RANK).fillna(len(LIST_ORDER))
-    table = table.sort_values(["advisor_crd", "order", "rank"])
+    table = table.sort_values(["advisor_crd", "order", "year", "rank"],
+                              ascending=[True, True, False, True])
 
     advisors: dict[str, list] = {}
     for crd, group in table.groupby("advisor_crd", sort=False):
@@ -77,6 +78,8 @@ def main() -> None:
         },
         "order": LIST_ORDER,
         "advisors": advisors,
+        "latestYear": {crd: max((entry[3] for entry in entries if entry[3] is not None), default=None)
+                       for crd, entries in advisors.items()},
     }
     OUT.mkdir(parents=True, exist_ok=True)
     (OUT / "barrons.json").write_text(json.dumps(payload, separators=(",", ":")),
@@ -88,7 +91,8 @@ def main() -> None:
     for name in LIST_ORDER:
         part = table[table["ranking"] == name]
         if len(part):
-            print(f"  {name:<12}{len(part):>6,}  {int(part['year'].iloc[0])}")
+            years = sorted({int(year) for year in part["year"].dropna()})
+            print(f"  {name:<12}{len(part):>6,}  editions {years or 'unknown'}")
 
 
 if __name__ == "__main__":

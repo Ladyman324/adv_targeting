@@ -137,14 +137,15 @@ def main() -> None:
     # names the firm's address, so for anyone employed there it corroborates
     # itself: EIC's record says Atlanta for every EIC employee regardless of
     # where they sit. Headquarters is the null hypothesis, not evidence.
-    profiles = json.loads(
-        (ROOT / "webapp" / "data" / "firm_profiles.json").read_text(encoding="utf-8"))
+    # Placement precedes national/profile export. Read current normalized SEC
+    # headquarters directly instead of feeding yesterday's exported profile
+    # back into a new SEC build.
+    headquarters = pd.read_parquet(ROOT / "data/output/firms.parquet", columns=["crd", "city", "state"]).fillna("")
     # City AND state, not state alone: matching on state made every Merrill
     # office in New York "headquarters" and pushed a quarter of all placements
     # into the weak bucket.
-    hq = {crd: (str(p.get("city") or "").upper().strip(),
-                str(p.get("state") or "").upper().strip())
-          for crd, p in profiles["profiles"].items()}
+    hq = {str(p.crd): (str(p.city).upper().strip(), str(p.state).upper().strip())
+          for p in headquarters.itertuples(index=False)}
     branch_city_u = br["branch_city"].fillna("").astype(str).str.upper().str.strip()
     br["is_hq"] = [hq.get(f, ("", "")) == (c, s) and s != ""
                    for f, c, s in zip(br["firm_crd"], branch_city_u, br["branch_state"])]

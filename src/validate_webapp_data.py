@@ -14,6 +14,18 @@ def read(name: str):
     return json.loads((WEB / name).read_text(encoding="utf-8"))
 
 
+def validate_forbes_entries(entries: list) -> None:
+    """Legacy five-column rows have unknown years; current rows append year."""
+    assert all(isinstance(entry, list) and len(entry) in (5, 6) for entry in entries), \
+        "forbes entry is not legacy 5 or current 6 wide"
+    assert all(entry[3] in ('c', 'h') for entry in entries), \
+        "forbes entry ships a tier below 'high' -- review rows must be withheld"
+    assert all(len(entry) == 5 or entry[5] is None or
+               (isinstance(entry[5], int) and not isinstance(entry[5], bool)
+                and 1900 <= entry[5] <= 2200) for entry in entries), \
+        "forbes entry year must be null or a four-digit publication year"
+
+
 NATIONAL_CELL = 0.25
 
 
@@ -239,8 +251,7 @@ def main() -> None:
         forbes = read("forbes.json")
         assert forbes["advisors"], "forbes.json carries no advisors"
         entries = [e for rows in forbes["advisors"].values() for e in rows]
-        assert all(len(e) == 5 for e in entries), "forbes entry is not 5 wide"
-        assert all(e[3] in ("c", "h") for e in entries),             "forbes entry ships a tier below 'high' -- review rows must be withheld"
+        validate_forbes_entries(entries)
         matched = sum(1 for crd in forbes["advisors"] if crd in advisor_ids)
         assert matched == len(forbes["advisors"]),             "forbes.json names a CRD that is not a mapped advisor"
         confirmed = sum(1 for e in entries if e[3] == "c")

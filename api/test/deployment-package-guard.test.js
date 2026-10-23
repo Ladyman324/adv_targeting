@@ -6,6 +6,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
+const crypto = require("node:crypto");
 
 const ROOT = path.resolve(__dirname, "..", "..");
 const SOURCE_ROOT = process.env.API_PACKAGE_SOURCE_ROOT || ROOT;
@@ -29,6 +30,61 @@ function check(dir) {
     cwd: SOURCE_ROOT, encoding: "utf8",
   });
 }
+
+function archiveFixture(t) {
+  const dir = fixture(t);
+  const stamp = "2026-10-23T00:00:00Z";
+  const contacts = Object.fromEntries(Array.from({ length: 1000 }, (_, i) => [String(i + 1), "fixture-" + i]));
+  const descriptor = {
+    schemaVersion: 1, registrySchemaVersion: 1,
+    registryContentHash: "a".repeat(64), shardManifestHash: "b".repeat(64),
+    recipientCount: 1000, ineligibleCount: 0,
+    provenance: { identityManifestHash: "c".repeat(64), identityLinksSha256: "d".repeat(64),
+      contactsSha256: "e".repeat(64), actSource: "fixture.json", actSourceSha256: "f".repeat(64) },
+  };
+  const canonical = (value) => Array.isArray(value)
+    ? "[" + value.map(canonical).join(",") + "]"
+    : value && typeof value === "object"
+      ? "{" + Object.keys(value).sort().map((key) => JSON.stringify(key) + ":" + canonical(value[key])).join(",") + "}"
+      : JSON.stringify(value);
+  descriptor.descriptorHash = crypto.createHash("sha256").update(canonical(descriptor)).digest("hex");
+  const files = {
+    "host.json": {}, "package.json": {}, "package-lock.json": {},
+    "release.json": { id: "fixture", commit: "a".repeat(40), builtUtc: stamp },
+    "local.settings.json": { IsEncrypted: false, Values: { AzureWebJobsStorage: "", FUNCTIONS_WORKER_RUNTIME: "node" } },
+    "shared/act_contacts.json": { built_utc: stamp, contacts },
+    "shared/act_mail_codes.json": { built_utc: stamp, addresses: contacts,
+      crds: Object.fromEntries(Object.entries(contacts).slice(0, 100)) },
+    "shared/approved-recipient-release.json": descriptor,
+  };
+  for (const [name, value] of Object.entries(files))
+    fs.writeFileSync(path.join(dir, name), JSON.stringify(value));
+  // Keep the archive outside the package tree so it cannot include itself.
+  const archive = dir + ".tgz";
+  t.after(() => fs.rmSync(archive, { force: true }));
+  const packed = spawnSync(BASH, ["-c", 'tar -czf "$1" .', "archive-fixture", "../" + path.basename(archive)],
+    { cwd: dir, encoding: "utf8" });
+  assert.equal(packed.status, 0, packed.stderr);
+  return { archive, digest: crypto.createHash("sha256").update(fs.readFileSync(archive)).digest("hex") };
+}
+
+test("archive hashes accept native Windows paths without filename escape prefixes", (t) => {
+  const { archive, digest } = archiveFixture(t);
+  if (process.platform === "win32") assert.ok(archive.includes("\\"));
+  const result = spawnSync(BASH, [SCRIPT, "--verify", archive, digest],
+    { cwd: SOURCE_ROOT, encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr);
+  assert.ok(result.stdout.includes("[*] sha256 " + digest));
+});
+
+test("archive verification still rejects the wrong digest before extraction", (t) => {
+  const { archive } = archiveFixture(t);
+  const result = spawnSync(BASH, [SCRIPT, "--verify", archive, "0".repeat(64)],
+    { cwd: SOURCE_ROOT, encoding: "utf8" });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /SHA-256 mismatch/);
+  assert.doesNotMatch(result.stdout, /\[\*\] verified/);
+});
 
 function runnerFixture(t) {
   // The test tree is local like the build's staged workspace. SOURCE_ROOT and

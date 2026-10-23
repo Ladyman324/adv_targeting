@@ -221,6 +221,7 @@ function hasAssets(r){
   return BOOK_STATE === "ready" && !!bookFor(r[COL.crd]);
 }
 const isRanked = (r) => r[COL.ranked] === 1;
+const rankedYear = (r) => COL.ranked_year == null ? null : (r[COL.ranked_year] || null);
 
 function passes(r){
   if (CHIPS.direct && !isDirect(r)) return false;
@@ -261,7 +262,7 @@ function render(rows, note){
         ? "Inferred ACT economic link; contact identity is evaluated separately"
         : "EIC account book on file"}">${
         assetTotal > 0 ? esc(money(assetTotal)) : "EIC book"}</span>` : "",
-      isRanked(r) ? `<span class="badge rank" title="Barron's or Forbes ranked">&#9733;</span>` : "",
+      isRanked(r) ? `<span class="badge rank" title="Barron's or Forbes ranked${rankedYear(r) ? `; latest recognition ${esc(rankedYear(r))}` : ''}">&#9733;${rankedYear(r) ? ` ${esc(rankedYear(r))}` : ''}</span>` : "",
       // Swiping a row queues it, so the row has to be able to say it is queued.
       Dial.inQueue(r[COL.crd]) ? `<span class="badge queued" title="on the call list">&#10003;</span>` : "",
     ].join("");
@@ -486,7 +487,7 @@ function openSheet(r){
     ${withEic(r)}
     ${territoryRow(r)}
     ${isRanked(r) ? `<p class="sheet-row"><span class="sheet-lab">Ranked</span>
-        &#9733; Barron's or Forbes</p>` : ""}
+        &#9733; Barron's or Forbes${rankedYear(r) ? `; latest recognition ${esc(rankedYear(r))}` : ""}</p>` : ""}
     ${r[COL.tier] === "review" ? `<p class="warn-box">&#9888; Unconfirmed match —
        we believe this is them, but it is not certain.</p>` : ""}
     ${dnc ? `<p class="warn-box">&#9940; <b>Do not call.</b> Added by

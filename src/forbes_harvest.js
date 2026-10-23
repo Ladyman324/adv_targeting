@@ -16,13 +16,34 @@
  * HOW TO RUN
  *   1. Open https://www.forbes.com/lists/best-in-state-wealth-advisors/
  *   2. DevTools -> Console, paste this file, Enter.
- *   3. await FORBES.run()   -- it visits both lists and downloads the JSON.
+ *   3. FORBES.configure({years:{"best-in-state":2026,"top-wealth":2026}})
+ *   4. await FORBES.run()   -- it visits both lists and downloads the JSON.
+ * Optionally select categories:["best-in-state"]. Verify the publication year
+ * on the actual page: metadata alone cannot request a historic edition.
  */
 (() => {
 const LISTS = [
   { name: "best-in-state", path: "/lists/best-in-state-wealth-advisors/" },
   { name: "top-wealth",    path: "/lists/top-wealth-advisors/" },
 ];
+let selectedCategories = LISTS.map(list => list.name), years = {}, running = false;
+function configure(options = {}){
+  if (running) throw new Error("Cannot change configuration during a harvest");
+  const categories = options.categories === undefined ? selectedCategories : options.categories;
+  if (!Array.isArray(categories) || !categories.length || new Set(categories).size !== categories.length ||
+      categories.some(name => !LISTS.some(list => list.name === name))) throw new Error("Unknown or empty ranking categories");
+  const updates = options.years || {};
+  for (const [name, year] of Object.entries(updates)){
+    if (!LISTS.some(list => list.name === name) || !Number.isInteger(year) || year < 1900 || year > 2200)
+      throw new Error("Invalid ranking edition; supply a four-digit year by category");
+  }
+  selectedCategories = categories.slice();
+  years = {...years, ...updates};
+  return configuration();
+}
+function configuration(){
+  return {categories:selectedCategories.slice(), years:{...years}};
+}
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
@@ -92,11 +113,11 @@ function download(obj, filename){
 
 async function run(){
   const out = [];
-  for (const list of LISTS){
+  for (const list of LISTS.filter(list => selectedCategories.includes(list.name))){
     // the page we are already on needs no iframe
     const here = location.pathname.replace(/\/?$/, "/") === list.path;
     const rows = here ? recordsFrom(document) : await loadList(list.path);
-    rows.forEach(r => out.push({ list: list.name, ...r }));
+    rows.forEach(r => out.push({ list: list.name, year:years[list.name] ?? null, ...r }));
     console.log(`[${list.name}] ${rows.length} advisors`);
     if (!here) await sleep(1000);
   }
@@ -107,6 +128,13 @@ async function run(){
   return out;
 }
 
-window.FORBES = { run, records: recordsFrom };
+window.FORBES = {
+  run: async () => {
+    if (running) throw new Error("Harvest already running");
+    running = true;
+    try { return await run(); } finally { running = false; }
+  },
+  configure, config:configuration, records: recordsFrom,
+};
 console.log("Forbes harvester ready. Run:  await FORBES.run()");
 })();

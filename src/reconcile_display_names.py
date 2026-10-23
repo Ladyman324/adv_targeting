@@ -216,7 +216,13 @@ def decide() -> dict:
             if not corroborated(published, entry):
                 skipped["no_corroboration"] += 1
                 continue
-            out[row.advisor_crd] = (f"{first} {last}".title(), f"{used} {last}".title())
+            # The corroborated SEC name may be a middle name. Emitting first
+            # unconditionally could turn Brooks Woodruff into C Woodruff even
+            # though the initial guard correctly approved "Brooks", not "C".
+            given = next(value for value in
+                         (first, str(row.middle_name or "").strip(), used)
+                         if value.lower() == candidate)
+            out[row.advisor_crd] = (f"{given} {last}".title(), f"{used} {last}".title())
             continue
         # A name the SEC has never heard of -- see shortens_used() for the
         # narrow case where that is accepted, and for what it deliberately is

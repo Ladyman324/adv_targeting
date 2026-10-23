@@ -472,6 +472,7 @@ def match(forbes: pd.DataFrame, index, firm_name, aliases, truth=None):
             tier, crd, score = "none", None, 0.0
 
         rows.append({
+            "year": getattr(rec, "year", None),
             "forbes_uri": rec.forbes_uri, "advisor_name": rec.advisor_name,
             "firm_name_forbes": rec.firm_name_forbes, "city": rec.city,
             "rank_state": state, "category": rec.category, "rank": rec.rank,

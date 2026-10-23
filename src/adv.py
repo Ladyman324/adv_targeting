@@ -129,9 +129,26 @@ def _flag(s: pd.Series) -> pd.Series:
     return s.astype(str).str.strip().str.upper().eq("Y")
 
 
+# Shared with acquisition validation. Keep the source contract and consumer
+# coercions together so a format accepted at import cannot become NaN later.
+NUMERIC_FIELDS = (
+    "emp_total", "emp_advisory", "emp_bd_reps", "emp_state_iars", "emp_iars_other_ia", "emp_ins_agents", "n_solicitors",
+    "raum_disc", "raum_nondisc", "raum_total", "acct_disc", "acct_nondisc", "acct_total", "wrap_sponsor_amt",
+    "wrap_pm_amt", "wrap_both_amt", "wrap_n_programs", "n_private_funds", "pf_gross_assets", "n_hedge_funds",
+    "n_pe_funds", "n_vc_funds", "n_other_offices",
+)
+FLAG_FIELDS = tuple(k for k in COLS if k.startswith("g_")) + (
+    "wrap_any", "has_non_pooled_raum", "has_private_funds", "recommends_brokers", "recommended_brokers_related",
+    "soft_dollars", "pays_for_referrals", "emp_comp_for_new_clients", "receives_referral_comp",
+)
+
+
 def load_raw() -> pd.DataFrame:
     """Read the firm roster from either the SEC download ZIP or a loose CSV."""
     src = config.ADV_SOURCE
+    if not src.is_file():
+        raise FileNotFoundError("Select an existing SEC firm ADV CSV/ZIP using ADV_SOURCE; "
+                                "no unambiguous local ADV snapshot was selected.")
     if src.suffix.lower() == ".zip":
         z = zipfile.ZipFile(src)
         handle = z.open(next(n for n in z.namelist() if n.lower().endswith(".csv")))
@@ -167,19 +184,9 @@ def build_features(raw: pd.DataFrame, keep_all: bool = True) -> pd.DataFrame:
                 d[col] = raw[col]
 
     # numeric / boolean coercion
-    for c in ["emp_total", "emp_advisory", "emp_bd_reps", "emp_state_iars",
-              "emp_iars_other_ia", "emp_ins_agents", "n_solicitors",
-              "raum_disc", "raum_nondisc", "raum_total", "acct_disc",
-              "acct_nondisc", "acct_total", "wrap_sponsor_amt", "wrap_pm_amt",
-              "wrap_both_amt", "wrap_n_programs", "n_private_funds",
-              "pf_gross_assets", "n_hedge_funds", "n_pe_funds", "n_vc_funds",
-              "n_other_offices"]:
+    for c in NUMERIC_FIELDS:
         d[c] = _num(d[c])
-    for c in [k for k in COLS if k.startswith("g_")] + [
-              "wrap_any", "has_non_pooled_raum", "has_private_funds",
-              "recommends_brokers", "recommended_brokers_related", "soft_dollars",
-              "pays_for_referrals", "emp_comp_for_new_clients",
-              "receives_referral_comp"]:
+    for c in FLAG_FIELDS:
         d[c] = _flag(d[c])
 
     # --- Item 5.D client mix ---

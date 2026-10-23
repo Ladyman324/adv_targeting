@@ -758,7 +758,8 @@ function loadBarrons(){
 function barronsFor(advisorId){
   const rows = BARRONS && BARRONS.advisors[String(advisorId)];
   if (!rows) return [];
-  return rows.map(([list, rank, state, year, url]) => ({ list, rank, state, year, url }));
+  return rows.map(([list, rank, state, year, url]) => ({ list, rank, state, year, url }))
+    .sort((a,b) => (Number(b.year) || 0) - (Number(a.year) || 0));
 }
 
 // The four lists are NOT comparable. top1500 ranks within a state, so "#1"
@@ -788,7 +789,7 @@ function barronsTag(advisorId){
   const best = hits[0];
   const more = hits.length > 1 ? ` +${hits.length - 1}` : "";
   const tip = hits.map(barronsTitle).join(" · ");
-  return `<span class="rbar" title="${esc(tip)}">BARRON'S ${esc(barronsRankText(best))}${more}</span>`;
+  return `<span class="rbar" title="${esc(tip)}">BARRON'S ${esc(barronsRankText(best))}${best.year ? ` (${esc(best.year)})` : ""}${more}</span>`;
 }
 
 // ---- Forbes rankings ----
@@ -808,8 +809,8 @@ function loadForbes(){
 function forbesFor(advisorId){
   const rows = FORBES && FORBES.advisors[String(advisorId)];
   if (!rows) return [];
-  return rows.map(([label, full, rank, tier, url]) => ({
-    label, full, rank, tier, url, confirmed: tier === "c",
+  return rows.map(([label, full, rank, tier, url, year]) => ({
+    label, full, rank, tier, url, year:year ?? null, confirmed: tier === "c",
   }));
 }
 
@@ -823,7 +824,8 @@ function forbesTeamAssets(advisorId){
 
 // Confirmed entries lead, so the badge shows the strongest provenance first.
 function forbesBest(hits){
-  return hits.slice().sort((a, b) => (b.confirmed - a.confirmed) || (a.rank - b.rank))[0];
+  return hits.slice().sort((a, b) => ((Number(b.year) || 0) - (Number(a.year) || 0)) ||
+    (b.confirmed - a.confirmed) || (a.rank - b.rank))[0];
 }
 
 function forbesTag(advisorId){
@@ -836,7 +838,7 @@ function forbesTag(advisorId){
   const mark = best.confirmed ? "" : "≈";
   const tip = hits.map(h => `${h.full}${h.confirmed ? "" : " (matched on name, firm and location)"}`).join(" · ");
   return `<span class="rfor${best.confirmed ? "" : " rfor-inferred"}" title="${esc(tip)}">` +
-         `${mark}FORBES ${esc(best.label)}${more}</span>`;
+         `${mark}FORBES ${esc(best.label)}${best.year ? ` (${esc(best.year)})` : ""}${more}</span>`;
 }
 
 /* ---- contact details ------------------------------------------------------
@@ -4540,6 +4542,10 @@ function paintSettings(){
     + `<button type="button" class="set-btn" data-set="caps">Email sending limits</button>`
     + `</p></div>`
 
+    + (ADMIN ? `<div class="set-row set-block"><span>Data administration</span>`
+      + `<p class="set-sub">Source dates, refresh outcomes, and release provenance.</p>`
+      + `<button type="button" class="set-btn" data-set="freshness">Data freshness</button></div>` : "")
+
     + `<div class="set-row set-block"><span>Signed in as</span>`
     + `<p class="set-sub">${esc((ME && ME.userDetails) || "not signed in")}</p>`
     + `<button type="button" class="set-signout" data-set="signout">Log out</button></div>`
@@ -4547,6 +4553,68 @@ function paintSettings(){
     + `<p class="set-saved" id="setSaved"></p>`
     + `<button type="button" class="ask-btn ghost" data-set="close">Close</button></div>`;
   if (window.EmailComposer) EmailComposer.mountSignatureSettings(setBack.querySelector("[data-signature-settings]"));
+}
+
+async function openDataFreshness(){
+  const back = document.createElement("div");
+  back.className = "ask-back";
+  back.innerHTML = `<div class="ask ask-scroll freshness-view" role="dialog" aria-modal="true" aria-labelledby="freshnessTitle" tabindex="-1">
+    <h3 id="freshnessTitle">Data freshness</h3><div data-freshness-body role="status">Loading source metadata...</div>
+    <p class="set-actions"><button type="button" class="set-btn" data-freshness-retry>Reload</button>
+    <button type="button" class="set-btn" data-freshness-close>Back to Settings</button></p></div>`;
+  document.body.appendChild(back);
+  const dialog = back.querySelector('[role="dialog"]');
+  const close = () => { document.removeEventListener("keydown", onKey); back.remove(); openSettings(); };
+  const onKey = (event) => {
+    if (event.key === "Escape") { event.preventDefault(); close(); }
+    if (event.key === "Tab") {
+      const buttons = [...dialog.querySelectorAll("button")];
+      const first = buttons[0], last = buttons[buttons.length - 1];
+      if (event.shiftKey && (document.activeElement === first || document.activeElement === dialog)) { event.preventDefault(); last.focus(); }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+    }
+  };
+  document.addEventListener("keydown", onKey);
+  back.onclick = (event) => { if (event.target === back || event.target.closest("[data-freshness-close]")) close(); };
+  const timestamp = (value) => value ? esc(value.replace("T", " ").replace(/(?:\.\d+)?Z$/, " UTC")) : "Unknown";
+  const load = async () => {
+    const host = back.querySelector("[data-freshness-body]");
+    const retry = back.querySelector("[data-freshness-retry]");
+    retry.disabled = true;
+    host.textContent = "Loading source metadata...";
+    try {
+      const response = await fetch("/api/data-freshness", { credentials: "same-origin", cache: "no-store" });
+      if (!response.ok) throw new Error(response.status === 403 ? "This view requires administrator access." : "Source metadata could not be loaded. Try again.");
+      const data = await response.json();
+      if (!back.isConnected) return;
+      if (!data.available) {
+        host.innerHTML = '<p class="set-sub">Source provenance is unavailable for this release. A rebuild or recent deployment does not establish when its source data was refreshed.</p>';
+        return;
+      }
+      const c = data.candidate, p = data.publication;
+      const names = { current: "Within refresh target", old: "Update due", failed: "Latest refresh failed",
+        never_loaded: "Never loaded", unknown: "Freshness unknown" };
+      host.innerHTML = `<p class="set-sub">Sources have independent dates. Downloading, rebuilding, and publishing are separate events. This view is read-only.</p>
+        <dl class="freshness-release"><dt>Candidate</dt><dd>${esc(c.id)}</dd><dt>Run started</dt><dd>${timestamp(c.createdUtc)}</dd>
+        <dt>Code</dt><dd>${esc(c.codeCommit || "Unknown")}</dd><dt>Static data</dt><dd>${esc(c.staticDataFingerprint || "Unknown")}</dd>
+        <dt>Publication</dt><dd>${p ? timestamp(p.publishedUtc) : "Not verified for this candidate"}</dd></dl>
+        <div class="freshness-table-wrap"><table class="freshness-table"><thead><tr><th>Source / edition</th><th>Source date</th>
+        <th>Retrieval</th><th>Coverage</th><th>Freshness / latest attempt</th><th>Release inclusion</th></tr></thead><tbody>
+        ${data.sources.map(row => `<tr><td><strong>${esc(row.label)}</strong>${row.edition ? `<br>${esc(row.edition)}` : ""}</td>
+          <td>${timestamp(row.sourceDate || row.snapshotDate)}${!row.sourceDate && row.snapshotDate ? "<br><small>Capture date</small>" : ""}</td><td>Retrieved: ${timestamp(row.retrievedUtc)}<br>Last success: ${timestamp(row.lastSuccessUtc)}</td>
+          <td>${Number.isSafeInteger(row.records) ? row.records.toLocaleString() : "Unknown"} records</td>
+          <td><span class="freshness-status" data-state="${esc(row.freshness)}">${esc(names[row.freshness] || names.unknown)}</span>
+          ${row.freshnessDays ? `<br>Target: ${row.freshnessDays} days` : ""}<br>Attempt: ${timestamp(row.lastAttemptUtc)}
+          <br>${esc(row.attemptStatus || "unknown")}${row.errorCode ? ` — ${esc(row.errorCode)}` : ""}</td>
+          <td>Candidate: ${row.candidateIncluded ? "included" : "not recorded"}<br>Published: ${row.publishedIncluded ? "verified" : "not verified"}</td></tr>`).join("")}
+        </tbody></table></div>${data.sources.length ? "" : '<p class="set-sub">No source snapshots are recorded.</p>'}`;
+    } catch (error) {
+      if (back.isConnected) host.textContent = error.message || "Source metadata could not be loaded.";
+    } finally { if (back.isConnected) retry.disabled = false; }
+  };
+  back.querySelector("[data-freshness-retry]").onclick = load;
+  dialog.focus();
+  await load();
 }
 
 async function saveSetting(patch){
@@ -4591,6 +4659,7 @@ document.addEventListener("click", async e => {
   }
   if (e.target.closest("#workQueueBtn")) { openWorkQueue(); return; }
   if (e.target.closest("#settingsBtn")) { openSettings(); return; }
+  if (e.target.closest('[data-set="freshness"]')) { closeSettings(); openDataFreshness(); return; }
   // Confirmed, because this signs out of Microsoft in this browser, not just the
   // app -- a mis-click costs a sign-in everywhere, and that is worth one question.
   const adm = e.target.closest('[data-set="templates"], [data-set="docs"], [data-set="health"], [data-set="caps"]');

@@ -9,6 +9,10 @@ from __future__ import annotations
 
 import datetime as dt
 import pathlib
+import gzip
+import tempfile
+import zipfile
+import xml.etree.ElementTree as ET
 import sys
 import urllib.error
 import urllib.request
@@ -34,6 +38,34 @@ def _stamp(day: dt.date) -> str:
     return day.strftime("%m_%d_%Y")
 
 
+def validate_feed(path: pathlib.Path, *, individual: bool = False) -> int:
+    """Fully consume compressed XML, validating CRC/truncation and record type."""
+    def count(stream):
+        records = 0
+        for _, element in ET.iterparse(stream, events=("end",)):
+            if element.tag.rsplit("}", 1)[-1] == ("Indvl" if individual else "Firm"):
+                records += 1
+                element.clear()
+        return records
+    if individual:
+        with zipfile.ZipFile(path) as archive:
+            if archive.testzip():
+                raise ValueError("SEC ZIP checksum failed")
+            members = [name for name in archive.namelist() if name.lower().endswith(".xml")]
+            if not members:
+                raise ValueError("SEC ZIP contains no XML")
+            records = 0
+            for name in members:
+                with archive.open(name) as stream:
+                    records += count(stream)
+    else:
+        with gzip.open(path, "rb") as stream:
+            records = count(stream)
+    if not records:
+        raise ValueError("SEC feed has no expected records")
+    return records
+
+
 def download(key: str, day: dt.date | None = None, lookback: int = 7) -> pathlib.Path:
     """Fetch a feed, walking back day by day until a published stamp is found."""
     pattern, label = FEEDS[key]
@@ -45,21 +77,33 @@ def download(key: str, day: dt.date | None = None, lookback: int = 7) -> pathlib
         fname = pattern.format(d=_stamp(d))
         dest = RAW / fname
         if dest.exists():
+            validate_feed(dest, individual=key == "individual")
             print(f"  cached  {fname}  ({dest.stat().st_size/1e6:.1f} MB)")
             return dest
         url = f"{BASE}/{fname}"
         try:
             req = urllib.request.Request(url, headers=UA)
-            with urllib.request.urlopen(req, timeout=900) as r, open(dest, "wb") as f:
-                total, got = int(r.headers.get("Content-Length", 0)), 0
-                while chunk := r.read(1 << 20):
-                    f.write(chunk); got += len(chunk)
+            temporary = None
+            try:
+                with tempfile.NamedTemporaryFile(dir=RAW, prefix=fname + ".", suffix=".part", delete=False) as f:
+                    temporary = pathlib.Path(f.name)
+                    with urllib.request.urlopen(req, timeout=900) as r:
+                        total, got = int(r.headers.get("Content-Length", 0)), 0
+                        while chunk := r.read(1 << 20):
+                            f.write(chunk)
+                            got += len(chunk)
+                if total and total != got:
+                    raise ValueError(f"Incomplete SEC download: expected {total}, got {got}")
+                validate_feed(temporary, individual=key == "individual")
+                temporary.replace(dest)
+            finally:
+                if temporary:
+                    temporary.unlink(missing_ok=True)
             print(f"  fetched {fname}  ({got/1e6:.1f} MB)  [{label}]")
             return dest
         except urllib.error.HTTPError as e:
             if e.code != 404:
                 raise
-            dest.unlink(missing_ok=True)
     raise FileNotFoundError(f"no {key} feed found in the last {lookback} days")
 
 

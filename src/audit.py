@@ -3498,7 +3498,10 @@ def _merge_safety():
 
     common = service.split("async function updateCommon")[1].split("async function updateMessage")[0]
     # A rep's edit passes the same lint the approved template had to pass.
-    lints_edits = "core.lintTemplate({ subject: subjectTemplate" in common
+    lints_edits = bool(re.search(
+        r'core\.lintTemplate\(\{\s*subject:\s*'
+        r'(?:batch\.parentBatchId\s*\?\s*"Inherited thread subject"\s*:\s*)?'
+        r'subjectTemplate,\s*bodyText:\s*bodyTemplate', common))
     blocks = 'code = "common_text_invalid"' in common
     # And a deletion is reported, which no typo check can catch.
     reports_removals = "removedTokens" in common or "const removed" in common

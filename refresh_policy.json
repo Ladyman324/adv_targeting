@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "coverageDropPercent": 20,
+  "freshnessDays": {
+    "act": 7,
+    "sec_individuals": 31,
+    "sec_firms": 31,
+    "sec_adv": 92,
+    "roster:*": 31,
+    "barrons": 366,
+    "forbes": 366
+  }
+}

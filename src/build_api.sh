@@ -36,7 +36,7 @@ STAGE_DIR=""
 #   50: training-video.test.js -- authenticated, scoped, expiring media access
 #   51: training-video-ui.test.js -- opt-in loading and shared shell contract
 #   55: email-signature.test.js -- private, optional and immutable sender photos
-EXPECTED_API_TEST_FILE_COUNT=55
+EXPECTED_API_TEST_FILE_COUNT=56
 
 cleanup() {
   test -z "$TEMP_ROOT" && return
@@ -306,19 +306,21 @@ verify_archive() {
     expected=$(awk 'NR == 1 { print $1 }' "$expected")
   fi
   local actual
-  actual=$(sha256sum "$archive" | awk '{print $1}')
+  # Hash stdin: GNU sha256sum escapes filenames containing backslashes (native
+  # Windows/UNC paths), prefixing its output with a non-digest backslash.
+  actual=$(sha256sum < "$archive" | awk '{print $1}')
   test -z "$expected" || test "$actual" = "$expected" \
     || die "SHA-256 mismatch: expected $expected, got $actual"
   while IFS= read -r member; do
     case "/$member/" in *"/../"*) die "unsafe parent path in archive: $member" ;; esac
     case "$member" in /*|*\\*) die "unsafe absolute or Windows path in archive: $member" ;; esac
-  done < <(tar -tzf "$archive")
+  done < <(tar -tzf - < "$archive")
   while read -r mode _; do
     case "${mode:0:1}" in
       -|d) ;;
       *) die "archive contains a link or special filesystem entry" ;;
     esac
-  done < <(tar -tvzf "$archive")
+  done < <(tar -tvzf - < "$archive")
   local verify_dir
   if test -z "$TEMP_ROOT"; then
     TEMP_ROOT=$(mktemp -d "$TEMP_BASE/api-build.XXXXXX")
@@ -326,7 +328,9 @@ verify_archive() {
   verify_dir="$TEMP_ROOT/verify"
   test ! -e "$verify_dir" || die "verification directory already exists: $verify_dir"
   mkdir -p "$verify_dir"
-  tar -xzf "$archive" -C "$verify_dir"
+  # Read through stdin here too: GNU tar treats a drive-letter colon in a
+  # native Windows archive name as a remote-host separator.
+  tar -xzf - -C "$verify_dir" < "$archive"
   validate_tree "$verify_dir"
   echo "[*] verified $archive"
   echo "[*] sha256 $actual"
@@ -423,7 +427,7 @@ ARCHIVE="$DIST/api-$RELEASE_ID.tgz"
 HASH_FILE="$ARCHIVE.sha256"
 test ! -e "$ARCHIVE" || die "immutable artifact already exists: $ARCHIVE"
 tar -czf "$ARCHIVE" -C "$STAGE_DIR" .
-HASH=$(sha256sum "$ARCHIVE" | awk '{print $1}')
+HASH=$(sha256sum < "$ARCHIVE" | awk '{print $1}')
 printf '%s  %s\n' "$HASH" "$(basename "$ARCHIVE")" > "$HASH_FILE"
 cp -f "$ARCHIVE" "$DIST/api.tgz"
 printf '%s  api.tgz\n' "$HASH" > "$DIST/api.tgz.sha256"

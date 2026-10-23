@@ -1739,3 +1739,17 @@ body.scope-pending #map{cursor:progress}
 /* Failed is not pending. A card that says "Loading…" about a file that already
    failed leaves a rep waiting for something that is never coming. */
 .contact-failed{color:var(--warn,#c2703a)}
+
+/* Administrator-only source metadata. No contact details or refresh actions. */
+.freshness-view{width:min(1080px,94vw);font-size:13px}
+.freshness-view h3{font-size:18px}
+.freshness-release{display:grid;grid-template-columns:90px minmax(0,1fr);gap:5px 12px;margin:14px 0}
+.freshness-release dt{color:var(--muted)}
+.freshness-release dd{margin:0;overflow-wrap:anywhere}
+.freshness-table-wrap{overflow-x:auto;margin:12px 0}
+.freshness-table{border-collapse:collapse;width:100%;font-size:12px;text-align:left;line-height:1.5}
+.freshness-table th,.freshness-table td{padding:9px 10px;border-bottom:1px solid var(--hair);vertical-align:top}
+.freshness-table th{font-weight:650;color:var(--muted)}
+.freshness-status{font-weight:650}
+.freshness-status[data-state="failed"],.freshness-status[data-state="old"]{color:var(--warn,#c2703a)}
+.freshness-view .set-actions{margin-top:16px}

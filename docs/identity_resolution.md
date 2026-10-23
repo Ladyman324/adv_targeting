@@ -40,6 +40,11 @@ evidence hash. Inactive records cannot be manually promoted.
 
 ## Eight-step operating sequence
 
+For coordinated updates use [the data refresh runbook](data_refresh.md).
+The commands below explain individual identity operations, not the full release
+dependency graph. Asset publication must follow the newly staged advisor index,
+and map/geography/search validation must precede publication.
+
 1. Pull a paired immutable ACT snapshot:
 
    `python src/act_pull.py --user bladyman@eicatlanta.com --db EQUITYINVESTMENT`

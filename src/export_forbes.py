@@ -84,33 +84,46 @@ def main() -> None:
     unmapped = before - len(shipped)
 
     # Rank ascending within an advisor so entry 0 is their best placement.
-    shipped = shipped.sort_values(["advisor_crd", "rank"])
+    if "year" not in shipped:
+        shipped["year"] = None
+    shipped = shipped.sort_values(["advisor_crd", "year", "rank"], ascending=[True, False, True])
 
     advisors: dict[str, list] = {}
     assets: dict[str, float] = {}
+    asset_years: dict[str, int] = {}
     for crd, group in shipped.groupby("advisor_crd", sort=False):
         entries = []
         for row in group.itertuples():
             rank = None if pd.isna(row.rank) else int(row.rank)
             entries.append([
                 short_label(row, rank),
-                full_label(row),
+                full_label(row) + (f" ({int(row.year)})" if not pd.isna(row.year) else ""),
                 rank,
                 TIER_CODE[row.match_tier],
                 f"https://www.forbes.com/profile/{row.forbes_uri}/",
+                None if pd.isna(row.year) else int(row.year),
             ])
             # Team assets describe the TEAM, so the same figure recurs across an
             # advisor's rankings and across teammates. Keep the largest rather
             # than summing, which would multiply one book by its headcount.
             if not pd.isna(row.team_assets_usd):
-                assets[crd] = max(assets.get(crd, 0.0), float(row.team_assets_usd))
+                year = -1 if pd.isna(row.year) else int(row.year)
+                previous_year = asset_years.get(crd, -2)
+                if year > previous_year:
+                    assets[crd] = float(row.team_assets_usd)
+                    asset_years[crd] = year
+                elif year == previous_year:
+                    assets[crd] = max(assets.get(crd, 0.0), float(row.team_assets_usd))
         advisors[crd] = entries
 
     payload = {
         "advisors": advisors,
+        "latestYear": {crd: max((entry[5] for entry in entries if entry[5] is not None), default=None)
+                       for crd, entries in advisors.items()},
         # separate map: an advisor can have team assets from Forbes while their
         # badge on the map comes from Barron's, and the app reads them apart
         "team_assets": {k: round(v) for k, v in assets.items()},
+        "team_assets_year": {k: year if year >= 0 else None for k, year in asset_years.items()},
         "tiers": {"c": "Confirmed via BrokerCheck", "h": "Matched on name, firm, and location"},
     }
     OUT.mkdir(parents=True, exist_ok=True)

@@ -1,5 +1,16 @@
 # Manual deployment with verifiable artifacts
 
+For source updates and validated data candidates, use
+[the data refresh runbook](data_refresh.md). Static/API deployment is not source
+acquisition. Packaging a refresh candidate does not authorize publication.
+
+For a prepared refresh release, follow
+[Deploy the exact prepared candidate](data_refresh.md#deploy-the-exact-prepared-candidate).
+The ordinary build/export/deploy commands below use checkout outputs and must not
+replace an approved candidate during transfer. Also complete the runbook's
+[published baseline checkpoint](data_refresh.md#retain-the-published-baseline-before-the-next-refresh)
+before starting the next live refresh; deployment does not adopt staged data.
+
 The web dataset and two generated Act! lookup files are intentionally absent
 from Git. Static Web Apps and the standalone Function App therefore have
 separate release paths. Neither path stores a credential in this repository.

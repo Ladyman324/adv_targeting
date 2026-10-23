@@ -18,13 +18,19 @@
  *   3. Leave the tab open. Progress prints as it goes; it takes ~15-20 minutes.
  *   4. It downloads barrons_rankings.json when finished.
  *
+ * Configure editions/categories before running, for example:
+ * BARRONS.configure({years:{top1500:2027}, categories:["top1500"], states:["ga"]})
+ * Verify publication years on the source pages; changing metadata does not
+ * retrieve an archived edition from an otherwise current-only URL.
  * Safe to interrupt: every page is checkpointed to localStorage, so re-running
  * resumes rather than starting over. Call BARRONS.reset() to start clean.
  *
  * Throttled deliberately. Do not lower the delays.
  */
 (() => {
-const YEAR = { top1500: 2026, women: 2026, independent: 2025, top100: 2026 };
+const DEFAULT_YEAR = { top1500: 2026, women: 2026, independent: 2025, top100: 2026 };
+let YEAR = {...DEFAULT_YEAR};
+let selectedCategories = Object.keys(DEFAULT_YEAR), selectedStates = null, running = false;
 
 const RANKINGS = {
   // by state: ranks restart at 1 in each state, so state is part of the key
@@ -41,12 +47,40 @@ const STATES = ["al","ak","az","ar","ca","co","ct","de","dc","fl","ga","hi","id"
 const PAGE_DELAY = 400;      // between ranking pages
 const ADVISOR_DELAY = 250;   // between advisor detail fetches
 const MAX_PAGES = 40;        // guard only; the real count is read from the page
-const KEY = "barronsHarvest.v1";
+function checkpointKey(){
+  return "barronsHarvest.v2:" + JSON.stringify({
+    editions: selectedCategories.slice().sort().map(name => [name, YEAR[name]]),
+    states: (selectedStates || STATES).slice().sort(),
+  });
+}
+
+function configure(options = {}){
+  if (running) throw new Error("Cannot change configuration during a harvest");
+  const categories = options.categories === undefined ? selectedCategories : options.categories;
+  if (!Array.isArray(categories) || !categories.length || new Set(categories).size !== categories.length ||
+      categories.some(name => !Object.hasOwn(DEFAULT_YEAR, name))) throw new Error("Unknown or empty ranking categories");
+  const updates = options.years || {};
+  for (const [name, year] of Object.entries(updates)){
+    if (!Object.hasOwn(DEFAULT_YEAR, name) || !Number.isInteger(year) || year < 1900 || year > 2200)
+      throw new Error("Invalid ranking edition; supply a four-digit year by category");
+  }
+  const states = options.states === undefined ? selectedStates : options.states;
+  if (states !== null && (!Array.isArray(states) || !states.length ||
+      states.some(state => !STATES.includes(String(state).toLowerCase())))) throw new Error("Unknown or empty states");
+  YEAR = {...YEAR, ...updates};
+  selectedCategories = categories.slice();
+  selectedStates = states === null ? null : [...new Set(states.map(state => String(state).toLowerCase()))];
+  return configuration();
+}
+
+function configuration(){
+  return {years: {...YEAR}, categories:selectedCategories.slice(), states:(selectedStates || STATES).slice(), checkpointKey:checkpointKey()};
+}
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const store = {
-  read(){ try { return JSON.parse(localStorage.getItem(KEY)) || {}; } catch { return {}; } },
-  write(s){ localStorage.setItem(KEY, JSON.stringify(s)); },
+  read(){ try { return JSON.parse(localStorage.getItem(checkpointKey())) || {}; } catch { return {}; } },
+  write(s){ localStorage.setItem(checkpointKey(), JSON.stringify(s)); },
 };
 
 // Load a ranking page in a hidden iframe and read the hydrated table.
@@ -151,8 +185,9 @@ async function run(){
   state.crd ||= {};
 
   // ---- phase 1: the ranking tables ----
-  for (const [name, cfg] of Object.entries(RANKINGS)){
-    const targets = cfg.byState ? STATES : [null];
+  for (const name of selectedCategories){
+    const cfg = RANKINGS[name];
+    const targets = cfg.byState ? (selectedStates || STATES) : [null];
     state.lists[name] ||= {};
     for (const st of targets){
       const key = st || "_";
@@ -203,6 +238,15 @@ async function run(){
   return out;
 }
 
-window.BARRONS = { run, reset: () => localStorage.removeItem(KEY), state: () => store.read() };
+window.BARRONS = {
+  run: async () => {
+    if (running) throw new Error("Harvest already running");
+    running = true;
+    try { return await run(); } finally { running = false; }
+  },
+  configure, config: configuration,
+  reset: () => { if (running) throw new Error("Harvest running"); localStorage.removeItem(checkpointKey()); },
+  state: () => store.read(),
+};
 console.log("Barron's harvester ready. Run:  await BARRONS.run()");
 })();

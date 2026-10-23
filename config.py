@@ -6,10 +6,19 @@ from pathlib import Path
 # Either the SEC download ZIP or the extracted firm-roster CSV — loader handles both.
 # ADV_SOURCE overrides it from the environment, so a second machine (or a rerun
 # against a newer quarter) does not require editing this file.
-ADV_SOURCE = Path(os.environ.get("ADV_SOURCE") or (
-    r"C:\Users\bladyman.eicatlanta\Downloads\ia07012026"
-    r"\IA_SEC_-_FIRM_ROSTER_FOIA_DOWNLOAD_-_34622660.CSV"
-))
+def adv_source() -> Path:
+    """Resolve a portable explicit/local source, never a developer's Downloads."""
+    explicit = os.environ.get("ADV_SOURCE")
+    if explicit:
+        return Path(explicit)
+    candidates = list((Path(__file__).parent / "data" / "raw").glob("ia??????.zip"))
+    if len(candidates) == 1:
+        return candidates[0]
+    # Delay missing-source failure until ADV is loaded, not config imported.
+    return Path(__file__).parent / "data" / "raw" / "ADV_SOURCE_NOT_SELECTED"
+
+
+ADV_SOURCE = adv_source()
 
 ROOT     = Path(__file__).parent
 INTERIM  = ROOT / "data" / "interim"
