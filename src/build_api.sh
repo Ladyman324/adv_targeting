@@ -36,7 +36,8 @@ STAGE_DIR=""
 #   50: training-video.test.js -- authenticated, scoped, expiring media access
 #   51: training-video-ui.test.js -- opt-in loading and shared shell contract
 #   55: email-signature.test.js -- private, optional and immutable sender photos
-EXPECTED_API_TEST_FILE_COUNT=56
+#   57: email-company-names.test.js -- approved presentation aliases, not firm identity
+EXPECTED_API_TEST_FILE_COUNT=57
 
 cleanup() {
   test -z "$TEMP_ROOT" && return

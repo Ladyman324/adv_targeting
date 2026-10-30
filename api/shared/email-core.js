@@ -2,6 +2,7 @@
 
 const crypto = require("crypto");
 const sanitizeHtml = require("sanitize-html");
+const { companyDisplayName } = require("./email-company-names");
 
 const ABSOLUTE_BATCH_STOP = 15000;
 const DEFAULTS = {
@@ -207,7 +208,7 @@ function mergeValues(recipient, sender) {
       || (allowNameFallback ? names.first_name : "") || ""),
     last_name: String((recipient && recipient.lastName)
       || (allowNameFallback ? names.last_name : "") || ""),
-    company_name: String((recipient && (recipient.companyName || recipient.firm)) || ""),
+    company_name: companyDisplayName((recipient && (recipient.companyName || recipient.firm)) || ""),
     sender_name: String(s.displayName || ""),
     sender_title: String(s.jobTitle || ""),
   };
