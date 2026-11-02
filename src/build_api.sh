@@ -419,6 +419,7 @@ cp "$ROOT/webapp/app.js" "$ROOT/webapp/dial.js" "$ROOT/webapp/email.js" \
   "$ROOT/webapp/email.css" "$ROOT/webapp/field.js" "$ROOT/webapp/field.html" \
   "$ROOT/webapp/index.html" "$ROOT/webapp/style.css" "$ROOT/webapp/training.js" \
   "$ROOT/webapp/list_import.js" "$ROOT/webapp/asset-product-filters.js" \
+  "$ROOT/webapp/field.css" \
   "$TEST_ROOT/webapp/"
 API_PACKAGE_SOURCE_ROOT="$ROOT" NODE_PATH="$API/node_modules" \
   run_api_tests "$TEST_API" "$EXPECTED_API_TEST_FILE_COUNT"
