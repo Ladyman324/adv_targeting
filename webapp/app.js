@@ -476,7 +476,7 @@ let activeInfoWrap = null;
 
 function positionFloatingInfo(){
   if (!activeInfoWrap || floatingInfo.hidden) return;
-  const button = activeInfoWrap.querySelector(".info-button");
+  const button = activeInfoWrap.querySelector(".info-button, .switch");
   if (!button) return;
   const anchor = button.getBoundingClientRect();
   const box = floatingInfo.getBoundingClientRect();
@@ -526,7 +526,7 @@ function hideFloatingInfo(){
 let infoSeq = 0;
 function linkInfoAria(wrap){
   const source = wrap.querySelector(".info-popover");
-  const button = wrap.querySelector(".info-button");
+  const button = wrap.querySelector(".info-button, .switch input");
   if (!source || !button) return;
   if (!source.id) source.id = `infoPopover${++infoSeq}`;
   button.setAttribute("aria-describedby", source.id);

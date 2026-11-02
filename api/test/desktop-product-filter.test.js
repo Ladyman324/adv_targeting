@@ -90,6 +90,22 @@ test("history restore, active-chip clear and reset-all retain or clear product c
   c.restoreAdvisorFilters(saved);assert.equal(c.assetsOnly,true);assert.deepEqual([...c.assetProducts],["acv"]);
   c.resetAllFilters();assert.equal(c.assetsOnly,false);assert.equal(c.assetProducts.size,0);
 });
+test("desktop filter layout keeps icon-free help and places compact EIC products after registration",()=>{
+  const html=fs.readFileSync(path.join(__dirname,"../../webapp/index.html"),"utf8");
+  const css=fs.readFileSync(path.join(__dirname,"../../webapp/style.css"),"utf8");
+  const switches=html.slice(html.indexOf('<div class="filter-switch-grid">'),html.indexOf('class="filter-row role-filter-row"'));
+  assert.equal((switches.match(/filter-switch-cell info-wrap/g)||[]).length,3);
+  assert.equal((switches.match(/role="tooltip"/g)||[]).length,3);
+  assert.doesNotMatch(switches,/info-button/);
+  assert.ok(html.indexOf('id="regToggle"')<html.indexOf('id="assetProductToggle"'));
+  assert.ok(html.indexOf('id="assetProductToggle"')<html.indexOf('id="lastEmailed"'));
+  assert.match(css,/\.filter-switch-grid\{[^}]*gap:5px/);
+  assert.match(css,/\.aum-bands\{[^}]*gap:5px/);
+  assert.doesNotMatch(css,/\.product-seg button\{[^}]*min-height/);
+  assert.match(source,/activeInfoWrap\.querySelector\("\.info-button, \.switch"\)/);
+  assert.match(source,/wrap\.querySelector\("\.info-button, \.switch input"\)/);
+});
+
 test("product-filtered summaries count a shared account once and retain other product balances",()=>{
   const {c,click,nodes}=setup();click("acv");
   const ids=["acv","alsoAcv","lcv"].filter(id=>c.passesHasAssets({id}));

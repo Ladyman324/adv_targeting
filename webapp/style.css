@@ -240,7 +240,7 @@ body.scope-pending #map{cursor:progress}
 .switch.compact{flex:1 1 auto;justify-content:flex-start;gap:8px}
 .switch.compact .switch-lbl{font-size:11.5px;font-weight:550}
 .filter-row>.info-wrap{margin-left:auto}
-.filter-switch-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(108px,1fr));gap:4px 6px;margin:2px 0 4px}
+.filter-switch-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(108px,1fr));gap:5px;margin:2px 0 4px}
 .filter-switch-cell{min-width:0;min-height:36px;display:flex;align-items:center;gap:3px;padding:1px 0}
 .filter-switch-cell .switch.compact{min-width:0;gap:0;min-height:30px;justify-content:center;
   padding:5px;border:1px solid var(--hair);border-radius:8px;background:var(--panel-2);text-align:center}
@@ -249,9 +249,8 @@ body.scope-pending #map{cursor:progress}
 .filter-switch-cell .switch.compact.on{border-color:var(--accent);background:color-mix(in srgb,var(--accent) 15%,var(--panel))}
 .filter-switch-cell .switch.compact.on .switch-lbl::before{content:"\2713 ";color:var(--accent)}
 .filter-switch-cell .switch.compact:focus-within{outline:2px solid var(--accent);outline-offset:2px}
-.filter-switch-cell>.info-wrap{margin-left:auto;flex:0 0 auto}
 .filter-row>.product-seg{display:grid;grid-template-columns:1.25fr repeat(4,minmax(0,1fr))}
-.product-seg button{min-width:0;white-space:nowrap;min-height:28px}
+.product-seg button{min-width:0;white-space:nowrap}
 .product-seg button:disabled{opacity:.45;cursor:not-allowed}
 .asset-filter-status{margin:0 0 4px;color:var(--muted)}
 .filter-select{flex:0 0 var(--filter-control-w);width:var(--filter-control-w);min-width:0;
