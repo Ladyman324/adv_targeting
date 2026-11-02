@@ -174,17 +174,17 @@ WEB = ROOT / "webapp"
 #
 # training.js is shared for the same reason: a stale onboarding module can
 # disagree with the API media version and repeatedly prompt an employee.
-VERSIONED = ("app.js", "style.css", "dial.js", "training.js", "list_import.js", "email.js", "email.css")
+VERSIONED = ("app.js", "style.css", "dial.js", "training.js", "list_import.js", "email.js", "email.css", "asset-product-filters.js")
 _VTAG = re.compile(
-    r'(app\.js|style\.css|dial\.js|training\.js|list_import\.js|email\.js|email\.css)\?v=([^"\']+)')
+    r'(app\.js|style\.css|dial\.js|training\.js|list_import\.js|email\.js|email\.css|asset-product-filters\.js)\?v=([^"\']+)')
 
 # The field view is versioned SEPARATELY, from its own files. One shared tag
 # would mean every desktop tweak invalidates the phone's cached shell and every
 # field tweak invalidates the map -- and the field shell is precisely what a rep
 # on the road would have to re-download.
-FIELD_VERSIONED = ("field.js", "field.css", "dial.js", "training.js", "email.js", "email.css")
+FIELD_VERSIONED = ("field.js", "field.css", "dial.js", "training.js", "email.js", "email.css", "asset-product-filters.js")
 _FTAG = re.compile(
-    r'(field\.js|field\.css|dial\.js|training\.js|email\.js|email\.css)\?v=([^"\']+)')
+    r'(field\.js|field\.css|dial\.js|training\.js|email\.js|email\.css|asset-product-filters\.js)\?v=([^"\']+)')
 _SWTAG = re.compile(r'const VERSION = "([^"]*)"')
 _DATA_VERSION = re.compile(r'const DATA_VERSION = "([^"]+)";')
 DATA_VERSION_FILES = (WEB / "app.js", WEB / "field.js")

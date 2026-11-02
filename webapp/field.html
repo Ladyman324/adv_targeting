@@ -21,8 +21,8 @@
   form-action 'none';
   object-src 'none'">
 <link rel="manifest" href="manifest.webmanifest">
-<link rel="stylesheet" href="field.css?v=2f759917e9">
-<link rel="stylesheet" href="email.css?v=2f759917e9">
+<link rel="stylesheet" href="field.css?v=6ea66d948f">
+<link rel="stylesheet" href="email.css?v=6ea66d948f">
 </head>
 <body>
 
@@ -60,9 +60,22 @@
   <button class="chip" data-chip="direct" aria-pressed="false">Direct line</button>
   <button class="chip" data-chip="crm"    aria-pressed="false"
           title="Someone at EIC is recorded as the relationship owner in Act!">In CRM</button>
-  <button class="chip" data-chip="assets" aria-pressed="false"
-          title="This advisor has assets with EIC">Has assets</button>
   <button class="chip" data-chip="ranked" aria-pressed="false">Ranked</button>
+</div>
+<div id="assetProducts" role="group" aria-label="EIC products; choose one or more"
+     aria-describedby="assetProductsHelp">
+  <span class="asset-products-label">EIC products</span>
+  <button type="button" class="chip" data-asset-product="any" aria-pressed="false" disabled
+          title="Any approved EIC account book">Any EIC</button>
+  <button type="button" class="chip" data-asset-product="acv" aria-pressed="false" disabled
+          title="All-Cap Value">ACV</button>
+  <button type="button" class="chip" data-asset-product="lcv" aria-pressed="false" disabled
+          title="Large-Cap Value">LCV</button>
+  <button type="button" class="chip" data-asset-product="midcap" aria-pressed="false" disabled
+          title="Mid-Cap / unallocated in ACT!">MCV</button>
+  <button type="button" class="chip" data-asset-product="mf" aria-pressed="false" disabled
+          title="EIC mutual fund">EICIX</button>
+  <small id="assetProductsHelp" role="status">Loading EIC account-book data...</small>
 </div>
 
 <!-- The call list, and the session that works through it. Both stay hidden
@@ -110,10 +123,11 @@
   <div id="workInner"></div>
 </div>
 
-<script src="dial.js?v=2f759917e9"></script>
-<script src="training.js?v=2f759917e9"></script>
-<script src="field.js?v=2f759917e9"></script>
-<script src="email.js?v=2f759917e9"></script>
+<script src="dial.js?v=6ea66d948f"></script>
+<script src="training.js?v=6ea66d948f"></script>
+<script src="asset-product-filters.js?v=6ea66d948f"></script>
+<script src="field.js?v=6ea66d948f"></script>
+<script src="email.js?v=6ea66d948f"></script>
 <!-- The service-worker registration moved into field.js. Keeping it inline
      would have required either 'unsafe-inline' or a hash in the CSP above,
      and 'unsafe-inline' is not a thing to spend on eight lines. -->

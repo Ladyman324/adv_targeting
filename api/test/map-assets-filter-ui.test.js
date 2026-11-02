@@ -10,6 +10,7 @@ const webapp = path.join(__dirname, '..', '..', 'webapp');
 const desktop = fs.readFileSync(path.join(webapp, 'app.js'), 'utf8');
 const field = fs.readFileSync(path.join(webapp, 'field.js'), 'utf8');
 const index = fs.readFileSync(path.join(webapp, 'index.html'), 'utf8');
+const AssetProductFilters = require('../../webapp/asset-product-filters');
 
 function declaration(source, name, nextName) {
   const start = source.indexOf('function ' + name + '(');
@@ -30,6 +31,7 @@ test('desktop EIC-assets filter trusts the canonical CRD book, not contact tm/ia
   const books = { roster: { t: 'high', n: 1, ix: [0] } };
   const context = {
     assetsOnly: true,
+    assetProducts: new Set(), AssetProductFilters,
     SUPPORT: { act: 'ready' },
     bookFor: (crd) => books[String(crd)] || null,
   };
@@ -86,16 +88,18 @@ test('asset filter readiness is visible and saved audiences cannot broaden', () 
   assert.notEqual(fieldLoaderStart, -1);
   assert.notEqual(fieldLoaderEnd, -1);
   const fieldLoader = field.slice(fieldLoaderStart, fieldLoaderEnd);
-  const fieldWiring = field.slice(field.indexOf('const chip = e.target.closest("[data-chip]")'),
+  const fieldWiring = field.slice(field.indexOf('const product = e.target.closest("[data-asset-product]")'),
     field.indexOf('const open = e.target.closest("[data-open]")'));
 
   assert.match(loader, /if \(assetsOnly\)[\s\S]*assetsOnly = false[\s\S]*showNotice/);
-  assert.match(apply, /f\.assetsOnly && SUPPORT\.act !== "ready"[\s\S]*throw new Error/);
-  assert.match(prepare, /f\.ownerOnly \|\| f\.rankedOnly \|\| f\.assetsOnly/);
-  assert.match(prepare, /f\.assetsOnly && SUPPORT\.act !== "ready"/);
+  assert.match(apply, /const needsAssets = !!f\.assetsOnly \|\| products\.length > 0/);
+  assert.match(apply, /needsAssets && SUPPORT\.act !== "ready"[\s\S]*throw new Error/);
+  assert.match(prepare, /f\.ownerOnly \|\| f\.rankedOnly \|\| needsAssets/);
+  assert.match(prepare, /needsAssets && SUPPORT\.act !== "ready"/);
   assert.match(fieldLoader, /BOOK_STATE === "failed" && CHIPS\.assets[\s\S]*CHIPS\.assets = false/);
-  assert.match(fieldLoader, /Has assets was turned off/);
-  assert.match(fieldWiring, /k === "assets" && BOOK_STATE !== "ready"/);
+  assert.match(fieldLoader, /EIC product filters were turned off/);
+  assert.match(fieldLoader, /assetProducts\.clear\(\)/);
+  assert.match(fieldWiring, /BOOK_STATE !== "ready"/);
 });
 
 test('national EIC help separates mapped headline totals from source reconciliation', () => {

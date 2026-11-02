@@ -81,6 +81,7 @@ const NAME_CACHE = new Map();      // shard key -> rows
 let searchSeq = 0;                 // guards against out-of-order responses
 
 const CHIPS = { direct: false, crm: false, assets: false, ranked: false };
+const assetProducts = new Set(); // canonical ACT book fields; empty + assets = Any EIC
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g,
@@ -114,15 +115,20 @@ let BOOK_STATE = "idle"; // idle | loading | ready | failed
 let TERR = null;      // {states:{XX:{c,n,e}}, national:{...}}
 
 function syncAssetChip(){
-  const chip = document.querySelector('[data-chip="assets"]');
-  if (!chip) return;
   const ready = BOOK_STATE === "ready";
-  chip.disabled = !ready;
-  chip.setAttribute("aria-pressed", String(ready && CHIPS.assets));
-  chip.classList.toggle("on", ready && CHIPS.assets);
-  chip.title = ready ? "This advisor has an approved EIC account book"
-    : BOOK_STATE === "failed" ? "EIC account-book data is unavailable"
-    : "Loading EIC account-book data…";
+  document.querySelectorAll('[data-asset-product]').forEach((chip) => {
+    const key = chip.dataset.assetProduct;
+    const selected = ready && CHIPS.assets
+      && (key === "any" ? !assetProducts.size : assetProducts.has(key));
+    chip.disabled = !ready;
+    chip.setAttribute("aria-pressed", String(selected));
+    chip.classList.toggle("on", selected);
+  });
+  const help = $("assetProductsHelp");
+  if (help) help.textContent = ready
+    ? "None selected includes prospects. MCV: Mid-Cap / unallocated in ACT!"
+    : BOOK_STATE === "failed" ? "EIC account-book data is unavailable; product filters are off."
+    : "Loading EIC account-book data...";
 }
 
 async function loadExtras(){
@@ -137,14 +143,17 @@ async function loadExtras(){
   BOOK_STATE = BOOK ? "ready" : "failed";
   TERR = territories;
   const clearedAssets = BOOK_STATE === "failed" && CHIPS.assets;
-  if (clearedAssets) CHIPS.assets = false;
+  if (BOOK_STATE === "failed") {
+    CHIPS.assets = false;
+    assetProducts.clear();
+  }
   syncAssetChip();
   // This lookup is intentionally off the first-paint path. Reconcile an
   // already-visible list once it arrives so its filter and badge switch to the
   // same current book without requiring another search.
   if (ROWS.length) render(ROWS);
   if (clearedAssets)
-    $("status").textContent += " · EIC account-book data is unavailable; Has assets was turned off.";
+    $("status").textContent += " · EIC account-book data is unavailable; EIC product filters were turned off.";
 }
 
 const bookFor = (crd) => (BOOK && BOOK.advisors[String(crd)]) || null;
@@ -226,7 +235,8 @@ const rankedYear = (r) => COL.ranked_year == null ? null : (r[COL.ranked_year] |
 function passes(r){
   if (CHIPS.direct && !isDirect(r)) return false;
   if (CHIPS.crm && !isCRM(r)) return false;
-  if (CHIPS.assets && !hasAssets(r)) return false;
+  if (CHIPS.assets && (!hasAssets(r)
+      || !AssetProductFilters.matches(bookFor(r[COL.crd]), [...assetProducts]))) return false;
   if (CHIPS.ranked && !isRanked(r)) return false;
   return true;
 }
@@ -2617,16 +2627,27 @@ async function search(term){
 
 /* ---------- wiring -------------------------------------------------------- */
 document.addEventListener("click", (e) => {
+  const product = e.target.closest("[data-asset-product]");
+  if (product) {
+    if (BOOK_STATE !== "ready") {
+      syncAssetChip();
+      $("status").textContent = BOOK_STATE === "failed"
+        ? "EIC account-book data is unavailable; EIC product filters cannot be applied."
+        : "EIC account-book data is still loading; EIC product filters cannot be applied yet.";
+      return;
+    }
+    const next = AssetProductFilters.transition(CHIPS.assets, [...assetProducts], product.dataset.assetProduct);
+    CHIPS.assets = next.assetsOnly;
+    assetProducts.clear();
+    next.assetProducts.forEach((key) => assetProducts.add(key));
+    syncAssetChip();
+    limit = PAGE;
+    render(ROWS);
+    return;
+  }
   const chip = e.target.closest("[data-chip]");
   if (chip) {
     const k = chip.dataset.chip;
-    if (k === "assets" && BOOK_STATE !== "ready") {
-      syncAssetChip();
-      $("status").textContent = BOOK_STATE === "failed"
-        ? "EIC account-book data is unavailable; Has assets cannot be applied."
-        : "EIC account-book data is still loading; Has assets cannot be applied yet.";
-      return;
-    }
     CHIPS[k] = !CHIPS[k];
     chip.setAttribute("aria-pressed", String(CHIPS[k]));
     chip.classList.toggle("on", CHIPS[k]);

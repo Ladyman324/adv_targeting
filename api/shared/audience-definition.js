@@ -16,6 +16,7 @@ const TERRITORIES = {
   "Florida/PR": ["FL", "PR", "VI"],
 };
 const ARRAY_FILTERS = new Set(["selectedFirms", "aum", "excluded", "roles"]);
+const ASSET_PRODUCTS = ["acv", "lcv", "midcap", "mf"];
 const BOOLEAN_FILTERS = new Set([
   "selectsOnly", "ownerOnly", "rankedOnly", "continentalOnly",
   "contactableOnly", "assetsOnly",
@@ -25,7 +26,8 @@ const STRING_FILTERS = new Set(["reg", "lastEmailed", "lastCalled", "joinedFirm"
 // Whose activity each activity filter reads. Absent means "me", which is what
 // every audience saved before the team view existed was built on.
 const STRING_DEFAULTS = { reg: "all", emailScope: "me", callScope: "me" };
-const FILTER_KEYS = new Set([...ARRAY_FILTERS, ...BOOLEAN_FILTERS, ...STRING_FILTERS]);
+const FILTER_KEYS = new Set([...ARRAY_FILTERS, ...BOOLEAN_FILTERS, ...STRING_FILTERS,
+  "assetProducts"]);
 const ENUMS = {
   aum: new Set(["lt100m", "100m1b", "1b10b", "10b100b", "gt100b"]),
   roles: new Set(["key", "dd", "scheduler"]),
@@ -65,6 +67,15 @@ function enumArray(value, key) {
     throw bad(`filters.${key} contains an unsupported value.`);
   return result;
 }
+function assetProducts(value) {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length > ASSET_PRODUCTS.length)
+    throw bad("filters.assetProducts must be a bounded array.");
+  // Never drop malformed entries: doing so could silently broaden a saved audience.
+  if (value.some((item) => typeof item !== "string" || !ASSET_PRODUCTS.includes(item)))
+    throw bad("filters.assetProducts contains an unsupported value.");
+  return ASSET_PRODUCTS.filter((product) => value.includes(product));
+}
 function normalizeScope(value) {
   const scope = object(value, "scope");
   for (const key of Object.keys(scope))
@@ -102,6 +113,10 @@ function normalizeFilters(value) {
     filters[key] = ENUMS[key] ? enumArray(input[key], key)
       : array(input[key], `filters.${key}`);
   for (const key of BOOLEAN_FILTERS) filters[key] = input[key] === true;
+  filters.assetProducts = assetProducts(input.assetProducts);
+  // An empty product selection retains legacy assetsOnly semantics (Any EIC).
+  // Specific products imply an asset restriction; clients match them with OR.
+  if (filters.assetProducts.length) filters.assetsOnly = true;
   for (const key of STRING_FILTERS) {
     const fallback = STRING_DEFAULTS[key] || "";
     filters[key] = text(input[key] === undefined ? fallback : input[key], 16, `filters.${key}`);
@@ -114,11 +129,15 @@ function normalizeDefinition(value) {
   for (const key of Object.keys(input))
     if (!["version", "scope", "filters"].includes(key))
       throw bad(`definition.${key} is not supported.`);
-  if (Number(input.version) !== 1) throw bad("definition.version must be 1.");
+  if (![1, 2].includes(Number(input.version)))
+    throw bad("definition.version must be 1 or 2.");
+  const filters = normalizeFilters(input.filters);
   const definition = {
-    version: 1,
+    // Legacy clients reject v2 instead of ignoring products and broadening to Any EIC.
+    // Empty products have the original v1 semantics, even on a v2 input.
+    version: filters.assetProducts.length ? 2 : 1,
     scope: normalizeScope(input.scope),
-    filters: normalizeFilters(input.filters),
+    filters,
   };
   const json = JSON.stringify(definition);
   if (Buffer.byteLength(json, "utf8") > MAX_DEFINITION_BYTES)

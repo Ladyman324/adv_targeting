@@ -188,6 +188,7 @@ let rankedOnly = false;             // Advanced: only advisors on a published ra
 let roleSel = new Set();            // Key Person / Research / Scheduler; union when multiple
 let contactableOnly = false;        // only advisors with an email or a phone on file
 let assetsOnly = false;             // only advisors in the canonical ACT account book
+const assetProducts = new Set();    // empty + assetsOnly = Any EIC; specific products match with OR
 // Firms struck off the map. Distinct from selectedFirms, which is a positive
 // "show only these"; this is a negative "show everything except these", and a
 // rep builds it up one firm at a time while working a territory -- the wirehouse
@@ -1086,6 +1087,7 @@ function loadActAssets(){
       supportFailed("act", err);
       if (assetsOnly){
         assetsOnly = false;
+        assetProducts.clear();
         showNotice("The EIC account book could not be loaded, so the EIC-assets filter was turned off.");
       }
     })
@@ -2737,11 +2739,11 @@ function audienceScopeDefinition(){
     states:territory ? [...(TERRITORIES[territory] || [])] : [scope] };
 }
 function captureAudienceDefinition(){
-  return { version:1, scope:audienceScopeDefinition(), filters:{
+  return { version:assetProducts.size ? 2 : 1, scope:audienceScopeDefinition(), filters:{
     selectedFirms:[...selectedFirms], selectsOnly, aum:[...aumSel], roles:[...roleSel], reg,
     lastEmailed, lastCalled, joinedFirm, ownerOnly, emailScope, callScope,
     rankedOnly, excluded:[...excludedFirms], continentalOnly,
-    contactableOnly, assetsOnly,
+    contactableOnly, assetsOnly, assetProducts:[...assetProducts],
   }};
 }
 async function saveCurrentAudience(){
@@ -2760,10 +2762,12 @@ async function saveCurrentAudience(){
 }
 async function applyAudienceDefinition(audience){
   const definition = audience && audience.definition;
-  if (!definition || definition.version !== 1) throw new Error("This audience uses an unsupported rule version.");
+  if (!definition || ![1, 2].includes(definition.version)) throw new Error("This audience uses an unsupported rule version.");
   const f = definition.filters || {};
-  if (f.assetsOnly && SUPPORT.act !== "ready") await loadRegionalSupport();
-  if (f.assetsOnly && SUPPORT.act !== "ready")
+  const products = AssetProductFilters.normalize(f.assetProducts);
+  const needsAssets = !!f.assetsOnly || products.length > 0;
+  if (needsAssets && SUPPORT.act !== "ready") await loadRegionalSupport();
+  if (needsAssets && SUPPORT.act !== "ready")
     throw new Error("EIC account-book data is unavailable for this saved audience.");
   const target = definition.scope && definition.scope.value;
   if (!target || target === "US") throw new Error("This audience does not identify an advisor-level state or territory.");
@@ -2785,7 +2789,8 @@ async function applyAudienceDefinition(audience){
   ownerOnly = !!f.ownerOnly; rankedOnly = !!f.rankedOnly;
   excludedFirms = new Set((f.excluded || []).map(String));
   setContinentalOnly(f.continentalOnly !== false, false);
-  contactableOnly = !!f.contactableOnly; assetsOnly = !!f.assetsOnly;
+  contactableOnly = !!f.contactableOnly; assetsOnly = needsAssets;
+  refill(assetProducts, products);
   focusedAdvisorId = null; focusedAdvisorLabel = ""; clearLasso(false);
   syncFirmColors(); document.getElementById("clearFirms").hidden = !selectedFirms.length;
   syncFilterButtons(); redraw();
@@ -2817,9 +2822,10 @@ async function ensureAudienceIdentity(){
 }
 async function prepareAudiencePreviewData(audience){
   const f = audience && audience.definition && audience.definition.filters || {};
+  const needsAssets = !!f.assetsOnly || AssetProductFilters.normalize(f.assetProducts).length > 0;
   await dialReady;
   if ((f.roles || []).length && !Dial.state.flagsReady) await Dial.fetchFlags();
-  const support = f.ownerOnly || f.rankedOnly || f.assetsOnly
+  const support = f.ownerOnly || f.rankedOnly || needsAssets
     ? loadRegionalSupport()
     : (SUPPORT.territories === "ready" ? Promise.resolve() : loadTerritories());
   await Promise.all([loadContacts(), ensureAudienceIdentity(), support,
@@ -2834,7 +2840,7 @@ async function prepareAudiencePreviewData(audience){
     throw new Error("Owner and officer data is unavailable for this saved audience.");
   if (f.rankedOnly && (SUPPORT.barrons !== "ready" || SUPPORT.forbes !== "ready"))
     throw new Error("Advisor ranking data is unavailable for this saved audience.");
-  if (f.assetsOnly && SUPPORT.act !== "ready")
+  if (needsAssets && SUPPORT.act !== "ready")
     throw new Error("EIC account-book data is unavailable for this saved audience.");
   await loadAudienceActivity(f);
 }
@@ -6738,7 +6744,7 @@ function passesContactable(p){
 // notice rather than silently broadening the map.
 function passesHasAssets(p){
   if (!assetsOnly) return true;
-  return SUPPORT.act === "ready" && !!bookFor(p.id);
+  return SUPPORT.act === "ready" && AssetProductFilters.matches(bookFor(p.id), [...assetProducts]);
 }
 function passesContinental(p){
   return !continentalOnly || !OUTSIDE_CONTINENTAL.has(p._state);
@@ -7878,7 +7884,7 @@ function activityFilterSignature(kind){
     kind === 'email' ? lastCalled : lastEmailed, emailScope, callScope,
     selectedFirms, selectsOnly, [...aumSel].sort(), [...roleSel].sort(), reg, joinedFirm,
     ownerOnly, rankedOnly, [...excludedFirms].sort(), continentalOnly,
-    contactableOnly, assetsOnly, lassoPolygon,
+    contactableOnly, assetsOnly, [...assetProducts].sort(), SUPPORT.act, lassoPolygon,
     CONTACTS_READY, SUPPORT.owner, SUPPORT.barrons, SUPPORT.forbes,
   ]);
 }
@@ -8053,30 +8059,34 @@ const syncContactableUI = wireContactSwitch("contactableOnly",
 // Asset availability is independent of contacts.json. Coupling this control to
 // CONTACTS_READY was the source of two conflicting truths: summaries used the
 // canonical account artifact while the filter used stale contact-side fields.
-const assetsBox = document.getElementById("assetsOnly");
+const assetProductToggle = document.getElementById("assetProductToggle");
 function syncAssetsUI(){
-  if (!assetsBox) return;
+  if (!assetProductToggle) return;
   const available = SUPPORT.act === "ready";
-  assetsBox.checked = assetsOnly;
-  assetsBox.disabled = scope === "US" || !available;
-  const shell = assetsBox.closest(".switch");
-  shell.classList.toggle("on", assetsOnly);
-  shell.classList.toggle("switch-waiting", scope !== "US" && !available);
-  shell.title = SUPPORT.act === "failed"
-    ? `EIC account book unavailable — ${ACT_ASSETS_ERROR}`
-    : (!available ? "Loading EIC account book…" : "");
-}
-assetsBox.addEventListener("change", () => {
-  if (SUPPORT.act !== "ready"){
-    assetsBox.checked = assetsOnly;
-    return;
+  for (const button of assetProductToggle.querySelectorAll("[data-product]")){
+    button.disabled = scope === "US" || !available;
+    button.setAttribute("aria-pressed", assetsOnly && (button.dataset.product === "any"
+      ? !assetProducts.size : assetProducts.has(button.dataset.product)));
   }
-  assetsOnly = assetsBox.checked;
+  const status = document.getElementById("assetFilterStatus");
+  if (status){
+    status.hidden = scope === "US" || available;
+    status.textContent = SUPPORT.act === "failed"
+      ? "EIC account book unavailable. Reload to try again."
+      : "Loading EIC account book...";
+  }
+}
+assetProductToggle.addEventListener("click", event => {
+  const button = event.target.closest("[data-product]");
+  if (!button || button.disabled || scope === "US" || SUPPORT.act !== "ready") return;
+  const next = AssetProductFilters.transition(assetsOnly, [...assetProducts], button.dataset.product);
+  assetsOnly = next.assetsOnly;
+  refill(assetProducts, next.assetProducts);
   syncAssetsUI();
   redraw();
   if (assetsOnly)
-    reportFilterReach("No advisors with an approved EIC book match the current filters.",
-                      "advisors with an approved EIC book");
+    reportFilterReach("No advisors with the selected EIC assets match the current filters.",
+                      "advisors with the selected EIC assets");
 });
 
 const ownerBox = document.getElementById("ownerOnly");
@@ -8371,7 +8381,7 @@ function refreshActiveFilters(){
       return ids.size.toLocaleString();
     };
     if (contactableOnly) add(`Email/phone · ${distinct()}`, "contactable");
-    if (assetsOnly) add(`EIC assets · ${distinct()}`, "assets");
+    if (assetsOnly) add(`EIC assets: ${AssetProductFilters.label([...assetProducts])} (${distinct()})`, "assets");
     if (rankedOnly){
       // Distinct advisors, not pins. Counting rows here reported 35 against an
       // Advisors KPI of 33, because an advisor filed at two offices is two
@@ -8409,6 +8419,7 @@ function resetAllFilters(){
   ownerOnly = false;
   rankedOnly = false;
   contactableOnly = false; assetsOnly = false;
+  assetProducts.clear();
   excludedFirms.clear();
   resetTargeting(SELECTS_DEFAULT);
   setContinentalOnly(OUTSIDE_CONTINENTAL.has(scope) ? false : true, false);
@@ -8440,7 +8451,7 @@ document.getElementById("activeFilters").addEventListener("click", e => {
   if (key === "owner") ownerOnly = false;
   if (key === "ranked") rankedOnly = false;
   if (key === "contactable") contactableOnly = false;
-  if (key === "assets") assetsOnly = false;
+  if (key === "assets"){ assetsOnly = false; assetProducts.clear(); }
   if (key === "excluded") excludedFirms.clear();
   syncFilterButtons(); redraw();
 });
@@ -8460,6 +8471,7 @@ function captureAdvisorFilters(){
     selectedFirms:[...selectedFirms], selectsOnly,
     aum:[...aumSel], roles:[...roleSel], reg, lastEmailed, lastCalled, joinedFirm,
     emailScope, callScope, ownerOnly, rankedOnly, excluded:[...excludedFirms],
+    contactableOnly, assetsOnly, assetProducts:[...assetProducts],
   };
 }
 
@@ -8481,6 +8493,9 @@ function restoreAdvisorFilters(saved){
   joinedFirm = saved.joinedFirm || "";
   ownerOnly = !!saved.ownerOnly;
   rankedOnly = !!saved.rankedOnly;
+  contactableOnly = !!saved.contactableOnly;
+  refill(assetProducts, AssetProductFilters.normalize(saved.assetProducts));
+  assetsOnly = !!saved.assetsOnly || assetProducts.size > 0;
   excludedFirms = new Set(saved.excluded || []);
   syncTargetingUI(); syncFilterButtons();
 }
@@ -8520,7 +8535,9 @@ function relaxFiltersForAdvisor(features, advisorName, announce=true){
   if (ownerOnly && !props.some(passesOwner)){ ownerOnly = false; add("the owners-and-officers filter"); }
   if (rankedOnly && !props.some(passesRanked)){ rankedOnly = false; add("the ranked-advisor filter"); }
   if (contactableOnly && !props.some(passesContactable)){ contactableOnly = false; add("the contact-data filter"); }
-  if (assetsOnly && !props.some(passesHasAssets)){ assetsOnly = false; add("the assets-on-file filter"); }
+  if (assetsOnly && !props.some(passesHasAssets)){
+    assetsOnly = false; assetProducts.clear(); add("the EIC-product filter");
+  }
   if (lassoPolygon && !props.some(passesGeography)){ clearLasso(false); add("the map lasso"); }
 
   // Distinct office records can each satisfy a different constraint while no

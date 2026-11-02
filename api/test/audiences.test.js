@@ -31,6 +31,22 @@ test("a corrupt saved definition is returned safely as invalid", async () => {
   assert.equal(loaded.name, "Old");
 });
 
+test("saved product audience rules round-trip without broadening", async () => {
+  const store = env();
+  const normalized = defs.normalizeDefinition({ ...raw(), filters: {
+    assetsOnly: false, assetProducts: ["mf", "acv"], contactableOnly: true,
+  } });
+  const made = await store.putAudience(WHO, { id: "a-products1", name: "ACV or EICIX",
+    definition: normalized.definition, definitionJson: normalized.json });
+  const loaded = await store.getAudience(WHO, made.id);
+  assert.deepEqual(loaded.definition, normalized.definition);
+  assert.equal(loaded.definition.version, 2);
+  assert.deepEqual(loaded.definition.filters.assetProducts, ["acv", "mf"]);
+  assert.equal(loaded.definition.filters.assetsOnly, true);
+  assert.equal(loaded.definition.filters.contactableOnly, true);
+  assert.equal(loaded.invalidDefinition, false);
+});
+
 test("last-called summary is per rep, outbound-only, and uses the latest event time", async () => {
   const store = env();
   const log = store.__testService.table("CallLog");

@@ -30,8 +30,8 @@
   <link rel="stylesheet" href="vendor/leaflet.css">
   <link rel="stylesheet" href="vendor/MarkerCluster.css">
   <link rel="stylesheet" href="vendor/MarkerCluster.Default.css">
-  <link rel="stylesheet" href="style.css?v=649658583c">
-  <link rel="stylesheet" href="email.css?v=649658583c">
+  <link rel="stylesheet" href="style.css?v=274311c947">
+  <link rel="stylesheet" href="email.css?v=274311c947">
 </head>
 <body>
   <div id="app">
@@ -150,17 +150,6 @@
           </div>
           <div class="filter-switch-cell">
             <label class="switch compact">
-              <input type="checkbox" id="assetsOnly">
-              <span class="switch-ui"></span>
-              <span class="switch-lbl">EIC assets</span>
-            </label>
-            <span class="info-wrap">
-              <button type="button" class="info-button" aria-label="About the assets filter">i</button>
-              <span class="info-popover" role="tooltip">Advisors carrying an asset figure from the CRM &mdash; either a team total or their own book. Coverage is thin and uneven: the CRM populates this for under 8% of contacts, so switching it on shows where EIC has recorded a number, NOT where the money is. Team amounts are stored once on the team and shown as the whole team's book, never as one person's.</span>
-            </span>
-          </div>
-          <div class="filter-switch-cell">
-            <label class="switch compact">
               <input type="checkbox" id="ownerOnly">
               <span class="switch-ui"></span>
               <span class="switch-lbl">Owners/officers</span>
@@ -171,6 +160,22 @@
             </span>
           </div>
           </div>
+          <div class="filter-row product-filter-row">
+            <span class="label">EIC assets
+              <span class="info-wrap">
+                <button type="button" class="info-button" aria-label="About EIC product filters">i</button>
+                <span class="info-popover" role="tooltip">Nothing selected includes all advisors, including prospects without a recorded EIC book. Any EIC shows advisors with any approved ACT! account book. Choose one or more products to match any selected product; EICIX is separate from All-Cap SMA. MCV is currently the Mid-Cap / unallocated remainder in ACT!, not a separately verified product classification. These asset links do not change contact permissions.</span>
+              </span>
+            </span>
+            <div id="assetProductToggle" class="seg product-seg" role="group" aria-label="EIC products; choose one or more">
+              <button type="button" data-product="any" aria-pressed="false" title="Any recorded EIC account book" disabled>Any EIC</button>
+              <button type="button" data-product="acv" aria-pressed="false" title="All-Cap Value SMA" disabled>ACV</button>
+              <button type="button" data-product="lcv" aria-pressed="false" title="Large-Cap Value SMA" disabled>LCV</button>
+              <button type="button" data-product="midcap" aria-pressed="false" title="Mid-Cap / unallocated in ACT!" disabled>MCV</button>
+              <button type="button" data-product="mf" aria-pressed="false" title="EICIX mutual fund" disabled>EICIX</button>
+            </div>
+          </div>
+          <p id="assetFilterStatus" class="mini-note asset-filter-status" role="status" hidden></p>
           <div class="filter-row role-filter-row">
             <span class="label">People</span>
             <div id="roleToggle" class="seg role-seg" aria-label="People labels; choose one or more">
@@ -381,10 +386,11 @@
   <script src="vendor/leaflet-heat.js"></script>
   <!-- Shared with the field view: one definition of what a call outcome is,
        one queue, one do-not-call list. Loaded before app.js, which uses it. -->
-  <script src="dial.js?v=649658583c"></script>
-  <script src="training.js?v=649658583c"></script>
-  <script src="list_import.js?v=649658583c"></script>
-  <script src="app.js?v=649658583c"></script>
-  <script src="email.js?v=649658583c"></script>
+  <script src="dial.js?v=274311c947"></script>
+  <script src="training.js?v=274311c947"></script>
+  <script src="list_import.js?v=274311c947"></script>
+  <script src="asset-product-filters.js?v=274311c947"></script>
+  <script src="app.js?v=274311c947"></script>
+  <script src="email.js?v=274311c947"></script>
 </body>
 </html>

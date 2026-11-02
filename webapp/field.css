@@ -95,6 +95,13 @@ body{
   background:var(--panel-2); color:var(--muted);
 }
 .chip.on{background:var(--accent); color:var(--accent-ink); border-color:transparent}
+#assetProducts{display:flex; align-items:center; gap:6px; flex-wrap:wrap;
+  padding:0 14px 10px}
+.asset-products-label{font-size:12.5px; color:var(--muted); font-weight:650}
+#assetProducts .chip{min-height:var(--tap); height:auto; padding:8px 12px}
+#assetProducts .chip:disabled{opacity:.5}
+#assetProducts .chip:focus-visible{outline:2px solid var(--accent); outline-offset:2px}
+#assetProductsHelp{flex-basis:100%; color:var(--muted); font-size:12px}
 
 #status{margin:0; padding:10px 14px; font-size:13px; color:var(--muted)}
 

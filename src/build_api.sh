@@ -37,7 +37,8 @@ STAGE_DIR=""
 #   51: training-video-ui.test.js -- opt-in loading and shared shell contract
 #   55: email-signature.test.js -- private, optional and immutable sender photos
 #   57: email-company-names.test.js -- approved presentation aliases, not firm identity
-EXPECTED_API_TEST_FILE_COUNT=57
+#   61: product-filter helper, desktop, Field, and saved-audience contracts
+EXPECTED_API_TEST_FILE_COUNT=61
 
 cleanup() {
   test -z "$TEMP_ROOT" && return
@@ -417,7 +418,7 @@ cp -R "$API/test/." "$TEST_API/test/"
 cp "$ROOT/webapp/app.js" "$ROOT/webapp/dial.js" "$ROOT/webapp/email.js" \
   "$ROOT/webapp/email.css" "$ROOT/webapp/field.js" "$ROOT/webapp/field.html" \
   "$ROOT/webapp/index.html" "$ROOT/webapp/style.css" "$ROOT/webapp/training.js" \
-  "$ROOT/webapp/list_import.js" \
+  "$ROOT/webapp/list_import.js" "$ROOT/webapp/asset-product-filters.js" \
   "$TEST_ROOT/webapp/"
 API_PACKAGE_SOURCE_ROOT="$ROOT" NODE_PATH="$API/node_modules" \
   run_api_tests "$TEST_API" "$EXPECTED_API_TEST_FILE_COUNT"
