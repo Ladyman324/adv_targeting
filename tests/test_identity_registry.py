@@ -34,6 +34,41 @@ def link(crd, email, act_id, status="approved"):
 
 
 class RegistryTests(unittest.TestCase):
+    def test_greeting_only_changes_preserve_recipient_identity_and_routing_fields(self):
+        from preferred_names import build_act_primary_email_index, choose_contact_greeting
+        links = pd.DataFrame([link("123", "person@example.com", "act-one")])
+        contact = {"e":"person@example.com", "n":"James Example", "sal":"James", "ln":"Example",
+                   "src":"CRM", "t":"confirmed", "ms":1.0}
+        before = build_registry(links, {"advisors":{"123":contact}})
+        for salutation in ("Trey", "JR", "A.J.", "Mr. Porter", "retired", "C."):
+            with self.subTest(salutation=salutation):
+                choice = choose_contact_greeting(
+                    email=contact["e"], act_primary_by_email=build_act_primary_email_index([
+                        {"norm_email":contact["e"], "raw_salutation":salutation,
+                         "record_active":True, "source_record_id":"act-one"}]),
+                    roster_names=["Jim Example"], sec={"first":"JAMES","last":"Example"})
+                after = build_registry(links, {"advisors":{"123":{
+                    **contact, "sal":choice.greeting, "ps":choice.source}}})
+                self.assertEqual(set(before["recipients"]),set(after["recipients"]))
+                ignore = {"greetingName","greetingSource","routingHash"}
+                self.assertEqual({k:v for k,v in before["recipients"]["123"].items() if k not in ignore},
+                                 {k:v for k,v in after["recipients"]["123"].items() if k not in ignore})
+                self.assertEqual(choice.greeting, after["recipients"]["123"]["greetingName"])
+        for source in ("", "firm_roster", "sec_fallback"):
+            denied = build_registry(links,{"advisors":{"123":{**contact,"sal":"JR","ps":source}}})
+            self.assertNotIn("123",denied["recipients"])
+        self.assertEqual("James",contact["sal"])
+
+    def test_explicit_empty_greeting_does_not_revive_legacy_act_salutation(self):
+        links = pd.DataFrame([link("123", "person@example.com", "act-one")])
+        contact = {"e":"person@example.com", "n":"Person Example", "ln":"Example",
+                   "src":"CRM", "t":"confirmed", "ms":1.0}
+        legacy = build_registry(links,{"advisors":{"123":{**contact,"ps":"legacy_source"}}})
+        self.assertIn("123",legacy["recipients"])
+        chosen_empty = build_registry(links,{"advisors":{"123":{
+            **contact,"ps":"no_usable_greeting"}}})
+        self.assertNotIn("123",chosen_empty["recipients"])
+
     def test_release_descriptor_is_deterministic_and_pii_free(self):
         provenance = {key: f"value-{key}"
                       for key in RELEASE_PROVENANCE_KEYS}

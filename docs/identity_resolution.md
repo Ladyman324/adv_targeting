@@ -236,27 +236,29 @@ setting was active for the release.
 ## Preferred names
 
 Preferred greeting/display names are separate from the legal identity link.
-Strict common forms such as Christopher/Chris can approve automatically after
-the ACT identity is approved. They may also be used as a presentation-only
-overlay on an independently authorized roster route when every stricter gate
-in src/preferred_names.py agrees: active ACT record; unique, personal primary
-email; no asserted ACT CRD; unique high-tier CRD candidate at score 1.0 and gap
-at least 0.25; exact surname/name/roster email; current roster firm, email
-domain and SEC firm agreement; no hard conflicts; and either a strict nickname
-or the SEC's own used first name. Alternate ACT emails are never considered.
+`preferred_names.choose_contact_greeting()` chooses for the exact delivery email:
 
-The overlay never supplies routing authority, never attaches an ACT GUID and
-never authorizes an ACT write. The legal/formal name remains visible as
-Christopher (Chris) Tolman; only the greeting uses Chris. Other forms,
-including Robert/Bo, still require a hash-bound human decision.
+1. Use a cleaned salutation from exactly one active ACT contact whose primary
+   email matches. ACT is trusted for this presentation choice; SEC validation
+   is not required. Alternate emails, shared primary emails, inactive contacts
+   and unusable salutations fall through.
+2. Use an accepted firm-roster given name or nickname. On a unique address at
+   the person's authoritative firm domain, a whole leading email token may
+   refine it to a known nickname. Initials, digits and substring guesses do
+   not supply a name; nickname maps are unchanged.
+3. Use an acceptable SEC used name, otherwise a substantive given-name token.
 
-Current named examples:
+Contacts record the selected source in `ps` and its evidence hash in `pih`.
+Salutations are validated before selection; invalid ACT salutations never
+remove an otherwise eligible recipient. Compact dotted initials are accepted;
+uppercase JR is accepted only from the unique ACT primary-email step. Jr/Jr.
+remain rejected. Formatting preserves short names and dotted initials.
 
-- Robert Ladyman / CRD 4996584 is approved and displays/greeted as Bo.
-- Chris Tolman's ACT record remains unmatched for CRD/write purposes. Its exact
-  primary email and preferred Chris now overlay the independently authorized
-  UBS route for CRD 2066775. It displays as Christopher (Chris) Tolman, greets
-  as Chris, and still carries no ACT GUID or ACT write capability.
+This presentation choice supplies no identity or routing authority, attaches
+no ACT GUID, and grants no ACT write capability. Identity classification,
+CRD links, permissions and email eligibility gates are unchanged, so this
+change does not bump the identity RULESET_VERSION. Uncorroborated ACT
+salutations remain usable and are reported separately for CRM review.
 
 ## Colleague workflow
 

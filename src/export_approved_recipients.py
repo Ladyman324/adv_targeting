@@ -248,8 +248,8 @@ def build_registry(links: pd.DataFrame, contacts_payload: dict | None = None,
             approved.get("email")) == email else None
         name = clean_text(contact.get("pn") or contact.get("n") or
                           (exact_act or {}).get("display_name"))
-        greeting = clean_text(contact.get("sal") or
-                              (exact_act or {}).get("email_greeting"))
+        greeting = clean_text(contact.get("sal") or (
+            (exact_act or {}).get("email_greeting") if contact.get("ps") != "no_usable_greeting" else ""))
         # A display-name tail may be a suffix or credential (Lynn Shaw II,
         # Brad Dickens, C(k)P).  The contact build carries the resolved SEC
         # surname explicitly; never reinterpret presentation text as identity.
@@ -266,7 +266,7 @@ def build_registry(links: pd.DataFrame, contacts_payload: dict | None = None,
             "cfa", "cfp", "cpa", "cima", "chfc", "clu",
             "mba", "phd", "ricp", "crpc", "cpwa", "planner",
         }
-        if not valid_greeting(greeting) or not last_name or unsafe_last:
+        if not valid_greeting(greeting, source=clean_text(contact.get("ps"))) or not last_name or unsafe_last:
             ineligible[crd] = "contact_presentation_not_approved"
             continue
         recipient = {

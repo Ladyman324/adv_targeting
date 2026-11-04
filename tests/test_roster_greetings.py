@@ -64,6 +64,50 @@ class RosterGreetingTests(unittest.TestCase):
                                 authoritative=authoritative)
                 self.assertEqual("Christopher", d.greeting)
 
+    def test_email_known_nickname_refines_a_full_roster_given_name(self):
+        for first, local, expected in [("James","jim.smith","Jim"),
+                                       ("Christopher","chris.smith","Chris"),
+                                       ("Robert","bob.smith","Bob"),
+                                       ("James","jim","Jim"),
+                                       ("James","jim_smith","Jim"),
+                                       ("Robert","bob-smith","Bob")]:
+            with self.subTest(first=first,local=local):
+                decision=self.decide(first+" Smith",local+"@firm.example",first,last="Smith")
+                self.assertEqual(expected,decision.greeting)
+                self.assertEqual("roster_email_nickname_refinement",decision.reason)
+        # The accepted roster can supply the legal form even if SEC names lag.
+        decision=self.decide("James Smith","jim.smith@firm.example","George",last="Smith")
+        self.assertEqual("Jim",decision.greeting)
+
+    def test_email_keeps_published_nicknames_and_exact_names(self):
+        for roster, email, legal, expected in [
+            ("Jim Smith","james.smith@firm.example","James","Jim"),
+            ("James (Jimmy) Smith","jim.smith@firm.example","James","Jimmy"),
+            ("James Smith","james.smith@firm.example","James","James"),
+        ]:
+            with self.subTest(roster=roster):
+                decision=self.decide(roster,email,legal,last="Smith")
+                self.assertEqual(expected,decision.greeting)
+                self.assertNotEqual("roster_email_nickname_refinement",decision.reason)
+
+    def test_email_full_name_refinement_requires_unique_verified_address(self):
+        for unique,authoritative in [(False,True),(True,False)]:
+            decision=self.decide("James Smith","jim.smith@firm.example","James",last="Smith",
+                                 unique=unique,authoritative=authoritative)
+            self.assertEqual("James",decision.greeting)
+
+    def test_email_refinement_does_not_guess_prefixes_initials_or_new_nicknames(self):
+        for first, local in [("Robert","robin.smith"),("James","jimothy.smith"),
+                             ("Christopher","chris2.smith"),("Robert","bob+team.smith"),
+                             ("James","jsmith"),("James","j.smith"),
+                             ("James","jim.wrong"),("Douglas","doug.smith"),
+                             ("Mitchell","mitch.smith")]:
+            with self.subTest(first=first,local=local):
+                decision=self.decide(first+" Smith",local+"@firm.example",first,last="Smith")
+                self.assertEqual(first,decision.greeting)
+        decision=self.decide("Wrong Person","jim.smith@firm.example","James",last="Smith")
+        self.assertEqual("James",decision.greeting)
+
     def test_parenthetical_middle_name_is_not_a_preference(self):
         d = self.decide("John (David) Smith", "john.smith@example.com",
                         "John", "David", last="Smith")
@@ -132,6 +176,22 @@ class RosterGreetingTests(unittest.TestCase):
             self.assertEqual("roster_sec_agree_published_initials", d.reason)
             self.assertTrue(valid_greeting(d.greeting))
             self.assertEqual(d.greeting + " " + surname, d.presentation_name)
+
+    def test_compact_dotted_initials_use_the_same_validator_as_spaced_initials(self):
+        for compact in ("A.J.", "J.P.", "G.R.", "E.J.", "T.J.", "A.J.K."):
+            with self.subTest(compact=compact):
+                self.assertTrue(valid_greeting(compact))
+                self.assertTrue(valid_greeting(compact.replace(".", ". ").strip()))
+        for invalid in ("J.", "A.J.K.L.", "A.j.", "J L"):
+            self.assertFalse(valid_greeting(invalid))
+
+    def test_jr_requires_the_act_primary_source_and_suffix_casing_stays_invalid(self):
+        self.assertTrue(valid_greeting("JR", source="act_primary_email"))
+        for source in ("", "firm_roster", "sec_fallback"):
+            self.assertFalse(valid_greeting("JR", source=source))
+        for suffix in ("Jr", "Jr."):
+            for source in ("", "act_primary_email", "firm_roster", "sec_fallback"):
+                self.assertFalse(valid_greeting(suffix, source=source))
 
     def test_initials_require_unique_authoritative_agreement(self):
         for kwargs in [dict(first="K L"), dict(first="J L", unique=False),

@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 import json
+import re
 from collections import Counter
 from typing import Any, Iterable, Mapping, Optional
 
+from display_name import looks_like_a_name, tidy
 from identity_normalize import (
-    clean_text, given_agreement, is_generic_email, name_token, normalize_crd, normalize_email,
+    clean_text, given_agreement, is_generic_email, name_token, name_tokens, normalize_crd, normalize_email,
     normalize_phone, normalize_suffix, parse_full_name, preferred_name_status,
     structured_name,
 )
@@ -22,6 +24,33 @@ def sec_name(sec: Mapping[str, Any]) -> str:
     return " ".join(clean_text(sec.get(k)) for k in
                     ("first_name", "middle_name", "last_name", "suffix")
                     if clean_text(sec.get(k)))
+
+
+def format_greeting(value: object) -> str:
+    """Preserve initials and supplied casing; re-case longer all-caps names."""
+    text = clean_text(value)
+    if "." in text or len(text) <= 3 or not text.isupper():
+        return text
+    return tidy(text)
+
+
+def sec_greeting(sec: Mapping[str, Any]) -> str:
+    """Choose a readable SEC fallback without using suffixes or initials."""
+    used = clean_text(sec.get("used_first_name"))
+    used_tokens = name_tokens(used)
+    if (looks_like_a_name(used) and used_tokens
+            and all(len(t) > 1 and t.isalpha() for t in used_tokens)):
+        return format_greeting(used)
+    # A filed first name may contain initials ("L.TIMOTHY"). If it has no
+    # usable given name, try the filed middle name, then a substantive used-name
+    # word ("V. JAMES" -> "James") as the last resort.
+    for field in ("first_name", "middle_name", "used_first_name"):
+        for word in re.findall(r"[\w'-]+", clean_text(sec.get(field))):
+            token = name_token(word)
+            if looks_like_a_name(word) and len(token) > 1 and token.isalpha():
+                return format_greeting(word)
+    return ""
+
 
 
 def prepare_act_records(rows: list[dict], source_file: str,
@@ -357,8 +386,8 @@ def evaluate_assertion(record: Mapping[str, Any],
     preferred_status, preferred_reason = preferred_name_status(
         record.get("raw_salutation"), (sec or {}).get("first_name"),
         (sec or {}).get("used_first_name"))
-    greeting = clean_text(record.get("raw_salutation")) if preferred_status == "approved_auto" else (
-        clean_text((sec or {}).get("used_first_name")) or clean_text((sec or {}).get("first_name")))
+    greeting = (format_greeting(record.get("raw_salutation"))
+                if preferred_status == "approved_auto" else sec_greeting(sec or {}))
     legal = sec_name(sec or {})
     link = {
         "record_key": record.get("record_key", ""), "source_system": "act",
@@ -385,7 +414,8 @@ def evaluate_assertion(record: Mapping[str, Any],
 
 
 def apply_decision(link: dict, decision: Mapping[str, Any],
-                   sec_by_crd: Mapping[str, Mapping[str, Any]]) -> dict:
+                   sec_by_crd: Mapping[str, Mapping[str, Any]],
+                   aliases_by_crd: Optional[Mapping[str, Iterable[Mapping[str, Any]]]] = None) -> dict:
     """Apply a hash-bound human decision without mutating its input."""
     out = dict(link)
     if clean_text(decision.get("expected_evidence_hash")) != link.get("assertion_evidence_hash"):
@@ -403,10 +433,9 @@ def apply_decision(link: dict, decision: Mapping[str, Any],
             link.get("preferred_first"), sec.get("first_name"),
             sec.get("used_first_name"))
         fallback_greeting = (
-            clean_text(link.get("preferred_first"))
+            format_greeting(link.get("preferred_first"))
             if preferred_status == "approved_auto"
-            else (clean_text(sec.get("used_first_name")) or
-                  clean_text(sec.get("first_name")))
+            else sec_greeting(sec)
         )
         out.update({
             "advisor_crd": resolved, "identity_status": "approved",
@@ -440,7 +469,7 @@ def apply_decision(link: dict, decision: Mapping[str, Any],
             out.update({"preferred_first": preferred,
                         "preferred_status": "approved_reviewed",
                         "preferred_reason": "human_review_approved",
-                        "email_greeting": preferred,
+                        "email_greeting": format_greeting(preferred),
                         "decision_source": "human_review",
                         "reviewed_by": clean_text(decision.get("reviewer")),
                         "reviewed_utc": clean_text(decision.get("reviewed_utc"))})
@@ -448,8 +477,7 @@ def apply_decision(link: dict, decision: Mapping[str, Any],
         sec = sec_by_crd.get(out.get("advisor_crd"), {})
         out.update({"preferred_status": "rejected_reviewed",
                     "preferred_reason": "human_review_rejected",
-                    "email_greeting": out.get("sec_used_name") or
-                                      clean_text(sec.get("first_name")),
+                    "email_greeting": sec_greeting(sec),
                     "decision_source": "human_review",
                     "reviewed_by": clean_text(decision.get("reviewer")),
                     "reviewed_utc": clean_text(decision.get("reviewed_utc"))})

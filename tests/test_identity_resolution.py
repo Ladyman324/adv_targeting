@@ -55,6 +55,23 @@ class NormalizationTests(unittest.TestCase):
         self.assertEqual(("review", "preferred_requires_review"),
                          preferred_name_status("Bo", "Robert"))
 
+    def test_multiletter_initial_preferences_require_an_exact_sec_first_or_used_name(self):
+        for preferred, first, used in [
+            ("A.J.", "Michael", "A.J."),
+            ("J.P.", "John", "J.P."),
+            ("G.R.", "Garland", "G R"),
+            ("JR", "John", "JR"),
+            ("J.R.", "J.R.", ""),
+        ]:
+            with self.subTest(preferred=preferred):
+                self.assertEqual(("approved_auto", "preferred_exact"),
+                                 preferred_name_status(preferred, first, used))
+                self.assertEqual("review", preferred_name_status(
+                    preferred, "Michael")[0])
+
+
+
+
 
 class ResolverTests(unittest.TestCase):
     def test_firm_aliases_are_scoped_to_current_firm_crd(self):
@@ -111,6 +128,173 @@ class ResolverTests(unittest.TestCase):
         self.assertTrue(link["can_email"])
         self.assertEqual("Chris", link["email_greeting"])
         self.assertEqual([], json.loads(evidence["hard_conflicts_json"]))
+
+
+    def test_five_initial_nickname_crds_retain_exact_approval_and_greetings(self):
+        for crd, first, used, preferred, email_local in [
+            ("6813058", "MICHAEL", "A.J.", "A.J.", "ajlakovich"),
+            ("4091448", "ANTHONY", "A.J.", "A.J.", "aj.nigh"),
+            ("2144014", "JOHN", "J.P.", "J.P.", "j.p.cullen"),
+            ("5109032", "GARLAND", "G R", "G.R.", "gr"),
+            ("5684048", "JOHN", "JR", "JR", "jr"),
+        ]:
+            with self.subTest(crd=crd):
+                person = {**sec(crd, first), "used_first_name": used}
+                record = prepare_act_records([
+                    act(crd=crd, first=preferred, salutation=preferred,
+                        email=email_local + "@example.com")
+                ], "act.json", "abc")[0]
+                _, link = evaluate_assertion(record, person, {
+                    "current_firm_names": ["examplefirm"]})
+                self.assertEqual("approved", link["identity_status"])
+                self.assertEqual("approved_auto", link["preferred_status"])
+                self.assertEqual("preferred_exact", link["preferred_reason"])
+                self.assertEqual(preferred, link["email_greeting"])
+                self.assertTrue(link["can_email"])
+                decision = {"expected_evidence_hash": link["assertion_evidence_hash"],
+                            "link_decision": "replace", "resolved_crd": crd}
+                replacement = apply_decision(link, decision, {crd: person})
+                self.assertEqual("approved_auto", replacement["preferred_status"])
+                self.assertEqual(preferred, replacement["email_greeting"])
+                for field in ("identity_status", "can_display_contact", "can_call", "can_email", "can_sync_act"):
+                    self.assertEqual(link[field], replacement[field])
+
+    def test_short_and_period_preferences_keep_casing_in_both_decision_paths(self):
+        for preferred in ("PJ", "RJ", "TJ", "JD", "AC", "AJ", "JR", "J.R."):
+            with self.subTest(preferred=preferred):
+                person = {**sec(), "used_first_name": preferred}
+                record = prepare_act_records([
+                    act(first="Christopher", salutation=preferred)
+                ], "act.json", "abc")[0]
+                _, link = evaluate_assertion(record, person)
+                self.assertEqual("approved_auto", link["preferred_status"])
+                self.assertEqual(preferred, link["email_greeting"])
+                decision = {"expected_evidence_hash": link["assertion_evidence_hash"],
+                            "link_decision": "approve", "resolved_crd": "123",
+                            "preferred_decision": "approve", "preferred_first": preferred}
+                reviewed = apply_decision(link, decision, {"123": person})
+                self.assertEqual("approved_reviewed", reviewed["preferred_status"])
+                self.assertEqual(preferred, reviewed["email_greeting"])
+
+    def test_short_period_and_lowercase_fallbacks_keep_their_casing(self):
+        for used, expected in [
+            ("PJ", "PJ"), ("RJ", "RJ"), ("TJ", "TJ"), ("JD", "JD"),
+            ("AC", "AC"), ("AJ", "AJ"), ("BOB", "BOB"),
+            ("ST.JOHN", "ST.JOHN"), ("Jo.Anne", "Jo.Anne"),
+            ("christopher", "christopher"), ("CHRISTOPHER", "Christopher"),
+        ]:
+            with self.subTest(used=used):
+                person = {**sec(), "used_first_name": used}
+                record = prepare_act_records([act(salutation="")], "act.json", "abc")[0]
+                _, link = evaluate_assertion(record, person)
+                self.assertEqual(expected, link["email_greeting"])
+                decision = {"expected_evidence_hash": link["assertion_evidence_hash"],
+                            "link_decision": "approve", "preferred_decision": "reject"}
+                reviewed = apply_decision(link, decision, {"123": person})
+                self.assertEqual(expected, reviewed["email_greeting"])
+
+    def test_greeting_evidence_never_changes_identity_or_permissions(self):
+        record = prepare_act_records([act(first="Michael", last="Myers")],
+                                     "act.json", "abc")[0]
+        person = sec(first="Michael", last="Myers")
+        person["middle_name"] = "Andrew"
+        for changes, context in [
+            ({}, {"current_firm_names": ["examplefirm"]}),
+            ({}, {}),
+            ({"record_active": False}, {}),
+            ({"norm_first_name": "Unrelated", "raw_first_name": "Unrelated"}, {}),
+            ({"raw_claimed_crd": ""}, {}),
+        ]:
+            _, control = evaluate_assertion({**record, **changes, "raw_salutation": ""},
+                                            person, context)
+            for preferred in ("Andrew", "Andy", "Deborah", "M", "Team"):
+                with self.subTest(changes=changes, preferred=preferred):
+                    _, link = evaluate_assertion(
+                        {**record, **changes, "raw_salutation": preferred}, person, context)
+                    fields = ["identity_status"] + [k for k in control if k.startswith("can_")]
+                    self.assertEqual({k: control[k] for k in fields},
+                                     {k: link[k] for k in fields})
+
+    def test_fallbacks_are_readable_and_skip_junk_used_names_and_initials(self):
+        for first, used, expected in [
+            ("CHRISTOPHER ANDREW", "CHRISTOPHER", "Christopher"),
+            ("CHRISTOPHER ANDREW", "(III)", "Christopher"),
+            ("CHRISTOPHER ANDREW", "R.D.", "Christopher"),
+            ("CHRISTOPHER ANDREW", "L", "Christopher"),
+            ("CHRISTOPHER ANDREW", "L.Christopher", "Christopher"),
+            ("J.RUSSELL", "J.RUSSELL", "Russell"),
+            ("L.TIMOTHY", "L", "Timothy"),
+            ("L TIMOTHY", "", "Timothy"),
+            ("L. TIMOTHY", "M", "Timothy"),
+            ("MARIA", "MARIA CONSUELO", "Maria Consuelo"),
+            ("MARY-ANN", "", "Mary-ann"),
+            ("CHRISTOPHER", "", "Christopher"),
+        ]:
+            with self.subTest(first=first, used=used):
+                record = prepare_act_records([act(salutation="")], "act.json", "abc")[0]
+                person = {**sec(first=first), "used_first_name": used}
+                _, link = evaluate_assertion(record, person)
+                self.assertEqual(expected, link["email_greeting"])
+
+    def test_initial_only_first_name_uses_a_substantive_middle_as_last_resort(self):
+        record = prepare_act_records([act(salutation="")], "act.json", "abc")[0]
+        person = {**sec(first="J"), "middle_name": "LEMOINE", "used_first_name": "J.L."}
+        _, link = evaluate_assertion(record, person)
+        self.assertEqual("absent", link["preferred_status"])
+        self.assertEqual("Lemoine", link["email_greeting"])
+
+    def test_approved_preferences_are_tidied_without_losing_compounds_or_mixed_case(self):
+        for preferred, first, expected in [
+            ("CHRIS", "CHRISTOPHER", "Chris"),
+            ("MARIA CONSUELO", "MARIA CONSUELO", "Maria Consuelo"),
+            ("McKenzie", "MCKENZIE", "McKenzie"),
+        ]:
+            with self.subTest(preferred=preferred):
+                record = prepare_act_records([act(salutation=preferred)], "act.json", "abc")[0]
+                _, link = evaluate_assertion(record, sec(first=first))
+                self.assertEqual("approved_auto", link["preferred_status"])
+                self.assertEqual(expected, link["email_greeting"])
+
+    def test_replacement_alias_context_does_not_authorize_a_greeting(self):
+        record = prepare_act_records([act(crd="111", salutation="Neal")],
+                                     "act.json", "abc")[0]
+        _, link = evaluate_assertion(record, sec("111"))
+        decision = {"expected_evidence_hash": link["assertion_evidence_hash"],
+                    "link_decision": "replace", "resolved_crd": "222"}
+        replacement = sec("222", "FREDERICK", "SUMTER")
+        alias = {"first_name": "FREDERICK", "middle_name": "NEAL", "last_name": "SUMTER"}
+        for aliases, expected_status, expected_greeting in [
+            ({"222": [alias]}, "review", "Frederick"),
+            ({"111": [alias]}, "review", "Frederick"),
+            ({"222": [{**alias, "last_name": "Other"}]}, "review", "Frederick"),
+        ]:
+            with self.subTest(aliases=aliases):
+                resolved = apply_decision(link, decision, {"222": replacement}, aliases)
+                self.assertEqual("approved", resolved["identity_status"])
+                self.assertEqual(expected_status, resolved["preferred_status"])
+                self.assertEqual(expected_greeting, resolved["email_greeting"])
+                self.assertTrue(all(resolved[k] for k in resolved if k.startswith("can_")))
+        self.assertEqual("111", link["advisor_crd"])
+
+    def test_human_preferences_override_automatic_replacement_greetings(self):
+        record = prepare_act_records([act(crd="111", salutation="Neal")],
+                                     "act.json", "abc")[0]
+        _, link = evaluate_assertion(record, sec("111"))
+        decision = {"expected_evidence_hash": link["assertion_evidence_hash"],
+                    "link_decision": "replace", "resolved_crd": "222"}
+        replacement = {**sec("222", "FREDERICK", "SUMTER"), "used_first_name": "R.D."}
+        aliases = {"222": [{"first_name": "FREDERICK", "middle_name": "NEAL", "last_name": "SUMTER"}]}
+        for choice, preferred, expected_status, expected_greeting in [
+            ("approve", "BO", "approved_reviewed", "BO"),
+            ("approve", "McKenzie", "approved_reviewed", "McKenzie"),
+            ("reject", "", "rejected_reviewed", "Frederick"),
+        ]:
+            with self.subTest(choice=choice, preferred=preferred):
+                resolved = apply_decision(link, {
+                    **decision, "preferred_decision": choice, "preferred_first": preferred,
+                }, {"222": replacement}, aliases)
+                self.assertEqual(expected_status, resolved["preferred_status"])
+                self.assertEqual(expected_greeting, resolved["email_greeting"])
 
     def test_same_name_without_independent_corroboration_requires_review(self):
         record = prepare_act_records([act()], "act.json", "abc")[0]

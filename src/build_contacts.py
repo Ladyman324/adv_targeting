@@ -78,8 +78,9 @@ from firm_rosters import FIRMS, allowed_crds
 from identity_schema import (IDENTITY_DIRNAME, LINKS_FILENAME,
                              MANIFEST_FILENAME, content_hash)
 from identity_normalize import is_generic_email, normalize_email
-from preferred_names import load_greeting_overlays
-from roster_greetings import resolve_roster_greeting, valid_greeting
+from preferred_names import (choose_contact_greeting, load_act_primary_email_index,
+                             roster_names_for_contact)
+from roster_greetings import resolve_roster_greeting
 from roster_firm_policy import (authoritative_families, build_domain_policy,
                                 crd_tuple)
 from web_assets import write_json_gz
@@ -2284,10 +2285,8 @@ def main() -> None:
     ]).to_csv(residual_report, index=False)
     print(f"[*] anchor residual report: {residual_report}")
     act_path = newest_act_pull()
-    preferred_overlays = (
-        load_greeting_overlays(IDENTITY, act_path) if act_path else {})
-    print(f"[*] safe ACT preferred-name overlays: "
-          f"{len(preferred_overlays):,} independently corroborated")
+    act_primary_by_email = (
+        load_act_primary_email_index(IDENTITY, act_path) if act_path else {})
     dist = people["tier"].value_counts()
     print("[*] match tiers: " + ", ".join(f"{k} {v:,}" for k, v in dist.items()))
 
@@ -2321,7 +2320,7 @@ def main() -> None:
             authorized_email_crds[candidate_email].add(
                 str(getattr(candidate, "advisor_crd", "")))
     contacts = {}
-    overlays_applied = 0
+    greeting_sources = collections.Counter()
     member_state: dict = {}
     for crd, group in usable.groupby("advisor_crd"):
         row = pick_best(group)
@@ -2373,69 +2372,42 @@ def main() -> None:
         # evidence available that the record belongs to somebody else -- Scott
         # Friberg's Virginia number was showing on Jennifer Friberg's Atlanta
         # card with nothing on screen to suggest a problem.
-        # THE GREETING, only when the CRM supplied one. Absent on roster-sourced
-        # advisors, and the emailer falls back to splitting the display name --
-        # which is what it did for everybody before this existed.
-        # APPROVED BY THE IDENTITY LEDGER, OR NOT USED AT ALL.
-        #
-        # The Dear field is usually the greeting a rep chose -- Chris for
-        # Christopher Tolman, Scott for HENRY SCOTT KRUSE, who goes by his
-        # middle name. But 1,834 of the 4,226 that differ from the display name
-        # name somebody ELSE: Michael Myers is "Deborah", Joseph Pena is
-        # "Melanie", Mitchell Stillman is "Kristin" -- a spouse, an assistant,
-        # or a household record. audit.py already cites Mitchell/Kristin
-        # Stillman as a known wrong pairing.
-        #
-        # "Hi Deborah," to Michael Myers is far worse than "Hi Michael," to a
-        # man who goes by Mike, so the greeting has to agree with a name the SEC
-        # has on file -- first, middle or used, allowing for nicknames.
-        #
-        # The cost is real and accepted: Chip for JOHN FREDERICK JOHNSON is
-        # almost certainly right and is refused, because nothing distinguishes
-        # it from Deborah except knowing the person.
-        sal = salutation_of(group)
-        if sal and not valid_greeting(sal):
-            # Identity approval does not make a legacy ACT value speakable.
-            # Values such as "(III)", "J" and "CFP" fall through to the
-            # already-resolved SEC/roster presentation rule below.
-            sal = ""
-        overlay = preferred_overlays.get(str(crd))
-        if (not sal and overlay
-                and str(row["tier"]) in {"confirmed", "high"}
-                and str(row["source"]).upper() not in {"CRM", "EIC"}
-                and normalize_email(entry["e"]) == overlay["email"]):
-            sal = overlay["greeting"]
-            entry["ps"] = overlay["source"]
-            entry["pih"] = overlay["evidenceHash"]
-            overlays_applied += 1
+        # Greeting presentation follows the exact sending address. It cannot
+        # donate an ACT GUID, CRD, permission or email to this contact.
         sec = sec_names.get(str(crd), {})
-        roster_decision = None
-        if str(row["tier"]) in {"confirmed", "high"} and sec:
+        sal = ""
+        if str(row["tier"]) in {"confirmed", "high"}:
             normalized_email = normalize_email(entry["e"])
-            roster_decision = resolve_roster_greeting(
-                roster_name=entry["n"],
-                email=normalized_email,
-                sec_first=sec.get("first", ""),
-                sec_middle=sec.get("middle", ""),
-                sec_used=sec.get("used", ""),
-                sec_last=sec.get("last", ""),
+            greeting = choose_contact_greeting(
+                email=normalized_email, act_primary_by_email=act_primary_by_email,
+                roster_names=roster_names_for_contact(group, normalized_email, entry["n"]),
+                sec=sec,
                 email_unique=(
                     authorized_email_crds.get(normalized_email, set()) == {str(crd)}
                 ),
                 authoritative_domain=bool(row.get("authoritative_domain", False)),
-                sec_aliases=tuple(sec.get("aliases", [])),
-                approved_greeting=sal,
+            )
+            sal = greeting.greeting
+            entry["ps"] = greeting.source
+            entry["pih"] = greeting.evidence_hash
+            greeting_sources[greeting.source] += 1
+        # This resolver renders surname/display fields; its greeting does not
+        # override the single address-based decision above.
+        roster_decision = None
+        if str(row["tier"]) in {"confirmed", "high"} and sec:
+            roster_decision = resolve_roster_greeting(
+                roster_name=entry["n"], email=normalize_email(entry["e"]),
+                sec_first=sec.get("first", ""), sec_middle=sec.get("middle", ""),
+                sec_used=sec.get("used", ""), sec_last=sec.get("last", ""),
+                email_unique=(
+                    authorized_email_crds.get(normalize_email(entry["e"]), set()) == {str(crd)}
+                ),
+                authoritative_domain=bool(row.get("authoritative_domain", False)),
+                sec_aliases=tuple(sec.get("aliases", [])), approved_greeting=sal,
             )
             if roster_decision.last_name:
                 entry["ln"] = roster_decision.last_name
-            if not sal and roster_decision.greeting:
-                sal = roster_decision.greeting
-                entry["ps"] = roster_decision.reason
         if sal:
-            # load_crm exposes only the ledger's email_greeting. That value is
-            # either a deterministic SEC/strict-nickname fallback or a
-            # hash-bound reviewed preference such as Bo. Re-running the old
-            # nickname gate here would erase exactly those reviewed exceptions.
             entry["sal"] = sal
             presented = (roster_decision.presentation_name
                          if roster_decision else entry["n"])
@@ -2492,8 +2464,8 @@ def main() -> None:
         # features yet and the panel has to know which scope to switch to.
         member_state[crd] = str(row["state"] or "")
 
-    print(f"[*] preferred-name overlays applied to authorized roster routes: "
-          f"{overlays_applied:,}")
+    print("[*] greeting sources: " + ", ".join(
+        f"{source} {count:,}" for source, count in sorted(greeting_sources.items())))
 
     # WHO ELSE IS ON THAT TEAM.
     #

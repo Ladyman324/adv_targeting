@@ -345,7 +345,7 @@ def main() -> None:
         }
         evidence, link = evaluate_assertion(record, sec.get(target), context)
         if act_id in decisions:
-            link = apply_decision(link, decisions[act_id], sec)
+            link = apply_decision(link, decisions[act_id], sec, aliases)
         evidence_rows.append(evidence)
         links.append(link)
     enforce_final_uniqueness(links)

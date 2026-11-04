@@ -1,43 +1,152 @@
-"""Safe ACT preferred-name overlays for independently resolved roster contacts.
-
-Identity and presentation are deliberately separate. An unmatched ACT record
-cannot authorize an email route or an ACT write. It may supply the name a
-person uses when an independently approved roster route agrees on the exact
-primary email, current SEC firm and CRD.
-
-The returned overlay contains no ACT GUID. It is presentation evidence only.
-"""
+"""Choose contact greetings by sending address, independently of identity gates."""
 from __future__ import annotations
 
 import json
 import pathlib
-from collections import Counter
+import re
+from collections import defaultdict
+from dataclasses import dataclass
+from typing import Iterable, Mapping
 
 import pandas as pd
 
+from contact_normalization import parse_full_name
 from contact_provenance import sha256_file
-from identity_normalize import (clean_text, is_generic_email, name_token,
-                                normalize_crd, normalize_email,
-                                strict_nickname_pair)
-from identity_schema import (EVIDENCE_FILENAME, LINKS_FILENAME,
-                             MANIFEST_FILENAME, SOURCE_RECORDS_FILENAME,
+from identity_normalize import (HONORIFICS, NON_NAME_GREETINGS, clean_text,
+                                name_token, normalize_email, strict_nickname_pair)
+from identity_resolver import format_greeting, sec_greeting
+from identity_schema import (MANIFEST_FILENAME, SOURCE_RECORDS_FILENAME,
                              content_hash)
+from roster_greetings import resolve_roster_greeting, valid_greeting
 
-OVERLAY_SOURCE = "act_primary_email_overlay_v1"
+ACT_PRIMARY_SOURCE = "act_primary_email"
+ROSTER_SOURCE = "firm_roster"
+SEC_SOURCE = "sec_fallback"
+_ANNOTATIONS = frozenset({"male", "female"})
+_NON_NAMES = NON_NAME_GREETINGS | _ANNOTATIONS | frozenset({
+    "retired", "retried", "leftindustry", "deceased", "inactive",
+    "donotcontact", "donotmail", "nomail", "unsubscribed", "none", "na",
+})
 
 
-def _truth(value) -> bool:
-    if isinstance(value, bool):
-        return value
-    return clean_text(value).lower() in {"1", "true", "yes"}
+@dataclass(frozen=True)
+class ContactGreeting:
+    greeting: str
+    source: str
+    reason: str
+    evidence_hash: str
+    act_contact_id: str = ""
 
 
-def _empty_json_list(value) -> bool:
-    try:
-        parsed = json.loads(clean_text(value) or "[]")
-    except (TypeError, ValueError, json.JSONDecodeError):
-        return False
-    return isinstance(parsed, list) and not parsed
+def build_act_primary_email_index(records: Iterable[Mapping]) -> dict[str, list[Mapping]]:
+    """Count all primary claims, including inactive rows; never index alternates."""
+    by_email = defaultdict(list)
+    for record in records:
+        email = normalize_email(record.get("norm_email"))
+        if email:
+            by_email[email].append(record)
+    return dict(by_email)
+
+
+def load_act_primary_email_index(identity_dir: pathlib.Path,
+                                 contacts_path: pathlib.Path) -> dict[str, list[Mapping]]:
+    """Load primary claims from the exact ACT snapshot bound to the ledger."""
+    identity_dir, contacts_path = map(pathlib.Path, (identity_dir, contacts_path))
+    manifest = json.loads((identity_dir / MANIFEST_FILENAME).read_text(encoding="utf-8"))
+    core = {k: v for k, v in manifest.items() if k not in {"generatedUtc", "contentHash"}}
+    if manifest.get("contentHash") != content_hash(core):
+        raise RuntimeError("Identity manifest contentHash is invalid.")
+    act = manifest.get("actSource") or {}
+    if (act.get("file") != contacts_path.name
+            or act.get("sha256") != sha256_file(contacts_path)):
+        raise RuntimeError("Greeting source describes different ACT contact bytes.")
+    path = identity_dir / SOURCE_RECORDS_FILENAME
+    meta = (manifest.get("outputs") or {}).get(SOURCE_RECORDS_FILENAME) or {}
+    if (not path.exists() or meta.get("sha256") != sha256_file(path)
+            or int(meta.get("rows") or -1) != int(act.get("rows") or -2)):
+        raise RuntimeError("ACT greeting source records are stale or modified.")
+    frame = pd.read_parquet(path).fillna("")
+    required = {"norm_email", "raw_salutation", "source_record_id", "record_active"}
+    if not required <= set(frame.columns) or len(frame) != int(meta["rows"]):
+        raise RuntimeError("ACT greeting source records are incomplete.")
+    return build_act_primary_email_index(frame.to_dict("records"))
+
+
+def clean_act_salutation(value: object) -> str:
+    """Clean a trusted CRM salutation without validating it against SEC names."""
+    text = clean_text(value)
+    if (not text or re.match(r"^(?:" + "|".join(sorted(HONORIFICS)) + r")(?:[.\s]|$)", text, re.I)
+            or name_token(text) in _NON_NAMES):
+        return ""
+    for parenthetical in re.findall(r"\(([^()]*)\)", text):
+        candidate = format_greeting(parenthetical)
+        if (name_token(candidate) not in _NON_NAMES
+                and valid_greeting(candidate, source=ACT_PRIMARY_SOURCE)):
+            return candidate
+    text = format_greeting(re.sub(r"\([^()]*\)", "", text))
+    return text if valid_greeting(text, source=ACT_PRIMARY_SOURCE) else ""
+
+
+def roster_names_for_contact(group: pd.DataFrame, email: object,
+                             preferred_name: object = "") -> list[str]:
+    """Only accepted roster rows for the exact sending address may supply a name."""
+    target = normalize_email(email)
+    candidates = []
+    for row in group.to_dict("records"):
+        if (row.get("tier") not in {"confirmed", "high"}
+                or str(row.get("source", "")).upper() == "CRM"
+                or normalize_email(row.get("email")) != target):
+            continue
+        name = clean_text(row.get("name"))
+        if name:
+            candidates.append((name == clean_text(preferred_name),
+                               float(row.get("match_score") or 0), name))
+    return list(dict.fromkeys(name for _, _, name in sorted(candidates, reverse=True)))
+
+
+def choose_contact_greeting(*, email: object, act_primary_by_email: Mapping,
+                            roster_names: Iterable[str], sec: Mapping,
+                            email_unique: bool = True,
+                            authoritative_domain: bool = False) -> ContactGreeting:
+    """One presentation decision: unique active ACT primary, roster, then SEC."""
+    email = normalize_email(email)
+    records = act_primary_by_email.get(email, ())
+    record = records[0] if len(records) == 1 else None
+    active = record is not None and str(record.get("record_active", "")).lower() in {"true", "1"}
+
+    def result(greeting, source, reason, act_id=""):
+        payload = {"email": email, "greeting": greeting, "source": source,
+                   "reason": reason, "actContactId": act_id}
+        return ContactGreeting(greeting, source, reason, content_hash(payload), act_id)
+
+    if active:
+        greeting = clean_act_salutation(record.get("raw_salutation"))
+        if greeting:
+            return result(greeting, ACT_PRIMARY_SOURCE, "unique_active_primary_email",
+                          clean_text(record.get("source_record_id")))
+    for roster_name in roster_names:
+        decision = resolve_roster_greeting(
+            roster_name=roster_name, email=email,
+            sec_first=sec.get("first", ""), sec_middle=sec.get("middle", ""),
+            sec_used=sec.get("used", ""),
+            sec_last=sec.get("last") or parse_full_name(roster_name).last,
+            sec_aliases=tuple(sec.get("aliases", ())), email_unique=email_unique,
+            authoritative_domain=authoritative_domain)
+        greeting = format_greeting(decision.greeting)
+        if (decision.reason.startswith("roster_")
+                and valid_greeting(greeting, source=ROSTER_SOURCE)):
+            return result(greeting, ROSTER_SOURCE, decision.reason)
+    sec_names = {"first_name": sec.get("first", ""),
+                 "middle_name": sec.get("middle", ""),
+                 "used_first_name": sec.get("used", "")}
+    greeting = sec_greeting(sec_names)
+    if not valid_greeting(greeting, source=SEC_SOURCE):
+        # A compound used name can fail the existing merge-name syntax. Keep
+        # the route's usable filed first/middle name instead (Dee Dee -> Deirdre).
+        greeting = sec_greeting({**sec_names, "used_first_name": ""})
+    if valid_greeting(greeting, source=SEC_SOURCE):
+        return result(greeting, SEC_SOURCE, "sec_given_name_fallback")
+    return result("", "no_usable_greeting", "no_usable_given_name")
 
 
 def _preferred_token(value) -> str:
@@ -66,137 +175,3 @@ def preferred_display_name(formal_name: object, preferred_first: object) -> str:
         return formal
     return f"{parts[0]} ({preferred})" + (
         f" {' '.join(parts[1:])}" if len(parts) > 1 else "")
-
-
-def build_greeting_overlays(source: pd.DataFrame, evidence: pd.DataFrame,
-                            links: pd.DataFrame) -> dict[str, dict[str, str]]:
-    """Return CRD-keyed presentation overlays from already verified inputs."""
-    required_source = {
-        "record_key", "source_system", "raw_claimed_crd", "raw_salutation", "norm_email",
-        "generic_email", "email_claim_count", "record_active",
-    }
-    required_evidence = {
-        "record_key", "candidate_crd", "candidate_tier", "candidate_score",
-        "candidate_gap", "full_surname_exact", "given_exact",
-        "given_sec_used", "given_strict_nickname", "sec_first_name",
-        "sec_used_first_name", "email_unique_in_act", "email_personal",
-        "email_domain_current_agrees", "firm_current_agrees",
-        "roster_email_exact", "roster_name_agrees",
-        "roster_firm_current_agrees", "hard_conflicts_json", "evidence_hash",
-    }
-    required_links = {
-        "record_key", "identity_status", "decision_reason",
-        "preferred_first", "preferred_status", "preferred_reason",
-        "resolved_evidence_hash",
-    }
-    for label, frame, required in (
-            ("source", source, required_source),
-            ("evidence", evidence, required_evidence),
-            ("links", links, required_links)):
-        missing = sorted(required - set(frame.columns))
-        if missing:
-            raise RuntimeError(
-                f"Identity {label} artifact is missing: {', '.join(missing)}")
-        if frame["record_key"].astype(str).duplicated().any():
-            raise RuntimeError(f"Identity {label} artifact has duplicate record keys.")
-
-    evidence_by_key = {str(row["record_key"]): row
-                       for row in evidence.fillna("").to_dict("records")}
-    links_by_key = {str(row["record_key"]): row
-                    for row in links.fillna("").to_dict("records")}
-    candidates = []
-    for src in source.fillna("").to_dict("records"):
-        key = str(src["record_key"])
-        ev, link = evidence_by_key.get(key), links_by_key.get(key)
-        if not ev or not link:
-            continue
-        email = normalize_email(src["norm_email"])
-        crd = normalize_crd(ev["candidate_crd"])
-        greeting = _preferred_token(link["preferred_first"])
-        try:
-            score, gap = float(ev["candidate_score"]), float(ev["candidate_gap"])
-            claim_count = int(float(src["email_claim_count"]))
-        except (TypeError, ValueError):
-            continue
-        preferred_t = name_token(greeting)
-        sec_legal_t = name_token(ev["sec_first_name"])
-        sec_used_t = name_token(ev["sec_used_first_name"])
-        nickname_ok = link["preferred_reason"] == "preferred_strict_nickname"
-        sec_used_ok = (link["preferred_reason"] == "preferred_exact"
-                       and preferred_t and preferred_t == sec_used_t
-                       and preferred_t != sec_legal_t)
-        row_hash = clean_text(ev["evidence_hash"])
-        safe = (
-            crd and email and greeting
-            and clean_text(src["source_system"]).lower() == "act"
-            and name_token(src["raw_salutation"]) == name_token(greeting)
-            and not normalize_crd(src["raw_claimed_crd"])
-            and _truth(src["record_active"])
-            and not _truth(src["generic_email"])
-            and not is_generic_email(email)
-            and claim_count == 1
-            and _truth(ev["email_unique_in_act"])
-            and _truth(ev["email_personal"])
-            and link["identity_status"] == "unmatched"
-            and link["decision_reason"] == "no_asserted_crd"
-            and ev["candidate_tier"] == "high"
-            and abs(score - 1.0) < 1e-9 and gap >= 0.25
-            and _truth(ev["full_surname_exact"])
-            and (_truth(ev["given_exact"]) or _truth(ev["given_sec_used"])
-                 or _truth(ev["given_strict_nickname"]))
-            and _truth(ev["roster_email_exact"])
-            and _truth(ev["roster_name_agrees"])
-            and _truth(ev["roster_firm_current_agrees"])
-            and _truth(ev["firm_current_agrees"])
-            and _truth(ev["email_domain_current_agrees"])
-            and _empty_json_list(ev["hard_conflicts_json"])
-            and link["preferred_status"] == "approved_auto"
-            and (nickname_ok or sec_used_ok)
-            and row_hash
-            and clean_text(link["resolved_evidence_hash"]) == row_hash
-        )
-        if safe:
-            candidates.append({
-                "crd": crd, "email": email, "greeting": greeting,
-                "evidenceHash": row_hash, "source": OVERLAY_SOURCE,
-            })
-
-    # A presentation hint must be one-to-one too. Reject every side of any
-    # collision instead of selecting whichever parquet row happens to be first.
-    crd_count = Counter(row["crd"] for row in candidates)
-    email_count = Counter(row["email"] for row in candidates)
-    return {row["crd"]: {k: v for k, v in row.items() if k != "crd"}
-            for row in candidates
-            if crd_count[row["crd"]] == 1 and email_count[row["email"]] == 1}
-
-
-def load_greeting_overlays(identity_dir: pathlib.Path,
-                           contacts_path: pathlib.Path) -> dict[str, dict[str, str]]:
-    """Validate the manifest and load overlays for these exact ACT bytes."""
-    identity_dir = pathlib.Path(identity_dir)
-    contacts_path = pathlib.Path(contacts_path)
-    manifest_path = identity_dir / MANIFEST_FILENAME
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    core = {k: v for k, v in manifest.items()
-            if k not in {"generatedUtc", "contentHash"}}
-    if manifest.get("contentHash") != content_hash(core):
-        raise RuntimeError("Identity manifest contentHash is invalid.")
-    act = manifest.get("actSource") or {}
-    if (act.get("file") != contacts_path.name
-            or act.get("sha256") != sha256_file(contacts_path)):
-        raise RuntimeError("Preferred names describe different ACT contact bytes.")
-
-    frames = {}
-    for filename in (SOURCE_RECORDS_FILENAME, EVIDENCE_FILENAME, LINKS_FILENAME):
-        path = identity_dir / filename
-        meta = (manifest.get("outputs") or {}).get(filename) or {}
-        if (not path.exists() or meta.get("sha256") != sha256_file(path)
-                or int(meta.get("rows") or -1) != int(act.get("rows") or -2)):
-            raise RuntimeError(f"Identity artifact is stale or modified: {filename}")
-        frame = pd.read_parquet(path).fillna("")
-        if len(frame) != int(meta["rows"]):
-            raise RuntimeError(f"Identity artifact row count changed: {filename}")
-        frames[filename] = frame
-    return build_greeting_overlays(
-        frames[SOURCE_RECORDS_FILENAME], frames[EVIDENCE_FILENAME],
-        frames[LINKS_FILENAME])

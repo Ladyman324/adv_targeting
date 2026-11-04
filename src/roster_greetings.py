@@ -59,10 +59,13 @@ def _valid_given(value: object) -> bool:
     )
 
 
-def valid_greeting(value: object) -> bool:
-    """Release-gate syntax for a given name or normalized published initials."""
-    return _valid_given(value) or bool(re.fullmatch(
-        r"[A-Z]\. (?:[A-Z]\.)(?: [A-Z]\.)?", clean_text(value)))
+def valid_greeting(value: object, *, source: str = "") -> bool:
+    """Accept spoken names and 2-3 published initials; JR needs an ACT primary."""
+    text = clean_text(value)
+    if text == "JR":
+        return source == "act_primary_email"
+    return _valid_given(text) or bool(re.fullmatch(
+        r"[A-Z]\.(?: ?[A-Z]\.){1,2}", text))
 
 
 def _published_initials(value: object) -> list[str]:
@@ -156,14 +159,20 @@ def _email_given(email: str, surname: list[str]) -> str:
     if email.count("@") != 1:
         return ""
     local = email.split("@", 1)[0]
-    parts = [part for part in re.split(r"[^A-Za-z]+", local) if part]
-    if len(parts) < 2:
+    leading = re.split(r"[._-]", local, maxsplit=1)[0]
+    # Match a whole leading token, never a prefix inside robin or chris2.
+    if not _WORD.fullmatch(leading) or not _valid_given(leading):
         return ""
+    if local == leading:
+        return leading
+    parts = [part for part in re.split(r"[^A-Za-z]+", local) if part]
     surname_tokens = [name_token(x) for x in surname]
+    if len(parts) < 2 or not surname_tokens:
+        return ""
     terminal = name_token(parts[-1])
     if terminal not in {surname_tokens[-1], "".join(surname_tokens)}:
         return ""
-    return parts[0] if _valid_given(parts[0]) else ""
+    return leading
 
 
 def resolve_roster_greeting(
@@ -214,14 +223,19 @@ def resolve_roster_greeting(
     initial_led = bool(given_words and len(name_token(given_words[0])) == 1)
     email_given = (_email_given(email, surname)
                    if email_unique and authoritative_domain else "")
-    if email_given and initial_led and _compatible(email_given, sec_name_forms):
-        if not greeting:
-            greeting, reason = tidy(email_given), "roster_email_initial_refinement"
-        elif name_token(email_given) != name_token(greeting):
-            if (_nickname_pair(greeting, email_given)
-                    or any(_nickname_pair(name, email_given)
-                           for name in sec_name_forms if name_token(name))):
+    if email_given and given_words:
+        if initial_led and _compatible(email_given, sec_name_forms):
+            if not greeting:
                 greeting, reason = tidy(email_given), "roster_email_initial_refinement"
+            elif name_token(email_given) != name_token(greeting):
+                if (_nickname_pair(greeting, email_given)
+                        or any(_nickname_pair(name, email_given)
+                               for name in sec_name_forms if name_token(name))):
+                    greeting, reason = tidy(email_given), "roster_email_initial_refinement"
+        elif not initial_led and greeting and _nickname_pair(greeting, email_given):
+            # A verified address can corroborate a known short form of the
+            # published name. Never expand Jim back to James from the email.
+            greeting, reason = tidy(email_given), "roster_email_nickname_refinement"
 
     if not greeting:
         used_parts = [part for part in _words(sec_used)

@@ -2450,7 +2450,7 @@ def _approved_recipient_registry():
         greeting = str(row.get("greetingName") or "").strip()
         # Keep real short names (Vi, Ea) and the SEC-filed used name JD. A
         # vocabulary-only check misclassified them as suffixes/credentials.
-        if not valid_greeting(greeting):
+        if not valid_greeting(greeting, source=str(row.get("greetingSource") or "")):
             invalid_greetings.append((crd, greeting))
         last_name = str(row.get("lastName") or "").strip()
         last_token = name_token(last_name)
