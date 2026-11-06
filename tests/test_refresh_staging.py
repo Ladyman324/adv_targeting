@@ -101,6 +101,15 @@ class StagingTests(unittest.TestCase):
         self.assertEqual(len(args[0]), len(manifest['copyPlan']))
         self.assertEqual(set(args[0]), {self.root / p for p in manifest['copyPlan']})
 
+    def test_capture_hashes_overlapping_roles_only_once(self):
+        path = self.write('data/interim/advisors.parquet', 'shared source/baseline evidence')
+        with self.fixtures(), mock.patch.object(core, 'file_hash', wraps=core.file_hash) as hashing:
+            manifest = {'mode': 'act-only'}
+            staging._capture(core, self.root, manifest)
+        self.assertEqual(sum(Path(call.args[0]) == path for call in hashing.call_args_list), 1)
+        self.assertEqual(manifest['inputs']['data/interim/advisors.parquet'],
+                         manifest['baselineArtifacts']['data/interim/advisors.parquet'])
+
     def test_removed_recorded_file_detected_before_hashing(self):
         manifest = self.start_interrupted()
         (self.root / 'data/raw/source.json').unlink()

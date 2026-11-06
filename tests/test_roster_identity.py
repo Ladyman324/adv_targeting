@@ -79,6 +79,29 @@ class ActTeamSiteTests(unittest.TestCase):
         self.assertNotIn("x.test/team", roster_team_sites(rosters))
 
 class DirectRosterCrdTests(unittest.TestCase):
+    def test_incompatible_first_name_cannot_inherit_departed_person_email(self):
+        frame = person("Barry Revis")
+        frame["given_crd"] = ""
+        frame["email"] = "barry.revis@example.com"
+        candidates = {"revis": [("123", {"rachel", "elisabeth"}, {
+            "firms": {"10"}, "cities": {"atlanta"}, "states": {"GA"}, "suffix": ""})]}
+        row = score_contacts(frame, candidates).iloc[0]
+        self.assertEqual("none", row["tier"])
+        self.assertEqual("", row["advisor_crd"])
+        self.assertEqual("barry.revis@example.com", row["email"])
+
+    def test_initial_alone_cannot_become_outbound_authority(self):
+        frame = person("A. Smith")
+        frame["given_crd"] = ""
+        frame["email"] = "a.smith@example.com"
+        row = score_contacts(frame, index()).iloc[0]
+        self.assertEqual("review", row["tier"])
+
+    def test_supported_nickname_still_matches_without_stated_crd(self):
+        frame = person("Ally Smith")
+        frame["given_crd"] = ""
+        self.assertEqual("high", score_contacts(frame, index()).iloc[0]["tier"])
+
     def test_equal_bare_initial_is_not_a_full_given_name_match(self):
         self.assertEqual(0.45, name_score(["j", "r"], {"kathy", "jean", "j"}))
 

@@ -3,11 +3,23 @@
   "coverageDropPercent": 20,
   "freshnessDays": {
     "act": 7,
-    "sec_individuals": 31,
-    "sec_firms": 31,
+    "sec_individuals": 92,
+    "sec_firms": 92,
     "sec_adv": 92,
-    "roster:*": 31,
+    "roster:*": 92,
     "barrons": 366,
     "forbes": 366
+  },
+  "schedule": {
+    "timezone": "Eastern Standard Time",
+    "dayOfWeek": "Saturday",
+    "time": "03:00",
+    "quarterlyMonths": [1, 4, 7, 10],
+    "quarterlyWeek": "first",
+    "weeklySources": ["act"],
+    "quarterlySources": ["sec_individuals", "sec_firms", "sec_adv", "barrons", "forbes", "roster:*"],
+    "rebuildDependencies": true,
+    "runTests": true,
+    "publish": false
   }
 }

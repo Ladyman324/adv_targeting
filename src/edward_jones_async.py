@@ -20,8 +20,9 @@ import subprocess
 import sys
 import time
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
+from html import unescape as unescape_html
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 from urllib.parse import urlencode, urljoin, urlparse
@@ -31,6 +32,8 @@ from lxml import etree, html
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from firm_rosters import roster_path, scratch_path  # one naming convention, defined once
+from scrape_runtime import AcquisitionProgress, SourceUnhealthy
+from edward_jones_email import select_email as select_edward_jones_email
 
 
 ROOT = Path(__file__).parents[1]
@@ -38,6 +41,8 @@ ROOT = Path(__file__).parents[1]
 # data/raw/firm_rosters/ so a rebuild of data/output/ cannot overwrite them.
 DEFAULT_OUTPUT = ROOT / "data" / "raw" / "firm_rosters"
 API_URL = "https://www.edwardjones.com/api/v3/financial-advisor/results"
+BOOTSTRAP_URL = "https://www.edwardjones.com/us-en/search/financial-advisor/results"
+ACCESS_TITLE_RE = re.compile(r"access\s+denied|request\s+rejected|verify\s+you\s+are\s+human|attention\s+required|just\s+a\s+moment|too\s+many\s+requests", re.I)
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
@@ -55,12 +60,18 @@ class RateLimiter:
         self.lock = asyncio.Lock()
 
     async def wait(self) -> None:
-        async with self.lock:
-            now = time.monotonic()
-            delay = self.next_start - now
-            if delay > 0:
-                await asyncio.sleep(delay)
-            self.next_start = max(self.next_start, time.monotonic()) + self.interval
+        while True:
+            async with self.lock:
+                now = time.monotonic()
+                delay = self.next_start - now
+                if delay <= 0:
+                    self.next_start = now + self.interval
+                    return
+            # A cooldown must not hold the coordination lock. Otherwise other
+            # workers cannot record their concurrent penalties until after the
+            # sleep, accidentally serializing one cooldown per queued worker.
+            # Recheck on wake because another response may extend the deadline.
+            await asyncio.sleep(delay)
 
     async def penalize(self, seconds: float) -> None:
         """Pause every worker after rate limiting or a transient server failure."""
@@ -111,6 +122,49 @@ def read_cookie(args: argparse.Namespace) -> Optional[str]:
     return args.cookie
 
 
+async def publisher_cookie(context) -> str:
+    """Never export unrelated cookies from the user's shared debug browser."""
+    values = await context.cookies([
+        API_URL, "https://www.edwardjones.com/us-en/financial-advisor/",
+        BOOTSTRAP_URL])
+    allowed = {"edwardjones.com", "www.edwardjones.com"}
+    return "; ".join("%s=%s" % (item["name"],item["value"]) for item in values
+        if str(item.get("domain", "")).lower().lstrip(".") in allowed)
+
+
+def safe_retry_after(response) -> str:
+    """Keep only a numeric duration or canonical HTTP-date, never raw headers."""
+    value = str(response.headers.get("retry-after") or response.headers.get("Retry-After") or "").strip()
+    if re.fullmatch(r"\d{1,10}", value):
+        return value
+    try:
+        parsed = parsedate_to_datetime(value)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc).isoformat()
+    except (TypeError, ValueError, OverflowError):
+        return ""
+
+
+def publisher_location(value: str) -> str:
+    parsed = urlparse(value)
+    return "%s://%s%s" % (parsed.scheme, parsed.hostname or "", parsed.path or "/")
+
+
+def publisher_challenge(page_html: str) -> bool:
+    title = re.search(r"<title\b[^>]*>(.*?)</title>", page_html, re.I | re.S)
+    return bool(title and ACCESS_TITLE_RE.search(unescape_html(title.group(1))))
+
+
+class PublisherBootstrapError(SourceUnhealthy):
+    def __init__(self, diagnostics):
+        self.diagnostics = diagnostics
+        logging.warning("Publisher bootstrap diagnostics: %s", json.dumps(diagnostics, sort_keys=True))
+        status = diagnostics.get("httpStatus")
+        detail = "HTTP " + str(status) if status is not None else diagnostics["reason"]
+        super().__init__("Publisher bootstrap unavailable (" + detail + "); no session cookies exported")
+
+
 async def request_with_retries(
     client: httpx.AsyncClient,
     url: str,
@@ -123,7 +177,9 @@ async def request_with_retries(
         await limiter.wait()
         try:
             response = await client.get(url)
-            if response.status_code not in {429, 500, 502, 503, 504}:
+            # Access/rate denials are not transient retries or permission to
+            # renew browser cookies. The caller checkpoints them and stops.
+            if response.status_code not in {500, 502, 503, 504}:
                 return response
             last_error = None
         except (httpx.TimeoutException, httpx.TransportError) as exc:
@@ -131,8 +187,6 @@ async def request_with_retries(
             response = None
         if attempt < retries:
             delay = retry_delay(response, attempt)
-            if response is not None and response.status_code == 429:
-                await limiter.cap_rate(1.0)
             logging.warning("Transient request failure for %s; global backoff %.1fs (attempt %s/%s)", url, delay, attempt + 1, retries + 1)
             await limiter.penalize(delay)
     if last_error:
@@ -256,7 +310,7 @@ async def connect_debug_chrome(playwright: Any, args: argparse.Namespace) -> Tup
             "--user-data-dir=%s" % user_data,
             "--no-first-run",
             "--no-default-browser-check",
-            getattr(args, "bootstrap_url", "https://www.edwardjones.com/us-en/find-a-financial-advisor"),
+            getattr(args, "bootstrap_url", BOOTSTRAP_URL),
         ]
         subprocess.Popen(
             command,
@@ -415,9 +469,8 @@ async def discover_in_browser(args: argparse.Namespace) -> List[Dict[str, Any]]:
                 worker_count = min(args.browser_concurrency, max(1, queue.qsize()))
                 await asyncio.gather(*(worker() for _ in range(worker_count)))
 
-            cookie_values = await context.cookies()
             if not args.cookie and not args.cookie_file:
-                args.cookie = "; ".join("%s=%s" % (item["name"], item["value"]) for item in cookie_values)
+                args.cookie = await publisher_cookie(context)
         finally:
             await page.close()
 
@@ -433,6 +486,7 @@ async def discover_in_browser(args: argparse.Namespace) -> List[Dict[str, Any]]:
     return advisors
 
 async def run_all(args: argparse.Namespace) -> None:
+    check_access_resume(args)
     records = await discover_in_browser(args)
     args.discovery_snapshot.parent.mkdir(parents=True, exist_ok=True)
     temporary = args.discovery_snapshot.with_suffix(args.discovery_snapshot.suffix + ".tmp")
@@ -625,6 +679,52 @@ def load_enrichment_checkpoint(path: Path) -> Tuple[Dict[str, Dict[str, Any]], D
     return results, metadata
 
 
+def archive_completed_checkpoint(checkpoint: Path) -> Path:
+    """Retain exact observation evidence after a complete CSV, not just its rows."""
+    digest = hashlib.sha256(checkpoint.read_bytes()).hexdigest()
+    archive = checkpoint.with_name(checkpoint.name + '.completed-' + digest + '.jsonl')
+    if archive.exists():
+        if hashlib.sha256(archive.read_bytes()).hexdigest() != digest:
+            raise SourceUnhealthy('Completed checkpoint archive is inconsistent; resume evidence retained')
+        checkpoint.unlink()
+    else:
+        checkpoint.rename(archive)
+    return archive
+
+
+def check_access_resume(args, results=None):
+    """A new full run or --no-resume is not permission to ignore a denial."""
+    checkpoint = getattr(args, "checkpoint", None)
+    if results is None:
+        results, _ = load_enrichment_checkpoint(checkpoint) if checkpoint and checkpoint.exists() else ({}, {})
+    denied = {url: result.get("http_status") for url, result in results.items()
+              if result.get("http_status") in {401, 403, 429} or result.get("status") == "access_challenge"}
+    # Operator review cannot shorten a publisher's explicit Retry-After.
+    for url in denied:
+        record = results[url]
+        value = str(record.get("retry_after") or "")
+        deadline = None
+        try:
+            if value.isdigit() and record.get("observed_utc"):
+                observed = datetime.fromisoformat(record["observed_utc"].replace("Z", "+00:00"))
+                if observed.tzinfo is None:
+                    observed = observed.replace(tzinfo=timezone.utc)
+                deadline = observed + timedelta(seconds=int(value))
+            elif value:
+                deadline = datetime.fromisoformat(value.replace("Z", "+00:00"))
+                if deadline.tzinfo is None:
+                    deadline = deadline.replace(tzinfo=timezone.utc)
+        except (ValueError, TypeError, OverflowError):
+            deadline = None
+        if deadline and deadline > datetime.now(timezone.utc):
+            raise SourceUnhealthy("Publisher rate-limit wait is still active until " + deadline.isoformat()
+                                  + "; no request or cookie renewal started")
+    if denied and not getattr(args, "reviewed_access_resume", False):
+        raise SourceUnhealthy("Checkpoint contains publisher access/rate denials; operator review is required before "
+                              "--reviewed-access-resume. No request or cookie renewal started.")
+    return denied
+
+
 NICKNAMES = {
     "bill": {"william"}, "will": {"william"}, "bob": {"robert"},
     "rob": {"robert"}, "dick": {"richard"}, "rick": {"richard"},
@@ -652,49 +752,13 @@ def name_tokens(text: str) -> List[str]:
     return [t for t in cleaned.split() if len(t) > 1 and t not in drop]
 
 
-def own_email(name: str, candidates: List[str]) -> Optional[str]:
-    """The address belonging to THIS advisor, out of the branch's list.
+def own_email(name: str, candidates: List[str], profile_url: str = '') -> Optional[str]:
+    """Use the same name/profile evidence as the EJ contact loader.
 
-    Every Edward Jones profile publishes the whole branch's addresses, and this
-    file used to store `emails[0]`. The list is SORTED, so first meant
-    alphabetically first, not the advisor's own: Paul Harrison shipped
-    christopher.tavel@edwardjones.com while paul.harrison@edwardjones.com sat
-    one element away in the same list. 16,329 of the 19,657 records carry more
-    than one address, so this was not a rare edge.
-
-    Surname is the test, not position. Where no candidate carries this
-    advisor's surname the answer is None rather than a colleague's address --
-    which is the whole point of the function.
-
-    build_contacts.py applies the same rule when it reads the `emails` column,
-    so the map was already right; this fixes the roster itself, which is read
-    directly often enough to matter.
+    Candidate arrays contain branch staff too; order and surname alone do not
+    establish ownership. Ambiguous choices stay blank without erasing facts.
     """
-    if not candidates:
-        return None
-    tokens = name_tokens(name)
-    if not tokens:
-        return None
-    given, surname = tokens[0], tokens[-1]
-    forms = {given} | NICKNAMES.get(given, set())
-
-    def parts(address: str) -> set:
-        return {t for t in re.split(r"[._\-]+", address.split("@")[0].lower()) if t}
-
-    # Surname AND given name is the strongest signal, and settles the branches
-    # that are FAMILY -- a father and son at one desk share both a surname and
-    # a mailbox list.
-    for address in candidates:
-        piece = parts(address)
-        if surname in piece and forms & piece:
-            return address
-    # An initial stands for the name: j.mitchell@ is James Mitchell.
-    for address in candidates:
-        piece = parts(address)
-        if surname in piece and any(len(t) == 1 and t == given[0] for t in piece):
-            return address
-    matches = [a for a in candidates if surname in parts(a)]
-    return matches[0] if len(matches) == 1 else None
+    return select_edward_jones_email(name, candidates, profile_url).email or None
 
 
 def branch_key(record: Dict[str, Any]) -> str:
@@ -810,7 +874,7 @@ def write_enriched_records(records: List[Dict[str, Any]], results: Dict[str, Dic
         profile_url = urljoin(base, found_url) if found_url else None
         result = results.get(profile_url, {}) if profile_url else {}
         emails = result.get("emails") or []
-        record["email"] = own_email(original.get("faName"), emails)
+        record["email"] = own_email(original.get("faName"), emails, profile_url or '')
         record["emails"] = emails
         record["email_status"] = result.get("status", "profile_url_missing" if not profile_url else "not_processed")
         record["email_source_url"] = profile_url
@@ -844,6 +908,10 @@ def write_enriched_records(records: List[Dict[str, Any]], results: Dict[str, Dic
 
 
 async def browser_cookie(args: argparse.Namespace) -> str:
+    bootstrap = getattr(args, "bootstrap_url", BOOTSTRAP_URL)
+    parsed = urlparse(bootstrap)
+    if parsed.scheme != "https" or parsed.netloc not in {"www.edwardjones.com", "edwardjones.com"}:
+        raise ValueError("Bootstrap URL must use HTTPS on the Edward Jones publisher")
     try:
         from playwright.async_api import async_playwright
     except ImportError as exc:
@@ -851,17 +919,45 @@ async def browser_cookie(args: argparse.Namespace) -> str:
     async with async_playwright() as playwright:
         browser, context, _ = await connect_debug_chrome(playwright, args)
         page = await context.new_page()
+        started = time.monotonic()
+        diagnostics = {"requestedLocation": publisher_location(bootstrap),
+                       "httpStatus": None, "reason": "navigation"}
         try:
-            await page.goto(
-                getattr(args, "bootstrap_url", "https://www.edwardjones.com/us-en/find-a-financial-advisor"),
-                wait_until="domcontentloaded",
-                timeout=int(args.timeout * 1000),
-            )
+            try:
+                response = await page.goto(bootstrap, wait_until="domcontentloaded", timeout=int(args.timeout * 1000))
+            except Exception as exc:
+                diagnostics.update(reason="navigation_failure", exceptionType=type(exc).__name__,
+                                   elapsedSeconds=round(time.monotonic() - started, 3))
+                raise PublisherBootstrapError(diagnostics) from None
+            diagnostics.update(httpStatus=response.status if response else None,
+                finalLocation=publisher_location(page.url), elapsedSeconds=round(time.monotonic() - started, 3))
+            if response:
+                retry = safe_retry_after(response)
+                if retry:
+                    diagnostics["retryAfter"] = retry
+            if response is None or response.status != 200:
+                diagnostics["reason"] = "http_unavailable" if response else "missing_response"
+                raise PublisherBootstrapError(diagnostics)
+            final = urlparse(page.url)
+            if final.scheme != "https" or final.netloc not in {"www.edwardjones.com", "edwardjones.com"}:
+                diagnostics["reason"] = "unexpected_publisher_redirect"
+                raise PublisherBootstrapError(diagnostics)
+            try:
+                title = await asyncio.wait_for(page.title(), timeout=5)
+            except Exception as exc:
+                diagnostics.update(reason="document_check_failure", exceptionType=type(exc).__name__)
+                raise PublisherBootstrapError(diagnostics) from None
+            if ACCESS_TITLE_RE.search(title):
+                diagnostics["reason"] = "access_challenge"
+                raise PublisherBootstrapError(diagnostics)
             await page.wait_for_timeout(1000)
-            values = await context.cookies()
-            return "; ".join("%s=%s" % (item["name"], item["value"]) for item in values)
+            return await publisher_cookie(context)
         finally:
-            await page.close()
+            try:
+                await asyncio.wait_for(page.close(), timeout=5)
+            except Exception as exc:
+                logging.warning("Publisher bootstrap page cleanup unverified: %s", type(exc).__name__)
+                raise SourceUnhealthy("Temporary publisher bootstrap page cleanup could not be verified; stop") from None
 
 async def enrich(args: argparse.Namespace, records: Optional[List[Dict[str, Any]]] = None) -> None:
     if records is None:
@@ -875,6 +971,9 @@ async def enrich(args: argparse.Namespace, records: Optional[List[Dict[str, Any]
     }
     if not urls:
         raise RuntimeError("No profile URLs found. Inspect the JSON and pass --url-field FIELD.NAME")
+    if any(urlparse(url).scheme != "https" or urlparse(url).hostname not in
+           {"www.edwardjones.com", "edwardjones.com"} for url in urls):
+        raise ValueError("Profile URLs must use HTTPS on the Edward Jones publisher host")
 
     fingerprint = stable_fingerprint({"urls": sorted(urls), "extractor_version": 3})
     prior_results: Dict[str, Dict[str, Any]] = {}
@@ -889,15 +988,22 @@ async def enrich(args: argparse.Namespace, records: Optional[List[Dict[str, Any]
     terminal_statuses = {"ok", "field_missing", "field_empty", "not_found"}
     done = {url for url, result in prior_results.items() if result.get("status") in terminal_statuses}
     pending = sorted(urls - done)
+    denied = check_access_resume(args, prior_results if args.resume else None)
+    if denied:
+        logging.warning("Explicit operator-reviewed access resume: %s denied profiles; checkpoint SHA256 %s",
+                        len(denied), hashlib.sha256(args.checkpoint.read_bytes()).hexdigest())
     print("Found %s unique profile URLs; %s already complete; %s pending" % (len(urls), len(done), len(pending)))
 
     args.checkpoint.parent.mkdir(parents=True, exist_ok=True)
     cookie = read_cookie(args)
+    if pending and not cookie:
+        # Full runs get this handoff from discovery. Standalone/resumed enrich
+        # must establish the same ordinary publisher session before requests.
+        cookie = await browser_cookie(args)
     limits = httpx.Limits(max_connections=args.concurrency, max_keepalive_connections=args.concurrency)
     output_lock = asyncio.Lock()
-    refresh_lock = asyncio.Lock()
-    session_generation = 0
     completed = 0
+    progress = AcquisitionProgress()
     mode = "a" if args.resume and args.checkpoint.exists() else "w"
 
     with args.checkpoint.open(mode, encoding="utf-8", buffering=1) as output:
@@ -906,18 +1012,6 @@ async def enrich(args: argparse.Namespace, records: Optional[List[Dict[str, Any]
         async with httpx.AsyncClient(
             headers=headers(cookie), follow_redirects=True, timeout=args.timeout, limits=limits
         ) as client:
-
-            async def refresh_session(observed_generation: int) -> None:
-                nonlocal session_generation
-                async with refresh_lock:
-                    if session_generation != observed_generation:
-                        return
-                    logging.warning("Refreshing profile-session cookies after 401/403")
-                    refreshed = await browser_cookie(args)
-                    if refreshed:
-                        client.headers["Cookie"] = refreshed
-                        args.cookie = refreshed
-                    session_generation += 1
 
             async def process_batch(batch: List[str], limiter: RateLimiter, label: str) -> None:
                 nonlocal completed
@@ -932,15 +1026,18 @@ async def enrich(args: argparse.Namespace, records: Optional[List[Dict[str, Any]
                             url = queue.get_nowait()
                         except asyncio.QueueEmpty:
                             return
-                        row: Dict[str, Any] = {"profile_url": url, "emails": []}
+                        row: Dict[str, Any] = {"profile_url": url, "emails": [],
+                                              "observed_utc": datetime.now(timezone.utc).isoformat()}
                         try:
-                            generation = session_generation
                             response = await request_with_retries(client, url, limiter, args.retries)
-                            if response.status_code in {401, 403}:
-                                await refresh_session(generation)
-                                response = await request_with_retries(client, url, limiter, 1)
                             row["http_status"] = response.status_code
-                            if response.is_success:
+                            row["source_body_sha256"] = hashlib.sha256(response.content).hexdigest()
+                            retry = safe_retry_after(response)
+                            if retry:
+                                row["retry_after"] = retry
+                            if response.is_success and publisher_challenge(response.text):
+                                row["status"] = "access_challenge"
+                            elif response.is_success:
                                 row["emails"], row["status"] = extract_emails(response.text)
                                 row["bio"] = extract_bio(response.text)
                             elif response.status_code == 404:
@@ -952,12 +1049,23 @@ async def enrich(args: argparse.Namespace, records: Optional[List[Dict[str, Any]
                         async with output_lock:
                             output.write(json.dumps(row, ensure_ascii=False) + "\n")
                             completed += 1
+                            progress.observe(row["status"],row.get("http_status"))
+                            if row.get("http_status") in {401, 403, 429} or row["status"] == "access_challenge":
+                                raise SourceUnhealthy("Publisher HTTP " + str(row["http_status"])
+                                    + "; checkpoint retained, no automatic retry or cookie renewal")
                             if completed % args.progress_every == 0:
-                                print("%s: completed %s requests" % (label, completed))
+                                print("%s: %s" % (label, json.dumps(progress.summary())), flush=True)
                         queue.task_done()
 
+                # Stop the bounded worker pool early on systemic failures.
                 workers = min(args.concurrency, max(1, len(batch)))
-                await asyncio.gather(*(worker() for _ in range(workers)))
+                tasks = [asyncio.create_task(worker()) for _ in range(workers)]
+                try:
+                    await asyncio.gather(*tasks)
+                except BaseException:
+                    for task in tasks: task.cancel()
+                    await asyncio.gather(*tasks,return_exceptions=True)
+                    raise
 
             await process_batch(pending, RateLimiter(args.rate), "Primary pass")
             current_results, _ = load_enrichment_checkpoint(args.checkpoint)
@@ -970,11 +1078,13 @@ async def enrich(args: argparse.Namespace, records: Optional[List[Dict[str, Any]
                 await process_batch(retryable, RateLimiter(max(0.1, args.rate / 2.0)), "Retry pass")
 
     results, _ = load_enrichment_checkpoint(args.checkpoint)
-    write_enriched_records(records, results, args.output, args.url_field)
     statuses = Counter(results.get(url, {}).get("status", "not_processed") for url in urls)
     missing_profile_urls = sum(1 for record in records if not find_profile_url(record, args.url_field))
     email_count = sum(1 for url in urls if results.get(url, {}).get("emails"))
     unfinished = urls - {url for url, result in results.items() if result.get("status") in terminal_statuses}
+    if unfinished:
+        raise SourceUnhealthy(str(len(unfinished)) + " profiles unresolved; last-good roster unchanged, checkpoint retained")
+    write_enriched_records(records, results, args.output, args.url_field)
 
     print("\nRun summary")
     print("  Advisor records:      %s" % len(records))
@@ -986,7 +1096,8 @@ async def enrich(args: argparse.Namespace, records: Optional[List[Dict[str, Any]
     print("  Final CSV:            %s" % args.output)
     logging.info("Enrichment complete: records=%s urls=%s emails=%s unfinished=%s statuses=%s", len(records), len(urls), email_count, len(unfinished), dict(statuses))
     if not unfinished:
-        args.checkpoint.unlink(missing_ok=True)
+        archive = archive_completed_checkpoint(args.checkpoint)
+        print("  Observation evidence: %s" % archive)
     else:
         print("  Resume checkpoint:    %s (%s retryable profiles)" % (args.checkpoint, len(unfinished)))
 
@@ -997,11 +1108,13 @@ def add_network_args(parser: argparse.ArgumentParser, default_rate: float) -> No
     parser.add_argument("--retries", type=int, default=4)
     parser.add_argument("--cookie", help="Browser Cookie header (visible in process listings)")
     parser.add_argument("--cookie-file", help="Preferred: UTF-8 file containing the Cookie header")
+    parser.add_argument("--reviewed-access-resume", action="store_true",
+                        help="Operator-only: resume a denied checkpoint after publisher access/rate-limit review; never an automatic retry")
     parser.add_argument("--log-file", type=Path, default=DEFAULT_OUTPUT / "superseded" / "edward_jones_run.log")
 
 
 def add_cdp_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--bootstrap-url", default="https://www.edwardjones.com/us-en/find-a-financial-advisor")
+    parser.add_argument("--bootstrap-url", default=BOOTSTRAP_URL)
     parser.add_argument("--cdp-url", default="http://127.0.0.1:9222")
     parser.add_argument("--chrome-path", help="Chrome executable; auto-detected by default")
     parser.add_argument("--chrome-user-data-dir", type=Path, default=Path(r"C:\SeleniumChrome"))

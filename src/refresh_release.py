@@ -69,9 +69,12 @@ def check_comparison(comparison, drop_percent=20):
         raise RefreshError("EIC asset reconciliation failed; inspect the private comparison report")
     if isinstance(drop_percent, bool) or not isinstance(drop_percent, (int, float)) or not 0 < drop_percent <= 50:
         raise RefreshError("Invalid coverage-drop policy")
-    return [key for key, before in comparison["coverage"]["before"].items()
+    drops = [key for key, before in comparison["coverage"]["before"].items()
             if key != "fieldUnplaced" and before and comparison["coverage"]["after"][key] is not None
             and comparison["coverage"]["after"][key] < before * (1 - drop_percent / 100)]
+    if comparison.get("mapContinuity", {}).get("missingFromCandidate", 0):
+        drops.append("previously_mapped_current_SEC")
+    return drops
 
 
 def _report(directory, manifest, stage):
@@ -145,7 +148,7 @@ def validate(root, run_id, coverage_reason=None, run_tests=True):
             drop_percent = policy.get("coverageDropPercent", 20)
             drops = check_comparison(comparison, drop_percent)
             if drops and not (coverage_reason and len(coverage_reason.strip()) >= 12):
-                raise RefreshError("Coverage fell by more than %s%% (%s); review and provide an explicit reason" % (drop_percent, ", ".join(drops)))
+                raise RefreshError("Coverage review required (%s); inspect the comparison and provide an explicit reason" % ", ".join(drops))
             if drops:
                 validation["coverageOverride"] = {"reason": coverage_reason.strip(), "metrics": drops, "recordedUtc": utc()}
             commands = [

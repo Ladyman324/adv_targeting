@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import contextlib
+import csv
 import datetime as dt
 import hashlib
 import json
@@ -116,7 +117,16 @@ def atomic_json(path, value):
         json.dump(value, handle, ensure_ascii=False, sort_keys=True, indent=2)
         handle.flush()
         os.fsync(handle.fileno())
-    os.replace(str(temp), str(path))
+    for attempt in range(5):
+        try:
+            os.replace(str(temp), str(path))
+            break
+        except PermissionError as exc:
+            # SMB readers can briefly deny a Windows rename. Retry only the
+            # same atomic replacement; never delete or rewrite the target.
+            if getattr(exc, "winerror", None) not in (5, 32, 33) or attempt == 4:
+                raise
+            time.sleep(.1 * (2 ** attempt))
 
 
 def contained(root, relative):
@@ -218,6 +228,20 @@ def lock(run_dir):
 def code_files(root):
     root = Path(root)
     paths = [root / name for name in ROOT_FILES if (root / name).is_file()]
+    # A few offline regression tests import reviewed campaign helpers. Pin only
+    # those declared scripts as code, without copying the campaign data trees.
+    test_dependencies = {
+        "test_edward_jones_concordance.py": "data/refresh/campaigns/all-rosters-20261025/audit_edward_jones_email_concordance.py",
+        "test_edward_jones_historical_routes.py": "data/refresh/campaigns/all-rosters-20261025/review_edward_jones_historical_routes.py",
+        "test_raymond_native_pacing_trial.py": "data/refresh/raymond-james-20261027/native-pacing-v35/paging.py",
+    }
+    for test, relative in test_dependencies.items():
+        if not (root / "tests" / test).is_file():
+            continue
+        dependency = root / relative
+        if not dependency.is_file() or dependency.is_symlink():
+            raise RefreshError("Required offline test helper is missing or unsafe: " + relative)
+        paths.append(dependency)
     for top in ("src", "scripts", "tests", "docs", "api", "webapp"):
         base = root / top
         if not base.exists():
@@ -243,7 +267,7 @@ def normalized_code_hash(path, relative):
     if relative in {"webapp/app.js", "webapp/field.js", "webapp/sw.js", "webapp/index.html", "webapp/field.html"}:
         text = content.decode("utf-8")
         text = re.sub(r'(const (?:DATA_VERSION|VERSION) = ")[^"\r\n]*(";)', r'\1<generated>\2', text)
-        text = re.sub(r'((?:app\.js|style\.css|field\.js|field\.css|email\.js|email\.css|dial\.js|training\.js|list_import\.js)\?v=)[A-Za-z0-9._-]+', r'\1<generated>', text)
+        text = re.sub(r'((?:app\.js|style\.css|field\.js|field\.css|email\.js|email\.css|dial\.js|training\.js|list_import\.js|asset-product-filters\.js)\?v=)[A-Za-z0-9._-]+', r'\1<generated>', text)
         content = text.encode("utf-8")
     return hashlib.sha256(content).hexdigest()
 
@@ -282,16 +306,29 @@ def source_paths(root, mode=None):
         base = Path(root) / directory
         if not base.exists():
             continue
-        for path in base.rglob("*"):
-            if not path.is_file() or path.name.startswith("CRM_Contacts_") or path.suffix.lower() == ".pdf":
-                continue
-            if directory == "data/raw" and path.name in {"barrons_rankings.json", "forbes_rankings.json"}:
-                continue  # derived union; immutable editions are pinned separately
-            if "__pycache__" not in path.parts:
-                result.append(path)
-    decisions = Path(root) / "data/identity/act_identity_decisions.json"
-    if decisions.exists():
-        result.append(decisions)
+        # scandir caches file attributes from the directory listing, avoiding
+        # serial SMB stat calls. facts() still verifies links and file hashes.
+        pending = [base]
+        while pending:
+            parent = pending.pop()
+            with os.scandir(str(parent)) as entries:
+                for entry in entries:
+                    if entry.is_dir(follow_symlinks=False):
+                        if entry.name != "__pycache__":
+                            pending.append(Path(entry.path))
+                        continue
+                    if not entry.is_file():
+                        continue
+                    path = Path(entry.path)
+                    if entry.name.startswith("CRM_Contacts_") or path.suffix.lower() == ".pdf":
+                        continue
+                    if directory == "data/raw" and entry.name in {"barrons_rankings.json", "forbes_rankings.json"}:
+                        continue  # derived union; immutable editions are pinned separately
+                    result.append(path)
+    for name in ("act_identity_decisions.json", "roster_identity_holds.json"):
+        decisions = Path(root) / "data/identity" / name
+        if decisions.exists():
+            result.append(decisions)
     receipts = Path(root) / "data/refresh/source_receipts.json"
     if receipts.exists():
         result.append(receipts)
@@ -336,8 +373,8 @@ def build_steps(mode, act_file="", rankings=()):
     steps += [step("crosswalk", ["src/act_crosswalk.py"], first, ["data/interim/act_crosswalk.parquet"]),
               step("identity", ["src/build_identity_ledger.py"], ["crosswalk"], ["data/identity/identity_manifest.json", "data/identity/act_identity_links.parquet"]),
               step("corrections", ["src/export_act_crd_corrections.py"], ["identity"], ["data/identity/act_crd_corrections.xlsx"]),
-              step("economic_links", ["src/build_act_economic_links.py"], ["identity"], ["data/identity/act_economic_manifest.json", "data/identity/act_economic_links.parquet"]),
-              step("contacts", ["src/build_contacts.py"], ["identity"], ["webapp/data/contacts.json", "webapp/data/contacts_base.json"]),
+              step("economic_links", ["src/build_act_economic_links.py"], ["identity"], ["data/identity/act_economic_manifest.json", "data/identity/act_economic_links.parquet", "data/identity/act_account_value_review.csv"]),
+              step("contacts", ["src/build_contacts.py"], ["identity"], ["webapp/data/contacts.json", "webapp/data/contacts_base.json", "data/identity/roster_identity_review.csv"]),
               step("geography", ["src/refresh_geography.py", "--root", "."], ["contacts"], ["data/interim/branch_geocoded_*.parquet"]),
               step("working_locations", ["src/contact_work_locations.py"], ["geography"], ["data/interim/contact_work_branches.parquet"]),
               step("placement", ["src/placement.py"], ["working_locations"], ["data/interim/advisor_placement.parquet"]),
@@ -414,7 +451,14 @@ def baseline_paths(root):
     for directory in ("data/interim", "data/output", "data/identity", "webapp/data"):
         base = Path(root) / directory
         if base.exists():
-            result.extend(p for p in base.rglob("*") if p.is_file() and p.suffix not in {".gz", ".xlsx", ".csv"})
+            # Scraper discovery/browser state is not build evidence. Prune the
+            # directory BEFORE traversal, not just after hashing every cache.
+            for parent, folders, names in os.walk(base):
+                if Path(parent) == Path(root) / "data/interim":
+                    folders[:] = [name for name in folders if name != "firm_rosters"]
+                result.extend(Path(parent) / name for name in names
+                              if (Path(parent) / name).is_file()
+                              and Path(name).suffix not in {".gz", ".xlsx", ".csv"})
     for name in ("act_contacts.json", "act_mail_codes.json"):
         path = Path(root) / "api/shared" / name
         if path.is_file():
@@ -430,9 +474,9 @@ def baseline_paths(root):
     return result
 
 
-def create_run(root, mode, firms=(), stage_parent=None, run_id=None):
+def create_run(root, mode, firms=(), stage_parent=None, run_id=None, source_run=None, source_run_root=None):
     from refresh_stage import start_stage
-    return start_stage(root, mode, firms, stage_parent, run_id)
+    return start_stage(root, mode, firms, stage_parent, run_id, source_run=source_run, source_run_root=source_run_root)
 
 
 def check_inputs(stage, manifest):
@@ -454,10 +498,16 @@ def check_inputs(stage, manifest):
 
 def child_environment(stage, root, marker, online=False):
     env = os.environ.copy()
-    if not online:
-        for key in list(env):
-            if any(part in key.upper() for part in ("PASSWORD", "SECRET", "TOKEN", "CONNECTION_STRING", "API_KEY", "ACCOUNT_KEY", "ACCESS_KEY", "AZUREWEBJOBSSTORAGE")) or key.upper().startswith(("ACT_", "GRAPH_", "AZURE_", "MSI_", "IDENTITY_", "GOOGLE_", "OPENAI_", "SWA_")):
-                env.pop(key, None)
+    # Public acquisition is online, but has no reason to inherit deployment,
+    # mailbox, ACT, or AI credentials. Only the explicit ACT worker needs ACT_*.
+    acquisition_marker = Path(stage) / ".refresh-acquisition.json"
+    act_worker = (online and acquisition_marker.is_file()
+                  and read_json(acquisition_marker).get("sourceId") == "act")
+    for key in list(env):
+        if act_worker and key.upper().startswith("ACT_"):
+            continue
+        if any(part in key.upper() for part in ("PASSWORD", "SECRET", "TOKEN", "CONNECTION_STRING", "API_KEY", "ACCOUNT_KEY", "ACCESS_KEY", "AZUREWEBJOBSSTORAGE")) or key.upper().startswith(("ACT_", "GRAPH_", "AZURE_", "MSI_", "IDENTITY_", "GOOGLE_", "OPENAI_", "SWA_")):
+            env.pop(key, None)
     env["PYTHONIOENCODING"] = "utf-8"
     env["PYTHONUNBUFFERED"] = "1"
     env["ADVISOR_REFRESH_OFFLINE"] = "0" if online else "1"
@@ -594,6 +644,22 @@ def build(root, run_id, retry=False, fallback_reason=None):
                 if unchanged:
                     raise RefreshError("A successful command did not regenerate its declared output: " + ", ".join(unchanged))
                 result.update(status="success", outputs=outputs, outputHash=digest(outputs), productionEvidence=sorted(set(evidence)))
+                if item["id"] == "economic_links":
+                    review = read_json(stage / "data/identity/act_economic_manifest.json").get("accountValueReview", {})
+                    if review.get("accounts"):
+                        warning = (f"ACT account-value discrepancies: {review['accounts']} broker codes; "
+                                   "highest recorded values used for summaries; "
+                                   "advisor-specific values preserved. Review data/identity/act_account_value_review.csv.")
+                        if warning not in manifest.setdefault("warnings", []):
+                            manifest["warnings"].append(warning)
+                if item["id"] == "contacts":
+                    with (stage / "data/identity/roster_identity_review.csv").open(encoding="utf-8-sig", newline="") as stream:
+                        held = sum(1 for _ in csv.DictReader(stream))
+                    if held:
+                        warning = (f"Roster identity review: {held} source rows held rather than reassigned to another CRD. "
+                                   "Review data/identity/roster_identity_review.csv; other records continue normally.")
+                        if warning not in manifest.setdefault("warnings", []):
+                            manifest["warnings"].append(warning)
             except BaseException as exc:
                 interrupted = isinstance(exc, (KeyboardInterrupt, SystemExit))
                 result.update(status="incomplete" if interrupted else "failed", errorCode="INTERRUPTED" if interrupted else "STEP_FAILED")

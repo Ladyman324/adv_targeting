@@ -47,52 +47,131 @@ function configuration(){
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-// The payload is a JSON blob inside a <script>. Rather than guess at its
-// envelope -- which is a Forbes implementation detail and will change -- pull
-// out every object that has a "rank", which is what a person record is.
+// Support the legacy data assignment and the newer Next.js JSON payload.
+// Parse their data without executing source-page JavaScript or flattening
+// nested objects. Complete national-list collection also uses the UI below.
 function recordsFrom(doc){
-  const script = [...doc.querySelectorAll("script")]
-    .find(s => /"rank"\s*:/.test(s.textContent));
-  if (!script) return [];
-  const objects = script.textContent.match(/\{[^{}]*"rank"\s*:\s*\d+[^{}]*\}/g) || [];
-  const out = [];
-  for (const raw of objects){
-    let rec;
-    try { rec = JSON.parse(raw); } catch { continue; }
-    if (!rec.personName) continue;
-    out.push({
-      rank: rec.rank,
+  const found = [], unique = new Map();
+  for (const script of doc.querySelectorAll("script")){
+    const text = script.textContent || "";
+    if (!text.includes('"personName"') && script.id !== '__NEXT_DATA__') continue;
+    // Parse data, never execute source-page JavaScript. This also preserves
+    // records with nested fields, which the old flat-object regex missed.
+    const marker = /window\["forbes"\]\["simple-site"\]\s*=\s*/.exec(text);
+    const raw = (marker ? text.slice(marker.index + marker[0].length) : text).trim().replace(/;\s*$/, "");
+    let root;
+    try { root = JSON.parse(raw); } catch { continue; }
+    const stack = [root];
+    while (stack.length){
+      const rec = stack.pop();
+      if (!rec || typeof rec !== "object") continue;
+      if ((rec.personName || (rec.name && rec.uri && String(rec.naturalId || '').startsWith('faris/')))
+          && Number.isInteger(Number(rec.rank)) && Number(rec.rank) > 0) found.push(rec);
+      for (const value of Object.values(rec)) if (value && typeof value === "object") stack.push(value);
+    }
+  }
+  for (const rec of found){
+    const qa = pattern => (rec.qas || []).find(q => pattern.test(q.question || ''))?.answer || null;
+    const row = {
+      rank: Number(rec.rank),
       // "Georgia - Atlanta (High Net Worth)" -- 112 of these, NOT 51 states.
       // Kept verbatim; parse_forbes.py splits it, so a change in Forbes'
       // wording is visible in one place rather than silently mis-parsed here.
       category: rec.category || null,
-      name: rec.personName,
+      name: rec.personName || rec.name,
       firm: rec.organization || null,
       city: rec.city || null,
       uri: rec.uri || null,
-      teamAssets: rec.teamAssets || null,
-      minAccountSize: rec.minAccountSize || null,
-      typicalNetWorth: rec.typicalNetWorth || null,
-      typicalSize: rec.typicalSize || null,
-    });
+      teamAssets: rec.teamAssets || qa(/^team assets/i),
+      minAccountSize: rec.minAccountSize || qa(/^minimum account/i),
+      typicalNetWorth: rec.typicalNetWorth || qa(/^typical net worth/i),
+      typicalSize: rec.typicalSize || qa(/^typical size/i),
+      sourceId: rec.naturalId || null,
+    };
+    const key = JSON.stringify([row.uri || row.name, row.category, row.rank]);
+    if (unique.has(key) && JSON.stringify(unique.get(key)) !== JSON.stringify(row))
+      throw new Error("Conflicting Forbes recognition records; review source payload");
+    unique.set(key, row);
   }
+  return [...unique.values()];
+}
+
+function pagination(doc = document){
+  const script = doc.querySelector('#__NEXT_DATA__');
+  if (!script) return null;
+  const data = JSON.parse(script.textContent);
+  const table = data.props?.pageProps?.schema?.blocks?.find(b => b.component === 'Table')?.data;
+  return table ? {year:Number(table.year), total:Number(table.totalCount), limit:Number(table.limit)} : null;
+}
+
+function rendered(doc = document){
+  const table = [...doc.querySelectorAll('table')].find(t => /TEAM ASSETS/i.test(t.querySelector('thead')?.innerText || ''));
+  if (!table) return [];
+  const headers = [...table.querySelectorAll('thead th,thead td')].map(e=>e.innerText.replace(/\s+/g,' ').trim());
+  return [...table.querySelectorAll('tbody tr')].filter(tr => tr.querySelector('a[href*="/profile/"]') &&
+    !tr.querySelector('[class*="SkeletonLoader_"]')).map(tr => {
+    const cells = [...tr.children], anchor = tr.querySelector('a[href*="/profile/"]');
+    const uri = /\/profile\/([^/?#]+)/.exec(anchor?.getAttribute('href') || '')?.[1];
+    const rank = Number(cells[0]?.innerText.trim());
+    const field = pattern => { const i=headers.findIndex(h=>pattern.test(h));return i<0 ? null : cells[i]?.innerText.trim() || null; };
+    const name = field(/^NAME$/i)?.replace(/^(?:(?:PROFILE SPOTLIGHT|PROMOTED)\s*)+/i,'').trim();
+    if (!uri || uri==='undefined' || !name || !Number.isInteger(rank) || rank < 1) throw new Error('Unrecognized Forbes rendered row');
+    return {rank,name,uri,category:null,firm:field(/^FIRM$/i),city:field(/^CITY$/i),
+      minAccountSize:field(/^MINIMUM ACCOUNT/i),teamAssets:field(/^TEAM ASSETS/i),
+      typicalNetWorth:field(/^TYPICAL NET WORTH/i),typicalSize:field(/^TYPICAL SIZE/i),sourceId:null};
+  });
+}
+
+async function currentRows(doc = document, expectedYear = null){
+  const pages = pagination(doc);
+  const sourceYear = pages?.year || Number(/\b(20\d{2})\b/.exec(doc.title || '')?.[1]);
+  if (expectedYear != null && sourceYear !== expectedYear) throw new Error('Forbes publication year does not match configured edition');
+  if (!pages) return recordsFrom(doc);
+  if (!Number.isInteger(pages.total) || pages.total < 1 || pages.total > 20000 || !Number.isInteger(pages.limit) || pages.limit < 1)
+    throw new Error('Unrecognized Forbes pagination metadata');
+  const out = [], seen = new Set();
+  for (let number=1;number<=Math.ceil(pages.total/pages.limit);number++){
+    let rows = rendered(doc);
+    const readyDeadline=Date.now()+30000;
+    while (!rows.length){
+      if (Date.now()>readyDeadline) throw new Error('Empty Forbes rendered page');
+      await sleep(250);rows=rendered(doc);
+    }
+    for (const row of rows){
+      if (seen.has(row.uri)) throw new Error('Forbes pagination repeated advisors');
+      seen.add(row.uri);out.push(row);
+    }
+    if (out.length>=pages.total) break;
+    const next = [...doc.querySelectorAll('[data-testid="pagination-tile"]')].find(b=>b.innerText.trim()===String(number+1));
+    if (!next) throw new Error('Forbes next page unavailable');
+    const first = rows[0].uri;
+    next.click();
+    const deadline=Date.now()+30000;
+    while (!rendered(doc).length || rendered(doc)[0]?.uri===first){
+      if (Date.now()>deadline) throw new Error('Forbes page change timed out');
+      await sleep(250);
+    }
+    await sleep(400);
+  }
+  if (out.length!==pages.total) throw new Error('Forbes total count does not match captured advisors');
   return out;
 }
 
 // Load a list in a hidden iframe so one console session can collect them all
 // without navigating away and losing the script.
-function loadList(path, timeoutMs = 45000){
-  return new Promise(resolve => {
+function loadList(path, timeoutMs = 45000, expectedYear = null){
+  return new Promise((resolve, reject) => {
     const frame = document.createElement("iframe");
     frame.style.cssText = "position:fixed;left:-9999px;top:0;width:1400px;height:1400px;border:0";
-    let settled = false;
-    const finish = v => { if (!settled){ settled = true; frame.remove(); resolve(v); } };
+    let settled = false, poll, deadline;
+    const finish = (v,error) => { if (!settled){ settled = true; clearInterval(poll); clearTimeout(deadline); frame.remove(); error ? reject(error) : resolve(v); } };
+    deadline = setTimeout(() => finish([]), timeoutMs + 1000);
     frame.onload = () => {
       const started = Date.now();
-      const poll = setInterval(() => {
+      poll = setInterval(() => {
         let rows = [];
         try { rows = recordsFrom(frame.contentDocument); } catch { /* not ready */ }
-        if (rows.length){ clearInterval(poll); finish(rows); }
+        if (rows.length){ clearInterval(poll); currentRows(frame.contentDocument, expectedYear).then(v=>finish(v),e=>finish(null,e)); }
         else if (Date.now() - started > timeoutMs){ clearInterval(poll); finish([]); }
       }, 500);
     };
@@ -116,7 +195,8 @@ async function run(){
   for (const list of LISTS.filter(list => selectedCategories.includes(list.name))){
     // the page we are already on needs no iframe
     const here = location.pathname.replace(/\/?$/, "/") === list.path;
-    const rows = here ? recordsFrom(document) : await loadList(list.path);
+    const rows = here ? await currentRows(document, years[list.name]) : await loadList(list.path, 45000, years[list.name]);
+    if (!rows.length) throw new Error(`No Forbes records for ${list.name}; no complete download produced`);
     rows.forEach(r => out.push({ list: list.name, year:years[list.name] ?? null, ...r }));
     console.log(`[${list.name}] ${rows.length} advisors`);
     if (!here) await sleep(1000);
@@ -134,7 +214,7 @@ window.FORBES = {
     running = true;
     try { return await run(); } finally { running = false; }
   },
-  configure, config:configuration, records: recordsFrom,
+  configure, config:configuration, records: recordsFrom, rendered, pagination, currentRows,
 };
 console.log("Forbes harvester ready. Run:  await FORBES.run()");
 })();

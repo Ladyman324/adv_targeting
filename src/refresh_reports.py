@@ -204,6 +204,19 @@ def compare(before_root: Path, after_root: Path, out_dir: Path,
                 for root in (before_root, after_root)]
     assets = [_json(root, 'webapp/data/act_assets.json') for root in (before_root, after_root)]
     indexes = [_index(root) for root in (before_root, after_root)]
+    # Net totals hide cohort churn: additions must not cancel out previously
+    # visible people who are still in the selected SEC feed.
+    sec_path = after_root / 'data/interim/advisors.parquet'
+    map_continuity = {'available': sec_path.is_file()}
+    if sec_path.is_file():
+        import pandas as pd
+        current = set(pd.read_parquet(sec_path, columns=['advisor_crd']).advisor_crd.astype(str))
+        missing = sorted((set(indexes[0])-set(indexes[1])) & current)
+        map_continuity.update(previouslyMappedStillInSEC=len(set(indexes[0]) & current),
+            missingFromCandidate=len(missing), csv='current_sec_map_gaps.csv')
+        _write_csv(out_dir / 'current_sec_map_gaps.csv',
+            [{'id':crd,'change':'missing_current_sec_person','before':indexes[0][crd],
+              'after':None} for crd in missing])
     territory_configs = [_json(root, 'webapp/data/territories.json')
                          for root in (before_root, after_root)]
     for index, config in zip(indexes, territory_configs):
@@ -276,9 +289,27 @@ def compare(before_root: Path, after_root: Path, out_dir: Path,
             for side, root in (('before', before_root), ('after', after_root))},
         'assets': {'before': _assets(assets[0]), 'after': _assets(assets[1])},
         'rankingMatchCoverage': ranking_coverage,
+        'mapContinuity': map_continuity,
         'coverage': {side: _coverage(contacts[i], indexes[i], recipients[i],
                          search[side]['desktop'], search[side]['field'])
                      for i, side in enumerate(('before', 'after'))}}
+    value_issues = _json(after_root, 'data/identity/act_economic_manifest.json').get('accountValueConflicts', [])
+    result['dataQualityWarnings'] = list(value_issues)
+    held_path = after_root / 'data/identity/roster_identity_review.csv'
+    if held_path.is_file():
+        with held_path.open(encoding='utf-8-sig', newline='') as stream:
+            held_rows = list(csv.DictReader(stream))
+        if held_rows:
+            result['dataQualityWarnings'].append({
+                'code': 'ROSTER_CRD_REASSIGNMENTS_HELD', 'rows': len(held_rows),
+                'severity': 'warning', 'publicationBlocking': False,
+                'report': 'data/identity/roster_identity_review.csv'})
+            categories['roster_identity_holds'] = [
+                {'id': str(i), 'change': 'warning', 'before': None, 'after': row}
+                for i, row in enumerate(held_rows)]
+    categories['act_account_value_discrepancies'] = [
+        {'id': issue['account_code'], 'change': 'warning', 'before': None, 'after': issue}
+        for issue in value_issues]
     for name, rows in categories.items():
         result['categories'][name] = {'changes': len(rows), 'csv': name + '.csv',
             'added': sum(row['change'] == 'added' for row in rows),

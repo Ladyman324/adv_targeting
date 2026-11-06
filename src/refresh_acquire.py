@@ -90,6 +90,40 @@ def _copy(source, target):
         temporary.unlink(missing_ok=True)
     return True
 
+def _move_with_verification(stage, source, target):
+    """Move an owned staged file on-volume, preserving immutable archives.
+
+    No operational checkout paths are allowed. Both endpoints are hashed;
+    interrupted verification restores the old selector before propagating.
+    Existing identical archives remain in place for rollback/audit reuse.
+    """
+    stage = stage.resolve()
+    for path in (source, target):
+        if path.is_symlink():
+            raise core.RefreshError("Staged move symlink refused")
+        try:
+            path.resolve().relative_to(stage)
+        except ValueError as exc:
+            raise core.RefreshError("Staged move escapes the owned workspace") from exc
+    if source.resolve() == target.resolve():
+        raise core.RefreshError("Staged move endpoints must differ")
+    expected = core.file_hash(source)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if target.exists():
+        _copy(source, target)  # verifies an existing immutable archive
+        source.unlink()
+        return False, expected
+    os.rename(source, target)
+    try:
+        if core.file_hash(target) != expected:
+            raise core.RefreshError("Staged move checksum verification failed")
+    except BaseException:
+        if not source.exists():
+            os.rename(target, source)
+        raise
+    return True, expected
+
+
 def _roster(path, slug, baseline=None, reduction_reason=None):
     if reduction_reason is not None and (not isinstance(reduction_reason, str) or len(reduction_reason.strip()) < 12):
         raise core.RefreshError("Reviewed reduction reason must contain at least 12 characters")
@@ -226,6 +260,17 @@ def _prepare(stage, sid, source, scratch, source_date, edition, categories, reas
         details["records"] = len(rows)
         if edition is not None:
             rows = [{**row, "year": int(edition)} for row in rows]
+        if sid == 'barrons':
+            from refresh_rankings import reuse_barrons_identifiers
+            from refresh_history import baseline_paths
+            prior_paths=baseline_paths(stage,sid)
+            prior_facts=core.facts(prior_paths,stage)
+            rows,reused=reuse_barrons_identifiers(rows,[r for p in prior_paths for r in core.read_json(p)])
+            if core.facts(baseline_paths(stage,sid),stage)!=prior_facts:
+                raise core.RefreshError('Ranking identity baseline changed during normalization')
+            if reused:
+                details['reusedRankingIdentifiers']={'records':reused,'baselineFacts':prior_facts,
+                    'policy':'exact-publisher-record-v1','freshIdentityLookup':False}
         normalized = scratch / (sid + "_edition.json")
         core.atomic_json(normalized, rows)
         from refresh_resilience import gate_source
@@ -296,8 +341,9 @@ def _register(stage, manifest, sid, products, details, source_date, edition, cat
             for old in _source_files(stage, sid):
                 relative = old.relative_to(stage).as_posix()
                 if relative not in selected:
-                    target = quarantine / relative
-                    _copy(old, target); old.unlink(); displaced.append((old, target))
+                    target = core.contained(stage, (quarantine / relative).relative_to(stage))
+                    moved, expected = _move_with_verification(stage, old, target)
+                    displaced.append((old, target, moved, expected))
         for source, relative in products:
             for target in (core.contained(stage, relative), archive / snapshot / source.name):
                 if _copy(source, target):
@@ -315,8 +361,15 @@ def _register(stage, manifest, sid, products, details, source_date, edition, cat
     except BaseException:
         for p in reversed(created):
             p.unlink(missing_ok=True)
-        for old, saved in reversed(displaced):
-            old.parent.mkdir(parents=True, exist_ok=True); shutil.copy2(saved, old)
+        for old, saved, moved, expected in reversed(displaced):
+            if core.file_hash(saved) != expected:
+                raise core.RefreshError("Quarantined rollback evidence changed; manual recovery required")
+            if moved:
+                if old.exists():
+                    raise core.RefreshError("Rollback selector unexpectedly exists; manual recovery required")
+                _move_with_verification(stage, saved, old)
+            else:
+                _copy(saved, old)
         raise
 
 def _finish(stage, manifest):
@@ -407,13 +460,19 @@ def acquisition_commands(sid, act_user=None, act_db=None):
     if sid == "sec_adv":
         raise core.RefreshError("Download official SEC ADV firm CSV/ZIP, then import sec_adv with --source-date")
     slug = sid[7:]
+    if slug in {'raymond_james', 'rj_branches'}:
+        raise core.RefreshError('Raymond James browser handoff: run the Raymond-only collector with explicit --chrome-profile and --output-dir staging, then import the reviewed CSV with import_snapshot. See docs/raymond_james_refresh.md.')
     if slug == "morgan_stanley":
         return [["src/morgan_stanley_async.py"], ["src/morgan_office_async.py"],
                 ["src/morgan_team_async.py", "--concurrency", "2", "--batch-size", "20", "--delay-ms", "2000"]]
     if slug == "edward_jones":
         return [["src/edward_jones_async.py", "run", "--location", "Atlanta, Georgia", "--no-launch-chrome"]]
     if slug == "rj_branches":
-        raise core.RefreshError("Raymond James branch browser capture requires operator handoff; import completed CSV")
+        return [["src/rj_branch_capture.py", "--refresh-known"]]
+    if slug == "red_door":
+        return [["src/red_door_browser.py"]]
+    if slug == "ameriprise":
+        return [["src/ameriprise_browser.py"]]
     return [["src/" + slug + "_async.py"]]
 
 def acquire(root, run_id, source_id, allow_network=False, act_user=None, act_db=None):
@@ -438,19 +497,34 @@ def acquire(root, run_id, source_id, allow_network=False, act_user=None, act_db=
             marker = work / ".refresh-acquisition.json"
             identity = {"runId": run_id, "sourceId": source_id, "baselineHash": baseline_hash}
             if not marker.exists():
-                for relative in manifest["codeFiles"]:
+                public_sec = source_id in {"sec_individuals", "sec_firms"}
+                public_roster = source_id.startswith("roster:")
+                roster_inputs = {relative for relative in manifest["inputs"]
+                    if public_roster and relative.startswith("data/raw/firm_rosters/" + source_id[7:] + "_")}
+                # The stdlib-only public XML downloader needs no private ACT,
+                # roster, normalized-map, browser, or historical source copies.
+                code_paths = (["src/fetch_feeds.py"] if public_sec else manifest["codeFiles"])
+                for relative in code_paths:
+                    if relative not in manifest["codeFiles"]:
+                        raise core.RefreshError("SEC downloader is not pinned to this run")
                     dst = core.contained(work, relative); dst.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(stage / relative, dst)
-                for relative in manifest["inputs"]:
+                for relative in (() if public_sec else manifest["inputs"]):
+                    if public_roster and relative not in roster_inputs:
+                        continue
                     if relative.startswith(("data/raw/", "data/reference/", "data/firm_api/", "data/firm_owners/")):
                         dst = core.contained(work, relative); dst.parent.mkdir(parents=True, exist_ok=True)
                         shutil.copy2(stage / relative, dst)
-                for relative in ("data/interim", "data/output/firms.parquet"):
+                derived = (("data/output/advisor_branches.parquet", "data/output/firms.parquet",
+                            "webapp/data/geo_index.json") if public_roster else
+                           ("data/interim", "data/output/firms.parquet"))
+                for relative in (() if public_sec else derived):
                     src, dst = stage / relative, work / relative
                     if src.is_dir():
                         shutil.copytree(src, dst, dirs_exist_ok=True)
                     elif src.is_file():
                         dst.parent.mkdir(parents=True, exist_ok=True); shutil.copy2(src, dst)
+                (work / "data/raw").mkdir(parents=True, exist_ok=True)
                 core.atomic_json(marker, identity)
             elif core.read_json(marker) != identity:
                 raise core.RefreshError("Acquisition workspace ownership mismatch")

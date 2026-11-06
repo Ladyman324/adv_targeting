@@ -19,6 +19,10 @@ def main():
     print(f"  {len(d):,} firms x {d.shape[1]} features\n")
 
     res = scoring.run(d)
+    from firm_universe import supplement_registered_firms
+    firm_feed = config.newest_feed(config.ROOT / "data/raw", "IA_FIRM_SEC_Feed_*.xml.gz")
+    employments = pd.read_parquet(config.INTERIM / "advisor_employments.parquet")
+    res = supplement_registered_firms(res, firm_feed, employments)
     config.INTERIM.mkdir(parents=True, exist_ok=True)
     config.OUTPUT.mkdir(parents=True, exist_ok=True)
     res.to_parquet(config.INTERIM / "firms_scored.parquet", index=False)

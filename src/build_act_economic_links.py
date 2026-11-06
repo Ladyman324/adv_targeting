@@ -13,7 +13,8 @@ import pandas as pd
 ROOT = pathlib.Path(__file__).parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from act_book import build as build_book, slots
+from act_book import (ACCOUNT_VALUE_POLICY, account_value_conflicts,
+                      build as build_book, slots)
 from act_economic_links import (LINK_COLUMNS, RULESET_VERSION, SCHEMA_VERSION,
                                 account_bucket, approved_link_map,
                                 choose_with_margin,
@@ -39,6 +40,7 @@ LEDGER = IDENTITY / "act_economic_links.parquet"
 MANIFEST = IDENTITY / "act_economic_manifest.json"
 REVIEW_CSV = IDENTITY / "act_economic_review.csv"
 REVIEW_XLSX = IDENTITY / "act_economic_review.xlsx"
+ACCOUNT_VALUE_REVIEW_CSV = IDENTITY / "act_account_value_review.csv"
 
 
 def atomic_json(path: pathlib.Path, payload: dict) -> None:
@@ -145,6 +147,25 @@ def candidate_score(name_reason: str, location_strength: int,
     return round(name + firm + location, 3)
 
 
+def write_account_value_review(rows):
+    """Flag differing ACT copies for the team; they do not block publication."""
+    issues = account_value_conflicts(rows)
+    fields = ["account_code", "severity", "selection_policy", "selected_value",
+              "selected_contact_id", "contact_id", "contact_name", "value",
+              "allcap", "largecap", "book_update", "edited"]
+    records = [{**{key: issue[key] for key in fields[:5]}, **copy}
+               for issue in issues for copy in issue["copies"]]
+    frame = pd.DataFrame(records, columns=fields).applymap(spreadsheet_safe)
+    ACCOUNT_VALUE_REVIEW_CSV.parent.mkdir(parents=True, exist_ok=True)
+    tmp = ACCOUNT_VALUE_REVIEW_CSV.with_suffix(".csv.tmp")
+    frame.to_csv(tmp, index=False, encoding="utf-8-sig")
+    tmp.replace(ACCOUNT_VALUE_REVIEW_CSV)
+    if issues:
+        print(f"[!] {len(issues)} ACT account-value discrepancies: "
+              f"highest value per broker code used; review {ACCOUNT_VALUE_REVIEW_CSV}")
+    return issues
+
+
 def main(argv=None) -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--review-limit", type=int, default=250)
@@ -154,9 +175,9 @@ def main(argv=None) -> None:
     act_path, act_rows = exact_act_snapshot(identity_manifest)
     validate_act_ids(act_rows)
     holders, accounts, unresolved_accounts = asset_holders(act_rows)
-    if unresolved_accounts:
-        raise SystemExit(
-            "ACT account-value conflicts remain unresolved; refusing economic build")
+    value_issues = write_account_value_review(act_rows)
+    relationship_values = {str(row["id"]): round(sum(a["value"] for a in build_book([row])[0].values()), 2)
+                           for row in act_rows if str(row.get("id")) in holders}
 
     source = pd.read_parquet(IDENTITY / "act_source_records.parquet").fillna("")
     evidence = pd.read_parquet(IDENTITY / "act_identity_evidence.parquet").fillna("")
@@ -303,7 +324,7 @@ def main(argv=None) -> None:
             "candidate_crd": crd, "candidate_score": float(score),
             "candidate_gap": float(gap), "account_codes_json": json_list(codes),
             "account_count": len(codes),
-            "relationship_value": round(sum(accounts[x]["value"] for x in codes), 2),
+            "relationship_value": relationship_values[act_id],
             "act_name": clean_text(rec.get("raw_full_name")),
             "act_company": clean_text(rec.get("raw_company")),
             "act_city": clean_text(rec.get("raw_city")),
@@ -403,6 +424,12 @@ def main(argv=None) -> None:
             "", "unresolved").value_counts().to_dict(),
         "accounts": len(accounts),
         "unresolvedAccountValueConflicts": len(unresolved_accounts),
+        "accountValuePolicy": ACCOUNT_VALUE_POLICY,
+        "accountValueConflicts": value_issues,
+        "accountValueReview": {"file": ACCOUNT_VALUE_REVIEW_CSV.name,
+                               "sha256": sha256_file(ACCOUNT_VALUE_REVIEW_CSV),
+                               "accounts": len(value_issues),
+                               "publicationBlocking": False},
         "reconciliation": reconciliation,
     }
     economic_manifest = {

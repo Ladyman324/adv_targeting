@@ -26,6 +26,72 @@ def write(path, records, fields=None):
     return path
 
 
+class EdwardJonesNativeHistoryTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.base = Path(self.temp.name) / 'baseline.csv'
+        self.candidate = Path(self.temp.name) / 'candidate.csv'
+        self.rows = [dict(fid=str(i), faEntityId='shared-branch-entity',
+            faName='Person ' + str(i), faCity='Atlanta',
+            faState='GA' if i < 90 else 'FL', phone='404555' + str(i).zfill(4),
+            address=str(i) + ' Main Street', email='person' + str(i) + '@example.invalid',
+            faUrl='/us-en/financial-advisor/person-' + str(i)) for i in range(100)]
+        write(self.base, self.rows)
+
+    def compare(self, current):
+        before = self.base.read_bytes()
+        write(self.candidate, current)
+        result = history.compare_roster(self.candidate, self.base, 'edward_jones')
+        self.assertEqual(self.base.read_bytes(), before)
+        return result
+
+    def test_native_schema_uses_distinct_fid_not_shared_entity(self):
+        result = self.compare(self.rows)
+        self.assertEqual(result['status'], 'accepted')
+        self.assertEqual(result['candidate']['sourceEntities'], 100)
+        self.assertEqual(result['candidate']['identityKinds'], {'provider': 100})
+        self.assertEqual(result['candidate']['fieldsPresent']['name'], 100)
+        self.assertEqual(result['candidate']['stateCounts'], {'ga': 90, 'fl': 10})
+        self.assertEqual(result['continuity'], dict(retained=100, removed=0, added=0))
+        self.assertEqual(result['policyVersion'], 'roster-history-v5:edward_jones')
+
+    def test_missing_fid_never_falls_back_to_nonunique_entity_id(self):
+        current = [dict(row, fid='') for row in self.rows]
+        people, summary, owners = history._roster_summary(current, 'edward_jones')
+        self.assertEqual(len(people), 100)
+        self.assertEqual(summary['identityKinds'], {'profile_and_name': 100})
+        self.assertFalse(any('faEntityId' in key for key in people))
+
+    def test_native_metadata_losses_are_not_hidden(self):
+        for field in ['faName', 'faCity', 'faState', 'faUrl']:
+            with self.subTest(field=field):
+                current = [dict(row) for row in self.rows]
+                for row in current[:30]:
+                    row[field] = ''
+                result = self.compare(current)
+                self.assertEqual(result['status'], 'held')
+                self.assertIn('FIELD_COVERAGE_LOST', {r['code'] for r in result['issues']})
+
+    def test_native_provider_replacements_are_held(self):
+        current = [dict(row) for row in self.rows]
+        for row in current[:25]:
+            row['fid'] = 'replacement-' + row['fid']
+        result = self.compare(current)
+        self.assertIn('SOURCE_ENTITIES_DISAPPEARED', {r['code'] for r in result['issues']})
+
+    def test_native_email_swap_is_held(self):
+        current = [dict(row) for row in self.rows]
+        current[0]['email'], current[1]['email'] = current[1]['email'], current[0]['email']
+        result = self.compare(current)
+        self.assertIn('EMAIL_PERSON_ASSOCIATION_CHANGED', {r['code'] for r in result['issues']})
+
+    def test_native_aliases_do_not_change_other_providers(self):
+        row = dict(name='Generic Name', faName='Native Name', faEntityId='not-person-id')
+        self.assertEqual(history._project(row, 'ameriprise')['name'], 'generic name')
+        self.assertEqual(history._project(row, 'edward_jones')['name'], 'native name')
+
+
 class HistoricalRosterPolicyTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(); self.addCleanup(self.temp.cleanup)
@@ -69,6 +135,34 @@ class HistoricalRosterPolicyTests(unittest.TestCase):
         records = rows()
         for row in records[80:]: row["record_type"] = "Advisor"
         self.assertIn("SOURCE_SEGMENT_COVERAGE_LOST", self.codes(records))
+
+    def test_newly_populated_fields_are_improvements_not_replacements(self):
+        original = rows()
+        for row in original[:30]: row["email"] = ""
+        write(self.old, original); self.before = self.old.read_bytes()
+        result = self.compare(rows())
+        self.assertEqual("accepted", result["status"])
+        self.assertEqual({"gained": 30, "lost": 0, "replaced": 0}, result["fieldTransitions"]["email"])
+
+    def test_population_mix_does_not_hide_or_invent_retained_field_loss(self):
+        records = rows(120)
+        for row in records[100:]: row["title"] = ""
+        result = self.compare(records)
+        self.assertEqual("accepted", result["status"])
+        self.assertTrue(any("Population changed field density" in warning for warning in result["warnings"]))
+        for row in records[:10]: row["title"] = ""
+        self.assertIn("FIELD_COVERAGE_LOST", self.codes(records))
+
+    def test_small_provider_rekey_with_same_named_email_owner_is_not_a_swap(self):
+        original=rows();original[0]['name']='Alice Smith'
+        write(self.old,original);self.before=self.old.read_bytes()
+        current=[dict(row) for row in original];current[0]['advisor_id']='new-id'
+        result=self.compare(current)
+        self.assertEqual('accepted',result['status'])
+        self.assertEqual(1,result['comparisonOnlyEmailOwnerNameContinuity'])
+        self.assertEqual(1,result['continuity']['removed'])
+        current[0]['name']='Bob Smith'
+        self.assertIn('EMAIL_PERSON_ASSOCIATION_CHANGED',self.codes(current))
 
     def test_small_email_swap_is_held_even_below_global_change_limit(self):
         records = rows()

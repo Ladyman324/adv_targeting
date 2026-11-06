@@ -8,9 +8,10 @@ from typing import Any, Iterable, Mapping, Optional
 
 from display_name import looks_like_a_name, tidy
 from identity_normalize import (
-    clean_text, given_agreement, is_generic_email, name_token, name_tokens, normalize_crd, normalize_email,
-    normalize_phone, normalize_suffix, parse_full_name, preferred_name_status,
-    structured_name,
+    clean_text, given_agreement, is_generic_email, name_token, name_tokens,
+    normalize_crd, normalize_email, normalize_phone, normalize_suffix,
+    parse_full_name, preferred_name_status,
+    structured_name, corroborated_act_given_name,
 )
 from identity_schema import RULESET_VERSION, evidence_hash
 from roster_firm_policy import crd_tuple
@@ -50,7 +51,6 @@ def sec_greeting(sec: Mapping[str, Any]) -> str:
             if looks_like_a_name(word) and len(token) > 1 and token.isalpha():
                 return format_greeting(word)
     return ""
-
 
 
 def prepare_act_records(rows: list[dict], source_file: str,
@@ -293,6 +293,15 @@ def evaluate_assertion(record: Mapping[str, Any],
         warnings.append("act_company_conflicts_authoritative_domain")
     if address_contradiction:
         warnings.append("current_address_differs")
+    bridge_reason, bridge_greeting = "", ""
+    if (sec is not None and full_exact and suffix_ok and not domain_current_conflicts
+            and set(conflicts) <= {"given_name_conflict", "missing_given_name"}):
+        bridge_reason, bridge_greeting = corroborated_act_given_name(
+            record, [sec, *sec_aliases], branches,
+            act_firm_current or domain_current_agrees or roster_firm_agrees)
+        if bridge_reason:
+            conflicts = [c for c in conflicts if c not in {"given_name_conflict", "missing_given_name"}]
+            positive.append(bridge_reason)
     conflicts, warnings, positive = map(lambda v: sorted(set(v)),
                                         (conflicts, warnings, positive))
     payload = {
@@ -332,6 +341,7 @@ def evaluate_assertion(record: Mapping[str, Any],
         "crd_exists": bool(sec), "full_surname_exact": full_exact,
         "structured_surname_exact": structured_exact, "given_exact": given_exact,
         "given_sec_used": given_used, "given_strict_nickname": nickname,
+        "given_corroborated": bool(bridge_reason),
         "suffix_agrees": suffix_ok, "act_given_name": record.get("norm_first_name", ""),
         "sec_first_name": clean_text((sec or {}).get("first_name")),
         "sec_middle_name": clean_text((sec or {}).get("middle_name")),
@@ -386,8 +396,12 @@ def evaluate_assertion(record: Mapping[str, Any],
     preferred_status, preferred_reason = preferred_name_status(
         record.get("raw_salutation"), (sec or {}).get("first_name"),
         (sec or {}).get("used_first_name"))
-    greeting = (format_greeting(record.get("raw_salutation"))
-                if preferred_status == "approved_auto" else sec_greeting(sec or {}))
+    if (status == "approved" and bridge_greeting
+            and name_token(record.get("raw_salutation")) == name_token(bridge_greeting)):
+        preferred_status, preferred_reason = "approved_auto", bridge_reason
+    greeting = format_greeting(record.get("raw_salutation")) if preferred_status == "approved_auto" else format_greeting(
+        (bridge_greeting if status == "approved" else "") or
+        sec_greeting(sec or {}))
     legal = sec_name(sec or {})
     link = {
         "record_key": record.get("record_key", ""), "source_system": "act",

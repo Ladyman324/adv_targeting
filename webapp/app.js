@@ -39,7 +39,7 @@ const COMPARE = ["#12b39c", "#e0a53a", "#8079e0", "#e8615d", "#4aa3e0", "#9fc93c
 // of every deployed JSON path and byte. It changes for standalone shard
 // rebuilds too, and its leading date keeps the stale-build warning readable.
 // Do not edit it by hand.
-const DATA_VERSION = "20260923T195616Z-de83f95e1de19989";
+const DATA_VERSION = "20260923T195616Z-01ccdb9300b7907f";
 const dataUrl = file => `data/${file}?v=${DATA_VERSION}`;
 Dial.setContactRouteVersion(DATA_VERSION);
 // ONE scale for every mark on the map. There used to be two, and they were not
@@ -1122,18 +1122,18 @@ function bookFor(advisorId){
  */
 function teamBook(crds){
   if (!ACT_ASSETS || !ACT_ASSETS.accounts) return null;
-  const seen = new Set();
+  const selected = AssetProductFilters.accountValues(ACT_ASSETS, crds);
+  const seen = new Set(selected.keys());
   let holders = 0;
   for (const crd of crds){
     const b = ACT_ASSETS.advisors[String(crd)];
     if (!b) continue;
     holders++;
-    for (const i of b.ix) seen.add(i);
   }
   if (!seen.size) return null;
   let acv = 0, lcv = 0, mf = 0, midcap = 0;
   for (const i of seen){
-    const a = ACT_ASSETS.accounts[i];
+    const a = selected.get(i);
     if (!a) continue;
     acv += a[0]; lcv += a[1]; mf += a[2]; midcap += a[3] || 0;
   }
@@ -7542,7 +7542,8 @@ function renderEicAssets(ids){
     ["eicAcv", "eicLcv", "eicMf", "eicMidcap"].forEach(i => { el(i).textContent = "—"; });
     return;
   }
-  const seen = new Set();
+  const selected = AssetProductFilters.accountValues(ACT_ASSETS, ids);
+  const seen = new Set(selected.keys());
   let advisors = 0, review = 0, economic = 0;
   for (const id of ids){
     const b = ACT_ASSETS.advisors[String(id)];
@@ -7550,11 +7551,10 @@ function renderEicAssets(ids){
     advisors++;
     if (b.t === "review") review++;
     if (b.t === "high") economic++;
-    for (const i of b.ix) seen.add(i);
   }
   let acv = 0, lcv = 0, mf = 0, midcap = 0;
   for (const i of seen){
-    const a = ACT_ASSETS.accounts[i];
+    const a = selected.get(i);
     if (!a) continue;
     acv += a[0]; lcv += a[1]; mf += a[2]; midcap += a[3] || 0;
   }

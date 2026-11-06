@@ -5,7 +5,7 @@ import hashlib
 import json
 from typing import Any, Mapping
 
-RULESET_VERSION = "identity-v1.5"
+RULESET_VERSION = "identity-v1.6"
 REGISTRY_SCHEMA_VERSION = "1.0"
 IDENTITY_STATUSES = frozenset({"approved", "review", "quarantine", "unmatched", "rejected"})
 LINK_DECISIONS = frozenset({"approve", "reject", "replace"})
@@ -31,7 +31,7 @@ EVIDENCE_COLUMNS = [
     "candidate_gap",
     "crd_exists", "full_surname_exact",
     "structured_surname_exact", "given_exact", "given_sec_used",
-    "given_strict_nickname", "suffix_agrees", "act_given_name",
+    "given_strict_nickname", "given_corroborated", "suffix_agrees", "act_given_name",
     "sec_first_name", "sec_middle_name", "sec_used_first_name", "sec_last_name",
     "sec_suffix", "email_valid", "email_unique_in_act", "email_personal",
     "email_surname_exact", "email_given_exact", "email_domain",

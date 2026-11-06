@@ -70,6 +70,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import pandas as pd
 
 from nicknames import same_person
+from edward_jones_email import select_email as select_edward_jones_email
 
 from contact_normalization import normalize_act_contact
 from contact_provenance import sha256_file, validate_owner_artifact
@@ -203,7 +204,8 @@ ROSTER_COLUMNS = {
                 "profile_url": ["Profile URL"]},
     "raymond_james": {"team": ["team_name"], "profile_url": ["advisor_profile_url"],
                       "website": ["website_url"]},
-    "ameriprise": {"team": ["team_name"], "profile_url": ["profile_url"]},
+    "ameriprise": {"team": ["team_name"], "profile_url": ["profile_url"],
+                  "team_url": ["source_directory_url", "team_url"]},
     "baird": {"team": ["team_name"], "profile_url": ["website_url"]},
     "janney": {"team": ["team_name"], "profile_url": ["profile_url"],
                "linkedin": ["linkedin"]},
@@ -804,6 +806,13 @@ def own_email(name: str, candidates: list) -> str:
     return surname_only[0] if len(surname_only) == 1 else ""
 
 
+def roster_own_email(slug: str, name: str, candidates: list, profile_url: str = '') -> str:
+    """Provider-specific selection; other firms retain their existing policy."""
+    if slug == 'edward_jones':
+        return select_edward_jones_email(name, candidates, profile_url).email
+    return own_email(name, candidates)
+
+
 def absolute_url(raw, base: str = "") -> str:
     """A link the browser can actually follow.
 
@@ -1109,10 +1118,16 @@ def load_rosters() -> pd.DataFrame:
         # address column is taken as given. own_email() returns "" rather than
         # a branch-mate's address when nothing matches.
         email_list = pick("emails", field="emails")
-        if email_list.str.strip().any():
+        if slug == 'edward_jones' or email_list.str.strip().any():
+            profiles = pick('profile_url', 'faUrl', field='profile_url')
+            if email_list.str.strip().any():
+                candidates = [parse_email_list(raw) for raw in email_list]
+            else:
+                candidates = [[value] if value else [] for value in
+                              pick('email', 'e-mail', field='email').map(clean_email)]
             email = pd.Series(
-                [own_email(n, parse_email_list(raw))
-                 for n, raw in zip(name, email_list)],
+                [roster_own_email(slug, n, values, profile)
+                 for n, values, profile in zip(name, candidates, profiles)],
                 index=frame.index, dtype=object)
         else:
             email = pick("email", "e-mail", field="email").map(clean_email)
@@ -1212,6 +1227,31 @@ def load_rosters() -> pd.DataFrame:
             "source_slug": slug,
             "source_file": path.name,
         })
+        rec['source_location_scope'] = ''
+        rec['source_team_location_context'] = ''
+        rec['source_email_scope'] = _coalesce('Email Source') if slug == 'morgan_stanley' else ''
+        rec['source_email_claims'] = _coalesce('Published Email Claims') if slug == 'morgan_stanley' else ''
+        rec['source_email_review_reason'] = _coalesce('Email Review Reason') if slug == 'morgan_stanley' else ''
+        if slug == 'morgan_stanley':
+            origin = _coalesce('Source').str.strip().str.casefold()
+            entity = _coalesce('Entity Type').str.strip().str.upper()
+            scope = _coalesce('Location Scope').str.strip()
+            team_member = origin.eq('team_page') | (entity.eq('TEAM_MEMBER') & ~origin.eq('directory'))
+            rec['source_location_scope'] = scope.where(scope.ne(''), 'individual_directory')
+            rec.loc[team_member & scope.eq(''), 'source_location_scope'] = 'legacy_team_seed_unverified'
+            contextual = team_member & scope.ne('individual_card')
+            # A team office is context, not this person's own location. Do not
+            # use it to disambiguate CRDs or override an individual SEC/ACT
+            # address. Keep names, phones, email claims and team links intact.
+            # `office` remains only a phone-sharing context (not a geo key).
+            if contextual.any():
+                rec.loc[contextual, 'source_team_location_context'] = rec.loc[contextual].apply(
+                    lambda row: json.dumps({
+                        'scope':row['source_location_scope'],'team_url':row['team_url'],
+                        'street':row['location_street'],'city':row['city'],'state':row['state'],
+                        'postal':row['location_zip'],'latitude':row['location_lat'],'longitude':row['location_lon'],
+                    },ensure_ascii=False), axis=1)
+            rec.loc[contextual, ['city','state','location_street','location_zip','location_lat','location_lon']] = ''
         # A roster that publishes the ADVISOR's own CRD needs no matching at
         # all. Cetera does, on 9,767 of 9,785 rows, and we were fuzzy-matching
         # them anyway -- 1,538 of its people landed in the review tier carrying
@@ -1242,13 +1282,17 @@ def load_rosters() -> pd.DataFrame:
         # names over 7,104 people; UBS 1,693 over 3,664) and does not simply
         # repeat the city.
         filled = rec["team"].str.strip().ne("")
-        if slug == "wells_fargo":
-            # These labels are extracted from a named associate card on the
-            # firm's own team page. Repeated names reflect real team sizes,
+        if slug in {"wells_fargo", "morgan_stanley"}:
+            # These labels are supplied by team-linked person records on the
+            # firm's own directory/pages. Repetition reflects real team sizes,
             # not generic departments; require the page URL as evidence.
             rec.loc[filled & rec["team_url"].eq(""), "team"] = ""
             filled = rec["team"].str.strip().ne("")
-        if filled.sum() >= 50 and slug != "wells_fargo":
+        # Ameriprise publishes team_name explicitly in its native API and in
+        # scoped team cards. Adding staff lowers name diversity naturally;
+        # it must not turn thousands of verified practice names into blanks.
+        # Native API records need not publish a team URL; do not invent one.
+        if filled.sum() >= 50 and slug not in {"wells_fargo", "morgan_stanley", "ameriprise"}:
             values = rec.loc[filled, "team"]
             variety = values.nunique() / filled.sum()
             echoes_city = (values.map(norm)
@@ -1421,18 +1465,12 @@ def score_contacts(people: pd.DataFrame, index) -> pd.DataFrame:
             match_reasons.append("stated_crd_not_found")
             continue
         given, last = resolve_surname(rec.name, index)
-        # A published nickname the filing never records is invisible to
-        # given_forms(); the email local part is the one place the firm spells
-        # it out. Used only as a FALLBACK and only when its surname half agrees
-        # with the name we are already gating on.
+        # A personal email may spell out a filed given name or a supported
+        # nickname hidden by display initials. Its surname half must agree.
         alt_given, alt_last = email_name(getattr(rec, "email", ""))
-        # Scoring the email's given name against the SEC forms does NOT work --
-        # that was the first attempt, and "collie" against {carl, ed, edward}
-        # scores 0.0 for the same reason the published name did. The email is
-        # not evidence that Collie EQUALS Edward. It is evidence that the firm
-        # addresses this person as Collie Krausnick, and the SURNAME half is
-        # what can be corroborated: it agrees with the filed surname we are
-        # already gating on, at a firm we can check.
+        # The email can supply a substantive SEC/known-nickname given-name
+        # match, but surname + firm + office cannot invent one. Otherwise a
+        # departing advisor's email can migrate to a remaining namesake.
         use_alt = bool(alt_last) and alt_last == last
         allowed = set(crd_tuple(
             getattr(rec, "allowed_firm_crds", ""))) or {
@@ -1450,13 +1488,6 @@ def score_contacts(people: pd.DataFrame, index) -> pd.DataFrame:
             # and current firm family already agree, that is safer evidence
             # than allowing a shared initial to decide between colleagues.
             n = max(n, email_n)
-            if n <= 0 and use_alt and allowed & firms:
-                # Surname and firm both agree and the filed given name simply
-                # never records the nickname. Deliberately BELOW the 0.8 that
-                # counts toward CONTACT_NAMESAKE_CAP: identifies a surname at a
-                # firm, not which same-named colleague, so where several exist
-                # they all score alike, tie, and are rejected as ambiguous.
-                n = 0.60
             if n <= 0:
                 continue
             f = 1.0 if allowed and allowed & firms else 0.0
@@ -1480,7 +1511,8 @@ def score_contacts(people: pd.DataFrame, index) -> pd.DataFrame:
         second = scored[1][0] if len(scored) > 1 else 0.0
         namesakes = sum(1 for row in scored if row[2] >= 0.8)
         ambiguous = bool(best) and (best[0] - second) < MARGIN
-        if best and best[0] >= ACCEPT and not ambiguous and namesakes <= CONTACT_NAMESAKE_CAP:
+        if (best and best[2] >= 0.8 and best[0] >= ACCEPT
+                and not ambiguous and namesakes <= CONTACT_NAMESAKE_CAP):
             tier, crd, score = "high", best[1], best[0]
         elif best:
             tier, crd, score = "review", best[1], best[0]
@@ -1504,7 +1536,8 @@ def score_contacts(people: pd.DataFrame, index) -> pd.DataFrame:
     people["match_gap"] = gaps
     people["proposed_crd"] = proposed_crds
     people["match_reason"] = match_reasons
-    return people
+    from roster_identity_review import apply_roster_identity_holds
+    return apply_roster_identity_holds(people, ROOT)
 
 
 def _row_text(row: pd.Series, key: str) -> str:
@@ -1521,6 +1554,8 @@ def _strict_residual_context(row: pd.Series, index) -> dict | None:
     under their existing identity-ledger/direct-identifier rules.
     """
     source_slug = _row_text(row, "source_slug")
+    if _row_text(row, "match_reason") == "roster_crd_change_requires_review":
+        return None
     if (source_slug not in FIRMS
             or _row_text(row, "source") in {"CRM", "EIC"}
             or _row_text(row, "given_crd")):
@@ -2277,6 +2312,11 @@ def main() -> None:
     index = load_index()
     people = score_contacts(people, index)
     people = apply_anchor_residual_pass(people, index)
+    from roster_identity_review import write_review_report
+    hold_rows = people.attrs.get("roster_identity_review", [])
+    write_review_report(IDENTITY / "roster_identity_review.csv", hold_rows)
+    if hold_rows:
+        print(f"[*] {len(hold_rows):,} roster CRD changes held for review")
     residual_report = IDENTITY / "anchor_residual_matches.csv"
     pd.DataFrame(people.attrs.get("anchor_residual_report", []), columns=[
         "email", "published_name", "advisor_crd", "anchor_crds",

@@ -20,6 +20,7 @@ Writes data/interim/barrons_rankings.parquet, one row per advisor-ranking.
 from __future__ import annotations
 
 import json
+import math
 import pathlib
 import re
 import sys
@@ -41,9 +42,13 @@ def _number(value):
     """'290.9' or '$1.2' or '1,250' -> float. Barron's mixes formats."""
     if value is None:
         return None
-    text = re.sub(r"[^0-9.]", "", str(value))
+    text = str(value).strip()
+    # Never turn a published range such as 5-10 into the single value 510.
+    if not re.fullmatch(r"\$?\s*(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?", text):
+        return None
     try:
-        return float(text) if text else None
+        number = float(text.replace('$','').replace(',','').strip())
+        return number if math.isfinite(number) else None
     except ValueError:
         return None
 
@@ -57,9 +62,14 @@ def _detail(row: dict) -> dict:
         for key, (column, scale) in DETAIL_FIELDS.items():
             if stem.startswith(key):
                 number = _number(value)
-                out[column] = number
+                unit = re.search(r"\(\s*\$?\s*(bil|billion|bn|mil|million|mm|b|m)\s*\)",str(label),re.I)
+                if '(' in str(label) and not unit:
+                    number = None
+                source_scale = (1e9 if unit[1].lower() in {'bil','billion','bn','b'} else 1e6) if unit else scale
+                usd = None if number is None else number * source_scale
+                out[column] = None if usd is None else usd / scale
                 out[column.rsplit("_", 1)[0] + "_usd"] = (
-                    None if number is None else number * scale)
+                    usd)
         if stem.startswith("client type"):
             out["client_types"] = str(value).strip()
         if re.match(r"^\d{4} rank$", stem):

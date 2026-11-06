@@ -2681,6 +2681,7 @@ def _first_names():
     """
     import pandas as pd                                   # noqa: PLC0415
     from nicknames import same_person                     # noqa: PLC0415
+    from identity_audit import corroborated_name_pairs    # noqa: PLC0415
 
     shipped = read(API / "shared" / "act_contacts.json")["contacts"]
     df = pd.read_parquet(ROOT / "data" / "interim" / "act_crosswalk.parquet")
@@ -2713,6 +2714,8 @@ def _first_names():
     # shipped. That made the check report hundreds of disagreements that were
     # really the wrong record being read, which is its own quiet wrongness.
     by_act = {str(r.act_id): str(r.name) for r in df.itertuples()}
+    bridges = corroborated_name_pairs(
+        ROOT / "data" / "identity", ROOT / "data" / "interim" / "advisors.parquet")
     # The identity resolver also validates against SEC-filed alternate names.
     # Check those same names here or a legitimate alias (e.g. Rocky Jones)
     # becomes a false first-name disagreement after an asserted CRD is added.
@@ -2735,6 +2738,8 @@ def _first_names():
 
     bad = []
     for crd, act_id in shipped.items():
+        if (str(crd), str(act_id)) in bridges:
+            continue
         if str(act_id) in stated:
             continue
         act_name = by_act.get(str(act_id))

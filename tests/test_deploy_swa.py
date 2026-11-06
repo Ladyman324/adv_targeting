@@ -155,7 +155,7 @@ class StagingSafetyTests(unittest.TestCase):
         )
         for name in (
             "style.css", "field.css", "dial.js", "training.js",
-            "list_import.js", "email.js", "email.css"
+            "list_import.js", "email.js", "email.css", "asset-product-filters.js"
         ):
             (staged / name).write_text(f"/* {name} */", encoding="utf-8")
         (staged / "sw.js").write_text(

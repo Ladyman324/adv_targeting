@@ -120,54 +120,83 @@ def load():
     return src, json.loads(src.read_text(encoding="utf-8"))
 
 
+ACCOUNT_VALUE_POLICY = "highest_recorded_value_per_account_v1"
+
+
+def account_copies(rows):
+    """Read every ACT account copy without changing the source records."""
+    copies = collections.defaultdict(list)
+    for row in rows:
+        fields = row.get("customFields") or {}
+        for code, value, allcap, large in slots(fields):
+            if code:
+                copies[code].append({
+                    "contact_id": str(row.get("id") or ""),
+                    "contact_name": str(row.get("fullName") or ""),
+                    "value": value, "allcap": allcap, "largecap": large,
+                    "book_update": str(fields.get("bupdate") or ""),
+                    "edited": str(row.get("edited") or ""),
+                })
+    return copies
+
+
+def copy_order(copy):
+    # Keep one whole source allocation. Never maximize products independently.
+    return (copy["value"], copy["allcap"], copy["largecap"],
+            copy["book_update"], copy["edited"], copy["contact_id"],
+            copy["contact_name"])
+
+
+def account_value_conflicts(rows):
+    """Private, non-blocking discrepancies; every source copy stays visible."""
+    report = []
+    for code, copies in sorted(account_copies(rows).items()):
+        vectors = {(round(c["value"], 2), round(c["allcap"], 2),
+                    round(c["largecap"], 2)) for c in copies}
+        if len(vectors) < 2:
+            continue
+        selected = max(copies, key=copy_order)
+        report.append({
+            "code": "ACT_ACCOUNT_VALUE_DISCREPANCY", "severity": "warning",
+            "publicationBlocking": False, "account_code": code,
+            "selection_policy": ACCOUNT_VALUE_POLICY,
+            "selected_value": round(selected["value"], 2),
+            "selected_contact_id": selected["contact_id"],
+            "copies": sorted(copies, key=copy_order, reverse=True),
+        })
+    return report
+
+
 def build(rows):
-    """De-duplicate accounts by bcode, keeping the most recently updated figure.
+    """Deduplicate broker codes using the highest recorded account value.
 
-    WHICH COPY WINS. A team account appears on every member's record, and nine
-    of them disagree about the amount -- one by $1.0M. First-seen was arbitrary,
-    and arbitrary is not good enough for an asset figure.
-
-    The order of preference is `bupdate` (the field Act! uses to stamp when the
-    book data was last refreshed, which is precisely the question), then the
-    contact's `edited` timestamp, then nothing. `edited` is weaker evidence --
-    a record is edited for all sorts of reasons that have nothing to do with
-    assets -- so it only breaks ties bupdate leaves. Anything still tied is
-    REPORTED rather than silently resolved.
+    Product allocations come from that same copy. Equal values use allocation,
+    timestamp and contact ID order for repeatable output. The third return value
+    retains timestamp-tie diagnostics for callers; these are source warnings,
+    not unresolved publication decisions under ACCOUNT_VALUE_POLICY.
     """
-    candidates = collections.defaultdict(list)
-    holders = collections.defaultdict(set)
-    for r in rows:
-        cf = r.get("customFields") or {}
-        stamp = (str(cf.get("bupdate") or ""), str(r.get("edited") or ""))
-        for code, val, allc, lg in slots(cf):
-            if not code:
-                continue
-            holders[code].add(r.get("id"))
-            candidates[code].append((stamp, val, allc, lg, r.get("fullName")))
-
-    accounts, conflicts, unresolved = {}, [], []
-    for code, cands in candidates.items():
-        distinct = {round(c[1], 2) for c in cands}
-        # Newest first: bupdate, then edited. Empty strings sort last, which is
-        # what we want -- a record with no stamp should not win.
-        ranked = sorted(cands, key=lambda c: c[0], reverse=True)
-        best = ranked[0]
+    accounts, conflicts, timestamp_ties = {}, [], []
+    for code, copies in account_copies(rows).items():
+        selected = max(copies, key=copy_order)
+        distinct = {round(c["value"], 2) for c in copies}
         if len(distinct) > 1:
             conflicts.append((code, sorted(distinct)))
-            if ranked[0][0] == ranked[1][0]:
-                unresolved.append(code)
-        _, val, allc, lg, _who = best
+        latest_stamp = max((c["book_update"], c["edited"]) for c in copies)
+        latest = {(c["value"], c["allcap"], c["largecap"]) for c in copies
+                  if (c["book_update"], c["edited"]) == latest_stamp}
+        if len(latest) > 1:
+            timestamp_ties.append(code)
+        value, allcap, large = (selected[k] for k in ("value", "allcap", "largecap"))
         group, label = platform_of(code)
         accounts[code] = {
-            "code": code, "group": group, "label": label, "value": val,
-            "allcap": allc, "large": lg,
-            "fund": allc if code.startswith("MF") else 0.0,
-            "acv_sma": 0.0 if code.startswith("MF") else allc,
-            "midcap": max(0.0, val - allc - lg),
-            "holders": len(holders[code]),
+            "code": code, "group": group, "label": label, "value": value,
+            "allcap": allcap, "large": large,
+            "fund": allcap if code.startswith("MF") else 0.0,
+            "acv_sma": 0.0 if code.startswith("MF") else allcap,
+            "midcap": max(0.0, value - allcap - large),
+            "holders": len({c["contact_id"] for c in copies}),
         }
-    return accounts, conflicts, unresolved
-
+    return accounts, conflicts, timestamp_ties
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
@@ -197,7 +226,7 @@ def main() -> None:
 
     if conflicts:
         print(f"\n[!] {len(conflicts)} accounts carry different values on different "
-              f"contacts. The most recently updated copy was used (bupdate, then edited):")
+              f"contacts. The highest recorded account value was used; source copies need review:")
         for code, vals in conflicts:
             mark = "  UNRESOLVED — identical timestamps" if code in unresolved else ""
             print(f"      {code:<12} " + " / ".join(f"${v:,.0f}" for v in vals) + mark)

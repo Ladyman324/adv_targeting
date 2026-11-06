@@ -93,16 +93,25 @@ def main() -> None:
     asset_years: dict[str, int] = {}
     for crd, group in shipped.groupby("advisor_crd", sort=False):
         entries = []
+        # Keep undated legacy evidence in the ledger, but do not present the
+        # same recognition twice simply because a fresh pull establishes its
+        # year. Distinct known historical years always remain visible.
+        def recognition(row):
+            return (row.forbes_uri, None if pd.isna(row.category) else row.category,
+                    None if pd.isna(row.rank) else int(row.rank))
+        dated = {recognition(row) for row in group.itertuples() if not pd.isna(row.year)}
         for row in group.itertuples():
             rank = None if pd.isna(row.rank) else int(row.rank)
-            entries.append([
+            entry = [
                 short_label(row, rank),
                 full_label(row) + (f" ({int(row.year)})" if not pd.isna(row.year) else ""),
                 rank,
                 TIER_CODE[row.match_tier],
                 f"https://www.forbes.com/profile/{row.forbes_uri}/",
                 None if pd.isna(row.year) else int(row.year),
-            ])
+            ]
+            if not (pd.isna(row.year) and recognition(row) in dated):
+                entries.append(entry)
             # Team assets describe the TEAM, so the same figure recurs across an
             # advisor's rankings and across teammates. Keep the largest rather
             # than summing, which would multiply one book by its headcount.
@@ -130,8 +139,9 @@ def main() -> None:
     (OUT / "forbes.json").write_text(json.dumps(payload, separators=(",", ":")),
                                      encoding="utf-8")
 
-    counts = shipped["match_tier"].value_counts()
-    print(f"forbes.json  {len(advisors):,} advisors, {len(shipped):,} rankings")
+    counts = {tier: sum(entry[3] == code for entries in advisors.values() for entry in entries)
+              for tier, code in TIER_CODE.items()}
+    print(f"forbes.json  {len(advisors):,} advisors, {sum(len(v) for v in advisors.values()):,} rankings")
     for tier in ("confirmed", "high"):
         print(f"  {tier:<10}{int(counts.get(tier, 0)):>7,}")
     print(f"  team assets backfilled for {len(assets):,} advisors")

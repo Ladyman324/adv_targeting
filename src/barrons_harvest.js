@@ -28,16 +28,16 @@
  * Throttled deliberately. Do not lower the delays.
  */
 (() => {
-const DEFAULT_YEAR = { top1500: 2026, women: 2026, independent: 2025, top100: 2026 };
+const DEFAULT_YEAR = { top1500: 2026, women: 2026, independent: 2026, top100: 2026 };
 let YEAR = {...DEFAULT_YEAR};
 let selectedCategories = Object.keys(DEFAULT_YEAR), selectedStates = null, running = false;
 
 const RANKINGS = {
   // by state: ranks restart at 1 in each state, so state is part of the key
   top1500: { byState: true, path: st => `/advisor/report/top-financial-advisors/1000/${YEAR.top1500}/${st}` },
-  women:       { path: () => `/advisor/report/top-financial-advisors/women` },
-  independent: { path: () => `/advisor/report/top-financial-advisors/independent` },
-  top100:      { path: () => `/advisor/report/top-financial-advisors/100` },
+    women:       { path: () => `/advisor/report/top-financial-advisors/women/${YEAR.women}` },
+  independent: { path: () => `/advisor/report/top-financial-advisors/independent/${YEAR.independent}` },
+  top100:      { path: () => `/advisor/report/top-financial-advisors/100/${YEAR.top100}` },
 };
 
 const STATES = ["al","ak","az","ar","ca","co","ct","de","dc","fl","ga","hi","id","il","in","ia",
@@ -88,17 +88,18 @@ function scrapePage(url, timeoutMs = 30000){
   return new Promise(resolve => {
     const frame = document.createElement("iframe");
     frame.style.cssText = "position:fixed;left:-9999px;top:0;width:1400px;height:1400px;border:0";
-    let settled = false;
-    const finish = value => { if (!settled){ settled = true; frame.remove(); resolve(value); } };
+    let settled = false, poll, deadline;
+    const finish = value => { if (!settled){ settled = true; clearInterval(poll); clearTimeout(deadline); frame.remove(); resolve(value); } };
+    deadline = setTimeout(() => finish({rows:[],pages:0}), timeoutMs + 1000);
     frame.onload = () => {
       const started = Date.now();
-      const poll = setInterval(() => {
+      poll = setInterval(() => {
         let rows = [];
         try {
           rows = [...frame.contentDocument.querySelectorAll("tbody tr")]
             .filter(r => r.querySelectorAll("td").length > 1);
         } catch { /* not ready */ }
-        if (rows.length){ clearInterval(poll); finish({ rows: rows.map(readRow), pages: pageCount(frame) }); }
+        if (rows.length){ finish(snapshot(frame.contentDocument)); }
         else if (Date.now() - started > timeoutMs){ clearInterval(poll); finish({ rows: [], pages: 0 }); }
       }, 250);
     };
@@ -131,6 +132,11 @@ function readRow(tr){
   const slug = link ? link.getAttribute("href").split("?")[0].split("/finder/")[1] : null;
 
   const detail = {};
+  const headers = [...tr.closest('table').querySelectorAll('thead tr:last-child > *')]
+    .map(e => e.textContent.trim().replace(/\s+/g, ' '));
+  for (let i = 4; i < cells.length; i++){
+    if (headers[i] && text(i)) detail[headers[i]] = text(i);
+  }
   const panel = cells[cells.length - 1];
   if (panel){
     const leaves = [...panel.querySelectorAll("*")]
@@ -145,24 +151,40 @@ function readRow(tr){
   };
 }
 
+function snapshot(doc = document){
+  const rows = [...doc.querySelectorAll('tbody tr')]
+    .filter(r => r.querySelector('a[href*="/advisor/finder/"]')).map(readRow);
+  const header = doc.querySelector('thead');
+  const firstHeader = header?.querySelector('th,td');
+  const year = /\b(20\d{2})\s*RANK\b/i.exec(firstHeader?.innerText || firstHeader?.textContent || '');
+  const page = /PAGE\s+(\d+)\s+OF\s+(\d+)/i.exec(doc.body.innerText);
+  return {rows,year:year ? Number(year[1]) : null,
+    page:page ? Number(page[1]) : 1,pages:page ? Number(page[2]) : 1};
+}
+
 async function harvestList(name, cfg, state){
   const first = await scrapePage(`${cfg.path(state)}?page=1`);
-  if (!first.rows.length) return [];
+  if (!first.rows.length || first.year !== YEAR[name] || first.page !== 1 || first.pages > MAX_PAGES)
+    throw new Error(`Incomplete or wrong-edition Barron's list: ${name}/${state || '_'}`);
   const rows = [...first.rows];
   const seen = new Set(rows.map(r => r.slug));
   const total = Math.min(first.pages || 1, MAX_PAGES);
   for (let page = 2; page <= total; page++){
     await sleep(PAGE_DELAY);
     const batch = await scrapePage(`${cfg.path(state)}?page=${page}`);
+    if (!batch.rows.length || batch.year !== YEAR[name] || batch.page !== page || batch.pages !== total)
+      throw new Error(`Incomplete Barron's page ${name}/${state || '_'}/${page}`);
+    const before = rows.length;
     for (const r of batch.rows)
       if (r.slug && !seen.has(r.slug)){ seen.add(r.slug); rows.push(r); }
+    if (rows.length === before) throw new Error('Barrons pagination repeated a page; no complete download produced');
   }
   return rows;
 }
 
 async function crdFor(slug){
-  const res = await fetch(`/advisor/finder/${slug}`, { credentials: "include" });
-  if (!res.ok) return null;
+  const res = await fetch(`/advisor/finder/${slug}`, { credentials: "include", signal:AbortSignal.timeout(30000) });
+  if (!res.ok) throw new Error(`Barrons profile HTTP ${res.status}`);
   const doc = new DOMParser().parseFromString(await res.text(), "text/html");
   const a = doc.querySelector('a[href*="brokercheck"]');
   if (!a) return null;
@@ -191,7 +213,7 @@ async function run(){
     state.lists[name] ||= {};
     for (const st of targets){
       const key = st || "_";
-      if (state.lists[name][key]) continue;            // already harvested
+      if (state.lists[name][key]?.length) continue;    // never checkpoint an empty failure
       const rows = await harvestList(name, cfg, st);
       state.lists[name][key] = rows;
       store.write(state);
@@ -204,13 +226,13 @@ async function run(){
   for (const byKey of Object.values(state.lists))
     for (const rows of Object.values(byKey))
       rows.forEach(r => r.slug && slugs.add(r.slug));
-  const pending = [...slugs].filter(s => !(s in state.crd));
+  const pending = [...slugs].filter(s => !state.crd[s]);
   console.log(`CRD lookup: ${pending.length} of ${slugs.size} advisors remaining`);
 
   let done = 0;
   for (const slug of pending){
     try { state.crd[slug] = await crdFor(slug); }
-    catch { state.crd[slug] = null; }
+    catch (error){ store.write(state); throw error; }
     if (++done % 25 === 0){ store.write(state); console.log(`  ${done}/${pending.length}`); }
     await sleep(ADVISOR_DELAY);
   }
@@ -245,6 +267,7 @@ window.BARRONS = {
     try { return await run(); } finally { running = false; }
   },
   configure, config: configuration,
+  snapshot,
   reset: () => { if (running) throw new Error("Harvest running"); localStorage.removeItem(checkpointKey()); },
   state: () => store.read(),
 };

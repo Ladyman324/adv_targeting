@@ -37,5 +37,29 @@
     const selected = normalize(values);
     return selected.length ? PRODUCTS.filter(p => selected.includes(p.id)).map(p => p.label).join(" / ") : "Any EIC";
   }
-  return Object.freeze({ PRODUCTS, normalize, transition, matches, label });
+  function accountValues(book, ids){
+    const selected = new Map();
+    if (!book || !book.accounts || !book.advisors) return selected;
+    const rank = (a) => [Number.isFinite(a[4]) ? a[4] : a.slice(0, 4).reduce((n, v) => n + (v || 0), 0),
+      (a[0] || 0) + (a[2] || 0), a[1] || 0];
+    const higher = (a, b) => {
+      const left = rank(a), right = rank(b);
+      for (let i = 0; i < left.length; i++) {
+        if (left[i] !== right[i]) return left[i] > right[i];
+      }
+      return false;
+    };
+    for (const id of new Set(ids || [])) {
+      const advisor = book.advisors[String(id)];
+      if (!advisor) continue;
+      for (const i of advisor.ix || []) {
+        const own = advisor.av && advisor.av[String(i)];
+        const value = own || book.accounts[i];
+        if (!value) continue;
+        if (!selected.has(i) || higher(value, selected.get(i))) selected.set(i, value);
+      }
+    }
+    return selected;
+  }
+  return Object.freeze({ PRODUCTS, normalize, transition, matches, label, accountValues });
 });

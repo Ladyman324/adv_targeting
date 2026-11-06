@@ -107,11 +107,13 @@ class RefreshSourcesTests(unittest.TestCase):
             old = pd.DataFrame([branch("1"), branch("2")]).assign(lat=33.0, lon=-84.0,
                 geocode_precision="rooftop", matched="1 MAIN ST, CITY, GA, 12345", geocode_source="census")
             old.to_parquet(interim / "branch_geocoded_GA.parquet", index=False)
-            pd.DataFrame([branch("1", "FL"), branch("3", "GA")]).to_parquet(output / "advisor_branches.parquet", index=False)
+            equivalent = branch("3", "GA", "1 MAIN STREET, SUITE 4")
+            equivalent["branch_postal"] = "12345-6789"
+            pd.DataFrame([branch("1", "FL"), equivalent]).to_parquet(output / "advisor_branches.parquet", index=False)
             pd.DataFrame([{"advisor_crd": str(n), "first_name": "First", "last_name": "Last"} for n in (1, 3)]).to_parquet(output / "advisors.parquet", index=False)
             pd.DataFrame([{"crd": "10", "firm_display": "Firm", "opportunity_score": 50.0, "motion": "SMA"}]).to_parquet(output / "firms.parquet", index=False)
             result = cached_geography(root)
-            self.assertEqual(result["GA"]["placed"], 1)  # new person, same exact physical address
+            self.assertEqual(result["GA"]["placed"], 1)  # same building, formatting-only change
             self.assertEqual(result["FL"]["placed"], 0)  # moved state must never inherit old CRD point
             self.assertEqual(pd.read_parquet(interim / "branch_geocoded_GA.parquet").advisor_crd.tolist(), ["3"])
             pd.DataFrame([branch("3")]).to_parquet(output / "advisor_branches.parquet", index=False)
@@ -170,7 +172,7 @@ class RefreshSourcesTests(unittest.TestCase):
             merge_rankings(root, "barrons", [source])
             out = root / "webapp/data"
             out.mkdir(parents=True)
-            (out / "advisor_index.json").write_text(json.dumps({"advisors": [["1"]]}))
+            (out / "advisor_index.json").write_text(json.dumps({"advisors": [["1"],["2"]]}))
             with patch.object(export_barrons, "INTERIM", root / "data/interim"), patch.object(export_barrons, "OUT", out):
                 export_barrons.main()
             result = json.loads((out / "barrons.json").read_text())
@@ -184,12 +186,17 @@ class RefreshSourcesTests(unittest.TestCase):
                      "category": "Georgia - State", "rank_state": "GA", "rank_market": None,
                      "rank_segment": None, "forbes_uri": "one", "team_assets_usd": 500,
                      "year": 2026}]
+            rows.append({**rows[1],"year":None,"team_assets_usd":99999})
+            rows.append({**rows[1],"advisor_crd":"2","forbes_uri":"two","year":None})
             pd.DataFrame(rows).to_parquet(root / "data/interim/forbes_matches.parquet", index=False)
             with patch.object(export_forbes, "INTERIM", root / "data/interim"), patch.object(export_forbes, "OUT", out):
                 export_forbes.main()
             result = json.loads((out / "forbes.json").read_text())
             self.assertEqual(result["latestYear"]["1"], 2026)
             self.assertEqual(result["advisors"]["1"][0][5], 2026)
+            self.assertEqual(len(result["advisors"]["1"]),2,'dated history stays; identical undated recognition is not a second award')
+            self.assertIsNone(result['latestYear']['2'])
+            self.assertIsNone(result['advisors']['2'][0][5],'undated-only recognition is retained without inventing a year')
             self.assertIn("2026", result["advisors"]["1"][0][1])
             self.assertEqual(result["team_assets"]["1"], 500)
             self.assertEqual(result["team_assets_year"]["1"], 2026)

@@ -37,7 +37,52 @@ STRICT_NICKNAMES = {
     "steven": {"steve"}, "theodore": {"ted", "theo"},
     "thomas": {"tom", "tommy"}, "timothy": {"tim"},
     "william": {"bill", "billy", "liam", "will"},
+    "zachary": {"zach", "zack"},
 }
+
+
+def corroborated_act_given_name(record, names, branches, firm_agrees):
+    """Narrow ACT-assertion bridges, never a fuzzy/search nickname authority.
+
+    The caller must still enforce unique ACT/CRD/email claims, surname/suffix
+    agreement, activity and domain conflicts. Location evidence must come from
+    ONE branch; independent city/ZIP hits cannot be combined across offices.
+    """
+    if not firm_agrees or not normalize_crd(record.get("raw_claimed_crd")):
+        return "", ""
+    email = normalize_email(record.get("norm_email"))
+    if (not email or is_generic_email(email)
+            or any(int(record.get(k) or 0) != 1 for k in
+                   ("act_id_claim_count", "crd_claim_count", "email_claim_count"))
+            or not record.get("record_active", True)):
+        return "", ""
+    address = {k: name_token(record.get("raw_" + k)) for k in ("street", "city", "state")}
+    postal = normalize_postal(record.get("raw_postal"))
+    if not all(address.values()) or not postal:
+        return "", ""
+    if not any(all(name_token(b.get(k)) == v for k, v in address.items())
+               and normalize_postal(b.get("postal")) == postal for b in branches):
+        return "", ""
+    parsed = parse_full_name(record.get("norm_full_name"))
+    first = name_token(record.get("norm_first_name"))
+    middle = name_token(parsed.middle or record.get("raw_middle_name"))
+    surname = name_token(record.get("norm_last_name"))
+    local = email.split("@", 1)[0]
+    for name in names:
+        if not surname or name_token(name.get("last_name")) != surname:
+            continue
+        legal = name_token(name.get("first_name"))
+        sec_middle = name_token(name.get("middle_name"))
+        if (len(first) == 1 and legal.startswith(first) and len(middle) > 1
+                and middle == sec_middle and not any(len(t) == 1 for t in name_tokens(parsed.middle or record.get("raw_middle_name")))):
+            return "given_initial_full_middle_corroborated", clean_text(parsed.middle or record.get("raw_middle_name"))
+        # These are not unconditional identity nicknames. Require the exact
+        # SEC first+surname email, supplied CRD, firm AND exact paired address.
+        if (legal in {"kaitlyn", "kathlyn"} and first == "katie"
+                and local in {legal + "." + surname, legal + "_" + surname,
+                              legal + "-" + surname}):
+            return "given_nickname_email_corroborated", clean_text(record.get("norm_first_name"))
+    return "", ""
 
 
 def clean_text(value: object) -> str:

@@ -73,6 +73,22 @@ class RankingHistoryTests(unittest.TestCase):
         self.assertEqual(result["candidate"]["editions"], ["unknown"])
         self.assertIn("RANKING_EDITION_UNDECLARED", {item["code"] for item in result["issues"]})
 
+    def test_forbes_financial_coverage_loss_is_held_without_person_loss(self):
+        old=rows()
+        for row in old:row['teamAssets']='$2B';row['minAccountSize']='$1M'
+        core.atomic_json(self.old,old)
+        result=self.assess(rows(year=2026))
+        lost={i.get('field') for i in result['issues'] if i['code']=='RANKING_FIELD_COVERAGE_LOST'}
+        self.assertEqual(lost,{'teamAssets','minAccountSize'})
+
+    def test_barrons_location_and_detail_coverage_are_checked(self):
+        old=rows(provider='barrons',category='top100',scope=None)
+        for row in old:row.update(location='Atlanta, GA',detail={'Team Assets ($bil)':'2','Typical Account ($mil)':'1'})
+        core.atomic_json(self.old,old)
+        result=self.assess(rows(year=2026,provider='barrons',category='top100',scope=None),provider='barrons')
+        lost={i.get('field') for i in result['issues'] if i['code']=='RANKING_FIELD_COVERAGE_LOST'}
+        self.assertEqual(lost,{'location','team_assets','typical_account'})
+
     def test_legacy_unknown_year_self_comparison_is_accepted(self):
         core.atomic_json(self.old, rows(year=None))
         self.assertEqual(self.assess(rows(year=None))["status"], "accepted")

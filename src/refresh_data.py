@@ -20,6 +20,19 @@ def parser():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--root", type=Path, default=ROOT, help="Repository root (fixtures/staging only; defaults to this checkout)")
     commands = p.add_subparsers(dest="action", required=True)
+    sub=commands.add_parser('run',help='Acquire, review source outcomes, build and validate; never publish')
+    sub.add_argument('--run',required=True,help='Existing run ID or ID to create')
+    sub.add_argument('--mode',choices=MODES)
+    sub.add_argument('--firm',action='append',default=[])
+    sub.add_argument('--source',action='append',default=[])
+    sub.add_argument('--stage-parent',type=Path)
+    sub.add_argument('--allow-network',action='store_true')
+    sub.add_argument('--reuse-last-good',action='append',default=[],metavar='SOURCE')
+    sub.add_argument('--fallback-reason')
+    sub.add_argument('--retry-failed',action='store_true')
+    sub.add_argument('--through',choices=['acquire','validate','prepare-release'],default='validate')
+    sub.add_argument('--act-user');sub.add_argument('--act-db')
+    sub.add_argument('--dry-run',action='store_true')
     for action in ("plan", "start"):
         sub = commands.add_parser(action)
         sub.add_argument("--mode", choices=MODES, required=True)
@@ -28,6 +41,8 @@ def parser():
         if action == "start":
             sub.add_argument("--stage-parent", type=Path, help="Local protected staging directory; defaults to OS temp")
             sub.add_argument("--run-id")
+            sub.add_argument("--source-run", help="Reuse an idle run's pinned source inputs with current code; rebuild every output")
+            sub.add_argument("--source-run-root", type=Path, help="Owning checkout of --source-run; allows a clean isolated release to reuse saved inputs")
     for action in ("status", "build", "resume", "report", "validate", "prepare-release", "verify-release", "prepare-publication-receipt", "import", "acquire"):
         sub = commands.add_parser(action)
         sub.add_argument("--run", required=True)
@@ -125,12 +140,42 @@ def make_plan(root, mode, firms=()):
 def main(argv=None):
     args = parser().parse_args(argv)
     root = args.root.resolve()
-    if args.action == "plan" or (args.action == "start" and args.dry_run):
-        result = make_plan(root, args.mode, args.firm)
+    if args.action == "start" and args.source_run_root is not None and not args.source_run:
+        raise RefreshError("Source run root requires a source run")
+    if args.action=='run':
+        from refresh_core import run_path
+        run_path(root,args.run)
+        from refresh_workflow import run_workflow,source_plan
+        if args.dry_run:
+            prior=read_json(root/'data/refresh/runs'/args.run/'run.json') if (root/'data/refresh/runs'/args.run/'run.json').exists() else {}
+            mode=args.mode or prior.get('mode','full');firms=args.firm or prior.get('firms',[])
+            saved=root/'data/refresh/runs'/args.run/'workflow/state.json'
+            sources=args.source or (read_json(saved).get('plan',[]) if saved.exists() else [])
+            result={'readOnly':True,'network':False,'publish':False,'mode':mode,
+                'sources':source_plan(mode,firms,sources),'through':args.through,
+                'reuseLastGood':args.reuse_last_good}
+        else:
+            result=run_workflow(root,args.run,sources=args.source,mode=args.mode,firms=args.firm,
+                stage_parent=args.stage_parent,allow_network=args.allow_network,
+                reuse_last_good=args.reuse_last_good,fallback_reason=args.fallback_reason,
+                retry_failed=args.retry_failed,through=args.through,act_user=args.act_user,act_db=args.act_db)
+        print(json.dumps(result,ensure_ascii=False,sort_keys=True,indent=2))
+        return 2 if result.get('status')=='needs_attention' else 0
+    elif args.action == "plan" or (args.action == "start" and args.dry_run):
+        if args.action == "start" and args.source_run:
+            source_owner = args.source_run_root.resolve() if args.source_run_root is not None else root
+            _, prior, source_stage = load_run(source_owner, args.source_run)
+            if prior['mode'] != args.mode or set(prior.get('firms', [])) != set(args.firm):
+                raise RefreshError('Source run must have matching scope')
+            result = make_plan(source_stage, args.mode, args.firm)
+            result['sourceRun'] = args.source_run
+            result['sourceRunRoot'] = str(source_owner)
+        else:
+            result = make_plan(root, args.mode, args.firm)
     elif args.action == "start":
         # Validate selection without doing an unrecorded duplicate inventory.
         check_selection(args.mode, args.firm)
-        result = create_run(root, args.mode, args.firm, args.stage_parent, args.run_id)
+        result = create_run(root, args.mode, args.firm, args.stage_parent, args.run_id, source_run=args.source_run, source_run_root=args.source_run_root)
         result = {"runId": result["id"], "status": result["status"], "outcome": result.get("outcome"), "workspace": result["workspaceRoot"],
                   "next": "import/acquire as needed, then build --run " + result["id"]}
     elif getattr(args, "dry_run", False):
@@ -141,6 +186,8 @@ def main(argv=None):
         directory, result, _ = load_run(root, args.run)
         result = {key: result.get(key) for key in ("id", "status", "outcome", "phase", "snapshotComplete", "recovery", "mode", "createdUtc", "updatedUtc", "failedStep", "errorCode", "steps", "validation", "candidate", "warnings", "attempts", "acquisitionReviews", "repairRequests")}
         result["activeProcesses"] = active_children(directory)
+        workflow=directory/'workflow/summary.json'
+        if workflow.exists():result['workflow']=read_json(workflow)
     elif args.action == "build":
         value = build(root, args.run, fallback_reason=args.fallback_reason)
         result = {"runId": value["id"], "status": value["status"], "outcome": value.get("outcome"), "warnings": value.get("warnings", []), "steps": len(value["steps"])}

@@ -318,6 +318,9 @@ class AcquisitionTests(unittest.TestCase):
         def execute(work, root, command, log, online=False):
             self.assertTrue(online); self.assertNotEqual(work, self.stage)
             self.assertEqual(command, ["src/fetch_feeds.py", "firm_sec"])
+            self.assertFalse((work / 'data/interim').exists())
+            self.assertFalse(list((work / 'data/raw').glob('act*')))
+            self.assertEqual([p.name for p in (work / 'src').iterdir()], ['fetch_feeds.py'])
             target = work / "data/raw/IA_FIRM_SEC_Feed_10_22_2026.xml.gz"
             with gzip.open(target, "wb") as handle: handle.write(sec_firms_xml())
         with patch.object(core, "execute_command", side_effect=execute):
@@ -340,6 +343,30 @@ class AcquisitionTests(unittest.TestCase):
                 acquire.acquire(self.root, "fixture", "sec_firms", allow_network=True)
         self.assertEqual(existing.read_bytes(), before)
         self.assertFalse((self.stage / "data/raw/IA_FIRM_SEC_Feed_10_22_2026.xml.gz").exists())
+
+    def test_public_roster_scratch_excludes_private_act_and_other_firms(self):
+        script = self.stage/'src/baird_async.py'; script.parent.mkdir(exist_ok=True)
+        script.write_text('print("synthetic")')
+        controller = self.root/'src/baird_async.py';controller.parent.mkdir(exist_ok=True)
+        controller.write_bytes(script.read_bytes())
+        other = roster(self.stage/'data/raw/firm_rosters/rbc_2026-01-01.csv')
+        secret = self.stage/'data/firm_api/1.json'; secret.parent.mkdir(parents=True);secret.write_text('{}')
+        geography = self.stage/'webapp/data/geo_index.json'
+        geography.parent.mkdir(parents=True);geography.write_text('{}')
+        value = core.read_json(self.directory/'run.json')
+        value['codeFiles'] = core.facts([script],self.stage)
+        value['codeNormalization'] = {'src/baird_async.py':core.normalized_code_hash(script,'src/baird_async.py')}
+        value['inputs'] = core.facts(core.source_paths(self.stage),self.stage)
+        core.save_run(self.directory,value)
+        def execute(work, root, command, log, online=False):
+            self.assertFalse(list((work/'data/raw').glob('act*')))
+            self.assertFalse((work/'data/firm_api').exists())
+            self.assertFalse((work/'data/raw/firm_rosters'/other.name).exists())
+            self.assertTrue((work/'webapp/data/geo_index.json').exists())
+            roster(work/'data/raw/firm_rosters/baird_2026-10-24.csv')
+        with patch.object(core,'execute_command',side_effect=execute):
+            result = acquire.acquire(self.root,'fixture','roster:baird',allow_network=True)
+        self.assertEqual('success',result['attempts'][-1]['status'])
 
     def test_command_failure_records_safe_incident_and_keeps_retrieval_unknown(self):
         self.mock_script()
@@ -373,16 +400,21 @@ class AcquisitionTests(unittest.TestCase):
             first = acquire.acquire(self.root, 'fixture', 'sec_firms', allow_network=True)
         old = next(row for row in first['sources'] if row['id'] == 'sec_firms')
         self.assertTrue(old['retrievedUtc'])
-        with patch.object(core, 'execute_command'):
+        selected = self.stage / 'data/raw/IA_FIRM_SEC_Feed_10_22_2026.xml.gz'
+        def identical_download(work, root, command, log, online=False):
+            # A minimal public downloader workspace has no copied baseline.
+            # Model a real, byte-identical retrieval rather than a no-op.
+            (work / 'data/raw' / selected.name).write_bytes(selected.read_bytes())
+        with patch.object(core, 'execute_command', side_effect=identical_download):
             unchanged = acquire.acquire(self.root, 'fixture', 'sec_firms', allow_network=True)
-        self.assertNotIn('retrievedUtc', unchanged['imports'][-1])
+        self.assertIn('retrievedUtc', unchanged['imports'][-1])
         retained = next(row for row in unchanged['sources'] if row['id'] == 'sec_firms')
-        self.assertEqual(retained['retrievedUtc'], old['retrievedUtc'])
+        self.assertGreaterEqual(retained['retrievedUtc'], old['retrievedUtc'])
         self.assertEqual(retained['fileFacts'], old['fileFacts'])
         selected = self.stage / 'data/raw/IA_FIRM_SEC_Feed_10_22_2026.xml.gz'
         same = acquire.import_snapshot(self.root, 'fixture', 'sec_firms', selected)
         reused = next(row for row in same['sources'] if row['id'] == 'sec_firms')
-        self.assertEqual(reused['retrievedUtc'], old['retrievedUtc'])
+        self.assertEqual(reused['retrievedUtc'], retained['retrievedUtc'])
         self.assertEqual(reused['snapshotId'], old['snapshotId'])
         incoming = self.incoming / 'IA_FIRM_SEC_Feed_10_23_2026.xml.gz'
         with gzip.open(incoming, 'wb') as handle:

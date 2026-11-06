@@ -3,13 +3,16 @@ from __future__ import annotations
 import argparse
 import asyncio
 import csv
+from contextvars import ContextVar
 import html
 import json
+import os
 import random
 import re
 import sys as _sys, pathlib as _pathlib
 _sys.path.insert(0, str(_pathlib.Path(__file__).resolve().parent))
 from firm_rosters import roster_path  # one naming convention, defined once
+from raymond_ui import RaymondUIError, stop_on_visible_challenge
 
 import subprocess
 import sys
@@ -18,6 +21,9 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 from urllib.parse import parse_qs, urljoin, urlparse
+
+_EVIDENCE_DIR=ContextVar('raymond_public_response_evidence',default=None)
+_ACTION_PACER=ContextVar('raymond_action_pacer', default=None)
 
 try:
     from playwright.async_api import (
@@ -349,11 +355,36 @@ class RaymondJamesError(RuntimeError):
     pass
 
 
-class RaymondJamesBlockedError(RaymondJamesError):
+class RaymondJamesHTTPError(RaymondJamesError):
+    """A non-denial HTTP failure; retain status without retrying broken UI."""
+
+    def __init__(self, message, *, status, retry_after=None):
+        super().__init__(message)
+        self.status = status
+        self.retry_after = retry_after
+
+
+class RaymondJamesInitializationError(RaymondJamesError):
     pass
 
 
+class RaymondJamesNavigationError(RaymondJamesInitializationError):
+    pass
+
+
+class RaymondJamesBlockedError(RaymondJamesError):
+    def __init__(self,message,status=403,retry_after=None,challenge=False):
+        super().__init__(message)
+        self.status=status
+        self.retry_after=retry_after
+        self.challenge=challenge
+
+
 class SelectorError(RaymondJamesError):
+    pass
+
+
+class OwnedContextCleanupError(RaymondJamesError):
     pass
 
 
@@ -411,12 +442,19 @@ def format_address(address: dict[str, Any]) -> str:
 
 def atomic_write_json(path: Path, data: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    if path.name == 'raymond_james_completed_locations.json':
+        from raymond_checkpoint import prepare_file_write
+        prepare_file_write(path)
     temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(
-        json.dumps(data, indent=2, ensure_ascii=False),
-        encoding="utf-8",
-    )
+    with temporary.open('w', encoding='utf-8') as handle:
+        json.dump(data, handle, indent=2, ensure_ascii=False)
+        handle.flush()
+        os.fsync(handle.fileno())
     temporary.replace(path)
+
+    if path.name == 'raymond_james_completed_locations.json':
+        from raymond_checkpoint import seal_file
+        seal_file(path)
 
 
 def load_json(path: Path, default: Any) -> Any:
@@ -609,23 +647,38 @@ def open_locator_tab_natively() -> None:
     )
 
 
-def attach_page_diagnostics(page: Page) -> None:
+def diagnostic_url(value: str) -> str:
+    """Only origin/path: never print request queries or credentials."""
+    parsed = urlparse(value)
+    return f'{parsed.scheme}://{parsed.hostname or ""}{parsed.path}'
+
+
+def attach_page_diagnostics(page: Page) -> Callable[[], None]:
     def on_response(response: Response) -> None:
         if response.status >= 400:
             print(
                 f"      Browser HTTP {response.status} "
-                f"[{response.request.resource_type}] {response.url}"
+                f"[{response.request.resource_type}] {diagnostic_url(response.url)}"
             )
 
     def on_request_failed(request: Any) -> None:
         print(
             f"      Browser request failed: {request.method} "
-            f"{request.url} | {request.failure}"
+            f"{diagnostic_url(request.url)}"
         )
 
-    page.on("response", on_response)
-    page.on("requestfailed", on_request_failed)
-    page.on("pageerror", lambda error: print(f"      Browser JS error: {error}"))
+    def on_page_error(error):
+        print(f"      Browser JS error: {getattr(error, 'name', type(error).__name__)}")
+
+    listeners = [('response', on_response), ('requestfailed', on_request_failed), ('pageerror', on_page_error)]
+    for event, listener in listeners: page.on(event, listener)
+    detached = False
+    def detach():
+        nonlocal detached
+        if detached: return
+        detached = True
+        for event, listener in listeners: page.remove_listener(event, listener)
+    return detach
 
 
 async def page_shows_access_denied(page: Page) -> bool:
@@ -685,6 +738,21 @@ async def find_existing_locator_page(context: BrowserContext) -> Page | None:
     return None
 
 
+async def open_owned_locator(context: BrowserContext) -> Page:
+    """One ordinary navigation in the same context that owns the scraper."""
+    page=await context.new_page()
+    try:
+        attach_page_diagnostics(page)
+        await page.goto(LOCATOR_URL,wait_until="domcontentloaded",timeout=60_000)
+        if await page_shows_access_denied(page):
+            raise RaymondJamesBlockedError("Raymond James denied access; stop for operator review")
+        await page.locator(LOCATION_INPUT_SELECTOR).first.wait_for(state="visible",timeout=30_000)
+        return page
+    except BaseException:
+        await page.close()
+        raise
+
+
 async def get_locator_page(context: BrowserContext) -> Page:
     page = await find_existing_locator_page(context)
     if page is None:
@@ -727,29 +795,93 @@ class NetworkCapture:
     def __init__(self, page: Page):
         self.page = page
         self._queue: asyncio.Queue[Response] = asyncio.Queue()
+        self._pacer = _ACTION_PACER.get()
+        self._pending_details = set()
+        self.borrowed_locator = False
+        page.on('request', self._on_request)
+        page.on('requestfailed', self._on_request_failed)
         page.on("response", self._on_response)
+
+    def _on_request(self, request):
+        if urlparse(request.url).path.casefold().endswith(DETAILS_API_PATH.casefold()):
+            self._pending_details.add(request.url)
+
+    def _on_request_failed(self, request):
+        self._pending_details.discard(request.url)
+
+    def pending_details(self, predicate):
+        from types import SimpleNamespace
+        return any(predicate(SimpleNamespace(url=url)) for url in self._pending_details)
+
+    def pop_matching(self, predicate):
+        self.check_borrowed_locator()
+        items = []
+        while not self._queue.empty(): items.append(self._queue.get_nowait())
+        for item in items: self._queue.put_nowait(item)
+        for item in items: self._guard_document(item)
+        kept = []
+        found = None
+        while not self._queue.empty():
+            item = self._queue.get_nowait()
+            if found is None and predicate(item): found = item
+            else: kept.append(item)
+        for item in kept: self._queue.put_nowait(item)
+        return found
+
+    def _guard_document(self, response):
+        if not self._is_main_document(response): return
+        if response.status in {401, 403, 429}:
+            raise RaymondJamesBlockedError('Queued locator document denied access; no further UI action',
+                status=response.status, retry_after=response.headers.get('retry-after'))
+        raise RaymondJamesNavigationError('Queued unexpected document navigation; no further UI action')
 
     def _on_response(self, response: Response) -> None:
         path = urlparse(response.url).path.casefold()
-        if path.endswith(AUTOCOMPLETE_API_PATH.casefold()) or path.endswith(
+        self._pending_details.discard(response.url)
+        if self._is_main_document(response) or path.endswith(AUTOCOMPLETE_API_PATH.casefold()) or path.endswith(
             DETAILS_API_PATH.casefold()
         ):
+            pacer = self._pacer
+            if pacer is not None and not self._is_main_document(response): pacer.response(response)
             self._queue.put_nowait(response)
 
-    def drain(self) -> None:
+    def _is_main_document(self, response):
+        try:
+            return response.request.is_navigation_request() and response.request.frame == self.page.main_frame
+        except Exception:
+            return False
+
+    def drain(self, check_documents=True) -> None:
+        if check_documents: self.check_borrowed_locator()
+        kept = []
         while True:
             try:
-                self._queue.get_nowait()
+                item = self._queue.get_nowait()
+                if self._is_main_document(item): kept.append(item)
             except asyncio.QueueEmpty:
-                return
+                break
+        for item in kept: self._queue.put_nowait(item)
+        if check_documents:
+            for item in kept: self._guard_document(item)
+
+    def check_borrowed_locator(self):
+        if not self.borrowed_locator: return
+        from raymond_browser import validate_borrowed_locator_url
+        try:
+            if self.page.is_closed(): raise ValueError('Selected tab closed')
+            validate_borrowed_locator_url(self.page.url)
+        except (ValueError, TypeError):
+            raise RaymondJamesNavigationError('Selected working tab closed or left the locator; no fallback or further action') from None
 
     def close(self) -> None:
         """Detach the listener before disconnecting from the CDP browser."""
         try:
             self.page.remove_listener("response", self._on_response)
+            self.page.remove_listener('request', self._on_request)
+            self.page.remove_listener('requestfailed', self._on_request_failed)
         except Exception:
             pass
-        self.drain()
+        self.drain(check_documents=False)
 
     async def wait_for(
         self,
@@ -762,7 +894,27 @@ class NetworkCapture:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise TimeoutError("Timed out waiting for the expected site response.")
-            response = await asyncio.wait_for(self._queue.get(), timeout=remaining)
+            try:
+                response = await asyncio.wait_for(self._queue.get(), timeout=min(remaining, 2))
+            except asyncio.TimeoutError:
+                # A verification UI can appear after the click, without an
+                # advisor response. Observe only, never solve or dismiss it.
+                if hasattr(self.page, 'locator'):
+                    try:
+                        await stop_on_visible_challenge(self.page)
+                    except RaymondUIError:
+                        raise
+                    except Exception as exc:
+                        raise RaymondUIError('Unable to inspect locator readiness; operator review required') from exc
+                continue
+            if self._is_main_document(response):
+                if response.status in {401, 403, 429}:
+                    parsed = urlparse(response.url)
+                    if parsed.hostname == 'www.raymondjames.com' and parsed.path.rstrip('/') == '/find-an-advisor':
+                        await read_json_response(response, description='unexpected locator document navigation')
+                    raise RaymondJamesBlockedError('The locator navigated to an access-denied document; stopped immediately',
+                        status=response.status, retry_after=response.headers.get('retry-after'))
+                raise RaymondJamesNavigationError('Unexpected document navigation during locator search; review the selected website control')
             if predicate(response):
                 return response
 
@@ -829,6 +981,25 @@ def is_details_response(
     return True
 
 
+async def retain_public_response(response,description):
+    """Retain response bytes, never request headers/cookies/session queries."""
+    folder=_EVIDENCE_DIR.get()
+    if folder is None:return
+    import gzip
+    import hashlib
+    from refresh_core import utc
+    parsed=urlparse(response.url)
+    if parsed.scheme!='https' or parsed.hostname!='www.raymondjames.com' or not (parsed.path.startswith('/dotcom/api/') or parsed.path.rstrip('/') == '/find-an-advisor'):
+        raise RaymondJamesError('Unexpected response origin/path for native evidence')
+    raw=await response.body();sha=hashlib.sha256(raw).hexdigest();folder=Path(folder);folder.mkdir(parents=True,exist_ok=True);name=sha+'.body.gz';file=folder/name
+    if file.exists():
+        if gzip.decompress(file.read_bytes())!=raw:raise RaymondJamesError('Retained native response body differs from its hash')
+    else:file.write_bytes(gzip.compress(raw,mtime=0))
+    headers=response.headers
+    item={'observedUtc':utc(),'status':response.status,'origin':'https://www.raymondjames.com','path':parsed.path,'description':description,'bodySha256':sha,'bodyBytes':len(raw),'file':name,'contentType':headers.get('content-type',''),'retryAfter':headers.get('retry-after'),'format':'native_http_body'}
+    with (folder/'observations.jsonl').open('a',encoding='utf8') as f:f.write(json.dumps(item,ensure_ascii=False)+'\n')
+
+
 async def read_json_response(
     response: Response,
     *,
@@ -838,16 +1009,19 @@ async def read_json_response(
     # Calling response.finished() separately created Playwright completion tasks
     # that could raise noisy "Target closed" warnings during CDP disconnect.
     status = response.status
-    if status == 403:
+    await retain_public_response(response,description)
+    if status in {401,403,429}:
         try:
             body = await response.text()
         except Exception:
             body = ""
         raise RaymondJamesBlockedError(
-            f"Raymond James returned HTTP 403 during {description}. "
-            "The script stopped immediately without reloading or retrying.\n"
-            f"URL: {response.url}\n"
-            f"Response: {clean_text(body)[:1800]}"
+            f"Raymond James returned HTTP {status} during {description}. "
+            "This attempt stopped immediately.\n"
+            f"URL: {diagnostic_url(response.url)}\n"
+            f"Response: {clean_text(body)[:1800]}",
+            status=status,retry_after=getattr(response,'headers',{}).get('retry-after'),
+            challenge=bool(re.search(r'captcha|verify\s+you\s+are\s+human|just\s+a\s+moment',clean_text(body),re.I)),
         )
 
     if status >= 400:
@@ -855,14 +1029,18 @@ async def read_json_response(
             body = await response.text()
         except Exception:
             body = ""
-        raise RaymondJamesError(
+        raise RaymondJamesHTTPError(
             f"Raymond James returned HTTP {status} during {description}.\n"
-            f"URL: {response.url}\n"
-            f"Response: {clean_text(body)[:1800]}"
+            f"URL: {diagnostic_url(response.url)}\n"
+            f"Response: {clean_text(body)[:1800]}",
+            status=status, retry_after=getattr(response, 'headers', {}).get('retry-after'),
         )
 
     try:
-        return await response.json()
+        payload = await response.json()
+        pacer = _ACTION_PACER.get()
+        if pacer is not None: pacer.response(response, 'completed')
+        return payload
     except Exception as exc:
         try:
             body = await response.text()
@@ -870,7 +1048,7 @@ async def read_json_response(
             body = ""
         raise RaymondJamesError(
             f"Expected JSON during {description}, but the response was not JSON.\n"
-            f"URL: {response.url}\n"
+            f"URL: {diagnostic_url(response.url)}\n"
             f"Response: {clean_text(body)[:1800]}"
         ) from exc
 
@@ -937,19 +1115,8 @@ async def find_location_input(page: Page) -> Locator:
 
 
 async def find_search_button(page: Page) -> Locator:
-    locator = await first_visible([
-        page.get_by_role(
-            "button",
-            name=re.compile(r"^\s*Find\s+An\s+Advisor\s*$", re.I),
-        ),
-        page.locator(
-            'button:has-text("Find An Advisor"), '
-            'input[type="submit"][value*="Find An Advisor" i]'
-        ),
-    ], require_enabled=True)
-    if locator is None:
-        raise SelectorError('Could not find the visible "Find An Advisor" button.')
-    return locator
+    from raymond_ui import find_location_search_button
+    return await find_location_search_button(page)
 
 
 def score_place_suggestion(
@@ -1062,6 +1229,10 @@ async def autocomplete_commit_state(
             const visibleOptions = list
                 ? Array.from(list.querySelectorAll('li[role="option"]'))
                     .filter(option => {
+                        // The widget keeps selected options mounted under a
+                        // hidden list; child rectangles can remain nonzero
+                        // when site CSS overrides the hidden display rule.
+                        if (option.closest('[hidden], [aria-hidden="true"]')) return false;
                         const style = window.getComputedStyle(option);
                         const rect = option.getBoundingClientRect();
                         return style.display !== 'none' &&
@@ -1077,6 +1248,7 @@ async def autocomplete_commit_state(
                 ariaExpanded: input?.getAttribute('aria-expanded'),
                 ariaActiveDescendant: input?.getAttribute('aria-activedescendant'),
                 listExists: Boolean(list),
+                listHidden: Boolean(list?.hidden),
                 visibleOptions,
                 committed: Boolean(input) &&
                     normalize(input.value) === normalize(expected) &&
@@ -1249,22 +1421,8 @@ async def type_location_and_select_suggestion(
     )
     visible_option_text = clean_text(await suggestion_locator.inner_text())
 
-    # Invoke the exact option's native click. This runs the page's own event
-    # handler but avoids Playwright's pointer-actionability checks, which can
-    # be blocked by the sticky header even when the option is correct.
-    await suggestion_locator.evaluate(
-        """
-        option => {
-            option.dispatchEvent(new MouseEvent('mousedown', {
-                bubbles: true, cancelable: true, view: window
-            }));
-            option.dispatchEvent(new MouseEvent('mouseup', {
-                bubbles: true, cancelable: true, view: window
-            }));
-            option.click();
-        }
-        """
-    )
+    await suggestion_locator.scroll_into_view_if_needed(timeout=CONTROL_TIMEOUT_MS)
+    await suggestion_locator.click(timeout=CONTROL_TIMEOUT_MS)
 
     # The site may keep the list element mounted but hidden. Verify the actual
     # committed state rather than requiring the list node to disappear.
@@ -1541,23 +1699,23 @@ async def dump_ui_diagnostics(page: Page, directory: Path, label: str) -> None:
     safe_label = re.sub(r"[^A-Za-z0-9]+", "_", label).strip("_") or "diagnostic"
 
     try:
-        await page.screenshot(
+        await asyncio.wait_for(page.screenshot(
             path=str(directory / f"{safe_label}.png"),
             full_page=True,
-        )
+        ),timeout=5)
     except Exception:
         pass
 
     try:
         (directory / f"{safe_label}.html").write_text(
-            await page.content(),
+            await asyncio.wait_for(page.content(),timeout=5),
             encoding="utf-8",
         )
     except Exception:
         pass
 
     try:
-        controls = await page.locator(
+        controls = await asyncio.wait_for(page.locator(
             'input, select, button, a, [role="button"], '
             '[role="combobox"], [role="option"]'
         ).evaluate_all(
@@ -1581,7 +1739,7 @@ async def dump_ui_diagnostics(page: Page, directory: Path, label: str) -> None:
                 visible: Boolean(element.offsetWidth || element.offsetHeight || element.getClientRects().length)
             }))
             """
-        )
+        ),timeout=5)
         atomic_write_json(directory / f"{safe_label}_controls.json", controls)
     except Exception:
         pass
@@ -1601,6 +1759,8 @@ async def wait_for_details_after_action(
     place_id: str,
     action_description: str,
 ) -> tuple[dict[str, Any], Response]:
+    pacer = _ACTION_PACER.get()
+    if pacer is not None: await pacer.before(action_description)
     capture.drain()
     await action()
 
@@ -1631,73 +1791,37 @@ async def start_visible_search(
     location_name: str,
     radius: int,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
+    pacer = _ACTION_PACER.get()
+    if pacer is not None: await pacer.before('location input for ' + location_name)
     place = await type_location_and_select_suggestion(
         page,
         capture,
         location_name,
     )
 
-    # Try to set the desired radius before submitting. If prior results are
-    # already displayed, changing this control can itself issue a fresh page-1
-    # request. The passive capture listener preserves that response.
-    capture.drain()
-    radius_changed = await set_radius_control(page, radius)
-
-    response: Response | None = None
-    payload: dict[str, Any] | None = None
-
-    if radius_changed:
-        response = await capture.wait_for_optional(
-            lambda candidate: is_details_response(
-                candidate,
-                location_name=location_name,
-                page_number=1,
-                radius=radius,
-                place_id=place["place_id"],
-            ),
-            timeout_seconds=5,
-        )
-        if response is not None:
-            received = await read_json_response(
-                response,
-                description=f"visible radius change for {location_name}",
-            )
-            if not isinstance(received, dict):
-                raise RaymondJamesError(
-                    f"Expected a JSON object after changing the radius for "
-                    f"{location_name}: {received!r}"
-                )
-            payload = received
-
-    if payload is None:
-        search_button = await find_search_button(page)
-
+    # Reproduce the observed normal flow: default search, rendered results,
+    # then the visible requested-radius control. Never discard an automatic
+    # initial result or resubmit while the site's request is still in flight.
+    initial_match = lambda candidate: is_details_response(candidate, location_name=location_name,
+        page_number=1, radius=None, place_id=place['place_id'])
+    if pacer is not None: await pacer.before('default location search')
+    response = capture.pop_matching(initial_match)
+    if response is not None:
+        payload = await read_json_response(response, description='automatic default location search')
+    elif capture.pending_details(initial_match):
+        response = await capture.wait_for(initial_match)
+        payload = await read_json_response(response, description='pending default location search')
+    else:
         async def click_search() -> None:
-            # The Raymond James sticky header and floating navigation can
-            # intercept a physical Playwright click on the submit button even
-            # when the button is visible. Submit the button's own form through
-            # the native browser form API instead. This changes only the
-            # initial search submission; pagination below still scrolls through
-            # each rendered page and physically clicks the visible Next button.
-            await search_button.evaluate(
-                """
-                button => {
-                    if (button.form &&
-                        typeof button.form.requestSubmit === 'function') {
-                        button.form.requestSubmit(button);
-                    } else {
-                        button.click();
-                    }
-                }
-                """
-            )
+            from raymond_ui import click_location_search
+            await click_location_search(page)
 
         payload, response = await wait_for_details_after_action(
             capture,
             click_search,
             location_name=location_name,
             page_number=1,
-            radius=radius if radius_changed else None,
+            radius=None,
             place_id=place["place_id"],
             action_description=f"visible search for {location_name}",
         )
@@ -1711,70 +1835,13 @@ async def start_visible_search(
     )
 
     if actual_radius != radius:
-        # The radius control was unavailable before the first search. Change it
-        # now through the visible results-page control. The site may fetch page
-        # 1 immediately on change; otherwise click Find again.
-        capture.drain()
-        changed = await set_radius_control(page, radius)
-        if not changed:
-            raise SelectorError(
-                f"The results loaded at {actual_radius} miles, and the script "
-                f"could not change the visible radius control to {radius} miles."
-            )
-
-        response = await capture.wait_for_optional(
-            lambda candidate: is_details_response(
-                candidate,
-                location_name=location_name,
-                page_number=1,
-                radius=radius,
-                place_id=place["place_id"],
-            ),
-            timeout_seconds=10,
-        )
-
-        if response is None:
-            search_button = await find_search_button(page)
-
-            async def click_search_again() -> None:
-                # Same native form submission fallback used for the first
-                # search. Visible page scrolling and Next-button clicks remain
-                # unchanged.
-                await search_button.evaluate(
-                    """
-                    button => {
-                        if (button.form &&
-                            typeof button.form.requestSubmit === 'function') {
-                            button.form.requestSubmit(button);
-                        } else {
-                            button.click();
-                        }
-                    }
-                    """
-                )
-
-            payload, response = await wait_for_details_after_action(
-                capture,
-                click_search_again,
-                location_name=location_name,
-                page_number=1,
-                radius=radius,
-                place_id=place["place_id"],
-                action_description=(
-                    f"visible {radius}-mile search for {location_name}"
-                ),
-            )
-        else:
-            received = await read_json_response(
-                response,
-                description=f"visible radius change for {location_name}",
-            )
-            if not isinstance(received, dict):
-                raise RaymondJamesError(
-                    f"Expected a JSON object after changing the radius for "
-                    f"{location_name}: {received!r}"
-                )
-            payload = received
+        async def change_radius():
+            from raymond_ui import click_location_radius
+            if not await click_location_radius(page, radius):
+                raise SelectorError('Radius response disagrees with the checked control; review rather than resubmit')
+        payload, response = await wait_for_details_after_action(capture, change_radius,
+            location_name=location_name, page_number=1, radius=radius, place_id=place['place_id'],
+            action_description=f'visible {radius}-mile radius change for {location_name}')
 
         await wait_for_results_render(page)
 
@@ -1953,13 +2020,13 @@ def advisor_dedup_key(record: dict[str, Any]) -> str:
     advisor_id = clean_text(record.get("advisor_id"))
     if advisor_id:
         return f"id:{advisor_id.casefold()}"
-    email = clean_text(record.get("email")).casefold()
-    if email:
-        return f"email:{email}"
+    name = clean_text(record.get("name")).casefold()
     profile = clean_text(record.get("advisor_profile_url")).casefold()
     if profile:
-        return f"profile:{profile}"
-    name = clean_text(record.get("name")).casefold()
+        return f"profile:{profile}|{name}"
+    email = clean_text(record.get("email")).casefold()
+    if email:
+        return f"email:{email}|{name}"
     phone = re.sub(r"\D+", "", clean_text(record.get("phone")))
     address = clean_text(record.get("_primary_branch_address")).casefold()
     return f"fallback:{name}|{phone}|{address}"
@@ -2103,6 +2170,8 @@ def write_dataset_csv(
     dataset: dict[str, dict[str, Any]],
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    from raymond_checkpoint import prepare_file_write
+    prepare_file_write(path)
     temporary = path.with_suffix(path.suffix + ".tmp")
     rows = [finalize_record(record) for record in dataset.values()]
     rows.sort(key=lambda row: (
@@ -2119,7 +2188,12 @@ def write_dataset_csv(
         )
         writer.writeheader()
         writer.writerows(rows)
+        handle.flush()
+        os.fsync(handle.fileno())
     temporary.replace(path)
+
+    from raymond_checkpoint import seal_file
+    seal_file(path)
 
 
 def load_existing_dataset(path: Path) -> dict[str, dict[str, Any]]:
@@ -2128,7 +2202,12 @@ def load_existing_dataset(path: Path) -> dict[str, dict[str, Any]]:
         return dataset
 
     with path.open("r", encoding="utf-8-sig", newline="") as handle:
-        for raw in csv.DictReader(handle):
+        reader = csv.DictReader(handle)
+        if reader.fieldnames != CSV_FIELDS:
+            raise RaymondJamesError('Raymond checkpoint CSV schema is missing or changed')
+        for raw in reader:
+            if None in raw or any(raw.get(field) is None for field in CSV_FIELDS):
+                raise RaymondJamesError('Incomplete Raymond checkpoint CSV row')
             record: dict[str, Any] = {
                 field: raw.get(field, "") for field in CSV_FIELDS
             }
@@ -2171,13 +2250,31 @@ def load_existing_dataset(path: Path) -> dict[str, dict[str, Any]]:
                 1,
                 len(record["_source_locations"]),
             )
-            dataset[advisor_dedup_key(record)] = record
+            key = advisor_dedup_key(record)
+            if key in dataset:
+                raise RaymondJamesError('Duplicate advisor identity in checkpoint CSV; preserve for review')
+            dataset[key] = record
     return dataset
 
 
 # =============================================================================
 # COMMAND LINE AND MAIN WORKFLOW
 # =============================================================================
+
+def validate_existing_tab_options(args) -> None:
+    target_id = getattr(args, 'existing_target_id', None)
+    if target_id is None: return
+    from raymond_browser import validate_existing_target_id
+    validate_existing_target_id(target_id)
+    if getattr(args, 'browser_mode', None) != 'native' or not getattr(args, 'chrome_profile', None):
+        raise ValueError('--existing-target-id requires native mode and --chrome-profile')
+    if getattr(args, 'clear_raymond_cookies', False):
+        raise ValueError('An existing working tab cannot be combined with cookie cleanup')
+    if getattr(args, 'consent_choice', 'operator') != 'operator':
+        raise ValueError('An existing working tab preserves consent; use --consent-choice operator')
+    if getattr(args, 'denial_retries', 0) or getattr(args, 'resume_reviewed_retries', False):
+        raise ValueError('An existing working tab stops on failure; automatic retries are not allowed')
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -2196,8 +2293,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path.cwd() / "data" / "raw" / "firm_rosters",
-        help="Default: ./data/raw/firm_rosters beneath the current working directory.",
+        default=Path.cwd() / "data" / "refresh" / "raymond_james" / "current",
+        help="Private staging output; never automatically replaces the operational roster.",
     )
     parser.add_argument(
         "--fresh",
@@ -2232,12 +2329,44 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Optional cap on target centers processed in this run.",
     )
+    parser.add_argument('--denial-retries',type=int,default=0,help='Explicitly reviewed retries per failed city search, at most 3; success resets the budget. Default: 0.')
+    parser.add_argument('--retry-delay',type=float,default=60,help='Seconds between reviewed retries, minimum 60. Temporary collector cookies are cleared after each attempt.')
+    parser.add_argument('--resume-reviewed-retries',action='store_true',help='Explicitly resume the same private retry log without resetting attempts already spent; incompatible with --fresh.')
+    parser.add_argument('--browser-mode', choices=['isolated', 'native'], default='native',
+        help='Native uses one owned normal tab in an explicitly selected debug profile. Isolated is diagnostic only.')
+    parser.add_argument('--cdp-url', default=CDP_HOST)
+    parser.add_argument('--chrome-profile', type=Path,
+        help='Required for native mode: exact dedicated user-data-dir of the selected debug Chrome.')
+    parser.add_argument('--existing-target-id',
+        help='Explicit CDP target ID of an already-working locator tab. Native only; no cookie reset, consent changes or automatic retries. Leaves the tab open; cities are collected from page1.')
+    parser.add_argument('--clear-raymond-cookies', action='store_true',
+        help='Explicitly clear only Raymond James cookies before this native session; never an automatic retry.')
+    parser.add_argument('--consent-choice', choices=['operator', 'decline'], default='operator',
+        help='Leave the cookie choice to the operator, or explicitly decline optional cookies. Never accepts automatically.')
+    parser.add_argument('--page-pause-seconds', type=float, default=45,
+        help='Minimum quiet time after a relevant response before the next owned UI action; trial setting, not a proven access requirement.')
+    parser.add_argument('--initial-dwell-seconds', type=float, default=50,
+        help='Initial normal-page dwell before the first search action.')
     args = parser.parse_args()
+    try: validate_existing_tab_options(args)
+    except ValueError as exc: parser.error(str(exc))
+    if not 0 <= args.page_pause_seconds <= 3600 or not 0 <= args.initial_dwell_seconds <= 3600:
+        parser.error('Pacing values must be between0 and3600seconds')
+    if args.browser_mode == 'native' and args.chrome_profile is None:
+        parser.error('--chrome-profile is required for native browser mode')
+    if args.browser_mode == 'native' and args.denial_retries:
+        parser.error('Native mode stops on denial; no automatic denial retries')
+    if args.browser_mode != 'native' and args.clear_raymond_cookies:
+        parser.error('--clear-raymond-cookies applies only to an explicitly selected native profile')
 
     if not 1 <= args.radius <= 500:
         parser.error("--radius must be between 1 and 500.")
     if args.max_locations is not None and args.max_locations < 1:
         parser.error("--max-locations must be at least 1.")
+    if not 0<=args.denial_retries<=3:parser.error('--denial-retries must be between 0 and 3')
+    if not 60<=args.retry_delay<=3600:parser.error('--retry-delay must be between 60 and 3600 seconds')
+    if args.resume_reviewed_retries and args.fresh:parser.error('Reviewed retry resume must not use --fresh')
+    if args.resume_reviewed_retries and not args.denial_retries:parser.error('Reviewed retry resume requires a positive --denial-retries budget')
 
     args.state = [clean_text(value).upper() for value in args.state]
     invalid_states = set(args.state) - EXPECTED_JURISDICTIONS
@@ -2288,7 +2417,7 @@ async def process_payload_page(
     dataset: dict[str, dict[str, Any]],
     csv_path: Path,
 ) -> tuple[int, int, int, int]:
-    results = payload.get("results", [])
+    results = payload.get("results")
     if not isinstance(results, list):
         raise RaymondJamesError(
             f"Expected a results list for {location_name}."
@@ -2304,13 +2433,64 @@ async def process_payload_page(
     return len(results), len(records), added, duplicates
 
 
+def validate_result_page(payload, expected_page=1, expected_totals=None):
+    if not isinstance(payload, dict) or not isinstance(payload.get('results'), list):
+        raise RaymondJamesError('Missing or invalid results list; not a completed empty search')
+    values = []
+    for field in ('page', 'totalPages', 'totalResults'):
+        value = payload.get(field)
+        if isinstance(value, bool) or not re.fullmatch(r'[0-9]+', str(value)):
+            raise RaymondJamesError('Missing or invalid pagination field: ' + field)
+        values.append(int(value))
+    current, pages, total = values
+    if current != expected_page or pages < 1 or not 1 <= current <= pages:
+        raise RaymondJamesError('Unexpected Raymond James result page or total page count')
+    if any(not isinstance(item, dict) for item in payload['results']):
+        raise RaymondJamesError('Invalid result object; do not silently drop source records')
+    for item in payload['results']:
+        people = item.get('advisors')
+        if isinstance(people, list):
+            if any(not isinstance(person, dict) or not clean_text(person.get('name')) for person in people):
+                raise RaymondJamesError('Invalid advisor object inside a location result')
+        elif not item.get('advisorID') or not clean_text(item.get('name')):
+            raise RaymondJamesError('Unrecognized Raymond location/advisor result structure')
+    if not payload['results'] and (total != 0 or pages != 1):
+        raise RaymondJamesError('Empty page contradicts reported result totals')
+    if payload['results'] and total == 0:
+        raise RaymondJamesError('Results contradict reported zero total')
+    if expected_totals is not None and (pages, total) != expected_totals:
+        raise RaymondJamesError('Pagination totals changed mid-city; retain partial data for review')
+    return current, pages, total
+
+
+def validate_city_totals(observed_locations, reported_locations):
+    # Historical Boston evidence: seven pages of14 locations plus13 on the
+    # final page equals111 totalResults (containing294 advisors, not111 people).
+    if observed_locations != reported_locations:
+        raise RaymondJamesError('Collected location count differs from totalResults; city remains incomplete')
+
+
 async def run_collection(args: argparse.Namespace) -> int:
+    validate_existing_tab_options(args)
+    from firm_rosters import ROSTER_DIR
+    from refresh_core import lock
+    output_dir = args.output_dir.resolve()
+    if output_dir == ROSTER_DIR.resolve() or ROSTER_DIR.resolve() in output_dir.parents:
+        raise ValueError('Raymond candidates must remain outside canonical firm_rosters')
+    output_dir.mkdir(parents=True, exist_ok=True)
+    with lock(output_dir):
+        return await _run_collection_locked(args)
+
+
+async def _run_collection_locked(args: argparse.Namespace) -> int:
     validate_target_locations()
 
     output_dir = args.output_dir.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    csv_path = output_dir / roster_path("raymond_james").name
+    from raymond_checkpoint import advisor_csv_path
+    csv_path = advisor_csv_path(output_dir, proposed_name=roster_path("raymond_james").name,
+        radius=args.radius, collector_path=Path(__file__), fresh=args.fresh)
     completed_path = output_dir / "raymond_james_completed_locations.json"
     failures_path = output_dir / "raymond_james_failures.json"
     diagnostics_dir = output_dir / "raymond_james_ui_diagnostics"
@@ -2344,30 +2524,87 @@ async def run_collection(args: argparse.Namespace) -> int:
     print(f"Existing deduplicated advisors: {len(dataset)}")
     print()
 
-    ensure_chrome_running()
+    if not args.fresh and not args.force and all(item['name'] in completed_locations for item in locations):
+        print('All selected cities are already complete; no browser or source requests needed.')
+        return 0
+
+    browser_mode = getattr(args, 'browser_mode', 'isolated')
+    if browser_mode == 'isolated':
+        ensure_chrome_running()
     started_at = time.monotonic()
     processed_this_run = 0
 
     async with async_playwright() as playwright:
         browser: Browser = await playwright.chromium.connect_over_cdp(
-            CDP_HOST,
+            getattr(args, 'cdp_url', CDP_HOST),
             timeout=30_000,
         )
 
         capture: NetworkCapture | None = None
+        owned_context = None
+        native_session = None
+        native_entered = False
+        detach_diagnostics = None
+        evidence_token=None
+        pacing_token=None
+        action_pacer=None
         try:
             if not browser.contexts:
                 raise RuntimeError(
                     "Chrome exposed no browser context through CDP."
                 )
 
-            context = browser.contexts[0]
-            context.set_default_timeout(CONTROL_TIMEOUT_MS)
-            page = await get_locator_page(context)
+            evidence_token=_EVIDENCE_DIR.set(diagnostics_dir/'native_responses')
+            if browser_mode == 'native':
+                from raymond_browser import native_raymond_session, borrowed_raymond_session
+                target_id = getattr(args, 'existing_target_id', None)
+                if target_id:
+                    native_session = borrowed_raymond_session(browser, target_id=target_id,
+                        endpoint=getattr(args, 'cdp_url', CDP_HOST), profile_path=args.chrome_profile)
+                else:
+                    native_session = native_raymond_session(browser,
+                        endpoint=getattr(args, 'cdp_url', CDP_HOST), profile_path=args.chrome_profile,
+                        clear_cookies=getattr(args, 'clear_raymond_cookies', False))
+                session = await native_session.__aenter__()
+                native_entered = True
+                context, page = session.context, session.page
+                detach_diagnostics = attach_page_diagnostics(page)
+                if target_id:
+                    print('Explicit working tab attached; cookies retained; tab will stay open. Collecting selected cities from page1.')
+                else:
+                    print('Native normal tab attached; scoped cookies cleared:', session.cleared_cookie_count)
+                await page.wait_for_load_state('domcontentloaded', timeout=60_000)
+                await session.refresh_navigation_metadata()
+                atomic_write_json(diagnostics_dir / 'initial_navigation.json', {
+                    'browserMode': 'native', 'navigationStatus': session.navigation_status,
+                    'tabOwnership': 'borrowed' if target_id else 'owned', 'targetId': target_id,
+                    'navigationStatusSource': session.navigation_status_source,
+                    'retryAfter': session.retry_after, 'clearedCookieCount': session.cleared_cookie_count,
+                    'url': page.url.split('?', 1)[0].split('#', 1)[0],
+                })
+                if session.navigation_status in {401, 403, 429} or await page_shows_access_denied(page):
+                    await dump_ui_diagnostics(page, diagnostics_dir, 'native_initial_denial')
+                    raise RaymondJamesBlockedError('Normal Raymond James page denied access; no automatic retry',
+                        status=session.navigation_status or 403, retry_after=session.retry_after)
+                from raymond_browser import observe_raymond_readiness
+                readiness = await observe_raymond_readiness(page,
+                    consent_choice=getattr(args, 'consent_choice', 'operator'))
+                atomic_write_json(diagnostics_dir / 'readiness.json', readiness)
+                if not readiness['ready']:
+                    raise RaymondJamesInitializationError(
+                        'Raymond James page is not initialized. No search was started; inspect the normal page.')
+                await page.locator(LOCATION_INPUT_SELECTOR).first.wait_for(state='visible', timeout=30_000)
+                if target_id: await stop_on_visible_challenge(page)
+            else:
+                owned_context = await browser.new_context()
+                context = owned_context
+                context.set_default_timeout(CONTROL_TIMEOUT_MS)
+                page = await open_owned_locator(context)
+            from raymond_pacing import ActionPacer
+            action_pacer = ActionPacer(getattr(args, 'page_pause_seconds', 0), getattr(args, 'initial_dwell_seconds', 0))
+            pacing_token = _ACTION_PACER.set(action_pacer)
             capture = NetworkCapture(page)
-
-            # 1. Attach a CDP session to the active page
-            cdp_session = await context.new_cdp_session(page)
+            capture.borrowed_locator = bool(getattr(args, 'existing_target_id', None))
 
             for index, item in enumerate(locations, start=1):
                 location_name = item["name"]
@@ -2387,6 +2624,8 @@ async def run_collection(args: argparse.Namespace) -> int:
                 print(f"[{index:>3}/{len(locations)}] {location_name}")
 
                 try:
+                    capture.check_borrowed_locator()
+                    if getattr(args, 'existing_target_id', None): await stop_on_visible_challenge(page)
                     if await page_shows_access_denied(page):
                         raise RaymondJamesBlockedError(
                             "The active locator tab is displaying Access Denied."
@@ -2406,15 +2645,7 @@ async def run_collection(args: argparse.Namespace) -> int:
                         f"visible UI"
                     )
 
-                    current_page = int_or_default(first_payload.get("page"), 1)
-                    total_pages = max(
-                        1,
-                        int_or_default(first_payload.get("totalPages"), 1),
-                    )
-                    total_results = int_or_default(
-                        first_payload.get("totalResults"),
-                        0,
-                    )
+                    current_page, total_pages, total_results = validate_result_page(first_payload)
                     final_radius = int_or_default(
                         first_payload.get("finalRadius"),
                         args.radius,
@@ -2459,11 +2690,10 @@ async def run_collection(args: argparse.Namespace) -> int:
                             radius=args.radius,
                             place_id=place["place_id"],
                         )
-                        current_page = int_or_default(
-                            payload.get("page"),
-                            expected_page,
-                        )
+                        current_page, _, _ = validate_result_page(payload, expected_page,
+                            (total_pages, total_results))
 
+                    validate_city_totals(location_rows_total, total_results)
                     completed_locations.add(location_name)
                     failures.pop(location_name, None)
                     processed_this_run += 1
@@ -2482,55 +2712,13 @@ async def run_collection(args: argparse.Namespace) -> int:
                         f"dataset total {len(dataset)}"
                     )
 
-                    # ------------------------------------------------------------------
-                    # 2. CLEANUP FOR THE TARGET URL (Runs after all pages are done)
-                    # ------------------------------------------------------------------
-                    from urllib.parse import urlparse
-                    parsed_url = urlparse(page.url)
-                    current_origin = f"{parsed_url.scheme}://{parsed_url.netloc}"
-
-                    # Target site storage cleanup (Cookies, LocalStorage, CacheStorage, IndexedDB)
-                    await cdp_session.send(
-                        "Storage.clearDataForOrigin",
-                        {
-                            "origin": current_origin,
-                            "storageTypes": "cookies,storage,cache_storage",
-                        },
-                    )
-
-                    #one_hour_ago_ms = (time.time() - 3600) * 1000
-
-                    # Clear browsing data generated in the last hour
-                    #await cdp_session.send(
-                    #    "BrowsingData.clear",
-                    #    {
-                    #        "dataTypes": [
-                    #            "cacheStorage",
-                    #            "fileSystems",
-                    #            "indexedDB",
-                    #            "localStorage",
-                    #            "webSQL",
-                    #            "serviceWorkers",
-                    #        ],
-                    #        "since": one_hour_ago_ms,
-                    #    },
-                    #)
-
-                    # Navigate back to a clean state/landing page to reset state machine
-                    #await page.goto("https://www.raymondjames.com/find-an-advisor", wait_until="domcontentloaded")
-                    #await page.wait_for_timeout(2000)
-
-                    # Clear general browser cookies & disk cache
-                    # await cdp_session.send("Network.clearBrowserCookies")
-                    # await cdp_session.send("Network.clearBrowserCache")
-
-                    print(f"      CLEANUP: Cleared site data and cookies for {current_origin}")
-                    # ------------------------------------------------------------------
-
                 except RaymondJamesBlockedError as exc:
                     failures[location_name] = {
                         "error_type": type(exc).__name__,
                         "error": str(exc),
+                        "http_status": exc.status,
+                        "retry_after": exc.retry_after,
+                        "verification_challenge": exc.challenge,
                     }
                     write_dataset_csv(csv_path, dataset)
                     atomic_write_json(
@@ -2543,36 +2731,43 @@ async def run_collection(args: argparse.Namespace) -> int:
                         diagnostics_dir,
                         f"blocked_{location_name}",
                     )
-                    from urllib.parse import urlparse
-                    parsed_url = urlparse(page.url)
-                    current_origin = f"{parsed_url.scheme}://{parsed_url.netloc}"
-
-                    # Target site storage cleanup (Cookies, LocalStorage, CacheStorage, IndexedDB)
-                    await cdp_session.send(
-                        "Storage.clearDataForOrigin",
-                        {
-                            "origin": current_origin,
-                            "storageTypes": "cookies,storage,cache_storage",
-                        },
-                    )
                     print()
                     print("STOPPED ON HTTP 403 / ACCESS DENIED")
                     print(str(exc))
                     print()
                     print(
                         "Every successful page was already merged into the CSV. "
-                        "The script did not reload, retry, clear cookies, or open "
-                        "another page. A later run will start the incomplete city "
-                        "normally at page 1 and deduplicate the repeated pages."
+                        "The script did not reload, retry, or open another page. "
+                        "Only a collector-owned tab/context is closed; an explicitly borrowed tab stays open. Native "
+                        "profile cookies are retained unless explicitly cleared. "
+                        "A denied run requires review before another attempt."
                     )
                     return 3
 
                 except Exception as exc:
+                    if isinstance(exc, (TimeoutError, asyncio.TimeoutError, PlaywrightTimeoutError)) and hasattr(page, 'locator'):
+                        try:
+                            await stop_on_visible_challenge(page)
+                        except RaymondUIError as observed:
+                            exc = observed
+                        except Exception:
+                            exc = RaymondUIError('Locator readiness inspection failed after timeout; operator review required')
                     failures[location_name] = {
                         "error_type": type(exc).__name__,
                         "error": str(exc),
+                        "failure_kind": (
+                            'temporary_server_error' if isinstance(exc, RaymondJamesHTTPError) and exc.status >= 500
+                            else 'http_error' if isinstance(exc, RaymondJamesHTTPError)
+                            else 'ui_state' if isinstance(exc, (SelectorError, RaymondUIError, RaymondJamesInitializationError))
+                            else 'transport_timeout' if isinstance(exc, (TimeoutError, asyncio.TimeoutError, PlaywrightTimeoutError))
+                            else 'unexpected_error'
+                        ),
+                        "operator_review_required": True,
                     }
+                    if isinstance(exc, RaymondJamesHTTPError):
+                        failures[location_name].update(http_status=exc.status, retry_after=exc.retry_after)
                     write_dataset_csv(csv_path, dataset)
+                    atomic_write_json(completed_path, sorted(completed_locations))
                     atomic_write_json(failures_path, failures)
                     await dump_ui_diagnostics(
                         page,
@@ -2580,6 +2775,11 @@ async def run_collection(args: argparse.Namespace) -> int:
                         f"failed_{location_name}",
                     )
                     print(f"      FAILED: {type(exc).__name__}: {exc}")
+                    # A failed request can leave the site's form disabled. Do
+                    # not turn one server/UI failure into failures for every
+                    # remaining city, or retry a borrowed tab's unknown state.
+                    print('STOPPED FOR OPERATOR REVIEW; no later cities will be requested.')
+                    return 2
 
                 if index < len(locations):
                     await asyncio.sleep(
@@ -2587,12 +2787,22 @@ async def run_collection(args: argparse.Namespace) -> int:
                     )
 
         finally:
-            if capture is not None:
-                capture.close()
-            # Give event callbacks a brief chance to settle before Playwright
-            # disconnects from the external CDP Chrome instance.
-            await asyncio.sleep(0.25)
-            await browser.close()
+            try:
+                try:
+                    if capture is not None:capture.close()
+                finally:
+                    if detach_diagnostics is not None: detach_diagnostics()
+                await asyncio.sleep(0.25)
+            finally:
+                try:
+                    if owned_context is not None:await close_owned_context(owned_context)
+                    if native_entered:await native_session.__aexit__(None, None, None)
+                finally:
+                    try:
+                        if action_pacer is not None: action_pacer.save(diagnostics_dir / 'action_timing.json')
+                    finally:
+                        if pacing_token is not None: _ACTION_PACER.reset(pacing_token)
+                        if evidence_token is not None:_EVIDENCE_DIR.reset(evidence_token)
 
     write_dataset_csv(csv_path, dataset)
     atomic_write_json(completed_path, sorted(completed_locations))
@@ -2611,13 +2821,101 @@ async def run_collection(args: argparse.Namespace) -> int:
     return 0 if not failures else 4
 
 
+async def close_owned_context(context) -> None:
+    """End-of-run cleanup only; never clear the user's browser or retry."""
+    try:
+        await asyncio.wait_for(context.clear_cookies(),timeout=5)
+    except Exception as exc:
+        # Closing a nonpersistent context also discards its session cookies.
+        print('Explicit temporary-cookie cleanup failed: '+type(exc).__name__+'; closing the isolated context')
+    finally:
+        try:await asyncio.wait_for(context.close(),timeout=10)
+        except Exception:raise OwnedContextCleanupError('Temporary context cleanup could not be verified;stop without another attempt') from None
+
+
+class ConsecutiveRetryBudget:
+    def __init__(self,maximum=3):
+        if isinstance(maximum,bool) or not isinstance(maximum,int) or not 0<=maximum<=3:raise ValueError('At most three retries allowed')
+        self.maximum=maximum;self.used=0
+    def failure(self):
+        if self.used>=self.maximum:return False
+        self.used+=1;return True
+    def success(self):self.used=0
+
+
+async def run_reviewed_retries(args):
+    """Opt-in per-city retries; each attempt owns and clears its own context."""
+    validate_existing_tab_options(args)
+    import copy
+    from refresh_core import utc,file_hash
+    maximum=getattr(args,'denial_retries',0)
+    if getattr(args,'resume_reviewed_retries',False) and not maximum:raise ValueError('Reviewed resume requires a positive retry budget')
+    if not maximum:return await run_collection(args)
+    budget=ConsecutiveRetryBudget(maximum);delay=args.retry_delay
+    if not 60<=delay<=3600:raise ValueError('Retry delay must be between 60 and 3600 seconds')
+    locations=selected_locations(args.only,args.state)
+    if args.max_locations is not None:locations=locations[:args.max_locations]
+    first=True;report=args.output_dir.resolve()/'raymond_james_retry_attempts.json'
+    resume=getattr(args,'resume_reviewed_retries',False)
+    if resume and args.fresh:raise ValueError('Retry resume must preserve existing data;do not use --fresh')
+    if report.exists() and not resume:raise ValueError('Retry log exists;use a new output directory or explicit --resume-reviewed-retries without resetting the budget')
+    attempts=load_json(report,[]) if resume else []
+    if not isinstance(attempts,list) or any(not isinstance(e,dict) or not e.get('location') or not isinstance(e.get('attempt'),int) for e in attempts):raise ValueError('Invalid prior retry log')
+    for location in locations:
+        previous=[entry for entry in attempts if entry['location']==location['name']]
+        if previous and previous[-1].get('outcome')=='success':continue
+        if previous:
+            last=previous[-1]
+            if last.get('httpStatus') in {401,429} or last.get('verificationChallenge'):return 3
+            if [e['attempt'] for e in previous]!=list(range(1,len(previous)+1)):raise ValueError('Prior attempt sequence is not contiguous')
+            if len(previous)>=maximum+1:return 3
+            if any(not e.get('finishedUtc') for e in previous):raise ValueError('Prior attempt is not terminal;inspect its worker before resuming')
+            budget.used=len(previous)
+            await asyncio.sleep(delay)
+        while True:
+            current=copy.copy(args);current.only=[location['name']];current.state=[];current.max_locations=1;current.fresh=args.fresh and first;first=False
+            entry={'location':location['name'],'attempt':budget.used+1,'startedUtc':utc(),'collectorCodeSha256':file_hash(Path(__file__))};attempts.append(entry);atomic_write_json(report,attempts)
+            try:
+                result=await run_collection(current)
+                failures=load_json(args.output_dir/'raymond_james_failures.json',{})
+                failure=failures.get(location['name'],{})
+            except RaymondJamesBlockedError as exc:
+                result=3;failure={'http_status':exc.status,'retry_after':exc.retry_after,'verification_challenge':exc.challenge}
+            except Exception as exc:
+                kind=type(exc).__name__
+                result=4 if kind in {'TimeoutError','ConnectError','ReadTimeout','WriteTimeout','ConnectTimeout','ConnectionError'} else 1
+                failure={'error_type':kind}
+            entry.update(finishedUtc=utc(),result=result,httpStatus=failure.get('http_status'),retryAfter=failure.get('retry_after'),verificationChallenge=bool(failure.get('verification_challenge')))
+            # A per-city attempt can finish successfully while unrelated old
+            # failure entries still exist. Only this city's completion counts.
+            completed=load_json(args.output_dir/'raymond_james_completed_locations.json',[])
+            if result in {0,4} and not failure and location['name'] in completed:
+                entry['outcome']='success';budget.success();atomic_write_json(report,attempts);break
+            retryable_denial=result==3 and failure.get('http_status')==403 and not failure.get('verification_challenge')
+            retryable_transport=result==4 and failure.get('error_type') in {'TimeoutError','ConnectError','ReadTimeout','WriteTimeout','ConnectTimeout','ConnectionError'}
+            if not (retryable_denial or retryable_transport):
+                entry['outcome']='held_no_automatic_retry';atomic_write_json(report,attempts);return result or 4
+            if not budget.failure():
+                entry['outcome']='retry_limit_reached';atomic_write_json(report,attempts);return 3
+            entry.update(outcome='reviewed_retry_pending',cooldownSeconds=delay);atomic_write_json(report,attempts)
+            print('Reviewed retry '+str(budget.used)+'/'+str(maximum)+' for '+location['name']+' after '+str(delay)+' seconds; temporary session already cleaned',flush=True)
+            await asyncio.sleep(delay)
+    return 0
+
+
 def main() -> int:
     args = parse_args()
     try:
-        return asyncio.run(run_collection(args))
+        return asyncio.run(run_reviewed_retries(args))
     except KeyboardInterrupt:
         print("\nStopped by user. Every completed page was already saved to CSV.")
         return 130
+    except RaymondJamesBlockedError as exc:
+        print(f'ACCESS DENIED: HTTP {exc.status}; no automatic retry. {exc}')
+        return 3
+    except RaymondJamesInitializationError as exc:
+        print(f'INITIALIZATION REQUIRED: {exc}')
+        return 2
     except Exception as exc:
         print(f"\nFATAL: {type(exc).__name__}: {exc}")
         return 1

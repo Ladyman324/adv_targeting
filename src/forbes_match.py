@@ -502,12 +502,15 @@ def barrons_truth() -> dict[str, str]:
     if not path.exists():
         return {}
     data = json.loads(path.read_text(encoding="utf-8"))
-    out = {}
+    candidates = defaultdict(set)
     for crd, entries in data["advisors"].items():
         for entry in entries:
             slug = str(entry[4]).rstrip("/").rsplit("/", 1)[-1]
-            out.setdefault(re.sub(r"-\d+$", "", slug), crd)
-    return out
+            candidates[re.sub(r"-\d+$", "", slug)].add(crd)
+    # Numeric suffixes distinguish namesakes on the publisher's own site.
+    # Historical editions may introduce another namesake: never let file order
+    # select a supposedly confirmed CRD when the normalized slug is ambiguous.
+    return {slug: next(iter(crds)) for slug, crds in candidates.items() if len(crds) == 1}
 
 
 def calibrate(matched: pd.DataFrame, truth: dict[str, str]) -> None:

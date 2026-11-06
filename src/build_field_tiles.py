@@ -48,6 +48,7 @@ from __future__ import annotations
 import collections
 import glob
 import json
+import math
 import pathlib
 import shutil
 import sys
@@ -57,6 +58,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import pandas as pd
 
 from web_assets import write_json_gz
+from contact_provenance import sha256_file
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 INTERIM = ROOT / "data" / "interim"
@@ -180,11 +182,52 @@ def load_ranked_years() -> dict:
     return years
 
 
+def canonical_asset_amounts(payload):
+    """Use each advisor's own linked account values, counting each code once.
+
+    Shared-account summaries choose the maximum among included advisors. A
+    single advisor's map tile retains that advisor's recorded account copy.
+    """
+    if payload.get("columns") != ["acv", "lcv", "mf", "midcap"]:
+        raise ValueError("Unsupported approved asset ledger columns")
+    accounts = payload.get("accounts")
+    advisors = payload.get("advisors")
+    if not isinstance(accounts, list) or not isinstance(advisors, dict):
+        raise ValueError("Approved asset ledger is missing accounts/advisors")
+
+    def vector_total(vector):
+        if (not isinstance(vector, list) or len(vector) not in {4, 5}
+                or any(isinstance(v, bool) or not isinstance(v, (float, int))
+                       or not math.isfinite(v) or v < 0 for v in vector)):
+            raise ValueError("Invalid approved asset account vector")
+        return vector[4] if len(vector) == 5 else sum(vector)
+
+    totals = [vector_total(vector) for vector in accounts]
+    result = {}
+    for crd, entry in advisors.items():
+        if not isinstance(entry, dict):
+            raise ValueError("Invalid approved advisor asset entry")
+        indices = entry.get("ix")
+        if (entry.get("t") not in {"confirmed", "high"} or not isinstance(indices, list)
+                or any(type(i) is not int or i < 0 or i >= len(totals) for i in indices)):
+            raise ValueError("Invalid approved advisor asset link")
+        overrides = entry.get("av", {})
+        if (not isinstance(overrides, dict)
+                or set(overrides) - {str(i) for i in indices}):
+            raise ValueError("Invalid approved advisor account override")
+        own_totals = {key: vector_total(vector) for key, vector in overrides.items()}
+        result[str(crd)] = sum(own_totals.get(str(i), totals[i]) for i in set(indices))
+    return result
+
 def main() -> None:
     contacts = json.loads((WEB / "contacts.json").read_text(encoding="utf-8"))
     advisors = contacts["advisors"]
     teams = contacts.get("teams", {})
     practices = contacts.get("practices", {})
+    assets = json.loads((WEB / "act_assets.json").read_text(encoding="utf-8"))
+    if (assets.get("advisor_index") or {}).get("sha256") != sha256_file(WEB / "advisor_index.json"):
+        raise ValueError("Approved asset ledger does not match the current advisor index")
+    asset_amounts = canonical_asset_amounts(assets)
     # crd -> the display name the desktop shows. See the comment where it is used.
     index_names = {str(r[0]): r[1] for r in
                    json.loads((WEB / "advisor_index.json").read_text(encoding="utf-8"))["advisors"]}
@@ -214,13 +257,8 @@ def main() -> None:
         if not team and c.get("tm") in teams:
             team = teams[c["tm"]].get("n", "")
             size = size or int(teams[c["tm"]].get("sz", 0) or 0)
-        # A team's assets belong to the TEAM and are stored once; an `ia` is
-        # this person's own book. Never summed together -- carrying whichever
-        # applies keeps the field view from repeating the double-count the
-        # whole team model exists to prevent.
-        money = float(c.get("ia", 0) or 0)
-        if not money and c.get("tm") in teams:
-            money = float(teams[c["tm"]].get("a", 0) or 0)
+        # Identical ledger authority to Field's runtime book and the desktop.
+        money = asset_amounts.get(str(crd), 0)
         formal_name = str(index_names.get(str(crd)) or c.get("n", ""))
         shown_name = c.get("pn") or formal_name
         buckets[cell_of(lat, lon)].append([
@@ -362,8 +400,8 @@ def main() -> None:
     print(f"    advisors per tile: median {counts[n // 2]}, "
           f"p95 {counts[int(n * 0.95)]}, max {counts[-1]:,}")
     print(f"    tile_index.json lists {n:,} populated cells")
-    flagged = sum(1 for rows in buckets.values() for r in rows if r[16])
-    monied = sum(1 for rows in buckets.values() for r in rows if r[17])
+    flagged = sum(1 for rows in buckets.values() for r in rows if r[COLUMNS.index("ranked")])
+    monied = sum(1 for rows in buckets.values() for r in rows if r[COLUMNS.index("assets")])
     print(f"    {flagged:,} ranked, {monied:,} carrying an EIC asset figure")
 
 

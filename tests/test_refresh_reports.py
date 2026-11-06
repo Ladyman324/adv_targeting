@@ -25,6 +25,18 @@ def parquet(root, relative, rows):
 
 
 class ReportTests(unittest.TestCase):
+    def test_net_growth_does_not_hide_current_sec_map_losses(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            before,after,out = [Path(tmp)/name for name in ('before','after','reports')]
+            put(before,'webapp/data/advisor_index.json',{'advisors':[['1','Prior',0,'GA',0]],'firms':['Firm'],'cities':['City']})
+            put(after,'webapp/data/advisor_index.json',{'advisors':[['2','New',0,'GA',0],['3','Newer',0,'GA',0]],'firms':['Firm'],'cities':['City']})
+            parquet(after,'data/interim/advisors.parquet',[{'advisor_crd':'1'},{'advisor_crd':'2'},{'advisor_crd':'3'}])
+            result = compare(before,after,out)
+            self.assertEqual(1,result['mapContinuity']['missingFromCandidate'])
+            with (out/'current_sec_map_gaps.csv').open(encoding='utf-8-sig') as stream:
+                rows = list(csv.DictReader(stream))
+            self.assertEqual(['1'],[row['id'] for row in rows])
+
     def test_only_defined_operational_timestamps_ignored(self):
         self.assertEqual(semantic_content_hash({'as_of': 'old', 'x': 1}),
                          semantic_content_hash({'as_of': 'new', 'x': 1}))

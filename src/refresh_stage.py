@@ -27,15 +27,43 @@ def _workspace(core, manifest):
     return stage
 
 
+def _source_root(core, root, manifest):
+    """An earlier run supplies pinned inputs only, never build success."""
+    snapshot = manifest.get('sourceSnapshot')
+    if not snapshot:
+        return root
+    directory, prior, stage = core.load_run(Path(snapshot.get('baselineRoot', root)), snapshot['runId'])
+    if (core.file_hash(directory / 'run.json') != snapshot['manifestSha256']
+            or str(stage) != snapshot['workspaceRoot']
+            or core.digest(prior['inputs']) != snapshot['inputsHash']):
+        raise core.RefreshError('Inherited source snapshot changed; create a new run')
+    if core.active_children(directory):
+        raise core.RefreshError('Inherited source run still has active children')
+    return stage
+
+
 def _capture(core, root, manifest):
     from refresh_inventory import inventory, validate_act_snapshot
-    sources = inventory(root)
-    validate_act_snapshot(root)
-    code = core.facts(core.code_files(root), root)
-    inputs = core.facts(core.source_paths(root, manifest['mode']), root)
-    baseline = core.facts(core.baseline_paths(root), root)
-    rankings = core.facts([root / 'data/raw' / (name + '_rankings.json')
-                          for name in ('barrons', 'forbes')], root)
+    source_root = _source_root(core, root, manifest)
+    sources = inventory(source_root)
+    validate_act_snapshot(source_root)
+    roles = [core.code_files(root), core.source_paths(source_root, manifest['mode']),
+             core.baseline_paths(root), [source_root / 'data/raw' / (name + '_rankings.json')
+                                         for name in ('barrons', 'forbes')]]
+    # Role overlap (notably normalized SEC tables) must not cause duplicate
+    # multi-hundred-MB reads. Final original/stage verification remains intact.
+    role_roots = [root, source_root, root, source_root]
+    if source_root == root:
+        captured = core.facts([path for paths in roles for path in paths], root)
+        role_facts = [captured] * 4
+    else:
+        control = core.facts(roles[0] + roles[2], root)
+        source = core.facts(roles[1] + roles[3], source_root)
+        role_facts = [control, source, control, source]
+    code, inputs, baseline, rankings = [
+        {p.relative_to(base).as_posix(): captured[p.relative_to(base).as_posix()]
+         for p in paths if p.relative_to(base).as_posix() in captured}
+        for paths, base, captured in zip(roles, role_roots, role_facts)]
     plan = {}
     for role in (code, inputs, baseline, rankings):
         for relative, fact in role.items():
@@ -57,15 +85,18 @@ def _capture(core, root, manifest):
 def _verify_originals(core, root, manifest):
     if core.digest(manifest['copyPlan']) != manifest.get('copyPlanHash'):
         raise core.RefreshError('Staging copy plan integrity failed; create a new run')
+    source_root = _source_root(core, root, manifest)
     roles = (
         ('controller code', core.code_files(root), manifest['codeFiles']),
-        ('source inputs', core.source_paths(root, manifest['mode']), manifest['capturedInputs']),
+        ('source inputs', core.source_paths(source_root, manifest['mode']), manifest['capturedInputs']),
         ('baseline artifacts', core.baseline_paths(root), manifest['baselineArtifacts']),
-        ('legacy ranking inputs', [root / 'data/raw' / (p + '_rankings.json')
-                                  for p in ('barrons', 'forbes')], manifest['legacyRankingFacts']))
+        ('legacy ranking inputs', [source_root / 'data/raw' / (p + '_rankings.json')
+                                  for p in ('barrons', 'forbes')
+                                  if (source_root / 'data/raw' / (p + '_rankings.json')).is_file()], manifest['legacyRankingFacts']))
+    role_roots = [root, source_root, root, source_root]
     merged = {}
-    for label, paths, expected in roles:
-        observed = {path.relative_to(root).as_posix() for path in paths if path.is_file()}
+    for (label, paths, expected), base in zip(roles, role_roots):
+        observed = {path.relative_to(base).as_posix() for path in paths}
         if observed != set(expected):
             raise core.RefreshError('Recorded ' + label + ' changed; create a new run')
         for relative, fact in expected.items():
@@ -74,11 +105,16 @@ def _verify_originals(core, root, manifest):
             merged[relative] = fact
     if merged != manifest['copyPlan']:
         raise core.RefreshError('Staging copy plan does not match its registered input roles')
-    # Discover every role's complete set, then hash each physical input once.
-    # Role attribution of an error is preserved without rereading the bytes.
-    current = core.facts([root / p for p in merged], root)
-    for label, _, expected in roles:
-        if {relative: current.get(relative) for relative in expected} != expected:
+    if source_root == root:
+        current = core.facts([path for _, paths, _ in roles for path in paths], root)
+        current_roles = [current] * 4
+    else:
+        control = core.facts(roles[0][1] + roles[2][1], root)
+        source = core.facts(roles[1][1] + roles[3][1], source_root)
+        current_roles = [control, source, control, source]
+        current = {**control, **source}
+    for (label, _, expected), observed in zip(roles, current_roles):
+        if {relative: observed.get(relative) for relative in expected} != expected:
             raise core.RefreshError('Recorded ' + label + ' changed; create a new run')
     if current != merged:
         raise core.RefreshError('Pinned originals changed; create a new run')
@@ -131,8 +167,11 @@ def _finish(core, root, stage, manifest):
     _verify_originals(core, root, manifest)
     _verify_stage_namespace(core, stage, manifest)
     plan = manifest['copyPlan']
+    source_root = _source_root(core, root, manifest)
+    source_files = set(manifest['capturedInputs']) | set(manifest['legacyRankingFacts'])
     def one(relative):
-        _copy_file(core, root / relative, core.contained(stage, relative), plan[relative])
+        origin = source_root if relative in source_files else root
+        _copy_file(core, origin / relative, core.contained(stage, relative), plan[relative])
     with ThreadPoolExecutor(max_workers=12) as pool:
         list(pool.map(one, sorted(plan)))
     if core.facts([stage / p for p in plan], stage) != plan:
@@ -192,7 +231,7 @@ def _run_staging(core, directory, manifest, resuming=False):
     return manifest
 
 
-def start_stage(root, mode, firms=(), stage_parent=None, run_id=None):
+def start_stage(root, mode, firms=(), stage_parent=None, run_id=None, source_run=None, source_run_root=None):
     import refresh_core as core
     root = Path(root).resolve()
     if mode not in core.MODES:
@@ -200,6 +239,26 @@ def start_stage(root, mode, firms=(), stage_parent=None, run_id=None):
     if mode == 'selected-firm' and not firms:
         raise core.RefreshError('selected-firm requires --firm')
     run_id = run_id or (core.dt.datetime.now(core.dt.timezone.utc).strftime('%Y%m%dT%H%M%SZ') + '-' + secrets.token_hex(4))
+    snapshot = None
+    source_warnings = []
+    if source_run_root is not None and not source_run:
+        raise core.RefreshError("Source run root requires a source run")
+    if source_run:
+        source_owner = Path(source_run_root).resolve() if source_run_root is not None else root
+        previous, prior, source_stage = core.load_run(source_owner, source_run)
+        if (prior.get('phase') != 'ready' or prior.get('status') in {'building', 'validating', 'importing', 'acquiring'}
+                or prior['mode'] != mode or set(prior.get('firms', [])) != set(firms)
+                or Path(prior['baselineRoot']).resolve() != source_owner or core.active_children(previous)):
+            raise core.RefreshError('Source run must be idle, staged and have matching scope')
+        if core.facts(core.source_paths(source_stage, mode), source_stage) != prior['inputs']:
+            raise core.RefreshError('Inherited source inputs changed')
+        snapshot = {'runId': source_run, 'baselineRoot': str(source_owner), 'manifestSha256': core.file_hash(previous / 'run.json'),
+                    'workspaceRoot': str(source_stage), 'inputsHash': core.digest(prior['inputs'])}
+        source_warnings = [f'Inherited source snapshots from {source_run}; no build or validation results reused.']
+        latest = {a['sourceId']: a for a in prior.get('attempts', [])}
+        for sid, attempt in sorted(latest.items()):
+            if attempt.get('status') != 'success':
+                source_warnings.append(f'{sid}: last-good source inherited; prior candidate remains held. See {source_run}.')
     directory = core.run_path(root, run_id)
     directory.mkdir(parents=True, exist_ok=False)
     token = secrets.token_hex(24)
@@ -209,6 +268,9 @@ def start_stage(root, mode, firms=(), stage_parent=None, run_id=None):
         'createdUtc': core.utc(), 'workspaceRoot': str(stage), 'baselineRoot': str(root),
         'mode': mode, 'firms': list(firms), 'status': 'staging', 'phase': 'capture',
         'outcome': 'incomplete', 'snapshotComplete': False, 'steps': {}, 'imports': [], 'attempts': [], 'warnings': []}
+    if snapshot:
+        manifest['sourceSnapshot'] = snapshot
+        manifest['warnings'].extend(source_warnings)
     with core.lock(directory):
         core.save_run(directory, manifest)  # before inventory, hashing or copying
         return _run_staging(core, directory, manifest)

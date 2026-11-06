@@ -42,7 +42,7 @@ import pandas as pd
 
 ROOT = pathlib.Path(__file__).parents[1]
 sys.path.insert(0, str(ROOT / "src"))
-from act_book import build, slots                        # noqa: E402
+from act_book import ACCOUNT_VALUE_POLICY, build, slots                        # noqa: E402
 from act_economic_links import approved_link_map         # noqa: E402
 from contact_provenance import sha256_file               # noqa: E402
 from identity_schema import content_hash                 # noqa: E402
@@ -80,6 +80,12 @@ def load_deployed_advisor_crds() -> tuple[set[str], dict]:
         crds.add(crd)
     return crds, {"file": ADVISOR_INDEX.name,
                   "sha256": sha256_file(ADVISOR_INDEX), "rows": len(rows)}
+
+
+def account_vector(account):
+    """Four products plus the source total used to choose a whole copy."""
+    return [round(account[key], 2) for key in
+            ("acv_sma", "large", "fund", "midcap", "value")]
 
 
 def totals_for(accounts: dict, codes) -> dict:
@@ -127,9 +133,6 @@ def load_economic_links() -> tuple[pathlib.Path, list[dict], pd.DataFrame, dict]
 def main() -> None:
     src, rows, links, economic_manifest = load_economic_links()
     accounts, conflicts, unresolved = build(rows)
-    if unresolved:
-        raise SystemExit(
-            "ACT account-value conflicts remain unresolved; refusing asset publication")
     print(f"[*] {src.name}: {len(accounts):,} distinct accounts")
     crd_of = approved_link_map(links.to_dict("records"))
     print(f"[*] economic ledger: {len(crd_of):,} approved ACT contacts")
@@ -164,40 +167,44 @@ def main() -> None:
     # Publish only accounts reachable from an advisor actually present in the
     # deployed advisor index. Unresolved and off-map vectors stay server-side.
     index_of = {code: i for i, code in enumerate(sorted(placed_accounts))}
+    scoped_rows = [r for r in rows if str(r.get("id")) in crd_of
+                   and crd_of[str(r.get("id"))][0] in deployed_crds]
+    scoped_accounts = build(scoped_rows)[0]
+    own_accounts = {str(r.get("id")): build([r])[0] for r in scoped_rows}
     table = [None] * len(index_of)
     for code, i in index_of.items():
-        a = accounts[code]
-        table[i] = [round(a["acv_sma"], 2), round(a["large"], 2),
-                    round(a["fund"], 2), round(a["midcap"], 2)]
+        table[i] = account_vector(scoped_accounts[code])
 
     RANK = {"confirmed": 0, "high": 1, "review": 2}
     per = collections.defaultdict(lambda: {"acv": 0.0, "lcv": 0.0, "mf": 0.0,
                                            "midcap": 0.0,
                                            "n": 0, "shared": 0, "t": "review",
-                                           "ix": []})
+                                           "ix": [], "av": {}})
     for code in sorted(placed_accounts):
-        a = accounts[code]
         for aid in holders[code]:
             hit = crd_of.get(aid)
             if not hit or hit[0] not in deployed_crds:
                 continue
             crd, tier = hit
+            a = own_accounts[aid][code]
             e = per[crd]
+            if account_vector(a) != table[index_of[code]]:
+                e["av"][str(index_of[code])] = account_vector(a)
             e["acv"] += a["acv_sma"]
             e["lcv"] += a["large"]
             e["mf"] += a["fund"]
             e["midcap"] += a["midcap"]
             e["n"] += 1
             e["ix"].append(index_of[code])
-            if a["holders"] > 1:
+            if accounts[code]["holders"] > 1:
                 e["shared"] += 1
             if RANK.get(tier, 9) < RANK.get(e["t"], 9):
                 e["t"] = tier
 
     # The headline and the EIC-assets filter now answer the same question:
     # approved economic links only, with every reached account counted once.
-    mapped_accounts = {code: accounts[code] for code in placed_accounts}
-    totals = totals_for(accounts, placed_accounts)
+    mapped_accounts = {code: scoped_accounts[code] for code in placed_accounts}
+    totals = totals_for(scoped_accounts, placed_accounts)
     totals.update({
         "accounts_on_map": len(placed_accounts),
         # The shape of the book, not just its size. These were computed here
@@ -230,10 +237,17 @@ def main() -> None:
         "unapproved_or_unresolved": unresolved_totals,
     })
     deployment_reconciliation = {
-        "approved_on_map": totals_for(accounts, placed_accounts),
+        "approved_on_map": totals_for(scoped_accounts, placed_accounts),
         "approved_off_map": off_map_totals,
         "unapproved_or_unresolved": unresolved_totals,
     }
+
+    source_mapped = totals_for(accounts, placed_accounts)
+    value_difference = {key: round(source_mapped[key] - totals[key], 2)
+                        for key in ("acv", "lcv", "mf", "midcap")}
+    if any(value_difference.values()):
+        deployment_reconciliation["source_holder_value_difference"] = {
+            **value_difference, "accounts": 0}
 
     out = {}
     for crd, e in per.items():
@@ -243,6 +257,8 @@ def main() -> None:
                 rec[k] = round(e[k], 2)
         if e["shared"]:
             rec["sh"] = e["shared"]
+        if e["av"]:
+            rec["av"] = e["av"]
         out[str(crd)] = rec
 
     payload = {
@@ -251,8 +267,11 @@ def main() -> None:
                  "account set. acv/lcv/mf are FULL "
                  "account values, so an account shared by several advisors appears "
                  "at full value on each -- correct for a card, WRONG for any sum. "
-                 "To total across advisors, union their `ix` account indices and "
-                 "sum `accounts` once per index. `totals` is the approved, "
+                 "For a selected advisor use that advisor's recorded values. "
+                 "To total across advisors, choose the highest recorded account "
+                 "value per `ix` index, using sparse `av` overrides where present. "
+                 "Each vector contains four products followed by its source value. "
+                 "`totals` is the approved, "
                  "map-addressable figure; `source_totals` reconciles the full book."),
         "as_of": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
         "source": src.name,
@@ -262,6 +281,7 @@ def main() -> None:
         "deployment_reconciliation": deployment_reconciliation,
         "columns": ["acv", "lcv", "mf", "midcap"],
         "accounts": table,
+        "account_value_policy": ACCOUNT_VALUE_POLICY,
         "totals": totals,
         "source_totals": source_totals,
         "advisors": out,

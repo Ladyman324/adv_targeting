@@ -8,6 +8,49 @@ from __future__ import annotations
 import argparse
 import json
 import pathlib
+import hashlib
+import re
+from urllib.parse import urlsplit
+
+
+def reuse_barrons_identifiers(records, previous):
+    """Retain a durable prior ranking ID only for an exact unchanged record.
+
+    This is not person matching or email authorization. Broken publisher links
+    must not erase an established ranking association, but a different name,
+    firm, location, list/state, conflicting CRD or future edition prevents reuse.
+    Raw captures are never modified; provenance travels with resolved rows.
+    """
+    def url(value):
+        try:
+            parsed=urlsplit(str(value or ''))
+            if parsed.scheme not in {'http','https'} or parsed.netloc.lower() not in {'www.barrons.com','barrons.com'}:
+                return ''
+            return parsed.path.rstrip('/') if re.fullmatch(r'/advisor/finder/[A-Za-z0-9_-]+/?',parsed.path) else ''
+        except ValueError:return ''
+    def text(value):return ' '.join(str(value or '').split()).casefold()
+    def key(row):return (url(row.get('barrons_url')),*(text(row.get(k)) for k in ('advisor','firm','location','ranking','state')))
+    by_url={};by_record={}
+    for row in previous:
+        crd=str(row.get('crd') or '').strip();person_url=url(row.get('barrons_url'))
+        if not person_url or not re.fullmatch(r'[1-9]\d*',crd):continue
+        by_url.setdefault(person_url,set()).add(crd)
+        by_record.setdefault(key(row),[]).append(row)
+    out=[];audit=[]
+    for original in records:
+        row=dict(original);k=key(row)
+        if not row.get('crd') and k[0] and all(k[1:5]) and len(by_url.get(k[0],set()))==1:
+            year=row.get('year')
+            candidates=[p for p in by_record.get(k,[]) if isinstance(year,int) and not isinstance(year,bool)
+                and isinstance(p.get('year'),int) and not isinstance(p['year'],bool) and p['year']<=year]
+            if candidates:
+                prior=max(candidates,key=lambda p:p['year'])
+                proof=hashlib.sha256(json.dumps(prior,sort_keys=True,separators=(',',':')).encode('utf-8')).hexdigest()
+                row.update(crd=str(prior['crd']).strip(),crd_origin='prior_exact_publisher_record',crd_prior_record_sha256=proof)
+                audit.append({'advisor':row['advisor'],'crd':row['crd'],'ranking':row['ranking'],'state':row.get('state'),
+                    'year':year,'priorYear':prior['year'],'barrons_url':row['barrons_url'],'priorRecordSha256':proof})
+        out.append(row)
+    return out,audit
 
 
 def merge_rankings(stage_root, provider, edition_files, include_existing=True):

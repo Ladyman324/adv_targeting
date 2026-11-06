@@ -18,6 +18,50 @@ def address_keys(frame):
         lambda col: col.str.upper().str.strip()).agg("|".join, axis=1)
 
 
+def person_address_keys(frame):
+    """Bind a prior point to the same SEC person, firm and full street address."""
+    if frame.empty:
+        return pd.Series(index=frame.index, dtype=object)
+    ids = frame.reindex(columns=["advisor_crd", "firm_crd"]).fillna("").astype(str)
+    valid = ids.apply(lambda col: col.str.fullmatch(r"[1-9][0-9]*")).all(axis=1)
+    street = frame.reindex(columns=["branch_street1"]).fillna("").iloc[:, 0].astype(str)
+    return (ids.advisor_crd + "|" + ids.firm_crd + "|" + address_keys(frame)).where(
+        valid & street.str.strip().ne(""))
+
+
+def building_keys(frame):
+    """Conservative building identity, not a fuzzy street or city match.
+
+    Normalize explicit street abbreviations, suite/floor and ZIP+4 only.
+    House number, directional, street, city, state and ZIP5 must still agree.
+    Building designators are retained: a campus is not necessarily one pin.
+    """
+    data = frame.reindex(columns=ADDRESS).fillna("").astype(str).apply(
+        lambda col: col.str.upper().str.strip().str.replace(r"\s+", " ", regex=True))
+    from normalize_addr import normalize
+    def street(value):
+        if re.search(r"\b(?:BLDG|BUILDING)\b", value):
+            return value
+        return normalize(value)
+    data["branch_street1"] = data.branch_street1.map(street)
+    postal = data.branch_postal.str.extract(r"^(\d{5})(?:-?\d{4})?$", expand=False)
+    valid = (postal.notna() & data.branch_street1.str.match(r"^\d+\s+\S+")
+             & data.branch_city.ne("") & data.branch_state.str.fullmatch(r"[A-Z]{2}"))
+    data["branch_postal"] = postal
+    keys = data[["branch_street1", "branch_city", "branch_state", "branch_postal"]].fillna("").agg("|".join, axis=1)
+    return keys.where(valid)
+
+
+def unambiguous_points(frame, key):
+    """Never let file order choose between conflicting cached coordinates."""
+    present = frame[frame[key].notna()].copy()
+    locations = present[[key, "lat", "lon"]].copy()
+    locations[["lat", "lon"]] = locations[["lat", "lon"]].round(5)
+    conflicts = locations.drop_duplicates().groupby(key).size()
+    safe = set(conflicts[conflicts.eq(1)].index)
+    return present[present[key].isin(safe)].drop_duplicates(key)[[key] + COORDINATES]
+
+
 def cached_geography(stage_root):
     root = pathlib.Path(stage_root)
     interim, output = root / "data/interim", root / "data/output"
@@ -50,12 +94,28 @@ def cached_geography(stage_root):
         validate_geocoded_frame(old, path.stem[len("branch_geocoded_"):], path.name)
         old = old[old.lat.between(-90, 90) & old.lon.between(-180, 180)]
         old["_address"] = address_keys(old)
-        caches.append(old.reindex(columns=["_address"] + COORDINATES))
-    cache = (pd.concat(caches, ignore_index=True).drop_duplicates("_address")
-             if caches else pd.DataFrame(columns=["_address"] + COORDINATES))
+        old["_person_address"] = person_address_keys(old)
+        old["_building"] = building_keys(old)
+        caches.append(old.reindex(columns=["_address", "_person_address", "_building"] + COORDINATES))
+    prior = (pd.concat(caches, ignore_index=True) if caches else
+             pd.DataFrame(columns=["_address", "_person_address", "_building"] + COORDINATES))
+    cache = unambiguous_points(prior, "_address")
     branches = branches.drop(columns=COORDINATES + ["addr_key"], errors="ignore").copy()
     branches["_address"] = address_keys(branches)
     branches = branches.merge(cache, on="_address", how="left").drop(columns="_address")
+    # Another person's conflicting point must not erase this person's own
+    # unambiguous prior point at an unchanged firm and full address.
+    personal = unambiguous_points(prior, "_person_address").set_index("_person_address")
+    personal_keys = person_address_keys(branches)
+    known = personal_keys.isin(personal.index)
+    for column in COORDINATES:
+        branches.loc[known, column] = personal_keys[known].map(personal[column])
+    branches["_building"] = building_keys(branches)
+    fallback = unambiguous_points(prior, "_building").set_index("_building")
+    missing = branches.lat.isna() & branches._building.isin(fallback.index)
+    for column in COORDINATES:
+        branches.loc[missing, column] = branches.loc[missing, "_building"].map(fallback[column])
+    branches = branches.drop(columns="_building")
     branches["addr_key"] = address_keys(branches)
     for name in ("advisor_crd", "firm_crd"):
         branches[name] = branches[name].astype(str)

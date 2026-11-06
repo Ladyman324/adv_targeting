@@ -13,6 +13,7 @@ import re
 
 import refresh_core as core
 from refresh_resilience import normalized
+from roster_continuity import canonical_value, bridge_keys, email_owner_names_agree
 
 FIELDS = {
     "name": ("name", "Name", "MarketingName", "Marketing Name", "Display Name"),
@@ -25,6 +26,8 @@ FIELDS = {
     "profile": ("profile_url", "Profile URL", "advisor_profile_url", "Url", "url", "bio_url", "website_url", "Website URL", "website", "source_page"),
 }
 IDENTIFIERS = {
+    # CMS publication ID, never a CRD. faEntityId is not globally unique.
+    "edward_jones": ("fid",),
     "ubs": ("UniqueId", "EntityId"), "morgan_stanley": ("Yext ID",),
     "merrill": ("Advisor ID",), "raymond_james": ("advisor_id",),
     "ameriprise": ("advisor_id",), "baird": ("advisor_id", "external_id"),
@@ -32,6 +35,10 @@ IDENTIFIERS = {
     "mercer": ("member_id",), "captrust": ("slug",), "ep_wealth": ("slug",),
     "focus_partners": ("slug",), "janney": ("slug",), "mariner": ("slug",), "stifel": ("slug",),
     "wealthspire": ("slug",), "chevy_chase_trust": ("slug",), "waverly": ("slug",), "red_door": ("slug",),
+}
+SOURCE_FIELDS = {
+    "edward_jones": {"name": ("faName",), "city": ("faCity",),
+                     "state": ("faState",), "profile": ("faUrl",)},
 }
 EMPTY = {"", "[]", "{}", "null", "none", "nan", "n/a"}
 EMAIL = re.compile(r"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+")
@@ -98,8 +105,10 @@ def _value(row, aliases):
     return ""
 
 
-def _project(row):
-    values = {field: _value(row, aliases) for field, aliases in FIELDS.items()}
+def _project(row, slug=None):
+    native = SOURCE_FIELDS.get(slug, {})
+    values = {field: canonical_value(field,_value(row, native.get(field, ()) + aliases))
+              for field, aliases in FIELDS.items()}
     # Email collections vary by provider. These are same-row values only;
     # recognizing a string does not assert that an address is a person's own.
     values["email"] = tuple(sorted(set(EMAIL.findall(values["email"]))))
@@ -110,6 +119,10 @@ def _project(row):
 def _identity(row, values, slug):
     for field in IDENTIFIERS.get(slug, ()):
         ident = _value(row, (field,))
+        if slug == "morgan_stanley" and field == "Yext ID" and "@" in ident:
+            # Legacy exports copied carousel mailbox IDs into this column.
+            # Shared mailboxes cannot group different named people together.
+            continue
         if ident:
             return "provider:" + field + ":" + ident, "provider"
     if slug == "sanctuary" and not values["name"]:
@@ -127,7 +140,7 @@ def _roster_summary(rows, slug):
     people, kinds, presence, segments, duplicates, states = defaultdict(lambda: defaultdict(set)), Counter(), Counter(), Counter(), Counter(), Counter()
     email_owners = defaultdict(set)
     for row in rows:
-        values = _project(row)
+        values = _project(row, slug)
         ident, kind = _identity(row, values, slug)
         kinds[kind] += 1
         presence.update({field: bool(value) for field, value in values.items()})
@@ -159,7 +172,8 @@ def compare_roster(candidate, baseline, slug):
     errors. New duplicates and provider-ID ambiguity are held for review.
     """
     sid = "roster:" + slug
-    result = {"schemaVersion": 1, "policyVersion": "roster-history-v1:" + slug, "sourceId": sid,
+    version = "roster-history-v5" if slug in {"morgan_stanley", "edward_jones"} else "roster-history-v4"
+    result = {"schemaVersion": 1, "policyVersion": version + ":" + slug, "sourceId": sid,
               "candidateSha256": core.file_hash(candidate),
               "baselineSha256": core.file_hash(baseline) if baseline else None,
               "comparisonOptions": {}, "status": "held", "issues": [], "warnings": [],
@@ -190,6 +204,8 @@ def compare_roster(candidate, baseline, slug):
         issue("BASELINE_INVALID", errorType=type(exc).__name__)
         return result
     result["baseline"] = old_summary
+    current,owners,bridged=bridge_keys(old,current,old_owners,owners,slug)
+    result['comparisonOnlyIdentityBridges']=bridged
     common = set(current) & set(old)
     result["continuity"] = {"retained": len(common), "removed": len(set(old) - set(current)), "added": len(set(current) - set(old))}
     if len(set(old) - set(current)) > len(old) * .20:
@@ -203,17 +219,32 @@ def compare_roster(candidate, baseline, slug):
     if ambiguous:
         issue("SOURCE_ID_AMBIGUITY", count=len(ambiguous))
     changed = {}
+    transitions = {}
     for field in FIELDS:
         before = old_summary["fieldsPresent"].get(field, 0)
         after = summary["fieldsPresent"].get(field, 0)
-        if before and after / len(rows) < (before / len(old_rows)) * .95:
+        gained=sum(not old[k].get(field) and bool(current[k].get(field)) for k in common)
+        lost=sum(bool(old[k].get(field)) and not current[k].get(field) for k in common)
+        replaced=sum(bool(old[k].get(field)) and bool(current[k].get(field))
+            and old[k][field]!=current[k][field] for k in common)
+        transitions[field]={'gained':gained,'lost':lost,'replaced':replaced}
+        density_loss=before and after / len(rows) < (before / len(old_rows)) * .95
+        if density_loss and lost:
             issue("FIELD_COVERAGE_LOST", field=field, before=before, after=after)
+        elif density_loss:
+            result['warnings'].append('Population changed field density without retained-person field loss: '+field)
         count = sum(old[key].get(field, set()) != current[key].get(field, set()) for key in common)
         changed[field] = count
-        if count > len(common) * .10:
-            issue("FIELD_VALUES_CHANGED", field=field, count=count)
+        if lost+replaced > len(common) * .10:
+            issue("FIELD_VALUES_CHANGED", field=field, count=lost+replaced)
     result["changedFields"] = changed
-    reassigned = sum(bool(old_owners[email]) and not keys.issubset(old_owners[email]) for email, keys in owners.items())
+    result['fieldTransitions']=transitions
+    changed_owners=[(email,keys) for email,keys in owners.items()
+        if old_owners[email] and not keys.issubset(old_owners[email])]
+    corroborated=sum(email_owner_names_agree(old,current,old_owners[email],keys)
+                     for email,keys in changed_owners)
+    result['comparisonOnlyEmailOwnerNameContinuity']=corroborated
+    reassigned=len(changed_owners)-corroborated
     if reassigned:
         issue("EMAIL_PERSON_ASSOCIATION_CHANGED", count=reassigned)
     for segment, count in old_summary["segmentCounts"].items():
@@ -260,7 +291,7 @@ def _ranking_groups(records, provider, categories=(), duplicate_metrics=None):
 def compare_rankings(candidate, baselines, provider, categories=()):
     """Edition transitions compare scope/coverage, never require same winners."""
     categories = tuple(sorted(set(categories)))
-    result = {"schemaVersion": 1, "policyVersion": "rankings-history-v1:" + provider, "sourceId": provider,
+    result = {"schemaVersion": 1, "policyVersion": "rankings-history-v2:" + provider, "sourceId": provider,
               "candidateSha256": core.file_hash(candidate), "baselineSha256": None,
               "comparisonOptions": {"categories": list(categories)}, "status": "held", "issues": [], "warnings": []}
     def issue(code, **facts): result["issues"].append({"code": code, **facts})
@@ -331,9 +362,16 @@ def compare_rankings(candidate, baselines, provider, categories=()):
                     item["removedRecognitionRecords"] = removed
                     if removed > len(old) * .20:
                         issue("RANKING_SAME_EDITION_PEOPLE_LOST", category=category, count=removed)
-                for field in ("rank", "firm", "city", "crd" if provider == "barrons" else "uri"):
-                    before = sum(normalized(row.get(field)) not in EMPTY for row in old.values())
-                    after = sum(normalized(row.get(field)) not in EMPTY for row in new.values())
+                fields = (("rank", "firm", "location", "crd", "team_assets", "typical_account") if provider == 'barrons'
+                          else ("rank", "firm", "city", "uri", "teamAssets", "minAccountSize", "typicalNetWorth", "typicalSize"))
+                def field_value(row, field):
+                    if provider == 'barrons' and field in {'team_assets','typical_account'}:
+                        stem = field.replace('_',' ')
+                        return next((v for k,v in (row.get('detail') or {}).items() if str(k).lower().startswith(stem)),None)
+                    return row.get(field)
+                for field in fields:
+                    before = sum(normalized(field_value(row,field)) not in EMPTY for row in old.values())
+                    after = sum(normalized(field_value(row,field)) not in EMPTY for row in new.values())
                     if before and after / len(new) < (before / len(old)) * .8:
                         issue("RANKING_FIELD_COVERAGE_LOST", field=field, before=before, after=after)
                 comparisons.append(item)

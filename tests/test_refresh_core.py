@@ -55,6 +55,9 @@ class RefreshCoreTests(unittest.TestCase):
             "coverage": {"before": {"contacts": 100, "fieldUnplaced": 100},
                          "after": {"contacts": 90, "fieldUnplaced": 0}}}
         self.assertEqual(refresh_release.check_comparison(comparison), [])
+        comparison["mapContinuity"] = {"available": True, "missingFromCandidate": 1}
+        self.assertEqual(refresh_release.check_comparison(comparison), ["previously_mapped_current_SEC"])
+        comparison.pop("mapContinuity")
         comparison["coverage"]["after"]["contacts"] = 70
         self.assertEqual(refresh_release.check_comparison(comparison), ["contacts"])
         comparison["artifactAvailability"]["after"]["webapp/data/contacts.json"] = False
@@ -339,6 +342,25 @@ class RefreshCoreTests(unittest.TestCase):
         self.assertNotIn("GRAPH_CLIENT_ID", env)
         self.assertNotIn("ADV_SOURCE", env)
         self.assertEqual(env["ADVISOR_REFRESH_OFFLINE"], "1")
+
+    def test_online_public_acquisition_does_not_inherit_private_credentials(self):
+        core.atomic_json(self.root / ".refresh-acquisition.json", {"sourceId": "roster:baird"})
+        with mock.patch.dict(os.environ, {"ACT_PASSWORD": "synthetic", "AZURE_TOKEN": "synthetic",
+                                         "GRAPH_CLIENT_ID": "synthetic", "PATH": "preserved"}):
+            env = core.child_environment(self.root, self.root, self.base / "marker", online=True)
+        for key in ("ACT_PASSWORD", "AZURE_TOKEN", "GRAPH_CLIENT_ID"):
+            self.assertNotIn(key, env)
+        self.assertEqual("preserved", env["PATH"])
+        self.assertEqual("0", env["ADVISOR_REFRESH_OFFLINE"])
+
+    def test_only_explicit_online_act_worker_keeps_act_credentials(self):
+        core.atomic_json(self.root / ".refresh-acquisition.json", {"sourceId": "act"})
+        with mock.patch.dict(os.environ, {"ACT_PASSWORD": "synthetic", "AZURE_TOKEN": "synthetic"}):
+            online = core.child_environment(self.root, self.root, self.base / "marker", online=True)
+            offline = core.child_environment(self.root, self.root, self.base / "marker")
+        self.assertEqual("synthetic", online["ACT_PASSWORD"])
+        self.assertNotIn("AZURE_TOKEN", online)
+        self.assertNotIn("ACT_PASSWORD", offline)
 
     @unittest.skipUnless(shutil.which("node"), "Node required for offline JS child guard")
     def test_node_guard_copied_and_caught_dns_denial_fails_step(self):
