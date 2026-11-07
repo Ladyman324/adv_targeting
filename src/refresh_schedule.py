@@ -1,4 +1,4 @@
-"""Saturday refresh dispatcher. Prepares tested candidates; never publishes."""
+"""Saturday refresh dispatcher with explicitly registered automatic publication."""
 from __future__ import annotations
 import argparse
 import datetime as dt
@@ -24,7 +24,7 @@ def quarter_slot(day):
     return first + dt.timedelta(days=(5 - first.weekday()) % 7)
 
 
-def make_plan(now, active_from, attempted_quarters=()):
+def make_plan(now, active_from, attempted_quarters=(), publish=False):
     slot = last_slot(now)
     quarter = quarter_slot(slot.date())
     quarterly = (active_from <= quarter <= slot.date()
@@ -33,7 +33,7 @@ def make_plan(now, active_from, attempted_quarters=()):
     mode = 'full' if quarterly else 'act-only'
     return dict(runId='scheduled-' + ('full-' if quarterly else 'act-') + day.strftime('%Y%m%d'),
                 mode=mode, scheduledDate=day.isoformat(), quarterly=quarterly,
-                sources='all' if quarterly else ['act'], publish=False, runTests=True,
+                sources='all' if quarterly else ['act'], publish=publish is True, runTests=True,
                 through='prepare-release')
 
 
@@ -70,42 +70,67 @@ def execute(root, stage_parent, registration, now):
     registration = core.read_json(registration)
     if registration.get('timezone') != 'Eastern Standard Time':
         raise RuntimeError('Schedule must use the approved Eastern time zone')
+    enabled = registration.get('publish', False)
+    if not isinstance(enabled, bool):
+        raise RuntimeError('Publication registration must be a boolean')
     folder = root / 'data/refresh/scheduled'
     folder.mkdir(parents=True, exist_ok=True)
-    # Shared with the supervised full-refresh launcher; never force or delete it.
     with core.lock(folder):
         history_path = folder / 'history.json'
         history = core.read_json(history_path) if history_path.exists() else {'quarterlyAttempts': [], 'runs': {}}
-        plan = make_plan(now, dt.date.fromisoformat(registration['activeFrom']), history['quarterlyAttempts'])
+        plan = make_plan(now, dt.date.fromisoformat(registration['activeFrom']), history['quarterlyAttempts'], publish=enabled)
         prior = history['runs'].get(plan['runId'], {})
-        if prior.get('status') in ('completed', 'completed_with_reuse'):
+        if prior.get('status') in ('published', 'published_with_warnings') or prior.get('publication', {}).get('status') == 'completed':
             return dict(plan, status='already_completed')
-        credentials = act_credentials()
-        history['runs'][plan['runId']] = dict(status='starting', startedUtc=core.utc(), plan=plan)
-        if plan['quarterly'] and plan['scheduledDate'] not in history['quarterlyAttempts']:
-            history['quarterlyAttempts'].append(plan['scheduledDate'])
-        core.atomic_json(history_path, history)
-        previous = {key: os.environ.get(key) for key in ACT_KEYS}
-        try:
-            os.environ.update(credentials)
-            result = run_workflow(root, plan['runId'], mode=plan['mode'],
-                sources=() if plan['quarterly'] else ('act',), stage_parent=stage_parent,
-                allow_network=True, through='prepare-release', act_user=credentials['ACT_USER'],
-                act_db=credentials['ACT_DB'])
-            history['runs'][plan['runId']].update(status=result['status'], finishedUtc=core.utc())
+        built = prior.get('buildStatus', prior.get('status')) in ('completed', 'completed_with_reuse')
+        if built and not enabled:
+            return dict(plan, status='already_completed')
+        if not built:
+            credentials = act_credentials()
+            history['runs'][plan['runId']] = dict(status='starting', startedUtc=core.utc(), plan=plan)
+            if plan['quarterly'] and plan['scheduledDate'] not in history['quarterlyAttempts']:
+                history['quarterlyAttempts'].append(plan['scheduledDate'])
             core.atomic_json(history_path, history)
-            return dict(plan, status=result['status'], summary=str(root / 'data/refresh/runs' / plan['runId'] / 'workflow/summary.json'))
-        except BaseException:
-            history['runs'][plan['runId']].update(status='needs_attention', finishedUtc=core.utc())
-            core.atomic_json(history_path, history)
-            raise
-        finally:
-            credentials.clear()
-            for key, value in previous.items():
-                if value is None:
-                    os.environ.pop(key, None)
-                else:
-                    os.environ[key] = value
+            previous = {key: os.environ.get(key) for key in ACT_KEYS}
+            try:
+                os.environ.update(credentials)
+                options = dict(mode=plan['mode'], sources=() if plan['quarterly'] else ('act',),
+                    stage_parent=stage_parent, allow_network=True, through='prepare-release',
+                    act_user=credentials['ACT_USER'], act_db=credentials['ACT_DB'])
+                if enabled:
+                    options['automatic_policy'] = True
+                result = run_workflow(root, plan['runId'], **options)
+                history['runs'][plan['runId']].update(status=result['status'], buildStatus=result['status'], finishedUtc=core.utc())
+                core.atomic_json(history_path, history)
+                if result['status'] not in ('completed', 'completed_with_reuse') or not enabled:
+                    return dict(plan, status=result['status'],
+                        summary=str(root / 'data/refresh/runs' / plan['runId'] / 'workflow/summary.json'))
+            except BaseException:
+                history['runs'][plan['runId']].update(status='needs_attention', finishedUtc=core.utc())
+                core.atomic_json(history_path, history)
+                raise
+            finally:
+                credentials.clear()
+                for key, value in previous.items():
+                    if value is None:
+                        os.environ.pop(key, None)
+                    else:
+                        os.environ[key] = value
+        # Source credentials have been restored before any deployment process.
+        if enabled:
+            from refresh_publish import publish
+            try:
+                config = dict(registration.get('publishing') or {}, enabled=True)
+                publication = publish(root, plan['runId'], config=config)
+                complete = publication['status'] == 'completed'
+                status = ('published_with_warnings' if publication.get('warnings') else 'published') if complete else 'publication_deferred'
+                history['runs'][plan['runId']].update(status=status, publication=publication, finishedUtc=core.utc())
+                core.atomic_json(history_path, history)
+                return dict(plan, status=status, publication=str(root / 'data/refresh/runs' / plan['runId'] / 'publication/automatic.json'))
+            except BaseException as exc:
+                history['runs'][plan['runId']].update(status='publication_failed', errorType=type(exc).__name__, finishedUtc=core.utc())
+                core.atomic_json(history_path, history)
+                raise
 
 
 def main(argv=None):
@@ -121,13 +146,14 @@ def main(argv=None):
     if not args.execute:
         when = dt.datetime.fromisoformat(args.on) if args.on else now
         active = dt.date.fromisoformat(json.loads(args.registration.read_text(encoding='utf-8-sig'))['activeFrom']) if args.registration else now.date()
-        print(json.dumps(dict(make_plan(when, active), readOnly=True), sort_keys=True))
+        publication = json.loads(args.registration.read_text(encoding='utf-8-sig')).get('publish', False) if args.registration else False
+        print(json.dumps(dict(make_plan(when, active, publish=publication), readOnly=True), sort_keys=True))
         return 0
     if not args.allow_network or not args.stage_parent or not args.registration or args.on:
         parser.error('Execution requires --allow-network, --stage-parent and --registration, with no simulated clock')
     result = execute(args.root, args.stage_parent, args.registration, now)
     print(json.dumps(result, sort_keys=True))
-    return 0 if result['status'] in ('completed', 'completed_with_reuse', 'already_completed') else 2
+    return 0 if result['status'] in ('completed', 'completed_with_reuse', 'already_completed', 'published', 'published_with_warnings') else 2
 
 
 if __name__ == '__main__':

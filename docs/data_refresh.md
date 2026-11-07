@@ -881,9 +881,36 @@ Source-ready status still does not authorize operational adoption or release.
 `src/refresh_schedule.py` dispatches the existing supervised workflow. Weekly runs
 use `act-only`; quarterly runs use `full`. Both rebuild their dependency graph,
 including contacts, map/search assets, ACT lookups and recipient shards, run the
-Python/API/application checks, and prepare private release packages. Publishing
-remains a separately approved operation. No held acquisition is auto-approved and
-no failed source is silently replaced with older data.
+Python/API/application checks, and prepare private release packages. The user approved
+automatic publishing on November 7, 2026. An explicit `publish: true` schedule
+registration enables publication for both weekly and quarterly runs; otherwise the
+workflow still only prepares candidates. `-EnablePublishing` opts in at installation;
+reinstalling preserves an existing opt-in.
+
+Known minor ACT account-value discrepancies and held roster identity rows are
+reported without blocking publication. A failed roster or rankings retrieval may
+retain its hash-verified last-good input with a warning, up to 25% of optional
+sources (at least one). ACT and SEC failures remain blocking. Map continuity gaps
+are minor only below 1% when none of the missing advisors has a usable candidate
+placement. Unknown warnings, coverage losses, broken hashes, tests, identity or
+recipient policy changes, unavailable storage and an unverifiable live baseline
+hold publication. No held acquisition is auto-approved.
+
+The publisher keeps exact prior API/static packages and lookup hashes, checks a
+quiet email-worker window, takes an app-wide blob lease, transfers immutable
+recipient shards before their manifest, then deploys and verifies the API before
+the website. It restores the prior release on a deployment failure. A failed
+rollback blocks further publication for operator recovery. After live verification
+it records the receipt and adopts exactly that published baseline for the next
+run. Publication journals allow retry without reacquiring ACT or redeploying an
+already verified release. Failed/deferred tasks retry three times at 30 minutes.
+
+Machine verification uses the read-only, function-key-protected GET endpoint
+`/api/refresh-release`. Only that exact Function App path is excluded from browser
+sign-in, as explicitly approved by the user; business routes retain their existing
+authentication. The anonymous static `/data/refresh_release.json` exposes release
+hashes only. Keys remain in memory. The probe reads only scheduling/lease metadata
+for its quiet-window check; it does not send email or return contact/message data.
 
 Install with `scripts/install_refresh_schedule.ps1`, supplying the operational
 repository, a durable `StageParent`, and the Python executable. It registers
@@ -907,8 +934,9 @@ ACT credentials use the existing environment or a scoped read of the existing
 application's ACT settings through the scheduled user's Azure CLI session. Passwords
 remain in memory and are never written to arguments, task XML, logs, or configuration.
 An expired sign-in or missing credential produces a visible failed run requiring
-attention. The scheduler does not change Azure settings or ACT records.
+attention. The publisher updates only deployment artifacts and its nonsecret publication receipt
+setting. It does not change ACT records or authentication configuration at runtime.
 
 Complete the published-baseline adoption checkpoint above after an approved release
-so later weekly builds select the intended source snapshots. A staged candidate and
-its source-ready roster files do not perform that adoption automatically.
+so later weekly builds select the intended source snapshots. Automatic publication
+performs this adoption only after live verification; staged candidates alone do not.

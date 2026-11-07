@@ -191,7 +191,7 @@ DATA_VERSION_FILES = (WEB / "app.js", WEB / "field.js")
 # Legacy monolith retained as a build/debug artefact. deploy_swa.py deliberately
 # never ships it and neither application fetches it; hashing it would make the
 # source tree and staged deployment compute different browser versions.
-FINGERPRINT_EXCLUDED = {"contacts.json"}
+FINGERPRINT_EXCLUDED = {"contacts.json", "refresh_release.json"}
 
 
 def data_json_paths(root: pathlib.Path = WEB_DATA) -> list:

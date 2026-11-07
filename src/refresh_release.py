@@ -13,7 +13,7 @@ from refresh_core import (RefreshError, atomic_json, check_inputs, code_files, d
                           contained, execute_command, facts, file_hash, load_run, lock,
                           paths_matching, read_json, save_run, utc, operation)
 
-ARTIFACT_PATTERNS = ["webapp", "api/shared/act_contacts.json", "api/shared/act_mail_codes.json",
+ARTIFACT_PATTERNS = ["webapp", "data/identity", "api/shared/act_contacts.json", "api/shared/act_mail_codes.json",
     "api/shared/approved-recipient-release.json", "api/shared/data-freshness.json",
     "data/identity/approved_recipients_manifest.json", "data/identity/approved_recipients_shards",
     "data/identity/approved_recipients.json.gz", "data/output/advisor_emails.json.gz"]
@@ -122,6 +122,14 @@ def write_descriptor(stage, manifest):
              "sources": _summary_sources(manifest["sources"]), "publication": None}
     path = stage / "api/shared/data-freshness.json"
     atomic_json(path, value)
+    # Public deployment proof contains hashes and version ids only. It is excluded
+    # from its own data fingerprint; business data keeps its authentication gate.
+    from hashlib import sha256
+    atomic_json(stage / "webapp/data/refresh_release.json", {
+        "schemaVersion": 1, "candidateId": manifest["id"],
+        "codeCommit": manifest["codeCommit"], "staticDataFingerprint": fingerprint,
+        "recipientRegistryHash": registry["registryContentHash"],
+        "descriptorSha256": sha256(path.read_bytes()).hexdigest()})
     # Exercise the runtime allowlist as a gate, not just a different Python schema.
     script = "const f=require(process.argv[1]);const x=f.read(process.argv[2]);if(!x.available||x.sources.length!==Number(process.argv[3]))process.exit(2);"
     result = subprocess.run(["node", "-e", script, str(stage / "api/shared/data-freshness.js"), str(path), str(len(value["sources"]))],
@@ -131,7 +139,7 @@ def write_descriptor(stage, manifest):
     return value
 
 
-def validate(root, run_id, coverage_reason=None, run_tests=True):
+def validate(root, run_id, coverage_reason=None, run_tests=True, minor_policy=False):
     directory, manifest, stage = load_run(root, run_id)
     _built(manifest)
     with lock(directory), operation(directory, manifest, "validating", success="validated",
@@ -147,6 +155,13 @@ def validate(root, run_id, coverage_reason=None, run_tests=True):
             policy = read_json(policy_path) if policy_path.exists() else {}
             drop_percent = policy.get("coverageDropPercent", 20)
             drops = check_comparison(comparison, drop_percent)
+            if drops and minor_policy and not coverage_reason:
+                from refresh_publish_policy import minor_map_reason
+                reason = minor_map_reason(comparison, drops)
+                if reason:
+                    coverage_reason = reason
+                    manifest.setdefault("warnings", []).append(reason)
+                    validation["minorCoverageWarning"] = reason
             if drops and not (coverage_reason and len(coverage_reason.strip()) >= 12):
                 raise RefreshError("Coverage review required (%s); inspect the comparison and provide an explicit reason" % ", ".join(drops))
             if drops:

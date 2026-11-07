@@ -195,6 +195,7 @@ def _finish(core, root, stage, manifest):
             for pattern in item['outputs']]))
         regenerated.update((stage / 'webapp/data/practices').rglob('*'))
         regenerated.add(stage / 'webapp/data/.gzip_manifest.json')
+        regenerated.add(stage / 'webapp/data/refresh_release.json')
         manifest['reusedArtifacts'] = core.facts([stage / p for p in manifest['baselineArtifacts']
                                                  if stage / p not in regenerated], stage)
     manifest.update(status='ready', phase='ready',

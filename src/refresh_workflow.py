@@ -46,7 +46,7 @@ def _write_summary(folder,state):
             for status in ('refreshed','reused_last_good','needs_review','failed','pending','running','interrupted')},
         'sources':{sid:{**record,'nextAction':_next_action(sid,record)} for sid,record in state['sources'].items()},
         'pipeline':state.get('pipeline',{}),
-        'warnings':state.get('pipeline',{}).get('warnings',[]),
+        'warnings':list(dict.fromkeys(state.get('warnings',[])+state.get('pipeline',{}).get('warnings',[]))),
         'updatedUtc':core.utc()}
     core.atomic_json(folder/'summary.json',summary)
     from refresh_reports import _safe_cell
@@ -60,7 +60,7 @@ def _write_summary(folder,state):
 
 def run_workflow(root,run_id,*,sources=(),mode=None,firms=(),stage_parent=None,
                  allow_network=False,reuse_last_good=(),fallback_reason=None,
-                 retry_failed=False,through='validate',act_user=None,act_db=None):
+                 retry_failed=False,through='validate',act_user=None,act_db=None,automatic_policy=False):
     from refresh_acquire import acquire,_source_files
     root=Path(root)
     if through not in {'acquire','validate','prepare-release'}:raise core.RefreshError('Invalid workflow endpoint')
@@ -129,6 +129,19 @@ def run_workflow(root,run_id,*,sources=(),mode=None,firms=(),stage_parent=None,
                 except BaseException:
                     state['sources'][sid]['status']='interrupted';state['status']='interrupted'
                     core.atomic_json(path,state);_write_summary(folder,state);raise
+            if automatic_policy and state['sources'][sid]['status'] in {'failed','needs_review'}:
+                from refresh_publish_policy import can_reuse_source
+                _, current, stage = core.load_run(root, run_id)
+                selected = _source_files(stage, sid)
+                if can_reuse_source(sid, selected):
+                    core.check_inputs(stage, current)
+                    selected_info = next((s for s in current.get('sources', []) if s['id'] == sid), {})
+                    state['sources'][sid].update(status='reused_last_good',
+                        reason='Automatic minor-issue policy: retained validated last-good source after failed retrieval; no new snapshot accepted',
+                        sourceDate=selected_info.get('sourceDate') or selected_info.get('snapshotDate'),
+                        retrievedUtc=selected_info.get('retrievedUtc'), selectedSha256=selected_info.get('sha256'),
+                        selectedFacts=core.facts(selected, stage))
+                    state.setdefault('warnings', []).append('Automatic last-good source reuse: ' + sid)
             if state['sources'][sid]['status'] in {'failed','needs_review','interrupted'} and sid in reuse_last_good:
                 _,current,stage=core.load_run(root,run_id)
                 core.check_inputs(stage,current)
@@ -152,10 +165,13 @@ def run_workflow(root,run_id,*,sources=(),mode=None,firms=(),stage_parent=None,
                 and state['sources'].get(sid,{}).get('status')!='reused_last_good']
             if uncovered:raise core.RefreshError('Failed sources lack explicit workflow reuse approval: '+', '.join(uncovered))
             recorded_reasons=[r['reason'] for r in state['sources'].values() if r['status']=='reused_last_good']
+            if automatic_policy:
+                from refresh_publish_policy import check_source_results
+                check_source_results(state['sources'])
             value=core.build(root,run_id,retry=True,fallback_reason='; '.join(recorded_reasons) or None)
             state['pipeline']={'build':value['status'],'warnings':value.get('warnings',[])}
             from refresh_release import validate,prepare
-            value=validate(root,run_id,run_tests=True)
+            value=validate(root,run_id,run_tests=True,minor_policy=True) if automatic_policy else validate(root,run_id,run_tests=True)
             state['pipeline']['validation']=value['status']
             if through=='prepare-release':
                 value=prepare(root,run_id);state['pipeline']['candidate']=value['status']

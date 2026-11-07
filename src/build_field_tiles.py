@@ -94,7 +94,7 @@ def cell_of(lat: float, lon: float) -> str:
     return f"{int(round(lat / CELL))}_{int(round(lon / CELL))}"
 
 
-def load_positions() -> pd.DataFrame:
+def load_positions(interim=None) -> pd.DataFrame:
     """One position per advisor.
 
     An advisor can be filed at several branches and several firms. placement.py
@@ -102,12 +102,13 @@ def load_positions() -> pd.DataFrame:
     decision rather than inventing a second answer, then keeps a single row per
     PERSON -- the field view shows a human once, not once per registration.
     """
+    interim = INTERIM if interim is None else interim
     frames = [pd.read_parquet(p, columns=["advisor_crd", "firm_crd", "lat", "lon",
                                           "branch_street1", "branch_city",
                                           "branch_state", "branch_postal"])
-              for p in glob.glob(str(INTERIM / "branch_geocoded_*.parquet"))]
+              for p in glob.glob(str(interim / "branch_geocoded_*.parquet"))]
     geo = pd.concat(frames, ignore_index=True).dropna(subset=["lat", "lon"])
-    work_path = INTERIM / "contact_work_branches.parquet"
+    work_path = interim / "contact_work_branches.parquet"
     if work_path.exists():
         work = pd.read_parquet(work_path)
         geo = pd.concat([geo, work], ignore_index=True, sort=False)
@@ -126,7 +127,7 @@ def load_positions() -> pd.DataFrame:
                        + "|"
                        + geo["branch_postal"].fillna("").astype(str).str.strip().str[:5])
 
-    place = pd.read_parquet(INTERIM / "advisor_placement.parquet")
+    place = pd.read_parquet(interim / "advisor_placement.parquet")
     for col in ("advisor_crd", "firm_crd", "addr_key"):
         place[col] = place[col].astype(str)
 

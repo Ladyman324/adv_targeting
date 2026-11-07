@@ -214,6 +214,19 @@ def compare(before_root: Path, after_root: Path, out_dir: Path,
         missing = sorted((set(indexes[0])-set(indexes[1])) & current)
         map_continuity.update(previouslyMappedStillInSEC=len(set(indexes[0]) & current),
             missingFromCandidate=len(missing), csv='current_sec_map_gaps.csv')
+        usable_missing = 0 if not missing else None
+        if missing:
+            try:
+                from build_field_tiles import load_positions
+                points = load_positions(after_root / 'data/interim')
+                scoped = set(pd.read_parquet(after_root / 'data/output/advisors.parquet',
+                    columns=['advisor_crd']).advisor_crd.astype(str))
+                valid = points.lat.between(-90, 90) & points.lon.between(-180, 180) & ((points.lat != 0) | (points.lon != 0))
+                usable = set(points.loc[valid, 'advisor_crd'].astype(str)) & scoped
+                usable_missing = len(set(missing) & usable)
+            except (OSError, ValueError, KeyError):
+                pass  # Unknown placement coverage cannot be auto-classified minor.
+        map_continuity['missingWithUsablePlacement'] = usable_missing
         _write_csv(out_dir / 'current_sec_map_gaps.csv',
             [{'id':crd,'change':'missing_current_sec_person','before':indexes[0][crd],
               'after':None} for crd in missing])

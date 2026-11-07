@@ -96,5 +96,40 @@ class DispatchTests(unittest.TestCase):
         self.assertEqual(history['runs']['scheduled-full-20270102']['status'],'needs_attention')
         self.assertEqual(os.environ.get('ACT_PASSWORD'),original)
 
+    def enable(self):
+        self.registration.write_text(json.dumps(dict(timezone='Eastern Standard Time',activeFrom='2026-11-05',publish=True)))
+
+    def test_weekly_and_quarterly_publication_are_explicit(self):
+        for when in [dt.datetime(2026,11,7,3),dt.datetime(2027,1,2,3)]:
+            self.assertTrue(schedule.make_plan(when,dt.date(2026,11,5),publish=True)['publish'])
+
+    def test_publisher_runs_after_act_credentials_are_restored(self):
+        import os
+        self.enable();original=os.environ.get('ACT_PASSWORD')
+        def publish(*args,**kwargs):
+            self.assertEqual(os.environ.get('ACT_PASSWORD'),original)
+            self.assertTrue(kwargs['config']['enabled'])
+            return dict(status='completed',warnings=['minor warning'])
+        with patch('refresh_schedule.act_credentials',return_value=dict(ACT_USER='u',ACT_DB='d',ACT_PASSWORD='private-test-value')), \
+                patch('refresh_workflow.run_workflow',return_value=dict(status='completed')) as build, \
+                patch('refresh_publish.publish',side_effect=publish) as publisher:
+            first=schedule.execute(self.root,self.stage,self.registration,dt.datetime(2026,11,7,3))
+            again=schedule.execute(self.root,self.stage,self.registration,dt.datetime(2026,11,7,4))
+        self.assertEqual(first['status'],'published_with_warnings')
+        self.assertEqual(again['status'],'already_completed')
+        self.assertTrue(build.call_args.kwargs['automatic_policy'])
+        self.assertEqual(publisher.call_count,1)
+
+    def test_deferred_publication_retries_without_reacquiring_sources(self):
+        self.enable()
+        with patch('refresh_schedule.act_credentials',return_value=dict(ACT_USER='u',ACT_DB='d',ACT_PASSWORD='fixture')), \
+                patch('refresh_workflow.run_workflow',return_value=dict(status='completed')) as build, \
+                patch('refresh_publish.publish',side_effect=[dict(status='deferred_busy'),dict(status='completed',warnings=[])]) as publisher:
+            first=schedule.execute(self.root,self.stage,self.registration,dt.datetime(2026,11,7,3))
+            again=schedule.execute(self.root,self.stage,self.registration,dt.datetime(2026,11,7,4))
+        self.assertEqual(first['status'],'publication_deferred')
+        self.assertEqual(again['status'],'published')
+        self.assertEqual(build.call_count,1);self.assertEqual(publisher.call_count,2)
+
 
 if __name__=='__main__':unittest.main()

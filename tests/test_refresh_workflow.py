@@ -144,5 +144,23 @@ class WorkflowTests(unittest.TestCase):
                     fallback_reason='Reviewed Baird outage only; retain baseline')
         build.assert_not_called()
 
+    def test_automatic_minor_policy_reuses_verified_roster_without_accepting_new_data(self):
+        before=self.old.read_bytes()
+        with patch.object(acquire,'acquire',side_effect=self.failure), \
+                patch.object(core,'build',return_value={'status':'built'}) as build, \
+                patch('refresh_release.validate',return_value={'status':'validated'}) as validate:
+            result=self.run_workflow(through='validate',automatic_policy=True)
+        self.assertEqual(result['status'],'completed_with_reuse')
+        self.assertEqual(self.old.read_bytes(),before)
+        self.assertEqual(result['sources']['roster:baird']['status'],'reused_last_good')
+        self.assertIn('Automatic last-good source reuse: roster:baird',result['warnings'])
+        self.assertTrue(validate.call_args.kwargs['minor_policy'])
+        self.assertEqual(build.call_count,1)
+
+    def test_automatic_policy_does_not_reuse_failed_act(self):
+        with patch.object(acquire,'acquire',side_effect=self.failure),patch.object(core,'build') as build:
+            result=self.run_workflow(sources=['act'],through='validate',automatic_policy=True)
+        self.assertEqual(result['status'],'needs_attention');build.assert_not_called()
+
 
 if __name__=='__main__':unittest.main()
