@@ -126,8 +126,7 @@ class AzurePublisher:
 
     @staticmethod
     def stored_bytes(client):
-        def raw(response):response.http_response.decompress=False
-        return client.download_blob(raw_response_hook=raw).readall()
+        return client.download_blob(decompress=False).readall()
 
     def assert_lease(self):
         if self._lease is None or self._lease_lost:raise PublicationHeld("Publication lease lost")
@@ -168,12 +167,12 @@ class AzurePublisher:
 
     def api_probe(self,window=False):
         if self._host is None:
-            self._host=self.az(["functionapp","show","--name",APP,"--resource-group",GROUP,"--query","defaultHostName"])
+            self._host=self.az(["functionapp","show","--name",APP,"--resource-group",GROUP,"--query","defaultHostName || properties.defaultHostName"])
             if not isinstance(self._host,str) or not self._host.endswith(".azurewebsites.net"):
                 raise PublicationHeld("Unexpected Function App host")
         if self._probe_key is None:
             self._probe_key=self.az(["functionapp","function","keys","list","--name",APP,"--resource-group",GROUP,
-                "--function-name","refresh-release","--query","default"],secret=True)
+                "--function-name","refresh-release","--query","default || properties.default"],secret=True)
             if not self._probe_key:raise PublicationHeld("Read-only function probe key unavailable")
         return self.request("https://"+self._host+"/api/refresh-release"+("?window=1" if window else ""),
             {"x-functions-key":self._probe_key})

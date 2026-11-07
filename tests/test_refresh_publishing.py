@@ -234,5 +234,65 @@ class BaselineBindingTests(unittest.TestCase):
         self.assertEqual(result["data/interim/advisors.parquet"],new)
         self.assertEqual(result["webapp/data/metadata.json"],new)
 
+
+class StoredBlobBytesTests(unittest.TestCase):
+    def test_real_sdk_preserves_gzip_bytes_for_release_hashes(self):
+        import gzip
+        import threading
+        from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
+        try:
+            from azure.storage.blob import BlobClient
+        except ImportError:
+            self.skipTest("Optional Azure publishing SDK is not installed")
+        wire=gzip.compress(b'{"metadata":"transport-fixture"}',mtime=0)
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self,*args):pass
+            def do_GET(self):
+                self.send_response(206)
+                self.send_header('Content-Type','application/json')
+                self.send_header('Content-Encoding','gzip')
+                self.send_header('Content-Length',str(len(wire)))
+                self.send_header('Content-Range','bytes 0-'+str(len(wire)-1)+'/'+str(len(wire)))
+                self.send_header('ETag','"transport-fixture"')
+                self.send_header('Last-Modified','Sat, 07 Nov 2026 12:00:00 GMT')
+                self.send_header('x-ms-blob-type','BlockBlob')
+                self.end_headers();self.wfile.write(wire)
+        server=ThreadingHTTPServer(('127.0.0.1',0),Handler)
+        worker=threading.Thread(target=server.serve_forever,daemon=True);worker.start()
+        client=BlobClient.from_blob_url('http://127.0.0.1:'+str(server.server_port)+'/fixtures/lookup.json.gz',retry_total=0)
+        try:
+            self.assertEqual(AzurePublisher.stored_bytes(client),wire)
+        finally:
+            client.close();server.shutdown();server.server_close();worker.join(timeout=2)
+
+class AzureMetadataLayoutTests(unittest.TestCase):
+    def test_probe_accepts_flat_and_wrapped_cli_metadata(self):
+        # Model the CLI's dotted-field/OR selectors for these metadata fixtures.
+        def read_selector(expression,payload):
+            for selector in expression.split('||'):
+                value=payload
+                for field in selector.strip().split('.'):
+                    value=value.get(field) if isinstance(value,dict) else None
+                if value is not None:return value
+            return None
+        from unittest.mock import patch
+        for wrapped in [False,True]:
+            with self.subTest(wrapped=wrapped):
+                backend=AzurePublisher.__new__(AzurePublisher)
+                backend._host=None;backend._probe_key=None;backend.secrets=[]
+                def command(args,**kwargs):
+                    payload={'default':'fixture-function-key'} if '--function-name' in args else {'defaultHostName':'fixture.azurewebsites.net'}
+                    if wrapped:payload={'properties':payload}
+                    result=read_selector(args[args.index('--query')+1],payload)
+                    return '' if result is None else json.dumps(result)
+                backend.command=command
+                def request(url,headers):
+                    self.assertEqual(url,'https://fixture.azurewebsites.net/api/refresh-release')
+                    self.assertEqual(headers,{'x-functions-key':'fixture-function-key'})
+                    return {'available':True}
+                backend.request=request
+                with patch('refresh_publish_azure.shutil.which',return_value='az.cmd'):
+                    self.assertEqual(backend.api_probe(),{'available':True})
+
 if __name__=="__main__":unittest.main()
 
