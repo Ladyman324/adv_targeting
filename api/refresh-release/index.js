@@ -10,8 +10,8 @@ const registry = require("../shared/recipient-registry");
 const releaseMetadata = require("../health").releaseMetadata;
 const capacity = require("../shared/email-limit-guard");
 const ROOT = path.join(__dirname, "..");
-const TERMINAL = new Set(["sent", "failed", "canceled", "draft_ready", "auth_required", "editing", "ready"]);
-const SELECT = ["PartitionKey", "RowKey", "state", "leaseUntilUtc", "retryAfterUtc", "plannedSendUtc", "capacityDay", "updatedUtc"];
+const TERMINAL = new Set(["sent", "failed", "canceled", "draft_ready", "auth_required", "editing", "ready", "invalid"]);
+const SELECT = ["PartitionKey", "RowKey", "state", "leaseUntilUtc", "retryAfterUtc", "plannedSendUtc", "capacityDay", "updatedUtc", "handledManuallyUtc", "retryBatchId"];
 const sha = file => crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
 function quiet(rows, now = Date.now(), horizonMinutes = 15, within = capacity.withinSendingWindow) {
   const end = now + horizonMinutes * 60000;
@@ -19,6 +19,8 @@ function quiet(rows, now = Date.now(), horizonMinutes = 15, within = capacity.wi
   for (const row of rows) {
     if (TERMINAL.has(row.state)) continue;
     if (Date.parse(row.leaseUntilUtc || "") > now) { blocking++; continue; }
+    // Match processWork(), draft() and send(): held/canceled work cannot start.
+    if (row.handledManuallyUtc || row.retryBatchId || ["canceled", "paused"].includes(row.parentBatchStatus)) continue;
     const due = Math.max(Date.parse(row.plannedSendUtc || "") || 0, Date.parse(row.retryAfterUtc || "") || 0);
     if (due > end) continue;
     if (row.state === "send_scheduled" && row.capacityDay) {
@@ -34,21 +36,25 @@ function quiet(rows, now = Date.now(), horizonMinutes = 15, within = capacity.wi
 async function workMetadata() {
   const connection = process.env.AZURE_STORAGE_CONNECTION_STRING;
   if (!connection) throw new Error("storage_unavailable");
-  const client = TableClient.fromConnectionString(connection, "EmailMessages", { allowInsecureConnection: false });
-  const rows = [];
-  const filter = "state ne 'sent' and state ne 'failed' and state ne 'canceled' and state ne 'draft_ready' and state ne 'auth_required' and state ne 'editing' and state ne 'ready'";
-  for await (const row of client.listEntities({ queryOptions: { filter, select: SELECT } })) {
-    rows.push(row);
-    if (rows.length > 5000) throw new Error("work_metadata_limit");
-  }
+  const rows = [], batchStatus = new Map();
   const batches = TableClient.fromConnectionString(connection, "EmailBatches", { allowInsecureConnection: false });
+  let count = 0;
   for await (const row of batches.listEntities({ queryOptions: {
-    filter: "status eq 'scheduled'", select: ["scheduledForUtc", "scheduleLeaseUntilUtc"] } })) {
-    rows.push({ state: "scheduled_preflight", plannedSendUtc: row.scheduledForUtc, leaseUntilUtc: row.scheduleLeaseUntilUtc });
+    select: ["PartitionKey", "RowKey", "status", "scheduledForUtc", "scheduleLeaseUntilUtc"] } })) {
+    if (++count > 5000) throw new Error("batch_metadata_limit");
+    batchStatus.set(`${row.partitionKey}_${row.rowKey}`, row.status);
+    if (row.status === "scheduled") rows.push({ state: "scheduled_preflight",
+      plannedSendUtc: row.scheduledForUtc, leaseUntilUtc: row.scheduleLeaseUntilUtc });
+  }
+  const client = TableClient.fromConnectionString(connection, "EmailMessages", { allowInsecureConnection: false });
+  const filter = "state ne 'sent' and state ne 'failed' and state ne 'canceled' and state ne 'draft_ready' and state ne 'auth_required' and state ne 'editing' and state ne 'ready' and state ne 'invalid'";
+  for await (const row of client.listEntities({ queryOptions: { filter, select: SELECT } })) {
+    rows.push({ ...row, parentBatchStatus: batchStatus.get(row.partitionKey) });
     if (rows.length > 5000) throw new Error("work_metadata_limit");
   }
   return rows;
 }
+
 async function probe(context, req) {
   const headers = { "Content-Type": "application/json", "Cache-Control": "no-store" };
   if (String(req.method || "GET").toUpperCase() !== "GET") {
@@ -79,3 +85,4 @@ async function probe(context, req) {
 module.exports = probe;
 module.exports.quiet = quiet;
 module.exports.SELECT = SELECT;
+module.exports.workMetadata = workMetadata;

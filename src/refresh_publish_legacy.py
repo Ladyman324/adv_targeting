@@ -56,27 +56,32 @@ def quiet_metadata(backend):
     env["AZURE_STORAGE_CONNECTION_STRING"]=backend._connection
     rows=[]
     sources=[
+        ("EmailBatches",None,["PartitionKey","RowKey","status","scheduledForUtc","scheduleLeaseUntilUtc"]),
         ("EmailMessages",
-         "state ne 'sent' and state ne 'failed' and state ne 'canceled' and state ne 'draft_ready' and state ne 'auth_required' and state ne 'editing' and state ne 'ready'",
-         ["PartitionKey","RowKey","state","leaseUntilUtc","retryAfterUtc","plannedSendUtc","capacityDay","updatedUtc"]),
-        ("EmailBatches","status eq 'scheduled'",["scheduledForUtc","scheduleLeaseUntilUtc"])]
+         "state ne 'sent' and state ne 'failed' and state ne 'canceled' and state ne 'draft_ready' and state ne 'auth_required' and state ne 'editing' and state ne 'ready' and state ne 'invalid'",
+         ["PartitionKey","RowKey","state","leaseUntilUtc","retryAfterUtc","plannedSendUtc","capacityDay","updatedUtc","handledManuallyUtc","retryBatchId"])]
+    batch_status={}
     for table,query,select in sources:
-        raw=backend.command([__import__("shutil").which("az"),"storage","entity","query",
+        args=[__import__("shutil").which("az"),"storage","entity","query",
             "--account-name","eicadvisorlog","--table-name",table,"--auth-mode","key",
-            "--filter",query,"--select"]+select+["--num-results","5000","--output","json","--only-show-errors"],
-            environment=env,timeout=180)
-        data=json.loads(raw)
+            "--select"]+select+["--num-results","1000","--output","json","--only-show-errors"]
+        if query:args += ["--filter",query]
+        data=json.loads(backend.command(args,environment=env,timeout=180))
         if any((data.get("next_marker") or {}).values()):raise PublicationHeld("Quiet-window metadata limit exceeded")
         for row in data.get("items",[]):
-            rows.append(row if table=="EmailMessages" else dict(state="scheduled_preflight",
-                plannedSendUtc=row.get("scheduledForUtc"),leaseUntilUtc=row.get("scheduleLeaseUntilUtc")))
+            if table=="EmailMessages":
+                rows.append(dict(row,parentBatchStatus=batch_status.get(row.get("PartitionKey"))))
+            else:
+                batch_status[row["PartitionKey"]+"_"+row["RowKey"]]=row.get("status")
+                if row.get("status")=="scheduled":rows.append(dict(state="scheduled_preflight",
+                    plannedSendUtc=row.get("scheduledForUtc"),leaseUntilUtc=row.get("scheduleLeaseUntilUtc")))
     del env
     # Reuse the deployed worker's exact Eastern sending-window helper and probe algorithm.
     script="const fs=require('node:fs'); const p=require(process.argv[1]); process.stdout.write(JSON.stringify(p.quiet(JSON.parse(fs.readFileSync(0,'utf8')))));"
     env={k:v for k,v in os.environ.items() if not any(s in k.upper() for s in ["SECRET","TOKEN","PASSWORD","CONNECTION_STRING","ACCOUNT_KEY"])}
     env["NODE_PATH"]=str(backend.root/"api/node_modules")
     result=json.loads(backend.command(["node","-e",script,str(backend.root/"api/refresh-release/index.js")],
-        environment=env,input_text=json.dumps(rows),timeout=60))
+        environment=env,input_text=json.dumps(rows),timeout=180))
     core.atomic_json(backend.folder/"bootstrap-quiet-window.json",result)
     return result.get("quiet") is True
 

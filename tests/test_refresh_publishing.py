@@ -180,6 +180,32 @@ class AdapterPrivacyTests(unittest.TestCase):
             with self.assertRaises(pub.PublicationHeld) as caught:backend.command(["fake"])
         self.assertNotIn("private-fixture-token",str(caught.exception))
 
+class LegacyMetadataTests(unittest.TestCase):
+    def test_bootstrap_uses_supported_page_size_and_only_worker_metadata(self):
+        from refresh_publish_legacy import quiet_metadata
+        class Backend:
+            def __init__(self,root):self.root=root;self.folder=root;self._connection='private-fixture';self.calls=[]
+            def container(self):return None
+            def command(self,args,**kw):
+                self.calls.append(args)
+                if args[0]=='node':
+                    rows=json.loads(kw['input_text'])
+                    self.assertions(rows,kw)
+                    return '{"quiet":true}'
+                self.assert_page(args)
+                if args[args.index('--table-name')+1]=='EmailBatches':
+                    return json.dumps(dict(items=[dict(PartitionKey='user',RowKey='old',status='canceled')]))
+                return json.dumps(dict(items=[dict(PartitionKey='user_old',state='draft_pending')]))
+            def assert_page(self,args):
+                assert args[args.index('--num-results')+1]=='1000'
+                assert not any(x in args for x in ['bodyText','subject','recipientEmail'])
+            def assertions(self,rows,kw):
+                assert rows[0]['parentBatchStatus']=='canceled'
+                assert kw['timeout']>=180
+                assert 'AZURE_STORAGE_CONNECTION_STRING' not in kw['environment']
+        with tempfile.TemporaryDirectory() as name:
+            self.assertTrue(quiet_metadata(Backend(Path(name))))
+
 class StaticProofTests(unittest.TestCase):
     def test_public_stamp_does_not_feed_its_own_fingerprint(self):
         import web_assets as assets
