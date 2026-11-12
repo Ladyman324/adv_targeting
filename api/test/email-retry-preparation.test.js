@@ -7,12 +7,13 @@ const now = Date.parse("2026-09-19T15:00:00Z");
 const batch = () => ({ id: "parent", userId: "u", status: "partial_failure", mode: "send",
   approvedUtc: "2026-09-18T13:00:00Z", graphMailboxId: "mailbox", templateId: "t",
   capacityReservationId: "old-reservation", commonSubject: "Common", copySelf: "bcc",
+  commonBodyRichHtml: "<p><b>Common body</b></p>",
   graphMailbox: "rep@example.test", senderMail: "rep@example.test" });
 const message = (id = "m1") => ({ id, state: "failed", sendAttempts: 0,
   failureCode: "draft_permanent_failure", capacityDay: "2026-09-18",
   outlookCheckStatus: "not_found", outlookCheckedUtc: new Date(now).toISOString(),
   subject: "Personal subject", subjectOverridden: true, bodyText: "Personal wording",
-  bodyHtml: "<p>Personal wording</p>", signatureHtml: "<div>Original signature</div>", bodyOverridden: true, graphMessageId: "old-draft",
+  bodyHtml: "<p>Personal wording</p>", bodyRichHtml: "<p><i>Personal wording</i></p>", signatureHtml: "<div>Original signature</div>", bodyOverridden: true, graphMessageId: "old-draft",
   recipientEmail: "advisor@example.test", contactId: "123", attachments: [{ id: "doc", version: 1 }],
   teammateCc: ["mate@example.test"], teammateCcCrds: ["456"], inlineImages: [{ id: "image" }],
   reviewed: true, draftAttempts: 6, etag: "v1" });
@@ -76,10 +77,12 @@ test("preparation preserves content/copies, retires sources and creates no appro
   const b = f.batches.get(result.batchId), ms = f.rows.get(result.batchId);
   assert.equal(b.status, "editing"); assert.equal(b.mode, ""); assert.equal(b.approvedUtc, "");
   assert.equal(b.capacityReservationId, undefined); assert.equal(b.copySelf, "bcc");
+  assert.equal(b.commonBodyRichHtml, "<p><b>Common body</b></p>");
   assert.deepEqual(b.retrySourceMessageIds, ["m1", "m2"]); assert.equal(ms.length, 2);
   for (const m of ms) {
     assert.equal(m.state, "editing"); assert.equal(m.subject, "Personal subject");
     assert.equal(m.bodyText, "Personal wording"); assert.equal(m.bodyOverridden, true);
+    assert.equal(m.bodyRichHtml, "<p><i>Personal wording</i></p>");
     assert.equal(m.signatureHtml, "<div>Original signature</div>");
     assert.deepEqual(m.inlineImages, [{ id: "image" }]);
     assert.equal(m.subjectOverridden, true); assert.equal(m.reviewed, false);

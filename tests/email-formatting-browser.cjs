@@ -24,6 +24,13 @@ async function select(page, id, phrase) {
     throw new Error("Phrase missing: " + phrase);
   }, phrase);
 }
+async function saveIndividual(page) {
+  const saved = page.waitForResponse(response => response.url().includes("op=update_message")
+    && response.request().postDataJSON()?.bodyRichHtml != null);
+  await page.locator("#emailOneSubject").click();
+  await saved;
+  await page.locator("#emailSaveState").filter({ hasText: "Saved" }).waitFor();
+}
 (async () => {
   const browser = await chromium.launch({ headless: true, executablePath: process.env.CHROME_EXECUTABLE });
   try {
@@ -77,7 +84,7 @@ async function select(page, id, phrase) {
       assert.match(rich, /font-weight: bold|font-weight:bold/); assert.match(rich, /font-style: italic|font-style:italic/);
       assert.match(rich, /text-decoration: underline|text-decoration:underline/); assert.match(rich, /139, 0, 0/);
       assert.match(rich, /<\/span> stays here\. Plain ending\./);
-      await page.locator("#emailOneSubject").click();
+      await saveIndividual(page);
       await page.waitForFunction(() => document.querySelector(".email-rendered").innerHTML.includes("139, 0, 0"));
       assert.ok(requests.some(r => r.op === "update_message" && r.body.bodyRichHtml));
       await page.evaluate(id => window.EmailComposer.openBatch(id), batchId);
@@ -87,7 +94,7 @@ async function select(page, id, phrase) {
       assert.doesNotMatch(await page.locator("#emailOneBody").evaluate(box => box._richHtml), /font-weight|font-style|text-decoration|139, 0, 0/);
       await page.locator("#emailOneBodyEditor").press("Control+z");
       assert.match(await page.locator("#emailOneBody").evaluate(box => box._richHtml), /139, 0, 0/, "native Undo restores the selected formatting");
-      await page.locator("#emailOneSubject").click();
+      await saveIndividual(page);
       await page.waitForFunction(() => document.querySelector(".email-rendered").innerHTML.includes("139, 0, 0"));
       await select(page, "emailCommonBody", "common phrase");
       await page.locator("#emailCommonBody").locator("..").getByRole("button", { name: "Bold", exact: true }).click();
