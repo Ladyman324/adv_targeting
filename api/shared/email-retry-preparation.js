@@ -71,6 +71,7 @@ async function prepare(who, input, overrides = {}) {
         retrySourceBatchId: parent.id, retrySourceMessageIds: ids,
         templateId: parent.templateId, templateName: parent.templateName, templateVersion: template.version,
         commonSubject: parent.commonSubject, commonBodyText: parent.commonBodyText,
+        commonBodyRichHtml: parent.commonBodyRichHtml || "",
         recipientCount: selected.length, externalCount: selected.filter(m => d.core.isExternal(m.recipientEmail, cfg)).length,
         attachmentIds, attachmentSummary: documents.map(({ id, name, size, contentType, version }) => ({ id, name, size, contentType, version })),
         graphMailboxId: parent.graphMailboxId, graphMailbox: parent.graphMailbox,

@@ -1853,6 +1853,7 @@ function routesHtml() {
     editor.contentEditable = box.disabled ? "false" : "true";
     editor.setAttribute("role", "textbox");
     editor.setAttribute("aria-multiline", "true");
+    editor.setAttribute("aria-readonly", box.disabled ? "true" : "false");
     editor.setAttribute("aria-label", id === "tplBody" ? "Template body" : id === "emailCommonBody" ? "Body template" : "Final body");
     editor.innerHTML = cleanRichHtml(html || esc(box.value).split(/\n{2,}/).map(previewBlock).join(""));
     box._richHtml = html ? editor.innerHTML : "";

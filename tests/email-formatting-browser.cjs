@@ -82,6 +82,13 @@ async function select(page, id, phrase) {
       assert.ok(requests.some(r => r.op === "update_message" && r.body.bodyRichHtml));
       await page.evaluate(id => window.EmailComposer.openBatch(id), batchId);
       assert.match(await page.locator("#emailOneBody").evaluate(box => box._richHtml), /139, 0, 0/);
+      await select(page, "emailOneBody", "selected phrase");
+      await page.locator("#emailOneBody").locator("..").getByRole("button", { name: "Clear formatting", exact: true }).click();
+      assert.doesNotMatch(await page.locator("#emailOneBody").evaluate(box => box._richHtml), /font-weight|font-style|text-decoration|139, 0, 0/);
+      await page.locator("#emailOneBodyEditor").press("Control+z");
+      assert.match(await page.locator("#emailOneBody").evaluate(box => box._richHtml), /139, 0, 0/, "native Undo restores the selected formatting");
+      await page.locator("#emailOneSubject").click();
+      await page.waitForFunction(() => document.querySelector(".email-rendered").innerHTML.includes("139, 0, 0"));
       await select(page, "emailCommonBody", "common phrase");
       await page.locator("#emailCommonBody").locator("..").getByRole("button", { name: "Bold", exact: true }).click();
       assert.equal(await page.locator("#emailApply").isEnabled(), true, "format-only common changes must enable Apply");
