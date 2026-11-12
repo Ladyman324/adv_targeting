@@ -481,10 +481,11 @@ function identityPresentationRefresh(message, approved, batch, sender, images) {
   };
   const subject = batch.parentBatchId ? message.subject
     : core.renderTemplate(batch.commonSubject, recipient, sender).rendered;
-  const bodyText = core.renderTemplate(batch.commonBodyText, recipient, sender).rendered;
+  const renderedBody = core.renderBody(batch.commonBodyText, batch.commonBodyRichHtml, recipient, sender, images);
+  const bodyText = renderedBody.bodyText;
   return { changed: true, blocked: false, patch: {
     ...presentation, subject, bodyText,
-    bodyHtml: core.plainTextToSafeHtml(bodyText, images),
+    bodyRichHtml: renderedBody.bodyRichHtml, bodyHtml: renderedBody.bodyHtml,
   } };
 }
 
@@ -594,7 +595,7 @@ async function validateBatch(who, batchId, options = {}) {
     // What "Restore approved wording" restores TO. Sent from the server so the
     // client restores the template as published rather than whatever it happens
     // to be holding.
-    approvedText: tpl ? { subject: tpl.subject, bodyText: tpl.bodyText } : null,
+    approvedText: tpl ? { subject: tpl.subject, bodyText: tpl.bodyText, bodyRichHtml: tpl.bodyRichHtml || "" } : null,
     // The chart ids that are actually valid here, so the composer can name them
     // instead of leaving a rep to remember the spelling.
     templateImages: tpl ? (tpl.images || []).map(({ id, name }) => ({ id, name })) : [] };
@@ -1161,7 +1162,7 @@ async function createBatch(who, input) {
     sourceRecipientName: kept.length === 1 ? (kept[0].name || kept[0].email) : "",
     name: input.name || `${template.name} \u2014 ${new Date().toLocaleDateString("en-US")}`,
     templateId: template.id, templateName: template.name, templateVersion: template.version, commonSubject: template.subject,
-    commonBodyText: template.bodyText, attachmentIds: batchAttachmentIds,
+    commonBodyText: template.bodyText, commonBodyRichHtml: template.bodyRichHtml || "", attachmentIds: batchAttachmentIds,
     attachmentSummary: batchDocuments.map(({ id, name, size, contentType, version }) => ({ id, name, size, contentType, version })),
     recipientCount: kept.length, externalCount: kept.filter((r) => core.isExternal(r.email, cfg)).length,
     warningLevel: warning.level, warningMessage: warning.message, signatureHtml,
@@ -1222,8 +1223,7 @@ async function createBatch(who, input) {
       // teammate. Suppression is re-checked on every actual copy.
       teammatesAvailableJson: JSON.stringify((r.teammatesFull || []).slice(0, 25)),
       teammateCcCrdsJson: "[]",
-      subject: subject.rendered, bodyText: body.rendered,
-      bodyHtml: core.plainTextToSafeHtml(body.rendered, template.images || []),
+      subject: subject.rendered, ...core.renderBody(template.bodyText, template.bodyRichHtml, r, profile, template.images || []),
       inlineImages: [...(template.images || []), ...signature.images],
       // Per-recipient: the footer's preference link is signed for THIS address.
       signatureHtml: core.corporateSignature(profile,
@@ -1247,7 +1247,12 @@ async function updateCommon(who, input) {
   const originals = await followUpOriginals(who, batch);
   const subjectTemplate = batch.parentBatchId ? ""
     : String(input.subject == null ? batch.commonSubject : input.subject).slice(0, 500);
-  const bodyTemplate = String(input.bodyText == null ? batch.commonBodyText : input.bodyText).slice(0, core.config().maxBodyChars);
+  const richInput = Object.prototype.hasOwnProperty.call(input, "bodyRichHtml")
+    ? input.bodyRichHtml : (input.bodyText == null ? batch.commonBodyRichHtml : "");
+  const richBody = richInput ? core.normalizeRichBody(richInput) : null;
+  const bodyRichHtml = richBody ? richBody.bodyRichHtml : "";
+  const bodyTemplate = richBody ? richBody.bodyText
+    : String(input.bodyText == null ? batch.commonBodyText : input.bodyText).slice(0, core.config().maxBodyChars);
   const template = await store.getTemplate(batch.templateId);
   const images = (template && template.images) || [];
   /* The sender's own profile, for {{sender_name}} and {{sender_title}}.
@@ -1327,13 +1332,12 @@ ${bodyTemplate}`.matchAll(core.IMAGE_TOKEN)) {
       if (overwrite) patch.subjectOverridden = false;
     }
     if (overwrite || !m.bodyOverridden) {
-      patch.bodyText = core.renderTemplate(bodyTemplate, recipient, sender).rendered;
-      patch.bodyHtml = core.plainTextToSafeHtml(patch.bodyText, images);
+      Object.assign(patch, core.renderBody(bodyTemplate, bodyRichHtml, recipient, sender, images));
       if (overwrite) patch.bodyOverridden = false;
     }
     await store.patchMessage(who.id, batch.id, m.id, patch, m.etag);
   });
-  await store.patchBatch(who.id, batch.id, { commonSubject: subjectTemplate, commonBodyText: bodyTemplate,
+  await store.patchBatch(who.id, batch.id, { commonSubject: subjectTemplate, commonBodyText: bodyTemplate, commonBodyRichHtml: bodyRichHtml,
     commonRevision: revision, status: "editing", reviewedUtc: "" }, batch.etag);
   await store.audit(who.id, batch.id, "common_content_updated",
     { revision, keptOwnText: behind.length, removedTokens: removed,
@@ -1355,14 +1359,19 @@ async function updateMessage(who, input) {
   const tpl = await store.getTemplate(batch.templateId);
   const tplImages = (tpl && tpl.images) || [];
   const sender = (await auth.status(who.id).catch(() => null) || {}).profile || null;
-  if ("bodyText" in input) { patch.bodyText = String(input.bodyText || "").slice(0, core.config().maxBodyChars);
-    patch.bodyHtml = core.plainTextToSafeHtml(patch.bodyText, tplImages); patch.bodyOverridden = true; }
+  if ("bodyText" in input || "bodyRichHtml" in input) {
+    Object.assign(patch, core.renderBody(String(input.bodyText || "").slice(0, core.config().maxBodyChars),
+      input.bodyRichHtml || "", null, null, tplImages));
+    patch.bodyOverridden = true;
+  }
   const mergeRecipient = { name: message.recipientName, firstName: message.greetingName,
     lastName: message.recipientLastName, firm: message.companyName,
     nameFallback: false };
   if (input.resetSubject && !batch.parentBatchId) { patch.subject = core.renderTemplate(batch.commonSubject, mergeRecipient, sender).rendered; patch.subjectOverridden = false; }
-  if (input.resetBody) { patch.bodyText = core.renderTemplate(batch.commonBodyText, mergeRecipient, sender).rendered;
-    patch.bodyHtml = core.plainTextToSafeHtml(patch.bodyText, tplImages); patch.bodyOverridden = false; }
+  if (input.resetBody) {
+    Object.assign(patch, core.renderBody(batch.commonBodyText, batch.commonBodyRichHtml, mergeRecipient, sender, tplImages));
+    patch.bodyOverridden = false;
+  }
   await store.patchMessage(who.id, batch.id, message.id, patch, message.etag);
   await store.audit(who.id, batch.id, "individual_message_updated", { messageId: message.id,
     subjectOverridden: patch.subjectOverridden, bodyOverridden: patch.bodyOverridden });

@@ -114,7 +114,7 @@ async function prepare(who, input, overrides = {}) {
         recipientPolicyVersion: m.recipientPolicyVersion,
         teammateCcJson: JSON.stringify(m.teammateCc || []), teammateCcCrdsJson: JSON.stringify(m.teammateCcCrds || []),
         teammatesAvailableJson: JSON.stringify(m.teammatesAvailable || []),
-        subject: m.subject, bodyText: m.bodyText, bodyHtml: m.bodyHtml, inlineImages: m.inlineImages,
+        subject: m.subject, bodyText: m.bodyText, bodyRichHtml: m.bodyRichHtml || "", bodyHtml: m.bodyHtml, inlineImages: m.inlineImages,
         subjectOverridden: m.subjectOverridden, bodyOverridden: m.bodyOverridden, baseRevision: 1,
         signatureHtml: m.signatureHtml || "",
         attachments: (m.attachments || []).map(a => docs.get(a.id)),

@@ -137,6 +137,7 @@ function batchFromEntity(e) {
     sourceRecipientName: e.sourceRecipientName || "",
     templateId: e.templateId, templateName: e.templateName, templateVersion: Number(e.templateVersion) || 1,
     commonSubject: e.commonSubject || "", commonBodyText: e.commonBodyText || "",
+    commonBodyRichHtml: e.commonBodyRichHtml || "",
     commonRevision: Number(e.commonRevision) || 1,
     attachmentIds: parse(e.attachmentIdsJson, []), attachmentSummary: parse(e.attachmentSummaryJson, []),
     recipientCount: Number(e.recipientCount) || 0, externalCount: Number(e.externalCount) || 0,
@@ -204,6 +205,7 @@ async function createBatch(who, batch) {
     sourceRecipientName: clean(batch.sourceRecipientName, 254),
     templateId: clean(batch.templateId, 80), templateName: clean(batch.templateName, 120), templateVersion: Number(batch.templateVersion) || 1,
     commonSubject: clean(batch.commonSubject, 500), commonBodyText: clean(batch.commonBodyText, 50000),
+    commonBodyRichHtml: clean(batch.commonBodyRichHtml, 30000),
     commonRevision: 1, attachmentIdsJson: json(batch.attachmentIds || []),
     attachmentSummaryJson: json(batch.attachmentSummary || []), recipientCount: batch.recipientCount,
     externalCount: batch.externalCount, warningLevel: batch.warningLevel || "normal",
@@ -242,7 +244,7 @@ const getBatch = async (userId, batchId) => batchFromEntity(await getOptional("b
 
 async function patchBatch(userId, batchId, patch, etag) {
   const entity = { partitionKey: userId, rowKey: batchId, updatedUtc: now() };
-  const strings = ["status", "mode", "name", "commonSubject", "commonBodyText", "warningLevel",
+  const strings = ["status", "mode", "name", "commonSubject", "commonBodyText", "commonBodyRichHtml", "warningLevel",
     "warningMessage", "reviewedUtc", "approvedUtc", "sendNotBeforeUtc", "scheduledForUtc",
     "scheduleState", "scheduleLeaseUntilUtc", "scheduleRetryAfterUtc",
     "scheduleLastErrorCode", "scheduleLastErrorStage", "scheduleLastErrorId",
@@ -292,7 +294,7 @@ function messageFromEntity(e) {
     teammateCcCrds: parse(e.teammateCcCrdsJson, []),
     teammatesAvailable: parse(e.teammatesAvailableJson, []),
     companyName: e.companyName || "", subject: e.subject || "", bodyText: e.bodyText || "",
-    bodyHtml: e.bodyHtml || "", signatureHtml: e.signatureHtml || "",
+    bodyRichHtml: e.bodyRichHtml || "", bodyHtml: e.bodyHtml || "", signatureHtml: e.signatureHtml || "",
     inlineImages: parse(e.inlineImagesJson, []), state: e.state,
     subjectOverridden: !!e.subjectOverridden, bodyOverridden: !!e.bodyOverridden,
     baseRevision: Number(e.baseRevision) || 1, reviewed: !!e.reviewed,
@@ -357,7 +359,7 @@ async function createMessage(userId, batchId, message) {
     teammateCcCrdsJson: clean(message.teammateCcCrdsJson, 2000),
     teammatesAvailableJson: clean(message.teammatesAvailableJson, 8000),
     companyName: clean(message.companyName, 256), subject: clean(message.subject, 500),
-    bodyText: clean(message.bodyText, 50000), bodyHtml: clean(message.bodyHtml, 50000),
+    bodyText: clean(message.bodyText, 50000), bodyRichHtml: clean(message.bodyRichHtml, 30000), bodyHtml: clean(message.bodyHtml, 50000),
     signatureHtml: clean(message.signatureHtml, 50000),
     inlineImagesJson: json(message.inlineImages || []), state: message.state || "editing",
     subjectOverridden: message.subjectOverridden === true, bodyOverridden: message.bodyOverridden === true, baseRevision: message.baseRevision || 1,
@@ -380,7 +382,7 @@ async function listMessages(userId, batchId) {
 
 async function patchMessage(userId, batchId, messageId, patch, etag) {
   const entity = { partitionKey: batchPartition(userId, batchId), rowKey: messageId, updatedUtc: now() };
-  const strings = ["subject", "bodyText", "bodyHtml", "state", "graphMessageId", "graphInternetMessageId",
+  const strings = ["subject", "bodyText", "bodyRichHtml", "bodyHtml", "state", "graphMessageId", "graphInternetMessageId",
     "graphConversationId",
     // The sent message this one is a follow-up to. Carries the Graph id rather
     // than the conversation id because the worker replies to a MESSAGE.
@@ -408,7 +410,7 @@ async function patchMessage(userId, batchId, messageId, patch, etag) {
     "recipientRegistryHash", "recipientRoutingHash",
     "recipientTier", "recipientSource", "recipientPolicyVersion",
     "capacityDay", "plannedSendUtc", "capacityPlanHash"];
-  for (const k of strings) if (k in patch) entity[k] = clean(patch[k], ["bodyText", "bodyHtml"].includes(k) ? 50000 : 2000);
+  for (const k of strings) if (k in patch) entity[k] = clean(patch[k], ["bodyText", "bodyRichHtml", "bodyHtml"].includes(k) ? 50000 : 2000);
   for (const k of ["subjectOverridden", "bodyOverridden", "reviewed"]) if (k in patch) entity[k] = !!patch[k];
   for (const k of ["baseRevision", "attemptCount", "draftAttempts", "sendAttempts",
                    "reconcileAttempts", "sendPosition", "hardBounceCount", "scheduleRevision",
@@ -468,7 +470,7 @@ async function listTemplates() {
   let out = [];
   for await (const e of client.listEntities({ queryOptions: { filter: odata`PartitionKey eq ${"approved"}` } })) {
     if (e.approved !== false) out.push({ id: e.rowKey, name: e.name, subject: e.subject,
-      bodyText: e.bodyText, defaultAttachmentIds: parse(e.defaultAttachmentIdsJson, []),
+      bodyText: e.bodyText, bodyRichHtml: e.bodyRichHtml || "", defaultAttachmentIds: parse(e.defaultAttachmentIdsJson, []),
       requiredDocumentIds: parse(e.requiredDocumentIdsJson, []),
       requiredMaterialFamilyIds: parse(e.requiredMaterialFamilyIdsJson, []),
       images: parse(e.imagesJson, []), documentNumber: e.documentNumber || "",
@@ -529,7 +531,9 @@ async function putTemplate(who, input) {
   const core = require("./email-core");
   const id = safeDocId(input.id || input.name);
   const subject = clean(input.subject, 500);
-  const bodyText = clean(input.bodyText, 30000);
+  const richBody = input.bodyRichHtml ? core.normalizeRichBody(input.bodyRichHtml) : null;
+  const bodyText = richBody ? richBody.bodyText : clean(input.bodyText, 30000);
+  const bodyRichHtml = richBody ? richBody.bodyRichHtml : "";
   const lint = core.lintTemplate({ subject, bodyText, maxBodyChars: core.config().maxBodyChars });
   const existing = await getOptional("templates", "approved", id);
   // existing is null for a template being created, which is the normal case here.
@@ -555,7 +559,7 @@ async function putTemplate(who, input) {
     throw err;
   }
   const entity = { partitionKey: "approved", rowKey: id,
-    name: clean(input.name || id, 256), subject, bodyText,
+    name: clean(input.name || id, 256), subject, bodyText, bodyRichHtml,
     documentNumber: clean(input.documentNumber, 60),
     author: clean(input.author, 120),
     approvalDate: clean(input.approvalDate, 40),

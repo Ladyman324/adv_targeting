@@ -1688,7 +1688,7 @@ function routesHtml() {
   }
 
   const templateFingerprint = (t) => JSON.stringify([t.name, t.documentNumber, t.author,
-    t.approvalDate, t.subject, t.bodyText, t.repNotes,
+    t.approvalDate, t.subject, t.bodyText, t.bodyRichHtml || "", t.repNotes,
     [...(t.requiredMaterialFamilyIds || [])].sort(), [...(t.requiredDocumentIds || [])].sort()]);
   const templateDirty = () => !savedSnapshot
     || templateFingerprint(collectTemplate()) !== savedSnapshot;
@@ -1730,7 +1730,7 @@ function routesHtml() {
    * unresolvedFields() below turns the same list into something an
    * administrator can act on.
    */
-  function mergePreview(text, r) {
+  function mergePreview(text, r, asHtml = false) {
     const values = Object.assign({
       first_name: r.firstName, last_name: r.lastName, company_name: r.companyName,
     }, senderFields());
@@ -1738,7 +1738,7 @@ function routesHtml() {
       (whole, field) => {
         const key = String(field).toLowerCase();
         if (!(key in values)) return whole;      // image tokens, typos: untouched
-        return values[key] ? values[key] : whole;
+        return values[key] ? (asHtml ? esc(values[key]) : values[key]) : whole;
       });
   }
 
@@ -1798,10 +1798,145 @@ function routesHtml() {
     return out.join("");
   }
 
+  // Keep the existing text inputs as the plain-text companion and event
+  // surface. All formatting belongs to the selected range in the visible editor.
+  function cleanRichHtml(html) {
+    const template = document.createElement("template");
+    template.innerHTML = String(html || "");
+    const allowed = new Set(["P", "DIV", "BR", "B", "STRONG", "I", "EM", "U", "SPAN", "A", "UL", "OL", "LI"]);
+    const clean = node => {
+      if (node.nodeType === 3) return document.createTextNode(node.textContent);
+      if (node.nodeType !== 1) return document.createTextNode("");
+      if (["SCRIPT", "STYLE", "IFRAME", "OBJECT", "IMG", "SVG", "MATH"].includes(node.tagName)) return document.createTextNode("");
+      const tag = node.tagName === "FONT" ? "SPAN" : node.tagName;
+      const next = document.createElement(allowed.has(tag) ? tag.toLowerCase() : "span");
+      const color = node.tagName === "FONT" ? node.getAttribute("color") : node.style.color;
+      if (/^(#[a-f0-9]{3}(?:[a-f0-9]{3})?|rgb\(\s*\d{1,3}\s*,\s*\d{1,3}\s*,\s*\d{1,3}\s*\))$/i.test(color || "")) next.style.color = color;
+      for (const [property, pattern] of [["fontWeight", /^(normal|bold|[1-9]00)$/],
+        ["fontStyle", /^(normal|italic)$/], ["textDecoration", /^(none|underline)$/]]) {
+        const value = property === "textDecoration" ? node.style.textDecorationLine || node.style.textDecoration : node.style[property];
+        if (pattern.test(value || "")) next.style[property] = value;
+      }
+      if (tag === "A" && /^(https?:|mailto:)/i.test(node.getAttribute("href") || "")) next.setAttribute("href", node.getAttribute("href"));
+      for (const child of node.childNodes) next.appendChild(clean(child));
+      return next;
+    };
+    const output = document.createElement("div");
+    for (const child of template.content.childNodes) output.appendChild(clean(child));
+    return output.innerHTML;
+  }
+  function richValue(id) {
+    const box = document.getElementById(id);
+    return box && box._richHtml || "";
+  }
+  function wireRichEditor(id, html) {
+    const box = document.getElementById(id);
+    if (!box || box.dataset.richReady) return;
+    box.dataset.richReady = "1";
+    const wrapper = document.createElement("div");
+    wrapper.className = "email-rich-wrap";
+    box.insertAdjacentElement("beforebegin", wrapper);
+    wrapper.appendChild(box);
+    box.hidden = true;
+    const toolbar = document.createElement("div");
+    toolbar.className = "email-rich-toolbar";
+    toolbar.setAttribute("role", "toolbar");
+    toolbar.setAttribute("aria-label", "Text formatting");
+    toolbar.innerHTML = `<button type="button" data-format="bold" aria-label="Bold" title="Bold (Ctrl+B)"><b>B</b></button>
+      <button type="button" data-format="italic" aria-label="Italic" title="Italic (Ctrl+I)"><i>I</i></button>
+      <button type="button" data-format="underline" aria-label="Underline" title="Underline (Ctrl+U)"><u>U</u></button>
+      <label class="email-rich-color" title="Color selected text">Text color<input type="color" value="#333333" aria-label="Text color"></label>
+      <button type="button" data-format="removeFormat" aria-label="Clear formatting" title="Clear formatting on selected text">Clear formatting</button>`;
+    const editor = document.createElement("div");
+    editor.className = "email-rich-editor";
+    editor.id = id + "Editor";
+    editor.contentEditable = box.disabled ? "false" : "true";
+    editor.setAttribute("role", "textbox");
+    editor.setAttribute("aria-multiline", "true");
+    editor.setAttribute("aria-label", id === "tplBody" ? "Template body" : id === "emailCommonBody" ? "Body template" : "Final body");
+    editor.innerHTML = cleanRichHtml(html || esc(box.value).split(/\n{2,}/).map(previewBlock).join(""));
+    box._richHtml = html ? editor.innerHTML : "";
+    if (!box.disabled) wrapper.appendChild(toolbar);
+    wrapper.appendChild(editor);
+    let range = null;
+    const remember = () => {
+      const selection = window.getSelection();
+      if (selection.rangeCount && editor.contains(selection.anchorNode) && editor.contains(selection.focusNode)) range = selection.getRangeAt(0).cloneRange();
+    };
+    const restore = () => {
+      editor.focus();
+      const selection = window.getSelection();
+      if (range && editor.contains(range.commonAncestorContainer)) { selection.removeAllRanges(); selection.addRange(range); }
+    };
+    const text = () => {
+      const copy = document.createElement("div"); copy.innerHTML = editor.innerHTML;
+      copy.querySelectorAll("br").forEach(node => node.replaceWith(document.createTextNode("\n")));
+      copy.querySelectorAll("li").forEach(node => { node.prepend(document.createTextNode("- ")); node.append(document.createTextNode("\n")); });
+      copy.querySelectorAll("p,div,ul,ol").forEach(node => node.append(document.createTextNode("\n\n")));
+      return (copy.textContent || "").replace(/\u00a0/g, " ").replace(/\n{3,}/g, "\n\n").trim();
+    };
+    const sync = () => {
+      box.value = text(); box._richHtml = cleanRichHtml(editor.innerHTML);
+      box.dispatchEvent(new Event("input", { bubbles: true }));
+      remember();
+    };
+    const command = (name, value) => {
+      // Treat a merge field as one unit even when only part was highlighted.
+      if (range && !["insertHTML", "insertText"].includes(name)) {
+        const before = range.cloneRange(); before.selectNodeContents(editor);
+        before.setEnd(range.startContainer, range.startOffset);
+        let start = before.toString().length, end = start + range.toString().length;
+        for (const match of editor.textContent.matchAll(/\{\{[^}]*\}\}/g)) {
+          const first = match.index, last = first + match[0].length;
+          if (start < last && end > first || start === end && start > first && start < last) {
+            start = Math.min(start, first); end = Math.max(end, last);
+          }
+        }
+        const walker = document.createTreeWalker(editor, NodeFilter.SHOW_TEXT);
+        let node, offset = 0, beginning = null;
+        while ((node = walker.nextNode())) {
+          if (!beginning && start <= offset + node.length) beginning = [node, Math.max(0, start - offset)];
+          if (beginning && end <= offset + node.length) {
+            range.setStart(...beginning); range.setEnd(node, Math.max(0, end - offset)); break;
+          }
+          offset += node.length;
+        }
+      }
+      restore();
+      document.execCommand("styleWithCSS", false, true);
+      document.execCommand(name, false, value);
+      sync();
+    };
+    for (const name of ["mouseup", "keyup", "touchend"]) editor.addEventListener(name, remember);
+    editor.addEventListener("input", sync);
+    toolbar.addEventListener("pointerdown", event => {
+      remember();
+      if (event.target.closest("button")) event.preventDefault();
+    });
+    toolbar.addEventListener("click", event => {
+      const button = event.target.closest("[data-format]");
+      if (!button) return;
+      event.preventDefault(); command(button.dataset.format);
+    });
+    toolbar.querySelector('input[type="color"]').addEventListener("input", event => command("foreColor", event.target.value));
+    editor.addEventListener("paste", event => {
+      event.preventDefault(); remember();
+      const data = event.clipboardData;
+      const pasted = data.getData("text/html");
+      command("insertHTML", pasted ? cleanRichHtml(pasted) : esc(data.getData("text/plain")).replace(/\n/g, "<br>"));
+    });
+    editor.addEventListener("drop", event => event.preventDefault());
+    wrapper.addEventListener("focusout", () => {
+      setTimeout(() => { if (box.isConnected && !wrapper.contains(document.activeElement)) box.dispatchEvent(new Event("blur")); }, 0);
+    });
+    box._insertRichText = value => { restore(); command("insertText", value); };
+  }
+
   function previewHtml(tpl, r) {
     const images = tpl.images || [];
     const body = mergePreview(tpl.bodyText, r);
-    const html = esc(body).split(/\n{2,}/).map(previewBlock).join("")
+    const html = (tpl.bodyRichHtml ? cleanRichHtml(mergePreview(tpl.bodyRichHtml, r, true))
+      : esc(body).split(/\n{2,}/).map(previewBlock).join(""))
       .replace(/\{\{\s*image:([a-z0-9-]+)\s*\}\}/gi, (whole, id) => {
         const img = images.find((i) => i.id.toLowerCase() === String(id).toLowerCase());
         return img ? `<span class="email-img-chip">&#128200; ${esc(img.name)}</span>`
@@ -1922,6 +2057,7 @@ function routesHtml() {
         ${t.id ? `<button type="button" class="ask-btn" data-email="tpl-test"
           data-id="${esc(t.id)}" data-name="${esc(t.name)}">Test to me</button>` : ""}
         <button type="button" class="ask-btn" data-email="tpl-back">Back</button></div></div>`;
+    wireRichEditor("tplBody", t.bodyRichHtml);
     for (const id of ["tplSubject", "tplBody"]) {
       const el = document.getElementById(id);
       if (el) el.addEventListener("input", () => { clearTimeout(lintTimer); lintTimer = setTimeout(runLint, 350); });
@@ -1943,7 +2079,7 @@ function routesHtml() {
     const g = (id) => (document.getElementById(id) || {}).value || "";
     return { ...editing, name: g("tplName").trim(), documentNumber: g("tplDoc").trim(),
       author: g("tplAuthor").trim(), approvalDate: g("tplApproved").trim(),
-      subject: g("tplSubject"), bodyText: g("tplBody"), repNotes: g("tplNotes"),
+      subject: g("tplSubject"), bodyText: g("tplBody"), bodyRichHtml: richValue("tplBody"), repNotes: g("tplNotes"),
       requiredMaterialFamilyIds: [...document.querySelectorAll(".tpl-family-req:checked")].map((x) => x.value),
       requiredDocumentIds: [...document.querySelectorAll(".tpl-req:checked")].map((x) => x.value),
       defaultAttachmentIds: [] };
@@ -2301,7 +2437,7 @@ ${t.bodyText}`);
     saving = true; markDirty(true);
     try {
       detail = await api("update_message", { batchId: detail.batch.id, messageId: m.id,
-        subject: subject.value, bodyText: body.value, reviewed: true });
+        subject: subject.value, bodyText: body.value, bodyRichHtml: richValue("emailOneBody"), reviewed: true });
       saving = false; dirty = false;
       composerView();
       return true;
@@ -2421,7 +2557,8 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
     const subject = document.getElementById("emailCommonSubject");
     const body = document.getElementById("emailCommonBody");
     if (!subject || !body || !commonBaseline) return false;
-    return subject.value !== commonBaseline.subject || body.value !== commonBaseline.bodyText;
+    return subject.value !== commonBaseline.subject || body.value !== commonBaseline.bodyText
+      || richValue("emailCommonBody") !== commonBaseline.bodyRichHtml;
   }
 
   function paintApplyState() {
@@ -2460,7 +2597,7 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
     const subject = document.getElementById("emailCommonSubject");
     const body = document.getElementById("emailCommonBody");
     if (!subject || !body) return;
-    commonBaseline = { subject: subject.value, bodyText: body.value };
+    commonBaseline = { subject: subject.value, bodyText: body.value, bodyRichHtml: richValue("emailCommonBody") };
     for (const el of [subject, body]) el.addEventListener("input", paintApplyState);
     paintApplyState();
   }
@@ -2704,6 +2841,8 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
       if (b2 && keepScroll.body) b2.scrollTop = keepScroll.body;
       if (e2 && keepScroll.editor) e2.scrollTop = keepScroll.editor;
     });
+    wireRichEditor("emailCommonBody", b.commonBodyRichHtml);
+    wireRichEditor("emailOneBody", m.bodyRichHtml);
     wireAutoSave();
     markOpened();
     wireCommonApply();
@@ -3457,6 +3596,7 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
       // administrator hand-type a token that must match exactly.
       const box = document.getElementById("tplBody");
       const token = `{{image:${button.dataset.id}}}`;
+      if (box._insertRichText) { box._insertRichText(token); runLint(); return; }
       const at = box.selectionStart == null ? box.value.length : box.selectionStart;
       box.value = `${box.value.slice(0, at)}${token}${box.value.slice(at)}`;
       box.focus();
@@ -3908,7 +4048,7 @@ They stay on your call list and keep their history — this only takes them out 
       try {
         notice("Restoring…");
         detail = await api("update_common", { batchId: detail.batch.id,
-          subject: approved.subject, bodyText: approved.bodyText });
+          subject: approved.subject, bodyText: approved.bodyText, bodyRichHtml: approved.bodyRichHtml || "" });
         composerView();
         notice("Restored to the approved wording.");
       } catch (e) { notice(e.message, true); }
@@ -3934,7 +4074,7 @@ They stay on your call list and keep their history — this only takes them out 
         notice("Applying to everybody…");
         detail = await api("update_common", { batchId: detail.batch.id, overwriteAll: true,
           subject: document.getElementById("emailCommonSubject").value,
-          bodyText: document.getElementById("emailCommonBody").value });
+          bodyText: document.getElementById("emailCommonBody").value, bodyRichHtml: richValue("emailCommonBody") });
         composerView();
         notice(`Applied to all ${detail.messages.length}. ${own.length} individual `
           + `edit${own.length === 1 ? " was" : "s were"} replaced.`);
@@ -3946,7 +4086,7 @@ They stay on your call list and keep their history — this only takes them out 
         notice("Applying common edits…");
         detail = await api("update_common", { batchId: detail.batch.id,
           subject: document.getElementById("emailCommonSubject").value,
-          bodyText: document.getElementById("emailCommonBody").value });
+          bodyText: document.getElementById("emailCommonBody").value, bodyRichHtml: richValue("emailCommonBody") });
         composerView();
         // Naming them is the point. "Applies to non-overridden emails" is true
         // and unreadable; "Chen, Whitfield and Okafor kept their own wording"

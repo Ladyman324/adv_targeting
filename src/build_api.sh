@@ -38,7 +38,8 @@ STAGE_DIR=""
 #   55: email-signature.test.js -- private, optional and immutable sender photos
 #   57: email-company-names.test.js -- approved presentation aliases, not firm identity
 #   61: product-filter helper, desktop, Field, and saved-audience contracts
-EXPECTED_API_TEST_FILE_COUNT=61
+# 64: preserve live release-probe/account-value tests and add email formatting
+EXPECTED_API_TEST_FILE_COUNT=64
 
 cleanup() {
   test -z "$TEMP_ROOT" && return

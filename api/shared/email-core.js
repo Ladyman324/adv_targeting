@@ -373,6 +373,79 @@ function plainTextToSafeHtml(text, images = []) {
   });
 }
 
+// Rich bodies remain separate from legacy plain text. Personalization is
+// escaped before it enters HTML, and charts still resolve only from approved ids.
+const RICH_MAX = 30000;
+function formattingError(message) {
+  return Object.assign(new Error(message), { statusCode: 400 });
+}
+function decodeRichText(value) {
+  const named = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " " };
+  return String(value).replace(/&(#x[0-9a-f]+|#\d+|amp|lt|gt|quot|apos|nbsp);/gi, (whole, key) => {
+    if (key[0] !== "#") return named[key.toLowerCase()] || whole;
+    const n = key[1].toLowerCase() === "x" ? parseInt(key.slice(2), 16) : Number(key.slice(1));
+    return n > 0 && n <= 0x10ffff ? String.fromCodePoint(n) : "";
+  });
+}
+function richText(html) {
+  return decodeRichText(String(html).replace(/<br\s*\/?\s*>/gi, "\n")
+    .replace(/<\/(?:p|div|ul|ol)>/gi, "\n\n").replace(/<li\b[^>]*>/gi, "- ")
+    .replace(/<\/li>/gi, "\n").replace(/<[^>]*>/g, ""))
+    .replace(/\n{3,}/g, "\n\n").trim();
+}
+function normalizeRichBody(html) {
+  if (typeof html !== "string" || html.length > RICH_MAX)
+    throw formattingError("Formatted email bodies must be 30,000 characters or fewer, including formatting.");
+  const safe = sanitizeHtml(html, {
+    allowedTags: ["p", "div", "br", "b", "strong", "i", "em", "u", "span", "a", "ul", "ol", "li"],
+    allowedAttributes: { "*": ["style"], a: ["href"] },
+    allowedSchemes: ["https", "http", "mailto"], allowProtocolRelative: false,
+    allowedStyles: { "*": {
+      color: [/^#[0-9a-f]{3}(?:[0-9a-f]{3})?$/i, /^rgb\(\s*\d{1,3}\s*,\s*\d{1,3}\s*,\s*\d{1,3}\s*\)$/i],
+      "font-weight": [/^(normal|bold|[1-9]00)$/],
+      "font-style": [/^(normal|italic)$/],
+      "text-decoration": [/^(none|underline)$/],
+      "text-decoration-line": [/^(none|underline)$/],
+    } },
+    transformTags: { font: (tag, attrs) => ({ tagName: "span", attribs: { style: "color:" + (attrs.color || "") } }) },
+    disallowedTagsMode: "discard",
+  });
+  const bodyText = richText(safe);
+  if (safe.length > RICH_MAX || bodyText.length > config().maxBodyChars)
+    throw formattingError("This formatted body is too long. Shorten it before saving.");
+  const tokens = value => [...value.matchAll(/\{\{[^}]*\}\}/g)].map(m => m[0]);
+  if (JSON.stringify(tokens(bodyText)) !== JSON.stringify(tokens(safe)))
+    throw formattingError("Keep merge fields and chart placeholders together when formatting them.");
+  return { bodyText, bodyRichHtml: safe };
+}
+function renderBody(bodyText, bodyRichHtml, recipient, sender, images = []) {
+  if (!bodyRichHtml) {
+    const text = recipient ? renderTemplate(bodyText, recipient, sender).rendered : String(bodyText || "");
+    return { bodyText: text, bodyRichHtml: "", bodyHtml: plainTextToSafeHtml(text, images) };
+  }
+  const normalized = normalizeRichBody(bodyRichHtml);
+  const escape = value => String(value || "").replace(/&/g, "&amp;").replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+  let rich = normalized.bodyRichHtml;
+  if (recipient) {
+    const values = mergeValues(recipient, sender);
+    rich = rich.replace(TOKEN, (whole, key) => values[String(key).toLowerCase()] ? escape(values[String(key).toLowerCase()]) : whole);
+  }
+  if (rich.length > RICH_MAX) throw formattingError("The personalized formatted email is too long. Shorten the template.");
+  const byId = new Map((images || []).map(image => [String(image.id).toLowerCase(), image]));
+  let rendered = rich.replace(IMAGE_TOKEN, (whole, id) => {
+    const image = byId.get(String(id).toLowerCase());
+    return image ? `<img src="cid:${escape(image.cid)}" alt="${escape(image.name || id)}" style="max-width:100%;height:auto;display:block;margin:12px 0">` : whole;
+  });
+  // Paragraph/list spacing is explicit so the editor and Outlook agree.
+  rendered = rendered.replace(/<(p|div)>/g, '<$1 style="margin:0 0 12px">')
+    .replace(/<(ul|ol)>/g, '<$1 style="margin:0 0 12px;padding-left:24px">')
+    .replace(/<li>/g, '<li style="margin:0 0 4px">');
+  const bodyHtml = sanitizeEmailHtml(rendered);
+  if (bodyHtml.length > RICH_MAX) throw formattingError("The formatted email is too long. Shorten the body or reduce formatting.");
+  return { bodyText: richText(rich), bodyRichHtml: rich, bodyHtml };
+}
+
 function sanitizeEmailHtml(html) {
   return sanitizeHtml(String(html || ""), {
     // ul/ol/li are here so a template can carry real bullets. Without them a
@@ -393,6 +466,9 @@ function sanitizeEmailHtml(html) {
         "font-family": [/^[a-z0-9 ,.'"-]+$/i],
         "font-size": [/^\d+(\.\d+)?(px|pt|em|rem|%)$/],
         "font-weight": [/^(normal|bold|[1-9]00)$/],
+        "font-style": [/^(normal|italic)$/],
+        "text-decoration": [/^(none|underline)$/],
+      "text-decoration-line": [/^(none|underline)$/],
         "line-height": [/^[0-9.]+(px|em|%)?$/],
         "mso-line-height-rule": [/^exactly$/],
         margin: [/^(-?\d+(\.\d+)?(px|pt|em|rem|%)?\s*){1,4}$/], "margin-top": [/^(-?\d+(\.\d+)?(px|pt|em|rem|%)?\s*){1,4}$/],
@@ -745,7 +821,7 @@ module.exports = {
   // undefined and every template save was rejected for referencing an image
   // called "undefined". Templates with no charts at all failed too.
   ABSOLUTE_BATCH_STOP, BUILTIN_TEMPLATES, ALLOWED_FIELDS, IMAGE_TOKEN, config, splitName,
-  mergeValues, renderTemplate, plainTextToSafeHtml, sanitizeEmailHtml, extraRecipients,
+  mergeValues, renderTemplate, plainTextToSafeHtml, sanitizeEmailHtml, normalizeRichBody, renderBody, extraRecipients,
   corporateSignature, validEmail, isExternal, guardrail, lintTemplate,
   passcodeRequired, passcodeMatches, archiveFooter, complianceBcc, FORESIDE_DEFAULT, interleaveByDomain, campaignHealth, directSendBlockedBy,
   internalRecipientAllowed

@@ -860,3 +860,22 @@
 .signature-crop-zoom input { width:180px; max-width:75%; }
 .signature-crop-preview { background:#fff; padding:10px; border:1px solid #ddd; border-radius:4px; overflow:auto; }
 .signature-crop .set-btn { margin:6px 6px 0 0; }
+
+/* Range formatting is shared by the common, individual and template editors. */
+.email-rich-wrap { min-width: 0; margin-top: 5px; }
+.email-rich-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 5px; padding: 6px; border: 1px solid #b7c0cc; border-bottom: 0; border-radius: 5px 5px 0 0; background: #f3f5f7; color: #202b38; }
+.email-rich-toolbar button { padding: 5px 9px; min-width: 32px; min-height: 32px; border: 1px solid #b7c0cc; border-radius: 4px; background: white; color: #202b38; font: inherit; cursor: pointer; }
+.email-rich-toolbar button:focus-visible, .email-rich-editor:focus-visible { outline: 2px solid #326a9a; outline-offset: 1px; }
+.email-rich-color { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; margin: 0; }
+.email-rich-color input[type=color] { width: 32px; height: 30px; padding: 2px; cursor: pointer; }
+.email-rich-editor { min-height: 210px; max-height: 65vh; overflow: auto; border: 1px solid #b7c0cc; border-radius: 0 0 5px 5px; padding: 12px; background: white; color: #333; font: 14px/1.5 Arial,sans-serif; overflow-wrap: anywhere; white-space: pre-wrap; }
+.email-rich-editor p, .email-rich-editor div { margin: 0 0 12px; }
+.email-rich-editor ul, .email-rich-editor ol { margin: 0 0 12px; padding-left: 24px; }
+.email-rich-editor li { margin: 0 0 4px; }
+.email-rich-editor[contenteditable=false] { background: #f6f7f8; }
+.email-rich-wrap textarea[hidden] { display: none; }
+@media (max-width: 600px) { .email-rich-toolbar button { min-height: 40px; } .email-rich-editor { min-height: 180px; font-size: 16px; } }
+
+/* On phones the body is the scroller. Let the stacked grid keep its content
+   height so the sticky delivery footer cannot sit over editor controls. */
+@media (max-width: 760px) { .email-body > .email-grid { flex: 0 0 auto; } }
