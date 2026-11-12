@@ -39,7 +39,8 @@ async function saveIndividual(page) {
       const page = await context.newPage(), errors = [], requests = [];
       page.on("pageerror", e => errors.push(e.message));
       let template = { id: "formatting", name: "Formatting", subject: "Example", bodyText: "Hi {{first_name}},\n\nThe common phrase stays here.",
-        bodyRichHtml: "", images: [], requiredDocumentIds: [], requiredMaterialFamilyIds: [], published: true, version: 1 };
+        bodyRichHtml: core.normalizeRichBody('<p>Hi {{first_name}},</p><p>The <span style="color:#006699">common phrase</span> stays here.</p>').bodyRichHtml,
+        documentNumber: "", author: "", approvalDate: "", repNotes: "", images: [], requiredDocumentIds: [], requiredMaterialFamilyIds: [], published: true, version: 1 };
       let data = { batch: { id: batchId, name: "Formatting check", templateId: template.id, status: "editing", mode: "", commonSubject: "Example",
         commonBodyText: template.bodyText, commonBodyRichHtml: "", attachmentIds: [], recipientCount: 1, commonRevision: 1, graphMailbox: "rep@example.test" },
         messages: [{ id: "m1", recipientName: "Dana Whitfield", recipientEmail: "dana@example.test", greetingName: "Dana", state: "editing", subject: "Example",
@@ -107,6 +108,7 @@ async function saveIndividual(page) {
       await page.evaluate(() => window.EmailComposer.openAdmin("templates"));
       await page.locator('[data-email="tpl-edit"]').first().click();
       await page.locator("#tplBodyEditor").waitFor();
+      assert.equal(await page.locator("#tplSave").isDisabled(), true, "opening a formatted template must not mark it unsaved");
       await select(page, "tplBody", "first_name");
       await page.locator("#tplBody").locator("..").getByRole("button", { name: "Bold", exact: true }).click();
       const merged = await page.locator("#tplBody").evaluate(box => box._richHtml);

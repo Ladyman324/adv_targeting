@@ -1688,7 +1688,7 @@ function routesHtml() {
   }
 
   const templateFingerprint = (t) => JSON.stringify([t.name, t.documentNumber, t.author,
-    t.approvalDate, t.subject, t.bodyText, t.bodyRichHtml || "", t.repNotes,
+    t.approvalDate, t.subject, t.bodyText, cleanRichHtml(t.bodyRichHtml || ""), t.repNotes,
     [...(t.requiredMaterialFamilyIds || [])].sort(), [...(t.requiredDocumentIds || [])].sort()]);
   const templateDirty = () => !savedSnapshot
     || templateFingerprint(collectTemplate()) !== savedSnapshot;
