@@ -1817,7 +1817,9 @@ function routesHtml() {
         const value = property === "textDecoration" ? node.style.textDecorationLine || node.style.textDecoration : node.style[property];
         if (pattern.test(value || "")) next.style[property] = value;
       }
-      if (tag === "A" && /^(https?:|mailto:)/i.test(node.getAttribute("href") || "")) next.setAttribute("href", node.getAttribute("href"));
+      const href = node.getAttribute("href") || "";
+      const scheme = href.split(":", 1)[0].toLowerCase();
+      if (tag === "A" && ["http", "https", "mailto"].includes(scheme)) next.setAttribute("href", href);
       for (const child of node.childNodes) next.appendChild(clean(child));
       return next;
     };
