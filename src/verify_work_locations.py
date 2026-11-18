@@ -22,10 +22,18 @@ def main() -> None:
                     "advisor_crd", "firm_crd", "addr_key", "uncertain"
                 ]].itertuples(index=False, name=None)}
     work = pd.read_parquet(INTERIM / "contact_work_branches.parquet")
-    source = {(str(a), str(f)): (str(state), str(kind))
-              for a, f, state, kind in work[[
-                  "advisor_crd", "firm_crd", "branch_state", "location_source"
-              ]].itertuples(index=False, name=None)}
+    source = {}
+    for row in work.itertuples(index=False):
+        pair = (str(row.advisor_crd), str(row.firm_crd))
+        street = row.branch_street1
+        suite = row.branch_street2
+        if isinstance(suite, str) and suite.strip() and suite.strip().lower() != "none":
+            street = f"{street}, {suite.strip()}"
+        # The placement key identifies the office using line one. The pin
+        # displays both street lines, so also check its full display address.
+        display_key = (f"{street.title().strip().upper()}|"
+                       f"{row.branch_city.title().strip().upper()}|{str(row.branch_postal)[:5]}")
+        source[pair] = (row.branch_state, row.location_source, row.addr_key, display_key)
     actual = collections.defaultdict(list)
     uncertain = 0
     for path in sorted(WEB.glob("pins_??.json")):
@@ -44,9 +52,10 @@ def main() -> None:
     duplicate = [pair for pair, pins in actual.items() if len(pins) != 1]
     wrong_key = [pair for pair, pins in actual.items()
                  if pair in source and pair in expected
-                 and pins[0][1] != expected[pair][0]]
+                 and (source[pair][2] != expected[pair][0]
+                      or pins[0][1] != source[pair][3])]
     wrong_source = [
-        pair for pair, (state, kind) in source.items()
+        pair for pair, (state, kind, _, _) in source.items()
         if pair not in actual or actual[pair][0][0] != state
         or actual[pair][0][3] != {"firm_roster": 1, "ACT": 2}[kind]
         or actual[pair][0][2]]
