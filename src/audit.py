@@ -3759,7 +3759,8 @@ def _unconfirmed_actions():
     # composer. Raw mailto is governed separately as an intentional escape hatch.
     composer_blocks_review = (
         "filter((r) => r && !r.unconfirmed)" in email and
-        "cannot use the controlled composer until the CRD link is resolved" in email)
+        "savedListExclusions = " in email and
+        "if (!recipients.length)" in email)
     raw_mailto_exists = "mailto:" in app and "mailto:" in field
     no_phone = 'const href = unconfirmed ? "" : Dial.telHref' in app
     no_queue = ("confirm who this is before adding them to a call list"

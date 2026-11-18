@@ -2270,13 +2270,16 @@ window.AdvisorEmailData = {
     catch {
       throw new Error("The saved list could not be refreshed. Please click Email list again to retry. No recipients have been excluded.");
     }
-    const out = Dial.state.items.filter((it) => Dial.emailRouteStatus(it).ok)
-      .map((it) => ({ ...it, firstName: greetingFor(it.crd),
+    const routes = Dial.state.items.map((item) => ({ item, status: Dial.emailRouteStatus(item) }));
+    const out = routes.filter(({ status }) => status.ok)
+      .map(({ item: it }) => ({ ...it, firstName: greetingFor(it.crd),
         materialStrategies: materialStrategiesFor(it.crd),
         identityLabel: Dial.identityTierLabel(it.contactTier, it.contactSource),
         teammates: teammateEmails(it.crd), teammatesFull: teammatesOf(it.crd) }));
     out.eligibilitySummary = { selected: Dial.state.items.length, included: out.length,
-      excluded: Dial.state.items.length - out.length };
+      excluded: Dial.state.items.length - out.length,
+      excludedContacts: routes.filter(({ status }) => !status.ok).map(({ item, status }) =>
+        ({ crd: item.crd, name: item.name, email: item.email, reasonCode: status.reason })) };
     out.sourceList = { id: Dial.state.listId, name: Dial.state.listName };
     return out;
   },

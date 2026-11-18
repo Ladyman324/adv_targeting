@@ -118,7 +118,7 @@ test("review tier is blocked from controlled actions but not raw mailto", () => 
   const field = source("field.js");
   const dial = source("dial.js");
   assert.match(desk, /return !snap\.emailConfirmed \? null/);
-  assert.match(desk, /filter\(\(it\) => Dial\.emailRouteStatus\(it\)\.ok\)/);
+  assert.match(desk, /status: Dial\.emailRouteStatus\(item\)/);
   assert.match(field, /const unconfirmed = r\[COL\.tier\] === "review"/);
   assert.match(field, /const mail = r\[COL\.email\] && emailConfirmed/);
   assert.match(field, /const queueBtn = dnc \|\| unconfirmed/);
@@ -129,8 +129,8 @@ test("review tier is blocked from controlled actions but not raw mailto", () => 
 test("the email whitelist cannot erase and then use an unconfirmed identity", () => {
   const email = source("email.js");
   assert.match(email, /filter\(\(r\) => r && !r\.unconfirmed\)/);
-  assert.match(email, /cannot use the controlled composer until the CRD link is resolved/);
-  assert.match(email, /if \(!recipients\.length\) return/);
+  assert.match(email, /savedListExclusions = /);
+  assert.match(email, /if \(!recipients\.length\) \{/);
 });
 
 test("teammate hints carry CRDs, tier, and source for server authorization", () => {

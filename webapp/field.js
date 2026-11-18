@@ -736,9 +736,13 @@ window.AdvisorEmailData = {
              teammates: mates.map((m) => m.email), teammatesFull: mates };
   },
   list: async () => {
-    const out = [];
+    const out = [], excludedContacts = [];
     for (const it of Dial.state.items) {
-      if (it.emailConfirmed !== true) continue;
+      if (it.emailConfirmed !== true) {
+        excludedContacts.push({ crd: it.crd, name: it.name, email: it.email,
+          reasonCode: it.email ? "identity" : "email" });
+        continue;
+      }
       const row = rowByCrd(String(it.crd));
       const mates = await teammatesWithEmail(
         String(it.crd), row ? row[COL.state] : it.state, row ? row[COL.team_key] : "");
@@ -747,7 +751,7 @@ window.AdvisorEmailData = {
                  teammates: mates.map((m) => m.email), teammatesFull: mates });
     }
     out.eligibilitySummary = { selected: Dial.state.items.length, included: out.length,
-      excluded: Dial.state.items.length - out.length };
+      excluded: excludedContacts.length, excludedContacts };
     out.sourceList = { id: Dial.state.listId, name: Dial.state.listName };
     return out;
   },

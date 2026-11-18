@@ -209,15 +209,13 @@ async function catalog(who, opts) {
 async function dailyLimitFor(userId, cfg, st = store) {
   const override = typeof st.getDailyCap === "function"
     ? await st.getDailyCap(userId) : null;
-  return Number.isInteger(override) && override >= cfg.dailyExternalLimit
-    && override <= 300 ? override : cfg.dailyExternalLimit;
+  return core.effectiveMailboxSetting(cfg.dailyExternalLimit, override);
 }
 
 async function mailboxIntervalFor(userId, cfg, st = store) {
   const override = typeof st.getMailboxInterval === "function"
     ? await st.getMailboxInterval(userId) : null;
-  return Number.isInteger(override) && override >= cfg.mailboxIntervalSeconds
-    && override <= 300 ? override : cfg.mailboxIntervalSeconds;
+  return core.effectiveMailboxSetting(cfg.mailboxIntervalSeconds, override);
 }
 
 function capacityEntries(messages, cfg) {

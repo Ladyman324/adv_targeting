@@ -141,15 +141,18 @@ for (const limit of [200, 300]) test(`a ${limit}-recipient override does not sto
   assert.equal(ordinary.deliveryPlan.days[0].messageCount, 25);
 });
 
-test("administrators can save a 300-person cap, but 301 and non-admin changes are refused", async () => {
+test("manual mailbox limits display the current minimums and accept only authorized values", async () => {
   const handler = require("../email/index");
   const store = require("../shared/email-store");
   const saved = Object.fromEntries(["listConnections", "listDailyCaps", "listMailboxIntervals", "setDailyCap"]
     .map((key) => [key, store[key]]));
   const writes = [];
-  store.listConnections = async () => [{ userId: "rep", mailbox: "rep@eicatlanta.com" }];
-  store.listDailyCaps = async () => [];
-  store.listMailboxIntervals = async () => [];
+  store.listConnections = async () => [
+    { userId: "rep", mailbox: "rep@eicatlanta.com" },
+    { userId: "custom", mailbox: "sales@eicatlanta.com" },
+  ];
+  store.listDailyCaps = async () => [{ userId: "rep", limit: 30 }, { userId: "custom", limit: 90 }];
+  store.listMailboxIntervals = async () => [{ userId: "rep", seconds: 5 }, { userId: "custom", seconds: 25 }];
   store.setDailyCap = async (_who, userId, limit) => {
     writes.push({ userId, limit }); return { userId, limit };
   };
@@ -161,15 +164,41 @@ test("administrators can save a 300-person cap, but 301 and non-admin changes ar
       headers: { "x-ms-client-principal": principal } });
     return { status: context.res.status, body: JSON.parse(context.res.body) };
   }
+  const defaults = { EMAIL_EXTERNAL_DAILY_LIMIT: "40", EMAIL_MAILBOX_INTERVAL_SECONDS: "10" };
+  const priorEnv = Object.fromEntries(Object.keys(defaults).map((key) => [key, process.env[key]]));
+  Object.assign(process.env, defaults);
   try {
     const settings = await request("GET", "daily_caps");
     assert.equal(settings.status, 200);
     assert.equal(settings.body.maxLimit, 300);
+    assert.equal(settings.body.defaultLimit, 40);
+    assert.equal(settings.body.defaultIntervalSeconds, 10);
+    const [rep, custom] = settings.body.reps;
+    assert.equal(rep.limit, 40);
+    assert.equal(rep.intervalSeconds, 10);
+    assert.equal(rep.override, null);
+    assert.equal(rep.intervalOverride, null);
+    assert.equal(custom.limit, 90);
+    assert.equal(custom.intervalSeconds, 25);
+    assert.equal(custom.override.limit, 90);
+    assert.equal(custom.intervalOverride.seconds, 25);
+    process.env.EMAIL_EXTERNAL_DAILY_LIMIT = "60";
+    const updated = await request("GET", "daily_caps");
+    assert.equal(updated.body.defaultLimit, 60);
+    assert.equal(updated.body.reps[0].limit, 60);
+    assert.equal(updated.body.reps[1].limit, 90);
+    assert.equal((await request("POST", "set_daily_cap", { userId: "rep", limit: 59 })).status, 400);
     assert.equal((await request("POST", "set_daily_cap", { userId: "rep", limit: 300 })).status, 200);
     assert.equal((await request("POST", "set_daily_cap", { userId: "rep", limit: 301 })).status, 400);
     assert.equal((await request("POST", "set_daily_cap", { userId: "rep", limit: 300 }, false)).status, 403);
     assert.deepEqual(writes, [{ userId: "rep", limit: 300 }]);
-  } finally { Object.assign(store, saved); }
+  } finally {
+    Object.assign(store, saved);
+    for (const [key, value] of Object.entries(priorEnv)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
 });
 
 test("Settings returns configured colleagues to a signed-in user without loading the email catalog", async () => {

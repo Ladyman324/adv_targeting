@@ -87,8 +87,9 @@ test("the composer preselects removable materials and previews wording before ge
 test("mixed material periods require an explicit pre-generation choice and save held contacts", () => {
   assert.match(email, /data-material-choice="latest"/);
   assert.match(email, /data-material-choice="newer"/);
-  assert.match(email, /api\("preview_materials", \{ recipients: kept, materialFamilyIds \}\)/);
-  assert.match(email, /saveMaterialHoldList\(held, kept\)/);
+  assert.match(email, /id="emailNewerOnly"/);
+  assert.match(email, /api\("preview_materials", \{ recipients: eligible, materialFamilyIds: inputs.materialFamilyIds \}\)/);
+  assert.match(email, /saveMaterialHoldList\(held, review.eligible, inputs.sourceListName\)/);
   assert.match(email, /expectedMaterialSignatures/);
   assert.match(service, /material_review_changed/);
   assert.match(handler, /op === "preview_materials"/);

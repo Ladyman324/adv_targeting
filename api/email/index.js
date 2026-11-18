@@ -65,15 +65,17 @@ module.exports = async function (context, req) {
         const byUser = new Map(overrides.map((entry) => [entry.userId, entry]));
         const intervalByUser = new Map(intervals.map((entry) => [entry.userId, entry]));
         const cfg = emailCore.config(), defaultLimit = cfg.dailyExternalLimit;
-        return ok(context, { defaultLimit, maxLimit: 300,
-          defaultIntervalSeconds: cfg.mailboxIntervalSeconds, maxIntervalSeconds: 300,
-          reps: connections.map((entry) => ({
-            ...entry, limit: (byUser.get(entry.userId) || {}).limit || defaultLimit,
-            override: byUser.get(entry.userId) || null,
-            intervalSeconds: (intervalByUser.get(entry.userId) || {}).seconds
-              || cfg.mailboxIntervalSeconds,
-            intervalOverride: intervalByUser.get(entry.userId) || null,
-          })).sort((a, b) => a.mailbox.localeCompare(b.mailbox)) });
+        const defaultIntervalSeconds = cfg.mailboxIntervalSeconds;
+        const reps = connections.map((entry) => {
+          const cap = byUser.get(entry.userId);
+          const pacing = intervalByUser.get(entry.userId);
+          const limit = emailCore.effectiveMailboxSetting(defaultLimit, cap?.limit);
+          const intervalSeconds = emailCore.effectiveMailboxSetting(defaultIntervalSeconds, pacing?.seconds);
+          return { ...entry, limit, intervalSeconds,
+            override: limit > defaultLimit ? cap : null,
+            intervalOverride: intervalSeconds > defaultIntervalSeconds ? pacing : null };
+        }).sort((a, b) => a.mailbox.localeCompare(b.mailbox));
+        return ok(context, { defaultLimit, maxLimit: 300, defaultIntervalSeconds, maxIntervalSeconds: 300, reps });
       }
       if (op === "material_routes") {
         if (!isAdmin(who)) throw service.httpError(403, "EmailAdministrator role is required.");

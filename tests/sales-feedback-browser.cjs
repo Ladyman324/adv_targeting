@@ -55,6 +55,17 @@ const profile = { displayName: "Example Rep", mail: "rep@example.test", jobTitle
       await page.getByText("Example Rep, CIMA\u00ae", { exact:true }).waitFor();
       await page.locator(".signature-outlook-help summary").click();
       assert.match(await page.locator(".signature-outlook-help").innerText(), /insert the saved file/);
+      const aligned = await page.locator(".signature-photo-controls").evaluate((controls) => {
+        const boxes = [...controls.querySelectorAll(".set-btn")].map((control) => {
+          const rect = control.getBoundingClientRect();
+          const text = document.createRange();
+          text.selectNodeContents(control);
+          const label = text.getBoundingClientRect();
+          return { height: rect.height, centered: Math.abs((rect.top + rect.bottom) - (label.top + label.bottom)) < 3 };
+        });
+        return boxes.every((box) => box.centered && box.height === boxes[0].height);
+      });
+      assert.equal(aligned, true, "photo actions use the same height and vertical label alignment");
       const pending = page.waitForEvent("download");
       await page.getByRole("link",{ name:"Download photo for Outlook" }).click();
       const download = await pending;

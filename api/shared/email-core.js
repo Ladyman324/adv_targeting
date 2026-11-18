@@ -88,6 +88,11 @@ function internalRecipientAllowed(email, cfg) {
   return !!domain && list.has(domain);
 }
 
+function effectiveMailboxSetting(defaultValue, override) {
+  return Number.isInteger(override) && override >= defaultValue && override <= 300
+    ? override : defaultValue;
+}
+
 function config() {
   // EMAIL_EXTERNAL_24H_LIMIT remains a compatibility alias during the staged
   // migration. Once calendar capacity is enabled it is a daily Eastern limit,
@@ -832,5 +837,5 @@ module.exports = {
   mergeValues, renderTemplate, plainTextToSafeHtml, sanitizeEmailHtml, normalizeRichBody, renderBody, extraRecipients,
   corporateSignature, signatureDisplayName, validEmail, isExternal, guardrail, lintTemplate,
   passcodeRequired, passcodeMatches, archiveFooter, complianceBcc, FORESIDE_DEFAULT, interleaveByDomain, campaignHealth, directSendBlockedBy,
-  internalRecipientAllowed
+  internalRecipientAllowed, effectiveMailboxSetting
 };

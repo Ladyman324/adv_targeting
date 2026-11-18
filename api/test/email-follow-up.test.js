@@ -248,39 +248,59 @@ test("recipient precheck reports name exclusions without creating drafts and doe
   await assert.rejects(() => svc.checkRecipients(WHO, { recipients }), /Storage down/);
 });
 
-test("batch preparation requires explicit consent before omitting rejected contacts", async () => {
+test("preparation reviews exclusions before writing, rechecks changed results, and fails closed", async () => {
   const vm = require("node:vm");
   const ui = fs.readFileSync(path.resolve(__dirname, "../../webapp/email.js"), "utf8");
-  const start = ui.indexOf('    if (action === "create")');
-  const end = ui.indexOf('    if (action === "pick")', start);
-  const calls = [];
-  const rows = [{ crd: "GOOD", email: "good@example.com" }, { crd: "BAD", email: "bad@example.com" }];
+  const excerpt = (start, end) => ui.slice(ui.indexOf(start), ui.indexOf(end));
+  const calls = [], notices = [];
+  const inputs = {
+    recipients: [{ crd: "GOOD", email: "good@example.com" }, { crd: "BAD", email: "bad@example.com" }],
+    materialFamilyIds: [], sourceListName: "Rotation",
+  };
+  const setup = {}, button = { isConnected: true, closest: () => setup };
+  let reject = true, outage = false;
   const ctx = vm.createContext({
-    action: "create", button: {}, keptRecipients: () => rows, domainGroups: () => [],
-    confirm: () => false, notice: () => {}, sourceList: null,
-    document: { querySelectorAll: () => [], getElementById: () => ({ value: "" }) },
+    preparationReview: null, preparationBusy: false, preparationWriting: false,
+    savedListExclusions: [{ name: "Saved contact", reasonCode: "stale" }],
+    preparationInputs: () => inputs, button,
+    notice: (message) => notices.push(message),
+    document: { getElementById: () => ({ hidden: false }), querySelector: () => ({ focus() {} }) },
     requestCapacityPlan: async () => {}, composerView: () => {},
+    saveMaterialHoldList: async () => "",
     api: async (op, input) => {
       calls.push([op, input]);
-      if (op === "check_recipients") return { eligibleCount: 1,
-        excluded: [{ crd: "BAD", name: "Bad Advisor", email: "bad@example.com", reason: "No safe greeting" }] };
+      if (outage) throw new Error("Storage unavailable");
+      if (op === "check_recipients") return { excluded: reject
+        ? [{ crd: "BAD", name: "Bad Advisor", reason: "No usable greeting" }] : [] };
       return {};
     },
   });
-  const execute = () => vm.runInContext("(async()=>{" + ui.slice(start, end) + "})()", ctx);
-  await execute();
+  vm.runInContext([
+    excerpt("  async function checkPreparation(", "  function showPreparationReview("),
+    excerpt("  async function prepareEmail(", "  function setupView("),
+    "function showPreparationReview(review) { preparationReview = review; }",
+    "function clearPreparationReview() { preparationReview = null; }",
+  ].join("\n"), ctx);
+  const run = (confirmed) => vm.runInContext("prepareEmail(button, " + confirmed + ")", ctx);
+  await run(false);
   assert.deepEqual(calls.map(([op]) => op), ["check_recipients"]);
-  assert.equal(ctx.button.disabled, false);
-  calls.length = 0;
-  ctx.confirm = () => true;
-  await execute();
-  assert.deepEqual(calls.map(([op]) => op), ["check_recipients", "create_batch"]);
-  assert.equal(calls[1][1].recipients.length, 1);
-  assert.equal(calls[1][1].recipients[0].crd, "GOOD");
-  calls.length = 0;
-  ctx.api = async () => { throw new Error("Storage unavailable"); };
-  await execute();
-  assert.deepEqual(calls, [], "an outage cannot continue into creation");
+  assert.equal(ctx.preparationReview.selected, 3);
+  assert.equal(ctx.preparationReview.blocked.length, 2);
+  reject = false;
+  await run(true);
+  assert.deepEqual(calls.map(([op]) => op), ["check_recipients", "check_recipients"]);
+  assert.equal(ctx.preparationReview.eligible.length, 2);
+  assert.match(notices.at(-1), /results changed/);
+  reject = true;
+  await run(false);
+  await run(true);
+  assert.deepEqual(Array.from(calls.at(-1)[1].recipients, (row) => row.crd), ["GOOD"]);
+  assert.equal(calls.at(-1)[0], "create_batch");
+  outage = true;
+  await run(true);
+  assert.equal(calls.at(-1)[0], "check_recipients");
+  assert.equal(ctx.preparationReview, null);
+  assert.equal(button.disabled, false);
 });
 
 function editingFixture(followUp = true) {

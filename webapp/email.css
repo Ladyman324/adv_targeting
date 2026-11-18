@@ -336,7 +336,6 @@
 .email-domains{margin:14px 0 0;padding:12px;border:1px solid var(--hair);border-radius:10px}
 .email-domains legend{padding:0 6px;font-size:12px;color:var(--muted)}
 .email-domain-acts{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:4px 0 10px}
-.email-domain-warn{font-size:11.5px;color:var(--warn)}
 .email-domain-list{list-style:none;margin:0;padding:0;max-height:44vh;overflow:auto}
 .email-domain-list>li{border-top:1px solid var(--hair)}
 .email-domain-list>li:first-child{border-top:0}
@@ -819,6 +818,9 @@
 .email-followup-doc-list>b{font-size:11px;color:var(--muted)}
 .email-followup-doc-list label{display:flex;align-items:center;gap:8px}
 .email-material-review{margin:15px 0;padding:14px;border:1px solid var(--warn);border-radius:9px;background:var(--panel)}
+.email-preparation-review{border-color:var(--hair);overflow-wrap:anywhere}
+.email-preparation-review summary{font-weight:700}
+.email-preparation-review li+li{margin-top:6px}
 .email-material-review h4{margin:0 0 5px;font-size:13px}
 .email-material-review p{margin:6px 0;font-size:12px}
 .email-material-review-groups{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:6px;margin:10px 0}
@@ -845,7 +847,8 @@
 .email-followup .email-preview{margin-top:16px;padding:16px;border:1px solid var(--border,#d7dde5);border-radius:10px}
 .signature-photo-toggle { display:flex; align-items:center; gap:8px; margin-top:10px; }
 .signature-photo-controls { display:flex; align-items:center; gap:12px; margin-top:10px; }
-.signature-photo-controls .set-btn { margin:0 6px 5px 0; }
+.signature-photo-controls .set-btn { display:inline-flex; align-items:center; justify-content:center;
+  box-sizing:border-box; vertical-align:middle; margin:0 6px 5px 0; }
 .signature-photo-thumbnail { width:48px; max-height:72px; object-fit:contain; border-radius:4px; }
 .signature-preview { margin-top:12px; font-size:12px; }
 .signature-preview summary { cursor:pointer; color:var(--accent, #286c9b); }
@@ -880,7 +883,7 @@
    height so the sticky delivery footer cannot sit over editor controls. */
 @media (max-width: 760px) { .email-body > .email-grid { flex: 0 0 auto; } }
 
-.signature-photo-controls a.set-btn { display:inline-block; text-decoration:none; }
+.signature-photo-controls a.set-btn { text-decoration:none; }
 .signature-outlook-help { margin-top:12px; font-size:12px; }
 .signature-outlook-help summary { cursor:pointer; }
 [data-signature-designation] { display:block; max-width:100%; margin-top:6px; }

@@ -7,6 +7,10 @@
   let sourceList = null;
   let materialReviewSnapshot = "";
   let materialHoldListId = "";
+  let savedListExclusions = [];
+  let preparationReview = null;
+  let preparationBusy = false;
+  let preparationWriting = false;
   // Addresses the rep has excluded on the setup screen. A Set of lowercase
   // addresses rather than an index, so it survives the list being re-sorted or
   // re-grouped underneath it.
@@ -793,7 +797,6 @@
       ${groups.length > 1 ? `<p class="email-domain-acts">
         <button type="button" class="email-small" data-email="dom-all">Include all</button>
         <button type="button" class="email-small" data-email="dom-none">Exclude all</button>
-        <span class="email-domain-warn">${groups.length} different domains in this list.</span>
       </p>` : ""}
       <ul class="email-domain-list">${groups.map((g) => {
         const state = g.kept === g.people.length ? "all" : g.kept === 0 ? "none" : "some";
@@ -1003,7 +1006,8 @@
     });
   }
 
-  function showMaterialReview(preview, key, action = "create") {
+  function showFollowUpMaterialReview(preview, key) {
+    const action = "follow-up-create";
     const panel = document.getElementById("emailMaterialReview");
     if (!panel) return;
     materialReviewSnapshot = key;
@@ -1029,7 +1033,7 @@
         ${preview.olderCount ? '<button type="button" class="ask-btn" data-email="' + esc(action) + '" data-material-choice="newer">Use only newer-period versions; save others to a list</button>' : ""}
         <button type="button" class="ask-btn ghost" data-email="material-review-cancel">Change attachments</button>
       </div>
-      <p class="email-fine">Any held recipients are saved to your Lists before the sendable batch is generated. Nothing is sent at this step.</p>`;
+      <p class="email-fine">Recipients waiting for material are saved to Lists when you prepare the follow-up.</p>`;
     panel.scrollIntoView({ block: "nearest" });
   }
 
@@ -1059,8 +1063,182 @@
   }
 
 
+  function preparationInputs() {
+    const value = (id) => document.getElementById(id)?.value || "";
+    const checked = (selector) => [...document.querySelectorAll(selector)].map((box) => box.value);
+    return { recipients: keptRecipients(), sourceListId: sourceList?.id || "", sourceListName: sourceList?.name || "",
+      templateId: value("emailTemplate"), attachmentIds: checked("#emailDocs input:checked"),
+      materialFamilyIds: checked(".email-family:checked"), ccColleague: value("ccColleague").trim(),
+      followUpDays: Number(value("followUpDays")) };
+  }
+
+  async function checkPreparation(inputs) {
+    const eligibility = await api("check_recipients", { recipients: inputs.recipients });
+    const blocked = eligibility.excluded || [];
+    const ids = new Set(blocked.map((row) => String(row.crd)));
+    const eligible = inputs.recipients.filter((row) => !ids.has(String(row.contactId || row.crd || "")));
+    const preview = eligible.length && inputs.materialFamilyIds.length
+      ? await api("preview_materials", { recipients: eligible, materialFamilyIds: inputs.materialFamilyIds }) : null;
+    return { key: JSON.stringify(inputs), selected: inputs.recipients.length + savedListExclusions.length,
+      blocked: [...savedListExclusions, ...blocked], eligible, preview };
+  }
+
+  function preparationSelection(review, newerOnly) {
+    const held = (review.preview?.rows || []).filter((row) =>
+      row.unavailable.length || (newerOnly && row.older));
+    const holdEmails = new Set(held.map((row) => row.email.toLowerCase()));
+    const ready = review.eligible.filter((row) => !holdEmails.has(row.email.toLowerCase()));
+    return { held, ready };
+  }
+
+  function showPreparationReview(review, newerOnly = false) {
+    preparationReview = review;
+    const panel = document.getElementById("emailPreparationReview");
+    const { held, ready } = preparationSelection(review, newerOnly);
+    const older = (review.preview?.rows || []).filter((row) => !row.unavailable.length
+      && (row.older || row.documents.some((doc) => doc.freshness === "stale")));
+    const materialNames = new Map((catalog?.documents || []).filter((doc) => doc.familyId)
+      .map((doc) => [doc.familyId, doc.familyName || doc.name]));
+    const domains = new Map();
+    for (const row of ready) {
+      const domain = domainOf(row);
+      domains.set(domain, (domains.get(domain) || 0) + 1);
+    }
+    const readyEmails = new Set(ready.map((row) => row.email.toLowerCase()));
+    const versions = new Map();
+    for (const row of review.preview?.rows || []) {
+      if (!readyEmails.has(row.email.toLowerCase())) continue;
+      for (const doc of row.documents) {
+        const name = doc.name || materialNames.get(doc.familyId) || doc.familyId;
+        const label = [name, channelLabel(row.channel), doc.periodKey].filter(Boolean).join(" ? ");
+        versions.set(label, (versions.get(label) || 0) + 1);
+      }
+    }
+    const localReasons = {
+      identity: "The saved contact does not have a confirmed email match. Verify the person and CRD.",
+      stale: "The saved email needs to be checked against current Map data. Reopen the list and try again.",
+      email: "No email address is available. Check the person's primary email.",
+      "email-changed": "The saved address differs from the current contact email. Verify the address.",
+    };
+    const unavailable = held.filter((row) => row.unavailable.length);
+    panel.hidden = false;
+    panel.innerHTML = `<h4 tabindex="-1">${review.selected} contact${review.selected === 1 ? "" : "s"} selected</h4>
+      <p><strong>${ready.length} ready to prepare</strong></p>
+      ${review.blocked.length ? `<details><summary>${review.blocked.length} need contact review</summary>
+        <ul>${review.blocked.map((row) => `<li><b>${esc(row.name || row.email || row.crd || "Saved contact")}</b>
+          <div>${esc(row.reason || localReasons[row.reasonCode] || "Verify the contact and current email address.")}
+          ${row.reason && row.reasonCode ? ` <code>${esc(row.reasonCode)}</code>` : ""}</div>
+          ${row.nextStep ? `<div>${esc(row.nextStep)}</div>` : ""}</li>`).join("")}</ul></details>` : ""}
+      ${unavailable.length ? `<details><summary>${unavailable.length} waiting for approved material</summary>
+        <ul>${unavailable.map((row) => `<li><b>${esc(row.name || row.email)}</b>
+          <div>${row.unavailable.map((item) => esc(item.reason || materialNames.get(item.familyId) || item.familyId)).join("<br>")}</div>
+          </li>`).join("")}</ul></details>` : ""}
+      ${older.length ? `<details><summary>${older.length} matched to an older approved edition</summary>
+        <ul>${older.map((row) => `<li>${esc(row.name || row.email)} ? ${esc(channelLabel(row.channel))}
+          ? ${esc(row.documents.map((doc) => doc.periodKey).filter(Boolean).join(", "))}</li>`).join("")}</ul></details>` : ""}
+      ${review.preview?.olderCount ? `<label class="email-check"><input type="checkbox" id="emailNewerOnly"${newerOnly ? " checked" : ""}>
+        <span>Hold contacts whose approved edition is from an earlier period</span></label>` : ""}
+      ${domains.size ? `<details><summary>Ready recipients by email domain</summary>
+        <ul>${[...domains.entries()].sort(([a], [b]) => a.localeCompare(b))
+          .map(([domain, count]) => `<li>${esc(domain)} ? ${count}</li>`).join("")}</ul></details>` : ""}
+      ${versions.size ? `<details><summary>Approved attachment versions</summary>
+        <ul>${[...versions.entries()].map(([label, count]) => `<li>${esc(label)} ? ${count}</li>`).join("")}</ul></details>` : ""}
+      ${!ready.length && unavailable.length ? '<p>Change the selected attachments to include more contacts.</p>' : ""}
+      ${held.length && ready.length ? `<p>${held.length} will be saved to Lists for follow-up when you prepare this batch.</p>` : ""}
+      <div class="email-material-review-actions">
+        ${ready.length ? `<button type="button" class="ask-btn primary" data-email="prepare-reviewed">Prepare ${ready.length} email${ready.length === 1 ? "" : "s"}</button>` : ""}
+        <button type="button" class="ask-btn ghost" data-email="edit-preparation">${recipients.length ? "Back to selection" : "Close"}</button>
+      </div>
+      ${ready.length ? '<p class="email-fine">Nothing is sent until you approve the prepared emails.</p>' : ""}`;
+    const reviewButton = document.getElementById("emailCreateButton");
+    if (reviewButton) reviewButton.hidden = true;
+    const period = panel.querySelector("#emailNewerOnly");
+    if (period) period.addEventListener("change", (event) => {
+      event.stopPropagation();
+      showPreparationReview(review, period.checked);
+      panel.querySelector("#emailNewerOnly").focus({ preventScroll: true });
+    });
+  }
+
+  function clearPreparationReview() {
+    preparationReview = null;
+    const panel = document.getElementById("emailPreparationReview");
+    if (panel) {
+      panel.hidden = true;
+      panel.replaceChildren();
+      const reviewButton = document.getElementById("emailCreateButton");
+      if (reviewButton) reviewButton.hidden = false;
+    }
+  }
+
+  async function prepareEmail(button, confirmed) {
+    if (preparationBusy) return;
+    const inputs = preparationInputs();
+    const prior = preparationReview;
+    const newerOnly = !!document.getElementById("emailNewerOnly")?.checked;
+    const back = document.getElementById("emailComposerBack");
+    const current = () => button.isConnected && !back.hidden
+      && JSON.stringify(preparationInputs()) === JSON.stringify(inputs)
+      && preparationReview === prior;
+    if (!inputs.recipients.length) return notice("Include at least one recipient to review.", true);
+    if (confirmed && prior?.key !== JSON.stringify(inputs)) {
+      clearPreparationReview();
+      return notice("The selection changed. Review recipients again.");
+    }
+
+    preparationBusy = true;
+    button.disabled = true;
+    notice("Checking recipients and attachments?");
+    let heldListName = "";
+    const setup = button.closest(".email-setup");
+    try {
+      const review = await checkPreparation(inputs);
+      if (!current()) {
+        if (button.isConnected && !back.hidden) notice("The selection changed. Review recipients again.");
+        return;
+      }
+      if (!confirmed || JSON.stringify(prior) !== JSON.stringify(review)) {
+        showPreparationReview(review, confirmed && newerOnly);
+        notice(confirmed ? "The results changed. Review the updated selection before preparing." : "");
+        document.querySelector("#emailPreparationReview h4").focus();
+        return;
+      }
+
+      const { held, ready } = preparationSelection(review, newerOnly);
+      if (!ready.length) return;
+      preparationWriting = true;
+      setup.inert = true;
+      notice("Preparing emails?");
+      const signatures = review.preview && Object.fromEntries(review.preview.rows.map((row) =>
+        [row.email.toLowerCase(), row.signature]));
+      const expectedMaterialSignatures = signatures && Object.fromEntries(ready.map((row) => {
+        const email = row.email.toLowerCase();
+        return [email, signatures[email] || ""];
+      }));
+      heldListName = await saveMaterialHoldList(held, review.eligible, inputs.sourceListName);
+      detail = await api("create_batch", { ...inputs, recipients: ready, expectedMaterialSignatures });
+      sendTiming = "now"; scheduleDate = ""; scheduleTime = "07:30"; continuationTime = "07:30";
+      deliveryPlan = null; deliveryPlanKey = ""; deliveryPlanError = "";
+      await requestCapacityPlan();
+      composerView();
+      if (heldListName) {
+        const count = detail.batch.recipientCount ?? detail.messages.length;
+        notice(`Prepared ${count} email${count === 1 ? "" : "s"}. Saved ${held.length} to "${heldListName}".`);
+      }
+    } catch (error) {
+      if (!button.isConnected || back.hidden) return;
+      if (confirmed) clearPreparationReview();
+      notice(heldListName ? `${error.message} The waiting contacts were saved to "${heldListName}".` : error.message, true);
+    } finally {
+      setup.inert = false;
+      preparationWriting = false;
+      preparationBusy = false;
+      button.disabled = false;
+    }
+  }
+
   function setupView(){
-    materialReviewSnapshot = "";
+    preparationReview = null;
     const templates = catalog.templates || [], docs = catalog.documents || [];
     const legacyDocs = docs.filter((d) => !d.familyId && materialSendable(d));
 
@@ -1072,12 +1250,6 @@
       familyMap.set(d.familyId, family);
     });
     const families = [...familyMap.values()];
-    const routeRules = (((catalog || {}).materialRoutes || {}).rules || []);
-
-    const domains = [...new Set(keptRecipients().map((r) => String(r.email || "").split("@")[1]).filter(Boolean))];
-    const preflight = families.length ? '<div class="email-material-preflight"><b>Recipient routing</b><span>'
-      + domains.map((domain) => esc(domain) + ' ->  ' + esc(channelLabel(routedChannel(domain, routeRules)))).join(' / ')
-      + '</span><small>The server verifies the exact approved version for every recipient when emails are generated.</small></div>' : '';
     const familyPicker = families.length ? '<fieldset class="email-docs email-families"><legend>Material series</legend>'
       + families.map((f) => '<label data-family="' + esc(f.id) + '" data-current="' + (f.channels.size ? '1' : '0')
         + '"><input type="checkbox" class="email-family" value="' + esc(f.id) + '"'
@@ -1085,7 +1257,7 @@
         + esc(f.name) + '</b><small>' + esc(f.category || 'Material') + ' / '
         + (f.channels.size ? [...f.channels].map(channelLabel).map(esc).join(', ') : 'No approved sendable version')
         + '</small></span></label>').join('')
-      + '<p>Choose the series once; the latest approved client-group version is selected per recipient.</p></fieldset>' + preflight : '';
+      + '<p>Choose the series once; the latest approved client-group version is selected per recipient.</p></fieldset>' : '';
     document.getElementById("emailBody").innerHTML = `<div class="email-setup">
       <p class="email-summary"><b id="emailKeptCount">${keptRecipients().length}</b> recipient${keptRecipients().length === 1 ? "" : "s"} · From <b>${esc(catalog.connection.mailbox)}</b></p>
       ${setupCapacityHtml()}
@@ -1109,10 +1281,10 @@
       ${copyPicker()}
       ${followUpPicker()}
       ${domainPicker()}
-      <p id="emailNotice" class="email-notice"></p>
-      <div id="emailMaterialReview" class="email-material-review" hidden></div>
-      <button type="button" id="emailCreateButton" class="ask-btn primary" data-email="create"${
-        templates.length ? "" : " disabled"}>Generate personalized emails</button></div>`;
+      <p id="emailNotice" class="email-notice" role="status"></p>
+      <div id="emailPreparationReview" class="email-material-review email-preparation-review" hidden></div>
+      <button type="button" id="emailCreateButton" class="ask-btn primary" data-email="review-preparation"${
+        templates.length && recipients.length ? "" : " disabled"}>Review recipients</button></div>`;
     // The Word templates carried instructions to the rep inside the body --
     // "INSERT LCV PERFORMANCE PAGE HERE AND ATTACH...". Those belong on screen,
     // not in the message, so they live on the template and are shown here.
@@ -1184,6 +1356,9 @@
       box.addEventListener("change", showSelectionWarning);
     showNotes();
     showSuggested();
+    document.querySelector(".email-setup").addEventListener("change", (event) => {
+      if (!event.target.closest("#emailPreparationReview") && preparationReview) clearPreparationReview();
+    });
     paintMixed();
   }
 
@@ -1452,15 +1627,6 @@ function latestEndedQuarter(now = new Date()) {
     if (typeof (rule && rule.provenance) === "string" && rule.provenance) return rule.provenance;
     return rule && rule.seeded ? "Firm roster seed" : "Administrator";
   }
-
-  function routedChannel(domain, rules) {
-    const value = String(domain || "").toLowerCase();
-    const matches = (rules || []).filter((r) => !r.disabled && r.domain
-      && (value === String(r.domain).toLowerCase() || value.endsWith("." + String(r.domain).toLowerCase())));
-    matches.sort((a, b) => String(b.domain).length - String(a.domain).length);
-    return matches.length ? matches[0].channel : "generic";
-  }
-
 
   function uploadLogicalId(row) {
     return (String(row.name || "") + "-" + String(row.channel || "generic") + "-" + String(row.strategy || "general") + "-"
@@ -2936,6 +3102,7 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
   }
 
   async function open(selected) {
+    if (preparationWriting) return;
     sourceList = selected && selected.sourceList || null;
     materialReviewSnapshot = "";
     materialHoldListId = "";
@@ -2963,7 +3130,9 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
     // Existing saved queues can predate the UI-level review guard. Refuse those
     // snapshots here; the server independently resolves every remaining CRD.
     const selectionSummary = selected && selected.eligibilitySummary;
-    const identityBlocked = (selected || []).filter((r) => r && r.unconfirmed).length;
+    savedListExclusions = [...(selectionSummary?.excludedContacts || []),
+      ...(selected || []).filter((r) => r && r.unconfirmed).map((row) =>
+        ({ crd: row.contactId || row.crd, name: row.name, email: row.email, reasonCode: "identity" }))];
     recipients = (selected || []).filter((r) => r && !r.unconfirmed).map((r) => ({ contactId: r.contactId || r.crd || "", name: r.name || "",
       email: r.email || "", firm: r.firm || r.companyName || "", firstName: r.firstName || "", lastName: r.lastName || "",
       unconfirmed: !!r.unconfirmed,
@@ -2974,16 +3143,17 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
         ? global.Dial.identityTierLabel(r.contactTier, r.contactSource) : ""),
       teammates: Array.isArray(r.teammates) ? r.teammates : [],
       teammatesFull: Array.isArray(r.teammatesFull) ? r.teammatesFull : [] }));
-    if (selectionSummary && selectionSummary.excluded)
-      global.alert(`${selectionSummary.included} of ${selectionSummary.selected} saved contacts can use the controlled composer. `
-        + `${selectionSummary.excluded} were excluded by identity, source, or stale-data checks.`);
-    else if (identityBlocked)
-      global.alert(`${identityBlocked} unconfirmed contact${identityBlocked === 1 ? "" : "s"} `
-        + `cannot use the controlled composer until the CRD link is resolved.`);
-    if (!recipients.length) return;
+    if (!recipients.length && !savedListExclusions.length) return;
     detail = null; cursor = 0; forceDetail = false; clearTimeout(pollTimer); clearInterval(tickTimer);
     const back = shell(); back.hidden = false;
     document.getElementById("emailTitle").textContent = "Prepare email";
+    if (!recipients.length) {
+      document.getElementById("emailBody").innerHTML = `<div class="email-setup">
+        <div id="emailPreparationReview" class="email-material-review email-preparation-review"></div></div>`;
+      showPreparationReview({ selected: savedListExclusions.length, blocked: savedListExclusions, eligible: [], preview: null });
+      document.querySelector("#emailPreparationReview h4").focus();
+      return;
+    }
     document.getElementById("emailBody").innerHTML = `<p class="email-loading">Loading Microsoft 365 email tools…</p>`;
     try { await loadCatalog(); if (!catalog.connection.connected) connectView(); else setupView(); }
     catch (e) { connectView(e.message); }
@@ -3299,6 +3469,7 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
 
   async function act(button) {
     const action = button.dataset.email;
+    if (preparationWriting) return;
     if (action === "cap-save") {
       const row = button.closest("[data-cap-user]");
       const userId = row && row.dataset.capUser;
@@ -3310,6 +3481,7 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
       button.disabled = true;
       try {
         await api("set_daily_cap", { userId, limit: Number(input.value) });
+        await loadCatalog().catch(() => {});
         return openDailyCaps("Daily limit saved.");
       } catch (error) {
         button.disabled = false;
@@ -3327,7 +3499,7 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
       button.disabled = true;
       try {
         await api("set_mailbox_interval", { userId, seconds: Number(input.value) });
-        await loadCatalog();
+        await loadCatalog().catch(() => {});
         return openDailyCaps("Minimum sending gap saved.");
       } catch (error) {
         button.disabled = false;
@@ -3405,6 +3577,8 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
       const keepTemplate = tplEl ? tplEl.value : "";
       const keepDocs = [...document.querySelectorAll("#emailDocs input:checked")].map((x) => x.value);
       const keepFamilies = [...document.querySelectorAll(".email-family:checked")].map((x) => x.value);
+      const keepCopy = document.getElementById("ccColleague")?.value;
+      const keepFollowUp = document.getElementById("followUpDays")?.value;
       const addrIn = (domain) => recipients.filter((r) => domainOf(r) === domain)
         .map((r) => String(r.email || "").toLowerCase());
 
@@ -3439,12 +3613,17 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
       setupView();
       if (scroller) scroller.scrollTop = wasAt;
       const tplBack = document.getElementById("emailTemplate");
-      if (tplBack && keepTemplate) tplBack.value = keepTemplate;
+      if (tplBack && keepTemplate) {
+        tplBack.value = keepTemplate;
+        tplBack.dispatchEvent(new Event("change"));
+      }
       for (const box of document.querySelectorAll("#emailDocs input"))
         if (!box.disabled) box.checked = keepDocs.includes(box.value);
       for (const box of document.querySelectorAll(".email-family")) box.checked = keepFamilies.includes(box.value);
-      const notes = document.getElementById("emailTemplate");
-      if (notes) notes.dispatchEvent(new Event("change"));
+      document.querySelector(".email-family, #emailDocs input")?.dispatchEvent(new Event("change"));
+      const copy = document.getElementById("ccColleague"), remind = document.getElementById("followUpDays");
+      if (copy && keepCopy !== undefined) copy.value = keepCopy;
+      if (remind && keepFollowUp !== undefined) remind.value = keepFollowUp;
       return;
     }
     if (action === "mates-open") {
@@ -3837,7 +4016,7 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
             || preview.rows.some((row) => row.documents.some((doc) => doc.freshness === "stale"));
           const choice = button.dataset.materialChoice || "";
           if (needsReview && (!choice || materialReviewSnapshot !== key)) {
-            showMaterialReview(preview, key, "follow-up-create");
+            showFollowUpMaterialReview(preview, key);
             button.disabled = false;
             notice("Review the material periods and choose how to continue.");
             return;
@@ -3896,80 +4075,13 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
       materialReviewSnapshot = "";
       return;
     }
-    if (action === "create") {
-      let kept = keptRecipients();
-      if (!kept.length) return notice("Every recipient is excluded. Include at least one.", true);
-      // Confirmed by domain, not by count. "Send to 52 people?" is answered yes
-      // without reading; "morganstanley.com 52, rjf.com 8" is the moment the
-      // stray firm gets caught, which is the entire point of the grouping.
-      const groups = domainGroups().filter((g) => g.kept);
-      if (groups.length > 1 && !confirm(`This batch spans ${groups.length} email domains:
-
-`
-        + groups.map((g) => `  ${g.domain} — ${g.kept}`).join("\n")
-        + `
-
-Generate emails for all of them?`)) return;
-      button.disabled = true; notice("Checking approved recipients…");
-      try {
-        const eligibility = await api("check_recipients", { recipients: kept });
-        if ((eligibility.excluded || []).length) {
-          const blocked = eligibility.excluded;
-          const explanation = blocked.map((r) =>
-            `${r.name || r.crd} <${r.email}>: ${r.reason} [${r.reasonCode || "recipient_not_approved"}]\n${r.nextStep || ""}`).join("\n\n");
-          if (!eligibility.eligibleCount) {
-            button.disabled = false;
-            return notice("No eligible recipients. " + explanation, true);
-          }
-          if (!confirm(`${blocked.length} contacts cannot be prepared:\n\n${explanation}\n\nContinue with the remaining ${eligibility.eligibleCount} recipients? No emails will be sent by this step.`)) {
-            button.disabled = false; return notice("Nothing was prepared. Review or exclude those contacts before continuing.");
-          }
-          const ids = new Set(blocked.map((r) => String(r.crd)));
-          kept = kept.filter((r) => !ids.has(String(r.contactId || r.crd || "")));
-        }
-        notice("Generating one email per eligible recipient…");
-        // Includes the disabled ones: :checked is independent of :disabled, and
-        // the required documents are checked-and-disabled by design.
-        const attachmentIds = [...document.querySelectorAll("#emailDocs input:checked")].map((x) => x.value);
-        const materialFamilyIds = [...document.querySelectorAll(".email-family:checked")].map((x) => x.value);
-        let prepared = kept, heldListName = "", expectedMaterialSignatures = null;
-        if (materialFamilyIds.length) {
-          const preview = await api("preview_materials", { recipients: kept, materialFamilyIds });
-          const key = materialReviewKey(preview, kept, materialFamilyIds, attachmentIds);
-          const needsReview = preview.olderCount || preview.unavailableCount
-            || preview.rows.some((row) => row.documents.some((doc) => doc.freshness === "stale"));
-          const choice = button.dataset.materialChoice || "";
-          if (needsReview && (!choice || materialReviewSnapshot !== key)) {
-            showMaterialReview(preview, key);
-            button.disabled = false;
-            notice("Review the material periods and choose how to continue.");
-            return;
-          }
-          const byEmail = new Map(preview.rows.map((row) => [row.email.toLowerCase(), row]));
-          const held = preview.rows.filter((row) => row.unavailable.length
-            || (choice === "newer" && row.older));
-          const holdEmails = new Set(held.map((row) => row.email.toLowerCase()));
-          prepared = kept.filter((row) => !holdEmails.has(String(row.email || "").toLowerCase()));
-          if (!prepared.length) throw new Error("No recipients have the selected material available. Nothing was generated.");
-          expectedMaterialSignatures = Object.fromEntries(prepared.map((row) => {
-            const email = String(row.email || "").toLowerCase();
-            return [email, byEmail.get(email)?.signature || ""];
-          }));
-          heldListName = await saveMaterialHoldList(held, kept);
-        }
-
-        const ccColleague = ((document.getElementById("ccColleague") || {}).value || "").trim();
-        const followUpDays = Number((document.getElementById("followUpDays") || {}).value || 0);
-        sendTiming = "now"; scheduleDate = ""; scheduleTime = "07:30"; continuationTime = "07:30";
-        detail = await api("create_batch", { recipients: prepared,
-          sourceListId: sourceList?.id || "", sourceListName: sourceList?.name || "",
-          templateId: (document.getElementById("emailTemplate") || {}).value || "",
-          attachmentIds, materialFamilyIds, expectedMaterialSignatures, ccColleague, followUpDays });
-        deliveryPlan = null; deliveryPlanKey = ""; deliveryPlanError = "";
-        await requestCapacityPlan();
-        composerView();
-        if (heldListName) notice(`Held recipients were saved to Lists as "${heldListName}". They were not included in this batch.`);
-      } catch (e) { button.disabled = false; notice(e.message, true); }
+    if (action === "review-preparation") return prepareEmail(button, false);
+    if (action === "prepare-reviewed") return prepareEmail(button, true);
+    if (action === "edit-preparation") {
+      if (!recipients.length) { shell().hidden = true; return; }
+      clearPreparationReview();
+      notice("");
+      document.getElementById("emailCreateButton").focus();
       return;
     }
     if (action === "pick") {
