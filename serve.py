@@ -91,6 +91,7 @@ SETTING_KEYS = {
     "copySelf": 8, "copyInternal": 8, "copyInternalTo": 254,
     "actEmailWrite": 1,
     "signaturePhotoEnabled": 1,
+    "signatureDesignation": 80,
     "homeLabel": 80, "homeLat": 24, "homeLon": 24,
     "emailSignature": 1500,
     "autoDialOn": 8, "autoDialDelay": 8, "autoDialAnnounce": 8,
