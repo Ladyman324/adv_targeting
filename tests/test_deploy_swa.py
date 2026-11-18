@@ -153,10 +153,8 @@ class StagingSafetyTests(unittest.TestCase):
         (staged / "field.js").write_text(
             f'const DATA_VERSION = "{expected}";', encoding="utf-8"
         )
-        for name in (
-            "style.css", "field.css", "dial.js", "training.js",
-            "list_import.js", "email.js", "email.css", "asset-product-filters.js"
-        ):
+        shared_assets = set(web_assets.VERSIONED + web_assets.FIELD_VERSIONED)
+        for name in sorted(shared_assets - {"app.js", "field.js"}):
             (staged / name).write_text(f"/* {name} */", encoding="utf-8")
         (staged / "sw.js").write_text(
             'const VERSION = "";', encoding="utf-8"
