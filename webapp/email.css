@@ -905,7 +905,6 @@
 .signature-outlook-help summary { cursor:pointer; }
 [data-signature-designation] { display:block; max-width:100%; margin-top:6px; }
 
-.act-directory-button{margin:6px 0;align-self:flex-start}
 .act-search-results[hidden]{display:none}
 .act-search-heading{display:flex;justify-content:space-between;gap:6px;padding:5px 8px;
   color:var(--muted);font-size:11px;font-weight:700}
@@ -947,7 +946,3 @@
   gap:3px 10px;font-size:13px}
 .act-create-fields dt{color:var(--muted)}
 .act-create-fields dd{margin:0;overflow-wrap:anywhere}
-.act-dialog input{display:block;box-sizing:border-box;width:100%;margin:6px 0;padding:8px;font:inherit}
-.act-directory-results{padding:0;list-style:none;overflow-wrap:anywhere}
-.act-directory-results li{padding:10px 0;border-top:1px solid var(--hair)}
-.act-directory-results h3{font-size:14px;margin:0 0 4px}

@@ -203,47 +203,6 @@
     });
   }
 
-  function directory() {
-    const dialog = openDialog("ACT! contacts without a matching CRD");
-    const body = dialog.querySelector(".act-dialog-body");
-    body.innerHTML = `<form data-act-search><label>Search by name, email, firm or location
-      <input type="search" name="search" required minlength="2" maxlength="120"></label>
-      <button type="submit" class="ask-btn">Search</button></form>
-      <p role="status"></p><ul class="act-directory-results"></ul>`;
-    const form = body.querySelector("form");
-    const status = body.querySelector("[role=status]");
-    const results = body.querySelector("ul");
-    let sequence = 0;
-    form.addEventListener("submit", async (event) => {
-      event.preventDefault();
-      const current = ++sequence;
-      results.replaceChildren();
-      status.textContent = "Searching ACT! contacts?";
-      try {
-        const result = await request("?search=" + encodeURIComponent(form.elements.search.value.trim()));
-        if (current !== sequence || !dialog.open) return;
-        status.textContent = result.count > result.contacts.length
-          ? `Showing ${result.contacts.length} of ${result.count}. Narrow the search to see more.`
-          : `${result.count} matching contact${result.count === 1 ? "" : "s"}`;
-        results.innerHTML = result.contacts.map((contact, index) => `<li>
-          <h3>${esc(contact.name)}</h3>${badge("linked")} ${chip("No matching CRD")}
-          <p>${esc(contact.company)}<br>${esc(contact.email)}</p>
-          <p>${esc(address(contact.primary) || "No ACT! primary address on file")}</p>
-          ${locate && contact.coordinates
-            ? `<button type="button" class="ask-btn" data-act-locate="${index}">Show on map</button>` : ""}
-        </li>`).join("");
-        results.onclick = (click) => {
-          const button = click.target.closest("[data-act-locate]");
-          if (!button || !locate) return;
-          const contact = result.contacts[Number(button.dataset.actLocate)];
-          if (contact?.coordinates) { locate(contact); dialog.close(); }
-        };
-      } catch (error) {
-        if (current === sequence && dialog.open) status.textContent = error.message;
-      }
-    });
-  }
-
   function scan(node) {
     if (node?.nodeType !== 1) return;
     if (node.matches("[data-act-profile]")) mount(node);
@@ -255,9 +214,6 @@
       scan(root.document.body);
       new root.MutationObserver((changes) => changes.forEach((change) => change.addedNodes.forEach(scan)))
         .observe(root.document.body, { childList: true, subtree: true });
-      root.document.addEventListener("click", (event) => {
-        if (event.target.closest("[data-act-directory]")) directory();
-      });
     };
     if (root.document.readyState === "loading") root.document.addEventListener("DOMContentLoaded", start);
     else start();

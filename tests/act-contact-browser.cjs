@@ -27,7 +27,7 @@ const origin = "https://act-fixture.invalid";
         const req = route.request(), url = new URL(req.url());
         assert.equal(url.origin, origin);
         if (url.pathname === "/") return route.fulfill({ contentType: "text/html", body:
-          '<meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="/style.css"><link rel="stylesheet" href="/email.css"><body><main></main><div id="actTestSearch" hidden></div><button data-act-directory>Search ACT! contacts</button><script src="/act-addresses.js"></script></body>' });
+          '<meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="/style.css"><link rel="stylesheet" href="/email.css"><body><main></main><div id="actTestSearch" hidden></div><script src="/act-addresses.js"></script></body>' });
         if (url.pathname === "/act-icon.png")
           return route.fulfill({ contentType: "image/png", body: fs.readFileSync(path.join(web, "act-icon.png")) });
         if (["/email.css", "/style.css", "/act-addresses.js"].includes(url.pathname))
@@ -83,13 +83,7 @@ const origin = "https://act-fixture.invalid";
       await page.locator("#actTestSearch").getByRole("button", { name: /ACT Only/ }).click();
       const contactDialog = page.getByRole("dialog", { name: "ACT Only" });
       await contactDialog.getByText("No matching CRD").waitFor();
-      await contactDialog.getByRole("button", { name: "Close" }).click();
-
-      await page.getByRole("button", { name: "Search ACT! contacts" }).click();
-      await page.getByRole("searchbox").fill("act@example.test");
-      await page.getByRole("button", { name: "Search", exact: true }).click();
-      await page.getByRole("dialog").getByText("No matching CRD", { exact: true }).waitFor();
-      await page.getByRole("button", { name: "Show on map" }).click();
+      await contactDialog.getByRole("button", { name: "Show on map" }).click();
       assert.equal(await page.evaluate(() => window.locatedContact), "ACT Only");
       const scrolls = await page.evaluate(() => {
         document.body.insertAdjacentHTML("beforeend", '<div class="ask-back"><div class="ask ask-scroll freshness-view"><div style="height:2400px"></div></div></div>');
