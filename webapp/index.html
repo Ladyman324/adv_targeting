@@ -284,14 +284,9 @@
           </span>
         </span>
         <strong id="kpiAdvisors">&mdash;</strong>
-        <!-- CSV export withdrawn for now, to be reconsidered. exportAdvisors()
-             and exportFirms() are left intact in app.js: they encode the
-             column decisions and the "exactly what the panel is showing"
-             predicate, and rebuilding that from memory later would be worse
-             than carrying two unused functions.
-        <button id="exportAdvisors" class="stat-export" ...>&#8623;</button> -->
-        <!-- Bulk queueing takes the slot export used to hold, and shares its
-             selection rule: the advisors passing the current filters inside the
+        <button type="button" id="exportAdvisors" class="stat-export" title="Export advisors in view to Excel-compatible CSV"
+                aria-label="Export advisors in view to Excel-compatible CSV">CSV</button>
+        <!-- Bulk queueing shares the export's selection rule: the advisors passing the current filters inside the
              viewport. One predicate, so the two can never disagree about what
              "what I am looking at" means. -->
         <button id="queueVisible" class="stat-export" title="Add the advisors in view to the call list"
@@ -301,7 +296,7 @@
       <div class="stat">
         <span class="stat-label">Firms</span>
         <strong id="kpiFirms">&mdash;</strong>
-        <!-- withdrawn with the advisor export above; exportFirms() remains in app.js
+        <!-- Firm export remains hidden; exportFirms() remains in app.js
         <button id="exportFirms" class="stat-export" ...>&#8623;</button> -->
       </div>
       <div class="stat">

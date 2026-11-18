@@ -3916,7 +3916,7 @@ Generate emails for all of them?`)) return;
         if ((eligibility.excluded || []).length) {
           const blocked = eligibility.excluded;
           const explanation = blocked.map((r) =>
-            `${r.name || r.crd} <${r.email}>: ${r.reason}`).join("\n");
+            `${r.name || r.crd} <${r.email}>: ${r.reason} [${r.reasonCode || "recipient_not_approved"}]\n${r.nextStep || ""}`).join("\n\n");
           if (!eligibility.eligibleCount) {
             button.disabled = false;
             return notice("No eligible recipients. " + explanation, true);
@@ -4390,7 +4390,11 @@ They stay on your call list and keep their history — this only takes them out 
     try {
       const data = await api("signature_settings", null, "GET");
       if (!host.isConnected) return;
-      host.innerHTML = `<label class="set-radio signature-photo-toggle"><input type="checkbox"
+      host.innerHTML = `<label class="set-row">Designations after my name
+          <input type="text" data-signature-designation maxlength="80" value="${esc(data.designation || "")}" placeholder="e.g. CIMA®"></label>
+        <button type="button" class="set-btn" data-signature-save-designation>Save designations</button>
+        <p class="set-sub">Shown after your Microsoft 365 name in new emails. Existing prepared and scheduled messages keep their saved signature.</p>
+        <label class="set-radio signature-photo-toggle"><input type="checkbox"
           data-signature-toggle${data.enabled ? " checked" : ""}${!data.photoAvailable && !data.enabled ? " disabled" : ""}>
           Include my photo</label>
         <p class="set-sub">Off by default. Applies to new emails; existing batches keep their signature.</p>
@@ -4398,10 +4402,16 @@ They stay on your call list and keep their history — this only takes them out 
           ${data.photoAvailable ? `<img class="signature-photo-thumbnail" src="${esc(data.photoUrl)}" alt="Your selected signature photo">` : ""}
           <div><button type="button" class="set-btn" data-signature-upload>${data.photoAvailable ? "Replace photo" : "Choose photo"}</button>
           ${data.photoAvailable ? '<button type="button" class="set-btn" data-signature-adjust>Adjust photo</button>' : ""}
+          ${data.photoAvailable ? `<a class="set-btn" href="${esc(data.photoUrl)}" download="${esc(data.photoDownloadName)}">Download photo for Outlook</a>` : ""}
           ${data.custom ? `<button type="button" class="set-btn" data-signature-reset>${data.websitePhotoAvailable ? "Use website photo" : "Remove uploaded photo"}</button>` : ""}
           <input type="file" data-signature-file accept="image/jpeg,image/png,image/webp" hidden>
           <p class="set-sub">${data.custom ? "Your uploaded photo" : data.photoAvailable ? "Photo supplied from the EIC website" : "No website photo is available for your account"}.</p></div>
         </div>
+        <details class="signature-outlook-help"><summary>Use this photo in Outlook</summary>
+          <p class="set-sub">Download the photo, then insert the saved file in Outlook's signature editor. Copying the browser preview can lose the photo or its layout.</p>
+          <p class="set-sub">New Outlook / web: Settings > Accounts > Signatures. Classic Outlook: File > Options > Mail > Signatures, then use the picture button. Keep the image's aspect ratio when resizing.</p>
+          <a href="https://support.microsoft.com/en-us/outlook/mail/how-to-add-and-change-an-email-signature-in-outlook" target="_blank" rel="noopener noreferrer">Microsoft's signature instructions</a>
+        </details>
         <div class="signature-crop" hidden></div>
         ${data.connected ? `<details class="signature-preview"${previewOpen ? " open" : ""}><summary>Preview signature</summary>
           <div>${previewWithImages(data.previewHtml, data.images)}</div></details>`
@@ -4413,6 +4423,7 @@ They stay on your call list and keep their history — this only takes them out 
         status.textContent = "Saving...";
         try {
           await action();
+          catalog = null; // New-email previews must reload the saved signature setting.
           await mountSignatureSettings(host);
           if (host.isConnected) host.querySelector(".signature-photo-status").textContent = "Saved.";
         } catch (error) {
@@ -4424,6 +4435,8 @@ They stay on your call list and keep their history — this only takes them out 
           status.classList.add("bad");
         }
       };
+      host.querySelector("[data-signature-save-designation]").onclick = () => run(() =>
+        global.Dial.saveSettings({ signatureDesignation: host.querySelector("[data-signature-designation]").value.trim() }));
       host.querySelector("[data-signature-toggle]").onchange = (event) => {
         const enabled = event.target.checked;
         run(() => global.Dial.saveSettings({ signaturePhotoEnabled: enabled ? "1" : "0" }));

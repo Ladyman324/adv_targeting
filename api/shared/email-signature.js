@@ -72,8 +72,8 @@ async function bundle(who, profile, options = {}) {
     if (!photo) throw problem("Choose a signature photo in Settings, or switch Include my photo off.", 409);
     if (!photo.custom && options.persist !== false) await ensureSeed(who, photo, options);
   }
-  return { signatureHtml: cr.corporateSignature ? cr.corporateSignature(profile || {}, options.manageUrl || "", cfg, photo) : "",
-    photo, images: photo ? [photo] : [] };
+  return { signatureHtml: cr.corporateSignature ? cr.corporateSignature(profile || {}, options.manageUrl || "", cfg, photo, prefs.signatureDesignation) : "",
+    designation: prefs.signatureDesignation || "", photo, images: photo ? [photo] : [] };
 }
 
 async function settings(who) {
@@ -82,17 +82,18 @@ async function settings(who) {
   ]);
   const enabled = prefs.signaturePhotoEnabled === "1";
   const profile = connection.profile;
-  return { enabled, photoAvailable: !!photo, websitePhotoAvailable: !!seed[who.id],
+  return { enabled, designation: prefs.signatureDesignation || "", photoAvailable: !!photo, websitePhotoAvailable: !!seed[who.id],
     custom: !!(photo && photo.custom), connected: !!profile,
     photoUrl: photo ? `/api/email?op=signature_photo&sha=${photo.sha256}` : "",
+    photoDownloadName: photo ? `signature-photo.${photo.contentType === "image/png" ? "png" : "jpg"}` : "",
     originalPhotoUrl: photo ? `/api/email?op=signature_photo&sha=${(custom && custom.original || photo).sha256}` : "",
     originalPhotoHash: photo ? (custom && custom.original || photo).sha256 : "",
     crop: custom && custom.crop || null,
     cropImages: photo ? [photo] : [],
-    previewHtml: profile ? core.corporateSignature(profile, "", core.config(), enabled ? photo : null) : "",
+    previewHtml: profile ? core.corporateSignature(profile, "", core.config(), enabled ? photo : null, prefs.signatureDesignation) : "",
     // The editor's output is always 264x336, which can differ from the current
     // uncropped website photo. Preview the shape that Save crop will produce.
-    cropPreviewHtml: profile && photo ? core.corporateSignature(profile, "", core.config(), { ...photo, width: 264, height: 336 }) : "",
+    cropPreviewHtml: profile && photo ? core.corporateSignature(profile, "", core.config(), { ...photo, width: 264, height: 336 }, prefs.signatureDesignation) : "",
     images: enabled && photo ? [photo] : [] };
 }
 

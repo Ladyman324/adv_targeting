@@ -602,3 +602,17 @@ test("projection refresh failure cannot skip completing work already sent", asyn
     assert.equal(d.calls.sent.length, 1);
   }
 });
+
+
+test("saved designations reach both one-to-one signature paths without changing the mailbox profile", async () => {
+  for (const mode of ["reply", "followUp"]) {
+    const d = deps();
+    d.signature = { bundle: async () => ({ photo: null, images: [], designation: "CIMA\u00ae" }) };
+    d.core.corporateSignature = (profile, _url, _cfg, _photo, designation) => {
+      assert.equal(profile.displayName, "Bo");
+      return `<strong>${profile.displayName}, ${designation}</strong>`;
+    };
+    await send[mode](BO, mode === "reply" ? REPLY : FOLLOW, d);
+    assert.match(mode === "reply" ? d.calls.bodies[0].html : d.calls.drafts[0].signatureHtml, /Bo, CIMA\u00ae/);
+  }
+});

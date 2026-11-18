@@ -18,9 +18,33 @@ photos or change signatures already frozen into generated/scheduled messages.
 These go in the Function App's environment variables. They are **firm-wide
 constants**, identical for every rep. The per-rep half of the signature (name,
 title, phone, email) is generated from each rep's Microsoft Entra profile when
-they connect their mailbox — nothing to configure there.
+they connect their mailbox. Optional designations are saved in each user's
+signature settings.
 
 Built by `corporateSignature()` in `api/shared/email-core.js`.
+
+## Per-user designations
+
+Settings > Email signature > Designations after my name stores an optional
+80-character suffix, for example `CIMA®` or `CFA, CIMA®`. The app adds it after
+the Microsoft 365 display name in new-message signatures and signature previews.
+It does not rename the mailbox, change body merge fields, edit ACT!, or alter
+signatures frozen into previously prepared or scheduled messages. Clear and save
+the field to remove the suffix. Do not add it if the Microsoft 365 name already
+contains the same designation.
+
+## Using the photo in Outlook
+
+Choose **Download photo for Outlook** in signature settings, then insert the
+saved file through Outlook's signature editor. The Map preview loads a private,
+authenticated image; copying browser HTML does not reliably transfer that image
+or its table layout into Outlook. Classic Outlook uses File > Options > Mail >
+Signatures and the picture button. New Outlook/web uses Settings > Accounts >
+Signatures. Keep the photo's aspect ratio when resizing. For a side-by-side
+layout, create a two-column table in Word and paste that into the signature
+editor, then insert the photo file.
+
+See [Microsoft's signature instructions](https://support.microsoft.com/en-us/outlook/mail/how-to-add-and-change-an-email-signature-in-outlook).
 
 ## Optional sender photos
 
@@ -111,22 +135,12 @@ it before it goes on every outbound message.
 
 ---
 
-## Open item — professional designations
+## Professional designations and job titles
 
-The generated signature uses `displayName` from Entra. If Entra holds
-"Stephen Halley" rather than "Stephen Halley, CIMA®", the designation is lost.
-Same for `jobTitle` — the signature will show whatever Entra holds, not
-"Senior Director-Western United States" unless that is what is on the profile.
-
-Check one rep's Entra profile before rollout. Two ways to fix a mismatch:
-
-- **Correct the Entra profile** — best, since it fixes the designation
-  everywhere in Microsoft 365, not just this app
-- **Add a small per-rep override** in the app's settings screen, limited to
-  name suffix and title, leaving the compliance block server-controlled
-
-The second is a modest change and reuses the now-unused `emailSignature` key in
-`SETTING_KEYS`.
+The name, job title and contact details come from the Microsoft 365 profile.
+If a designation is missing there, the rep can now add it in Settings using the
+per-user designation field described above. Job-title corrections still belong
+in Microsoft 365. Corporate disclosures remain server-controlled.
 
 ---
 

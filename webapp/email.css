@@ -879,3 +879,8 @@
 /* On phones the body is the scroller. Let the stacked grid keep its content
    height so the sticky delivery footer cannot sit over editor controls. */
 @media (max-width: 760px) { .email-body > .email-grid { flex: 0 0 auto; } }
+
+.signature-photo-controls a.set-btn { display:inline-block; text-decoration:none; }
+.signature-outlook-help { margin-top:12px; font-size:12px; }
+.signature-outlook-help summary { cursor:pointer; }
+[data-signature-designation] { display:block; max-width:100%; margin-top:6px; }

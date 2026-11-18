@@ -236,6 +236,14 @@ test("recipient precheck reports name exclusions without creating drafts and doe
   assert.equal(large.checkedCount, 600);
   assert.equal(large.eligibleCount, 599);
   assert.equal(large.excluded.length, 1);
+  for (const code of ["missing_or_invalid_email", "contact_identity_not_approved", "act_identity_not_approved", "approved_email_not_unique", "unrecognized_future_reason"]) {
+    failure.detail = code;
+    const reviewed = await svc.checkRecipients(WHO, { recipients });
+    assert.equal(reviewed.eligibleCount, 1, "explanations must not change eligibility");
+    assert.equal(reviewed.excluded[0].reasonCode, code);
+    assert.ok(reviewed.excluded[0].nextStep.length > 20);
+    assert.equal(reviewed.excluded[0].crd, "BAD");
+  }
   failure = Object.assign(new Error("Storage down"), { code: "recipient_registry_unavailable" });
   await assert.rejects(() => svc.checkRecipients(WHO, { recipients }), /Storage down/);
 });
@@ -898,4 +906,24 @@ test("a stale interrupted build is retired so the rep can prepare the follow-up 
   assert.equal(result.batch.id, "F1");
   assert.equal(result.batch.status, "editing");
   assert.equal(f.batches.get("B1").followUpBatchId, "F1");
+});
+
+
+test("recipient precheck explains exact review codes while keeping the same exclusions", async () => {
+  for (const code of ["contact_identity_not_approved", "act_identity_not_approved", "missing_or_invalid_email",
+      "approved_email_not_unique", "act_email_does_not_match_approved_identity", "roster_current_firm_conflict", "unknown_code"]) {
+    const svc = load({
+      "email-auth": { status: async () => ({ connected: true, profile: {} }) },
+      "email-store": { createBatch: () => assert.fail("No drafts may be created") },
+      "recipient-registry": { load: async () => {},
+        resolve: async () => { throw Object.assign(new Error("Not approved"), { code: "recipient_not_approved", detail: code }); },
+      },
+    });
+    const result = await svc.checkRecipients(WHO, { recipients: [{ crd: "123", name: "A Person", email: "a@example.com" }] });
+    assert.equal(result.eligibleCount, 0);
+    assert.equal(result.excluded.length, 1);
+    assert.equal(result.excluded[0].reasonCode, code);
+    assert.ok(result.excluded[0].nextStep.length > 30);
+    assert.equal(result.excluded[0].crd, "123");
+  }
 });

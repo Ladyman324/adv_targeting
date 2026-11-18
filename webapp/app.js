@@ -2922,6 +2922,8 @@ function listRowActions(l){
         ${l.count ? "" : "disabled"}>Call</button>
       <button type="button" data-lists="email" data-id="${esc(l.id)}"
         ${l.count ? "" : "disabled"}>Email</button>
+      <button type="button" data-lists="export" data-id="${esc(l.id)}"
+        ${l.count ? "" : "disabled"}>Export CSV</button>
       <button type="button" data-lists="edit-open" data-id="${esc(l.id)}"
         ${l.count ? "" : "disabled"}>Edit</button>
       <button type="button" data-lists="rename" data-id="${esc(l.id)}">Rename</button>
@@ -3082,6 +3084,8 @@ function flagListRows(){
       <span class="lists-acts">
         <button type="button" class="ask-btn primary" data-lists="flag-call"
           data-kind="${kind}"${callable ? "" : " disabled"}>Call</button>
+        <button type="button" data-lists="flag-export" data-kind="${kind}"
+          ${people.length ? "" : "disabled"}>Export CSV</button>
         <button type="button" data-lists="flag-show" data-kind="${kind}"
           ${people.length ? "" : "disabled"}>Show</button>
       </span></li>`;
@@ -3454,6 +3458,26 @@ document.addEventListener("click", async e => {
   const l = (Dial.state.lists || []).find(x => x.id === id);
   try {
     if (act === "close") { listsEditMode = false; return closeListManager(); }
+    if (act === "export") {
+      if (!l) return;
+      b.disabled = true;
+      try {
+        if (!await loadContacts()) throw new Error("Contact details could not be loaded. Retry the export.");
+        // Read the complete saved list without switching the active calling queue.
+        const response = await fetch(`/api/queue?id=${encodeURIComponent(id)}`, { credentials:"same-origin", cache:"no-store" });
+        const saved = await response.json();
+        if (!response.ok) throw new Error(saved.error || "This list could not be exported.");
+        exportContactList(saved.name || l.name, saved.items || []);
+      } finally { b.disabled = false; }
+      return;
+    }
+    if (act === "flag-export") {
+      if (!await loadContacts()) throw new Error("Contact details could not be loaded. Retry the export.");
+      const kind = b.dataset.kind;
+      exportContactList((ROLE_META[kind] || ROLE_META.key).label,
+        flaggedAdvisors(kind).map(person => dialSnapshot(person.crd)));
+      return;
+    }
     if (act === "import-open") {
       listImport = { name:"", split:true, ranked:false, role:"", created:new Set(), busy:false };
       paintListImporter(); return focusListDialog("#listImportFile");
@@ -9701,23 +9725,20 @@ function csvCell(value){
   // file a rep opens without thinking. A leading apostrophe is the standard
   // neutraliser and is not displayed. Tab and CR are included because some
   // spreadsheet versions treat them as formula leaders too.
-  if (/^[=+\-@\t\r]/.test(text)) text = `'${text}`;
-  return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+  if (/^[\s\u0000-\u001f]*[=+\-@]|^[\t\r]/.test(text)) text = `'${text}`;
+  return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
 }
 
-function csvDownload(name, header, rows, extra){
-  const provenance = [
-    `# Advisor Map export`,
-    `# generated ${new Date().toISOString().slice(0, 19).replace("T", " ")}`,
-    `# scope: ${scopeLabel(scope)}`,
-    `# filters: ${activeFilterSummary()}`,
-    `# SEC feed ${META && META.source_date ? META.source_date : "unknown"} · data build ${DATA_VERSION}`,
-    `# rows: ${rows.length}${extra ? " · " + extra : ""}`,
-    `# ZIP codes starting with 0 (e.g. 01880) must be imported as text, not number`,
-  ].join("\n");
-  const body = [header.join(","), ...rows.map(r => r.map(csvCell).join(","))].join("\n");
-  // BOM so Excel reads UTF-8 and does not mangle "&" or accented names
-  const blob = new Blob(["\ufeff" + provenance + "\n" + body], { type:"text/csv;charset=utf-8" });
+function csvDownload(name, header, rows, extra, context = {}){
+  // A real header in row 1 makes this immediately tabular in Excel. Put
+  // provenance in columns instead of comment lines ahead of the header.
+  const metadata = [context.scope || scopeLabel(scope), context.filters || activeFilterSummary(),
+    META && META.source_date ? META.source_date : "unknown", DATA_VERSION,
+    new Date().toISOString(), extra || ""];
+  const columns = [...header, "Export scope", "Export filters", "SEC feed date", "Data build", "Exported UTC", "Export notes"];
+  const body = [columns, ...rows.map(row => [...row, ...metadata])]
+    .map(row => row.map(csvCell).join(",")).join("\r\n");
+  const blob = new Blob(["\ufeff" + body + "\r\n"], { type:"text/csv;charset=utf-8" });
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob);
   a.download = name;
@@ -9741,7 +9762,8 @@ function epochDayIso(day){
   return Number.isInteger(day) ? new Date(day * FILTER_DAY_MS).toISOString().slice(0, 10) : "";
 }
 
-function exportAdvisors(){
+async function exportAdvisors(){
+  if (!await loadContacts()) return showNotice("Contact details could not be loaded. Retry the export.");
   const bounds = map.getBounds();
   const seen = new Set();
   const rows = [];
@@ -9756,6 +9778,7 @@ function exportAdvisors(){
     const idx = advisorRow(p.id);
     const role = ownerRolesFor(p.id).find(r => String(r.firmCrd) === String(p.fc));
     const bar = barronsFor(p.id);
+    const contact = contactFor(p.id) || {};
     rows.push([
       p.n, idx && idx[6] ? idx[6] : "", p.id,
       p.f, p.fc,
@@ -9775,6 +9798,7 @@ function exportAdvisors(){
       bar.length ? bar[0].url : "",
       forbesFor(p.id).map(h => `${h.label}${h.confirmed ? "" : " (inferred)"}`).join("; "),
       forbesTeamAssets(p.id) == null ? "" : Math.round(forbesTeamAssets(p.id)),
+      contact.e || "", contact.w || "", contact.c || "", contact.sal || "", contact.t || "", contact.src || "",
     ]);
   }
   rows.sort((a, b) => String(a[3]).localeCompare(String(b[3])) ||
@@ -9791,8 +9815,29 @@ function exportAdvisors(){
     "Designations","Disclosures","Prior firms","Territory","IAPD",
     "Barron's ranking","Barron's profile",
     "Forbes ranking","Forbes team assets ($)",
+    "Email","Work phone","Mobile phone","Greeting","Identity match tier","Contact source",
   ], rows, `${people.toLocaleString()} distinct advisors, one row per advisor-firm relationship`);
   showNotice(`Exported ${rows.length.toLocaleString()} rows for ${people.toLocaleString()} advisors.`);
+}
+
+function exportContactList(name, items){
+  const pins = new Map(ALL.map(feature => [String(feature.properties.id), feature.properties]));
+  const rows = items.map(item => {
+    const id = String(item.crd || item.contactId || "");
+    const contact = contactFor(id) || {}, pin = pins.get(id) || {};
+    return [name, advisorDisplayName(id, item.name) || item.name || `CRD ${id}`, id,
+      contact.cn || item.firm || pin.f || "", contact.e || "", item.email || "",
+      contact.w || "", contact.c || "", item.phone || "", pin.a || "",
+      pin.c || item.city || "", pin._state || item.state || "", pin.z || "",
+      contact.sal || "", contact.src || "", contact.t || ""];
+  });
+  csvDownload(`advisors_${String(name).replace(/[^a-z0-9_-]+/gi, "_")}.csv`, [
+    "List", "Advisor", "Advisor CRD", "Firm", "Current Map email", "Saved list email",
+    "Work phone", "Mobile phone", "Saved list phone", "Street", "City", "State", "ZIP", "Greeting",
+    "Contact source", "Identity match tier",
+  ], rows, "Complete list membership; export does not establish email eligibility. Import ZIP and phone columns as text.",
+    { scope:`Contact list: ${name}`, filters:"Complete membership; map filters and viewport do not apply" });
+  showNotice(`Exported ${rows.length.toLocaleString()} people from ${name}. Open the CSV in Excel; use Data > From Text/CSV to preserve ZIP and phone formatting.`);
 }
 
 function exportFirms(){

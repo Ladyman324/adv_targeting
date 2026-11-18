@@ -391,12 +391,13 @@ async function alreadySent(token, operationId, deps) {
 function signatureFor(token, deps) {
   const cr = deps.core || core;
   return cr.corporateSignature ? cr.corporateSignature(token.profile || {}, "",
-    typeof cr.config === "function" ? cr.config() : undefined, token.signaturePhoto) : "";
+    typeof cr.config === "function" ? cr.config() : undefined, token.signaturePhoto, token.signatureDesignation) : "";
 }
 
 async function prepareSignature(who, token, deps = {}) {
   const result = await (deps.signature || require("./email-signature")).bundle(who, token.profile || {},
     { core: deps.core || core });
+  token.signatureDesignation = result.designation;
   token.signaturePhoto = result.photo;
   token.signatureImages = result.images;
   token.signatureOwner = { id: who.id };

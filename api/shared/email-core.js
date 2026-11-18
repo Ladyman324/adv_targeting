@@ -522,7 +522,15 @@ function archiveFooter(manageUrl) {
     + `<p style="margin:0">${esc(text)}${link}. Thank you.</p></div>`;
 }
 
-function corporateSignature(profile, manageUrl = "", cfg = config(), photo = null) {
+function signatureDisplayName(profile, designation = "") {
+  const name = String((profile || {}).displayName || "").trim();
+  const suffix = String(designation || "").replace(/[\r\n\t]+/g, " ").trim().replace(/^,\s*/, "").slice(0, 80);
+  if (!name || !suffix || name.toLowerCase() === suffix.toLowerCase()
+      || name.toLowerCase().endsWith(" " + suffix.toLowerCase())) return name;
+  return `${name}, ${suffix}`;
+}
+
+function corporateSignature(profile, manageUrl = "", cfg = config(), photo = null, designation = "") {
   const p = profile || {};
   const inline = (value) => String(value || "").replace(/&/g, "&amp;")
     .replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
@@ -553,7 +561,7 @@ function corporateSignature(profile, manageUrl = "", cfg = config(), photo = nul
     .replace(new RegExp("\\\\n|\\r?\\n", "g"), "<br>");
 
   const rows = [
-    `<strong>${inline(p.displayName)}</strong>`,
+    `<strong>${inline(signatureDisplayName(p, designation))}</strong>`,
     p.jobTitle ? inline(p.jobTitle) : "",
     inline(company),
     phone ? `${phoneLabel} ${inline(phone)}` : "",
@@ -822,7 +830,7 @@ module.exports = {
   // called "undefined". Templates with no charts at all failed too.
   ABSOLUTE_BATCH_STOP, BUILTIN_TEMPLATES, ALLOWED_FIELDS, IMAGE_TOKEN, config, splitName,
   mergeValues, renderTemplate, plainTextToSafeHtml, sanitizeEmailHtml, normalizeRichBody, renderBody, extraRecipients,
-  corporateSignature, validEmail, isExternal, guardrail, lintTemplate,
+  corporateSignature, signatureDisplayName, validEmail, isExternal, guardrail, lintTemplate,
   passcodeRequired, passcodeMatches, archiveFooter, complianceBcc, FORESIDE_DEFAULT, interleaveByDomain, campaignHealth, directSendBlockedBy,
   internalRecipientAllowed
 };

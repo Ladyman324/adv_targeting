@@ -39,7 +39,7 @@ STAGE_DIR=""
 #   57: email-company-names.test.js -- approved presentation aliases, not firm identity
 #   61: product-filter helper, desktop, Field, and saved-audience contracts
 # 64: preserve live release-probe/account-value tests and add email formatting
-EXPECTED_API_TEST_FILE_COUNT=64
+EXPECTED_API_TEST_FILE_COUNT=65
 
 cleanup() {
   test -z "$TEMP_ROOT" && return

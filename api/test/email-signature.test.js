@@ -182,3 +182,41 @@ test("seed and uploaded dimensions survive selection and generated messages free
   assert.equal(before.images[0].width, 264);
   assert.equal(before.images[0].height, 336);
 });
+
+
+test("per-user designations appear in the signature without changing the sender's identity or merge name", async () => {
+  const result = await signature.bundle(who, profile, { prefs: { signatureDesignation: "CIMA\u00ae" } });
+  assert.match(result.signatureHtml, new RegExp(`<strong>${profile.displayName}, CIMA\u00ae</strong>`));
+  assert.equal(result.designation, "CIMA\u00ae");
+  assert.equal(core.mergeValues({}, profile).sender_name, profile.displayName);
+  assert.equal(profile.signatureDesignation, undefined);
+  assert.deepEqual(result.images, []);
+  assert.equal(core.signatureDisplayName({ displayName: "A Rep, CIMA\u00ae" }, "CIMA\u00ae"), "A Rep, CIMA\u00ae");
+  assert.equal(core.signatureDisplayName({ displayName: "A Rep CIMA\u00ae" }, "CIMA\u00ae"), "A Rep CIMA\u00ae");
+  assert.equal(core.signatureDisplayName(profile, ""), profile.displayName);
+  assert.equal(require("../shared/store").SETTING_KEYS.signatureDesignation, 80);
+});
+
+test("designation text is escaped and applies consistently with a signature photo and compliance footer", () => {
+  const html = core.corporateSignature(profile, "", core.config(), signature.descriptor(who, photo), '<script>alert(1)</script>');
+  assert.match(html, /&lt;script&gt;/);
+  assert.doesNotMatch(html, /<script>/);
+  assert.match(html, /src="cid:/);
+  assert.match(html, /EIC e-mails are archived/);
+});
+
+test("signature settings preview includes the saved designation and downloads the selected photo", async () => {
+  const auth = require("../shared/email-auth"), app = require("../shared/store"), st = require("../shared/email-store");
+  const old = [auth.status, app.getSettings, st.getSignaturePhoto];
+  auth.status = async () => ({ profile });
+  app.getSettings = async () => ({ signatureDesignation: "CIMA\u00ae", signaturePhotoEnabled: "1" });
+  st.getSignaturePhoto = async () => null;
+  try {
+    const result = await signature.settings(who);
+    assert.equal(result.designation, "CIMA\u00ae");
+    assert.match(result.previewHtml, /CIMA\u00ae/);
+    assert.match(result.cropPreviewHtml, /CIMA\u00ae/);
+    assert.equal(result.photoDownloadName, "signature-photo.jpg");
+    assert.match(result.photoUrl, new RegExp(photo.sha256));
+  } finally { [auth.status, app.getSettings, st.getSignaturePhoto] = old; }
+});

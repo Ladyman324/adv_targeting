@@ -868,6 +868,7 @@ const SETTING_KEYS = {
   copyInternalTo: 254,
   actEmailWrite: 1,
   signaturePhotoEnabled: 1,
+  signatureDesignation: 80,
   // The field view's starting point when "Near me" is not what is wanted --
   // a rep planning a trip to a city they are not standing in.
   homeLabel: 80,

@@ -182,7 +182,8 @@ async function catalog(who, opts) {
     // then refuse.
     internalRecipients: cfg.internalRecipients,
     recipientEligibility: recipientRegistry.policy(),
-    signatureHtml: connection.profile ? core.corporateSignature(connection.profile) : "",
+    signatureHtml: connection.profile ? core.corporateSignature(connection.profile, "", cfg, null,
+      (await appStore.getSettings(who).catch(() => ({}))).signatureDesignation) : "",
     capacity,
     policy: { directSendAvailable: cfg.directSendEnvironmentEnabled && !policy.killed,
       killed: policy.killed, reason: policy.reason,
@@ -967,13 +968,24 @@ async function checkRecipients(who, input) {
       // Infrastructure and unknown failures are not permission to skip people.
       if (error.code !== "recipient_not_approved") throw error;
       const reasons = {
-        contact_presentation_not_approved: "A safe greeting or surname has not been established.",
-        roster_current_firm_conflict: "The roster firm conflicts with current registration.",
-        duplicate_email: "This email is linked to more than one advisor.",
-        not_in_approved_registry: "No approved email route is available.",
+        contact_presentation_not_approved: ["A usable greeting or surname is missing.", "Check the person's salutation and name in ACT! or the firm roster; ask the Map team to review the presentation."],
+        roster_current_firm_conflict: ["The roster firm conflicts with current SEC registration.", "Check whether the advisor moved firms and ask the Map team to verify the current roster. Changing an ACT! label will not resolve this."],
+        duplicate_email: ["This email is linked to more than one advisor.", "Verify each person's own primary email in ACT!; a shared or assistant address needs review."],
+        approved_email_not_unique: ["This email is linked to more than one advisor.", "Verify each person's own primary email in ACT!; a shared or assistant address needs review."],
+        missing_or_invalid_email: ["No valid email is available for this advisor.", "Check the person's primary email in ACT! or the firm roster. Correct ACT! data is picked up by the next published refresh."],
+        contact_identity_not_approved: ["The contact has not passed identity matching.", "Verify the ACT! CRD, full name and current firm against this person. Send the Map team the contact and code for review."],
+        act_identity_not_approved: ["The ACT! contact is not linked to an approved advisor identity.", "Verify the ACT! CRD, full name and current firm. Client or prospect status alone does not establish an advisor identity."],
+        act_email_does_not_match_approved_identity: ["The ACT! email differs from the approved identity's email.", "Verify the exact person's primary email and CRD in ACT!, then ask the Map team to review the link."],
+        high_match_evidence_missing: ["The contact match is missing required evidence.", "Ask the Map team to review the source record; changing an ACT! relationship label will not supply this evidence."],
+        roster_firm_evidence_missing: ["The roster does not establish the advisor's firm.", "Ask the Map team to verify the roster profile and current firm."],
+        not_in_approved_registry: ["No approved email route is available.", "Send the Map team the ACT! contact, CRD and email. Some analysts or other contacts may not be registered advisors; they need a separate review."],
       };
+      const [reason, nextStep] = reasons[error.detail] || [
+        "This contact has not passed the approved-recipient checks.",
+        "Send the Map team this contact and review code. Do not change ACT! data without checking the underlying record.",
+      ];
       return { crd: raw.contactId, name: raw.name, email: raw.email,
-        reason: reasons[error.detail] || "This contact has not passed the approved-recipient checks." };
+        reasonCode: error.detail || "recipient_not_approved", reason, nextStep };
     }
   }, 4);
   const excluded = decisions.filter(Boolean);
@@ -1227,7 +1239,7 @@ async function createBatch(who, input) {
       inlineImages: [...(template.images || []), ...signature.images],
       // Per-recipient: the footer's preference link is signed for THIS address.
       signatureHtml: core.corporateSignature(profile,
-        suppress.manageUrl(r.email, r.contactId), cfg, signature.photo),
+        suppress.manageUrl(r.email, r.contactId), cfg, signature.photo, signature.designation),
       baseRevision: 1, attachments: [...new Map([...documents, ...(routedMaterials.get(r.email) || { documents: [] }).documents].map((doc) => [doc.id, doc])).values()], validation: { errors: [
         ...subject.missing.map((f) => ({ code: "missing_merge_value", message: `Missing ${f}.` })),
         ...body.missing.map((f) => ({ code: "missing_merge_value", message: `Missing ${f}.` })),

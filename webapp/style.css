@@ -1431,7 +1431,7 @@ body.scope-pending #map{cursor:progress}
 .lists-main{flex:1 1 auto; min-width:0}
 .lists-main b{font-size:13px}
 .lists-main small{display:block; margin-top:1px; font-size:11px; color:var(--muted)}
-.lists-acts{flex:0 0 auto; display:flex; gap:5px}
+.lists-acts{flex:0 0 auto; display:flex; flex-wrap:wrap; gap:5px}
 .lists-acts button{height:28px; padding:0 9px; font:inherit; font-size:11.5px;
   cursor:pointer; border:0; border-radius:7px; background:var(--panel-2);
   color:var(--ink); box-shadow:inset 0 0 0 1px var(--hair)}
