@@ -81,7 +81,8 @@ test("the composer preselects removable materials and previews wording before ge
   assert.match(email, /id="emailSetupPreview"/);
   assert.match(email, /previewHtml\(chosen, SAMPLE\)/);
   assert.match(email, /You removed a recommended attachment/);
-  assert.match(email, /latest approved client-group version is selected per recipient/);
+  assert.match(email, /id="emailTemplateReadiness"/);
+  assert.match(email, /attachmentChips\(\(platform\) => platformAvailability\(f\.id, platform\)\)/);
 });
 
 test("mixed material periods require an explicit pre-generation choice and save held contacts", () => {

@@ -154,22 +154,70 @@ function strategySelection(matches, target, held, familyId) {
   if (available.has("combined")) return [pick("combined")];
   throw error(`No general current approved ${target.toUpperCase()} material is available for ${familyId}.`, "material_variant_unavailable");
 }
+function selectForChannel(candidates, target, held, familyId) {
+  let matches = candidates.filter((d) => d.channel === target);
+  let selectedTarget = target;
+  if (!matches.length && target !== "generic") {
+    matches = candidates.filter((d) => d.channel === "generic" && (d.genericFallbackChannels || []).includes(target));
+    selectedTarget = "generic";
+  }
+  if (!matches.length) throw error(`No current approved ${target.toUpperCase()} material is available for ${familyId}.`, "material_variant_unavailable");
+  return strategySelection(matches, selectedTarget, held, familyId);
+}
+
 function resolveFamilies(documents, familyIds, recipientEmail, policy, options = {}) {
   const wanted = [...new Set((familyIds || []).map(cleanId).filter(Boolean))];
   const target = resolveChannel(recipientEmail, policy), chosen = [];
   const held = new Set((options.strategies || []).map(strategy).filter((value) => value === "acv" || value === "lcv"));
   for (const familyId of wanted) {
     const candidates = documents.filter((d) => d.familyId === familyId && sendableDocument(d));
-    let matches = candidates.filter((d) => d.channel === target);
-    let selectedTarget = target;
-    if (!matches.length && target !== "generic") {
-      matches = candidates.filter((d) => d.channel === "generic" && (d.genericFallbackChannels || []).includes(target));
-      selectedTarget = "generic";
-    }
-    if (!matches.length) throw error(`No current approved ${target.toUpperCase()} material is available for ${familyId}.`, "material_variant_unavailable");
-    chosen.push(...strategySelection(matches, selectedTarget, held, familyId));
+    chosen.push(...selectForChannel(candidates, target, held, familyId));
   }
   return { channel: target, documents: [...new Map(chosen.map((doc) => [doc.id, doc])).values()] };
+}
+
+function materialAvailability(documents, at = Date.now()) {
+  const families = new Map();
+  for (const doc of documents) {
+    if (!doc.familyId) continue;
+    if (!families.has(doc.familyId)) families.set(doc.familyId, []);
+    if (sendableDocument(doc, at)) families.get(doc.familyId).push(doc);
+  }
+  return Object.fromEntries([...families].map(([familyId, candidates]) => {
+    const latest = new Map();
+    for (const doc of candidates) {
+      const kind = doc.periodKind || "";
+      const edition = doc.periodKey || doc.asOfDate || "";
+      if (edition > (latest.get(kind) || "")) latest.set(kind, edition);
+    }
+    const channels = Object.fromEntries(CHANNELS.map((target) => {
+      const docs = new Map(), unavailable = [];
+      // The default Raymond James route is LCV. Account evidence can also
+      // select ACV, so show both before an actual recipient's route is known.
+      const strategies = target === "rj" ? ["lcv", "acv"] : [""];
+      for (const held of strategies) {
+        try {
+          for (const doc of selectForChannel(candidates, target, new Set(held ? [held] : []), familyId))
+            docs.set(doc.id, doc);
+        } catch (error) {
+          if (error.code !== "material_variant_unavailable") throw error;
+          unavailable.push(held);
+        }
+      }
+      const routed = [...docs.values()].map((doc) => {
+        const edition = doc.periodKey || doc.asOfDate || "";
+        return {
+          id: doc.id, name: doc.name, channel: doc.channel, strategy: doc.strategy,
+          periodKey: doc.periodKey, asOfDate: doc.asOfDate,
+          older: freshnessOf(doc, at) === "stale" || Boolean(edition && edition < (latest.get(doc.periodKind || "") || "")),
+        };
+      });
+      const status = unavailable.length ? (routed.length ? "partial" : "unavailable")
+        : routed.some((doc) => doc.older) ? "older" : "current";
+      return [target, { status, documents: routed, unavailable }];
+    }));
+    return [familyId, channels];
+  }));
 }
 
 /* Template requirements used to point at one PDF id. Once documents gained a
@@ -213,7 +261,7 @@ function templatesRequiringDocument(templates = [], documentId) {
   });
 }
 
-module.exports = { CHANNELS, AUDIENCES, STRATEGIES, channel, audience, strategy,
+module.exports = { CHANNELS, AUDIENCES, STRATEGIES, channel, audience, strategy, materialAvailability,
   domain, emailDomain, hash, validateRoutes, loadSeed, resolveChannel,
   normalizeMetadata, materialSlotKey, replacementMetadata, latestCompletedQuarter,
   freshnessOf, currentDocument, sendableDocument, resolveFamilies, templateRequirements,

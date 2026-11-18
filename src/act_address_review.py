@@ -88,6 +88,40 @@ def build_address_reviews(mapping, contacts, act_rows, roster_rows, employment):
     return result
 
 
+def build_contact_create_profiles(mapping, contacts, roster_rows, employment):
+    """Contact details for future creates, bound to the approved primary email."""
+    email_counts = Counter(normalize_email(row.get("e")) for row in contacts.values())
+    by_route = defaultdict(list)
+    for row in roster_rows:
+        email, firm = normalize_email(row.get("email")), text(row.get("firm_crd"))
+        if email and firm:
+            by_route[(email, firm)].append(row)
+    profiles = {}
+    for crd, row in contacts.items():
+        crd = str(crd)
+        email, firm = normalize_email(row.get("e")), text(row.get("fc"))
+        if (crd in mapping or row.get("aid") or row.get("t") not in {"confirmed", "high"}
+                or not email or email_counts[email] != 1 or (crd, firm) not in employment):
+            continue
+        fields = {"department": text(row.get("tn")), "jobTitle": text(row.get("ti")),
+                  "website": text(row.get("pu")), "businessPhone": text(row.get("w")),
+                  "businessExtension": text(row.get("wx")), "mobilePhone": text(row.get("c"))}
+        fields = {key: value for key, value in fields.items() if value}
+        roster = by_route[(email, firm)]
+        if len({text(item.get("name")).casefold() for item in roster}) == 1:
+            offices = {}
+            for item in roster:
+                office = from_roster(item)
+                if usable(office):
+                    key = tuple(office[k].casefold() for k in ADDRESS_FIELDS)
+                    offices[key] = office
+            if len(offices) == 1:
+                fields["businessAddress"] = next(iter(offices.values()))
+        if fields:
+            profiles[crd] = {"emailHash": hashlib.sha256(email.encode()).hexdigest(), **fields}
+    return profiles
+
+
 def build_crm_directory(mapping, rows, zips):
     """Project shared, active CRM contacts separately from the advisor universe."""
     from contact_work_locations import source_record

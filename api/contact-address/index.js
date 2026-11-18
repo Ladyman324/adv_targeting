@@ -11,7 +11,7 @@ module.exports = async function (context, req) {
     if (req.method === "GET") {
       const query = req.query || {};
       return store.ok(context, query.search !== undefined
-        ? crm.search(String(query.search)) : await crm.preview(String(query.crd || "")));
+        ? crm.search(String(query.search), query.mode === "person") : await crm.preview(String(query.crd || "")));
     }
     if (req.method !== "POST" || !/^application\/json\b/i.test((req.headers || {})["content-type"] || ""))
       throw Object.assign(new Error("Send a confirmed ACT! contact action as JSON."),

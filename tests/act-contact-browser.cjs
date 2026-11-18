@@ -7,9 +7,10 @@ const web = path.join(__dirname, "../webapp");
 const primary = { line1: "1285 Avenue of the Americas", city: "New York", state: "NY", postalCode: "10019" };
 const alternate = { line1: "401 West 4th Street", line2: "Suite 3100", city: "Austin", state: "TX", postalCode: "78701" };
 const linked = { status: "linked", primary, revision: "address-version",
-  candidates: [{ id: "ubs-austin", source: "UBS", address: alternate }] };
+  candidates: [{ id: "ubs-austin", source: "UBS", address: alternate, url: "https://www.ubs.com/" }] };
 const unlinked = { status: "unlinked", revision: "creation-version",
-  draft: { fullName: "Jane Advisor", company: "Firm", emailAddress: "jane@example.test", customFields: { crd: "5551234" } } };
+  draft: { fullName: "Jane Advisor", company: "Firm", emailAddress: "jane@example.test", department: "Advisory team",
+    businessAddress: primary, customFields: { crd: "5551234", email__y_n: "2" } } };
 const origin = "https://act-fixture.invalid";
 
 (async () => {
@@ -26,8 +27,10 @@ const origin = "https://act-fixture.invalid";
         const req = route.request(), url = new URL(req.url());
         assert.equal(url.origin, origin);
         if (url.pathname === "/") return route.fulfill({ contentType: "text/html", body:
-          '<meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="/email.css"><body><main></main><button data-act-directory>Search ACT! contacts</button><script src="/act-addresses.js"></script></body>' });
-        if (url.pathname === "/email.css" || url.pathname === "/act-addresses.js")
+          '<meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="/style.css"><link rel="stylesheet" href="/email.css"><body><main></main><div id="actTestSearch" hidden></div><button data-act-directory>Search ACT! contacts</button><script src="/act-addresses.js"></script></body>' });
+        if (url.pathname === "/act-icon.png")
+          return route.fulfill({ contentType: "image/png", body: fs.readFileSync(path.join(web, "act-icon.png")) });
+        if (["/email.css", "/style.css", "/act-addresses.js"].includes(url.pathname))
           return route.fulfill({ contentType: url.pathname.endsWith(".js") ? "application/javascript" : "text/css",
             body: fs.readFileSync(path.join(web, url.pathname.slice(1))) });
         assert.equal(url.pathname, "/api/contact-address");
@@ -45,10 +48,14 @@ const origin = "https://act-fixture.invalid";
       });
       await page.goto(origin);
       await page.evaluate(() => {
-        document.querySelector("main").innerHTML = ActAddresses.slot("2066775") + ActAddresses.slot("5551234");
+        document.querySelector("main").innerHTML = ActAddresses.badgeSlot("2066775") + ActAddresses.slot("2066775")
+          + ActAddresses.badgeSlot("5551234") + ActAddresses.slot("5551234");
         ActAddresses.setLocator(contact => { window.locatedContact = contact.name; });
       });
-      await page.getByText("UBS lists this advisor in Austin, TX.").waitFor();
+      await page.getByText("UBS lists Austin, TX").waitFor();
+      await page.locator(".act-badge.linked").waitFor();
+      await page.locator(".act-badge.unlinked").waitFor();
+      assert.equal(await page.getByRole("link", { name: /Source profile/ }).getAttribute("href"), "https://www.ubs.com/");
       await page.getByText("1285 Avenue of the Americas", { exact: false }).waitFor();
       const replace = page.getByRole("button", { name: "Replace ACT! primary address with Austin, TX" });
       await replace.click();
@@ -61,19 +68,36 @@ const origin = "https://act-fixture.invalid";
       assert.deepEqual(writes[0], { crd: "2066775", action: "replace_primary", candidateId: "ubs-austin",
         revision: "address-version", confirmed: true });
 
-      await page.getByRole("button", { name: "Add to ACT!" }).click();
-      await page.getByRole("dialog", { name: "Add contact to ACT!" }).getByText("Jane Advisor").waitFor();
+      accept = false;
+      await page.getByRole("button", { name: "Add contact to ACT!" }).click();
+      const review = page.getByRole("dialog", { name: "Add contact to ACT!" });
+      await review.getByText("Jane Advisor").waitFor();
+      await review.getByText("Email only", { exact: true }).waitFor();
+      await review.getByText("Advisory team", { exact: true }).waitFor();
       assert.equal(writes.length, 1);
-      await page.getByRole("button", { name: "Continue" }).click();
-      await page.getByText("? Added to ACT!").waitFor();
+      await review.getByRole("button", { name: "Add contact", exact: true }).click();
+      await page.getByRole("img", { name: "Added to ACT!" }).waitFor();
       assert.deepEqual(writes[1], { crd: "5551234", action: "add_contact", revision: "creation-version", confirmed: true });
+
+      await page.evaluate(() => ActAddresses.searchInto(document.getElementById("actTestSearch"), "ACT Only"));
+      await page.locator("#actTestSearch").getByRole("button", { name: /ACT Only/ }).click();
+      const contactDialog = page.getByRole("dialog", { name: "ACT Only" });
+      await contactDialog.getByText("No matching CRD").waitFor();
+      await contactDialog.getByRole("button", { name: "Close" }).click();
 
       await page.getByRole("button", { name: "Search ACT! contacts" }).click();
       await page.getByRole("searchbox").fill("act@example.test");
       await page.getByRole("button", { name: "Search", exact: true }).click();
-      await page.getByText("No matching CRD", { exact: true }).waitFor();
+      await page.getByRole("dialog").getByText("No matching CRD", { exact: true }).waitFor();
       await page.getByRole("button", { name: "Show on map" }).click();
       assert.equal(await page.evaluate(() => window.locatedContact), "ACT Only");
+      const scrolls = await page.evaluate(() => {
+        document.body.insertAdjacentHTML("beforeend", '<div class="ask-back"><div class="ask ask-scroll freshness-view"><div style="height:2400px"></div></div></div>');
+        const panel = document.querySelector(".freshness-view");
+        panel.scrollTop = panel.scrollHeight;
+        return panel.getBoundingClientRect().height <= innerHeight && panel.scrollTop > 0;
+      });
+      assert.equal(scrolls, true);
       assert.deepEqual(errors, []);
       console.log("PASS " + width + "px ACT primary, both confirmations, verified creation and ACT-only contact search");
       await page.close();

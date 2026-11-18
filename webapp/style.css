@@ -1749,7 +1749,8 @@ body.scope-pending #map{cursor:progress}
 .contact-failed{color:var(--warn,#c2703a)}
 
 /* Administrator-only source metadata. No contact details or refresh actions. */
-.freshness-view{width:min(1080px,94vw);font-size:13px}
+.freshness-view{box-sizing:border-box;width:min(1080px,94vw);max-height:calc(100vh - 24px);
+  max-height:calc(100dvh - 24px);font-size:13px}
 .freshness-view h3{font-size:18px}
 .freshness-release{display:grid;grid-template-columns:90px minmax(0,1fr);gap:5px 12px;margin:14px 0}
 .freshness-release dt{color:var(--muted)}

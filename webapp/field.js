@@ -478,7 +478,7 @@ function openSheet(r){
 
   $("sheetInner").innerHTML = `
     <button id="sheetClose" aria-label="Close">&times;</button>
-    <h2>${esc(r[COL.name])}${flagMarksField(r[COL.crd])}</h2>
+    <h2>${esc(r[COL.name])}${flagMarksField(r[COL.crd])}${ActAddresses.badgeSlot(r[COL.crd])}</h2>
     ${ActAddresses.slot(r[COL.crd])}
     <div class="sub">${esc(r[COL.title] || "")}</div>
     ${owned}
@@ -2536,6 +2536,7 @@ function setDeskLink(term){
 
 async function search(term){
   const q = term.trim().toLowerCase();
+  ActAddresses.searchInto($("fieldActSearchResults"), q);
   const seq = ++searchSeq;
   setDeskLink("");
   // The session gets out of the way while searching and comes back when the

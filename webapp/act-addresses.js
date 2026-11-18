@@ -7,40 +7,51 @@
   const place = (a) => [a.city, a.state].filter(Boolean).join(", ");
   const address = (a) => [a.line1, a.line2, a.line3, place(a), a.postalCode].filter(Boolean).join(", ");
   const chip = (label, tone = "") => `<span class="act-chip ${tone}">${esc(label)}</span>`;
+  const states = {
+    linked: "In ACT!", added: "Added to ACT!", review: "ACT! match needs review",
+    unlinked: "Not in ACT!", pending: "ACT! addition needs verification", unknown: "ACT! status unavailable",
+  };
   let locate;
+
+  function badge(state, crd = "") {
+    const label = states[state] || "Checking ACT!";
+    const tone = state === "linked" || state === "added" ? " linked" : state === "unlinked" ? " unlinked" : "";
+    return `<span class="act-badge${tone}" ${crd ? `data-act-badge="${esc(crd)}"` : ""}
+      title="${label}" role="img" aria-label="${label}"><img src="act-icon.png" alt=""></span>`;
+  }
+
+  function badgeSlot(crd) {
+    return /^\d{3,12}$/.test(String(crd)) ? badge("", crd) : "";
+  }
 
   function slot(crd) {
     return /^\d{3,12}$/.test(String(crd))
       ? `<section class="act-profile" data-act-profile="${esc(crd)}" aria-label="ACT! contact">
-          ${chip("Checking ACT!")}<p role="status"></p></section>` : "";
+          <p class="act-result" role="status"></p></section>` : "";
   }
 
   function render(state) {
-    const labels = {
-      linked: "? In ACT!", added: "? Added to ACT!", review: "ACT! match needs review",
-      unlinked: "No ACT! link", pending: "ACT! addition needs verification", unknown: "ACT! status unavailable",
-    };
-    const linked = state.status === "linked" || state.status === "added";
     const primary = state.primary && address(state.primary);
-    return chip(labels[state.status] || labels.unknown, linked ? "yes" : "")
-      + (primary ? `<p><b>ACT! primary address</b> <span>${esc(primary)}</span></p>` : "")
+    const statusNote = ["review", "pending", "unknown"].includes(state.status) ? states[state.status] : "";
+    return (state.draft ? '<button type="button" class="ask-btn" data-act-action="add_contact">Add contact to ACT!</button>' : "")
+      + (statusNote ? `<p class="act-status-note">${esc(statusNote)}</p>` : "")
+      + (primary ? `<div class="act-office-used"><b>ACT! primary address</b><p>${esc(primary)}</p></div>` : "")
       + (state.notice ? `<p>${esc(state.notice)}</p>` : "")
       + (state.candidates || []).map((candidate) => {
         const city = place(candidate.address);
         const source = /^https?:\/\//i.test(candidate.url || "")
-          ? `<a href="${esc(candidate.url)}" rel="noopener noreferrer" target="_blank">Source profile</a>` : "";
-        return `<div class="act-office-note"><p><b>${esc(candidate.source)} lists this advisor in ${esc(city)}.</b></p>
-          <p>${esc(address(candidate.address))} ${source}</p>
+          ? `<a class="act-source-link" href="${esc(candidate.url)}" rel="noopener noreferrer" target="_blank">Source profile <span aria-hidden="true">&#8599;</span></a>` : "";
+        return `<div class="act-office-note"><div class="act-office-heading"><b>${esc(candidate.source)} lists ${esc(city)}</b>${source}</div>
+          <p>${esc(address(candidate.address))}</p>
           <button type="button" class="ask-btn" data-act-action="replace_primary" data-candidate="${esc(candidate.id)}">
             Replace ACT! primary address with ${esc(city)}</button></div>`;
       }).join("")
-      + (state.draft ? '<button type="button" class="ask-btn" data-act-action="add_contact">Add to ACT!</button>' : "")
       + '<p class="act-result" role="status"></p>';
   }
 
-  async function request(query, body) {
+  async function request(query, body, signal) {
     const response = await root.fetch("/api/contact-address" + query, {
-      credentials: "same-origin", cache: "no-store",
+      credentials: "same-origin", cache: "no-store", signal,
       ...(body ? { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) } : {}),
     });
     if (!(response.headers.get("content-type") || "").includes("application/json"))
@@ -62,23 +73,36 @@
     return dialog;
   }
 
-  // First review the server-provided fields in context. Continue then asks for
-  // a separate final confirmation before issuing the first write request.
+  // The Add button opens a review of the server-provided fields. Submitting
+  // that review is the confirmation for creation. Address replacement keeps
+  // its separate final confirmation.
   function confirmChange(action, state, candidate) {
     const adding = action === "add_contact";
     const verb = adding ? "Add contact to ACT!" : "Replace ACT! primary address";
     const dialog = openDialog(verb);
     const body = dialog.querySelector(".act-dialog-body");
-    body.innerHTML = (adding
-      ? `<p><b>${esc(state.draft.fullName)}</b> ? CRD ${esc(state.draft.customFields.crd)}</p>
-          <p>${esc(state.draft.company)} ? ${esc(state.draft.emailAddress)}</p>`
-      : `<p><b>Current ACT! primary</b> ${esc(address(state.primary) || "No address")}</p>
-         <p><b>New ACT! primary</b> ${esc(address(candidate.address))}</p>`)
-      + '<button type="button" class="ask-btn primary" data-act-confirm>Continue</button>';
+    if (adding) {
+      const draft = state.draft;
+      const fields = [["Company", draft.company], ["Email", draft.emailAddress], ["Team", draft.department],
+        ["Title", draft.jobTitle], ["Salutation", draft.salutation],
+        ["Office phone", [draft.businessPhone, draft.businessExtension && "ext. " + draft.businessExtension].filter(Boolean).join(" ")],
+        ["Mobile phone", draft.mobilePhone], ["Website", draft.website],
+        ["Business address", draft.businessAddress && address(draft.businessAddress)],
+        ["Mail Code", draft.customFields.email__y_n === "2" ? "Email only" : draft.customFields.email__y_n]];
+      body.innerHTML = `<p><b>${esc(draft.fullName)}</b> / CRD ${esc(draft.customFields.crd)}</p>
+        <dl class="act-create-fields">${fields.filter(([, value]) => value).map(([label, value]) =>
+          `<dt>${label}</dt><dd>${esc(value)}</dd>`).join("")}</dl>
+        <p>EIC Contact can be set on the new record in ACT!.</p>
+        <button type="button" class="ask-btn primary" data-act-confirm>Add contact</button>`;
+    } else {
+      body.innerHTML = `<p><b>Current ACT! primary</b> ${esc(address(state.primary) || "No address")}</p>
+        <p><b>New ACT! primary</b> ${esc(address(candidate.address))}</p>
+        <button type="button" class="ask-btn primary" data-act-confirm>Continue</button>`;
+    }
     return new Promise((resolve) => {
       dialog.addEventListener("close", () => resolve(false), { once: true });
       body.querySelector("[data-act-confirm]").onclick = () => {
-        const accepted = root.confirm(`${verb} now?`);
+        const accepted = adding || root.confirm(`${verb} now?`);
         if (accepted) {
           resolve(true);
           dialog.close();
@@ -91,10 +115,16 @@
     if (element.dataset.actMounted) return;
     element.dataset.actMounted = "1";
     const crd = element.dataset.actProfile;
+    const update = (value) => {
+      if (!element.isConnected) return;
+      element.innerHTML = render(value);
+      const header = root.document.querySelector(`[data-act-badge="${crd}"]`);
+      if (header) header.outerHTML = badge(value.status, crd);
+    };
     let state;
     try { state = await request("?crd=" + encodeURIComponent(crd)); }
-    catch (error) { element.innerHTML = render({ status: "unknown", notice: error.message }); return; }
-    element.innerHTML = render(state);
+    catch (error) { update({ status: "unknown", notice: error.message }); return; }
+    update(state);
     let busy = false;
     element.addEventListener("click", async (event) => {
       const button = event.target.closest("[data-act-action]");
@@ -112,15 +142,64 @@
             revision: state.revision, confirmed: true });
           if (!saved.verified) throw new Error("ACT! could not verify this change.");
           state = { status: "linked", ...saved };
-          element.innerHTML = render(state);
+          update(state);
           element.querySelector(".act-result").textContent = action === "add_contact"
-            ? "Contact created and verified in ACT!. The CRD link will be checked at the next refresh."
+            ? (saved.unverifiedFields?.length
+              ? "Contact created. Review these fields in ACT!: " + saved.unverifiedFields.join(", ") + "."
+              : "Contact created and verified in ACT!. The CRD link will be checked at the next refresh.")
             : "Primary address saved in ACT!. The map pin updates at the next refresh.";
         } catch (error) {
           status.textContent = error.message + " Reopen this profile to check the current ACT! record.";
           element.querySelectorAll("[data-act-action]").forEach((item) => { item.disabled = true; });
         }
       } finally { busy = false; }
+    });
+  }
+
+  function contactDetails(contact) {
+    const dialog = openDialog(contact.name);
+    const body = dialog.querySelector(".act-dialog-body");
+    body.innerHTML = `<p>${badge("linked")} ${chip("No matching CRD")}</p>
+      <p>${esc(contact.company)}</p><p>${esc(contact.email)}</p>
+      <p>${esc(address(contact.primary) || "No ACT! primary address on file")}</p>
+      ${locate && contact.coordinates ? '<button type="button" class="ask-btn" data-act-pin>Show on map</button>' : ""}`;
+    const pin = body.querySelector("[data-act-pin]");
+    if (pin) pin.onclick = () => { locate(contact); dialog.close(); };
+  }
+
+  const searches = new WeakMap();
+  function searchInto(host, query, onChange = () => {}, onSelect = () => {}) {
+    query = String(query || "").trim().toLowerCase();
+    const previous = searches.get(host);
+    if (query && previous?.query === query) return;
+    previous?.controller.abort();
+    searches.delete(host);
+    host.replaceChildren();
+    host.hidden = true;
+    onChange();
+    if (query.length < 2 || !/[^\d\s]/.test(query)) return;
+    const controller = new AbortController();
+    searches.set(host, { query, controller });
+    request("?mode=person&search=" + encodeURIComponent(query), undefined, controller.signal).then((result) => {
+      if (controller.signal.aborted || !result.contacts.length) return;
+      const contacts = result.contacts.slice(0, 8);
+      host.innerHTML = `<div class="act-search-heading">ACT! contacts <small>No matching CRD</small></div>
+        ${contacts.map((contact, i) => `<button type="button" class="act-search-result" data-act-hit="${i}">
+          <b>${esc(contact.name)}</b><span>${esc([contact.company, place(contact.primary)].filter(Boolean).join(" / "))}</span>
+        </button>`).join("")}`;
+      host.onclick = (event) => {
+        const button = event.target.closest("[data-act-hit]");
+        if (!button) return;
+        const contact = contacts[Number(button.dataset.actHit)];
+        if (!contact) return;
+        onSelect();
+        contactDetails(contact);
+      };
+      host.hidden = false;
+      onChange();
+    }).catch(() => {
+      // The advisor index remains usable while the authenticated directory is unavailable.
+      if (searches.get(host)?.controller === controller) searches.delete(host);
     });
   }
 
@@ -147,7 +226,7 @@
           ? `Showing ${result.contacts.length} of ${result.count}. Narrow the search to see more.`
           : `${result.count} matching contact${result.count === 1 ? "" : "s"}`;
         results.innerHTML = result.contacts.map((contact, index) => `<li>
-          <h3>${esc(contact.name)}</h3>${chip("? In ACT!", "yes")} ${chip("No matching CRD")}
+          <h3>${esc(contact.name)}</h3>${badge("linked")} ${chip("No matching CRD")}
           <p>${esc(contact.company)}<br>${esc(contact.email)}</p>
           <p>${esc(address(contact.primary) || "No ACT! primary address on file")}</p>
           ${locate && contact.coordinates
@@ -170,7 +249,7 @@
     if (node.matches("[data-act-profile]")) mount(node);
     node.querySelectorAll("[data-act-profile]").forEach(mount);
   }
-  root.ActAddresses = { slot, render, setLocator: (callback) => { locate = callback; } };
+  root.ActAddresses = { slot, badgeSlot, render, searchInto, setLocator: (callback) => { locate = callback; } };
   if (root.document && root.MutationObserver) {
     const start = () => {
       scan(root.document.body);

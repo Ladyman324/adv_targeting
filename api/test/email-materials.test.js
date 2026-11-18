@@ -41,6 +41,23 @@ test("families select channel variant and only explicit generic fallback", () =>
   assert.equal(m.resolveFamilies(docs, ["case"], "a@rjf.com", p).documents[0].id, "g");
   assert.throws(() => m.resolveFamilies(docs, ["case"], "a@ml.com", p), (e) => e.code === "material_variant_unavailable");
 });
+test("availability reflects current, older, partial, fallback and missing routes per platform", () => {
+  const q3 = { familyId: "case", periodKind: "quarter", periodKey: "2026-Q3", approved: true };
+  const docs = [
+    { ...q3, id: "g", name: "Generic Q3", channel: "generic", asOfDate: "2026-09-30", genericFallbackChannels: ["ml"] },
+    { ...q3, id: "ms", name: "Morgan Stanley Q2", channel: "mswm", periodKey: "2026-Q2", asOfDate: "2026-06-30" },
+    { ...q3, id: "rj", name: "Raymond James Large-Cap", channel: "rj", strategy: "lcv" },
+    { ...q3, id: "u", name: "UBS draft", channel: "ubs", approved: false },
+  ];
+  const availability = m.materialAvailability(docs, Date.UTC(2026, 10, 18)).case;
+  assert.deepEqual(Object.fromEntries(Object.entries(availability).map(([key, row]) => [key, row.status])),
+    { generic: "current", ml: "current", mswm: "older", rj: "partial", ubs: "unavailable" });
+  assert.equal(availability.ml.documents[0].channel, "generic");
+  assert.equal(availability.ml.documents[0].asOfDate, "2026-09-30");
+  assert.deepEqual(availability.rj.unavailable, ["acv"]);
+  assert.deepEqual(availability.ubs.documents, []);
+});
+
 test("Client material wins within the same document slot", () => {
   const docs = [
     { id: "advisor", familyId: "commentary", channel: "generic", strategy: "general",

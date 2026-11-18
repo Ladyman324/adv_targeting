@@ -7,24 +7,38 @@ const addresses = require("./act-address-review");
 const core = require("./email-core");
 
 const crdPattern = /^\d{3,12}$/;
+const mailCodes = require("./email-suppress");
+const ACT_EMAIL_ONLY = "2";
+const phoneDigits = (value) => String(value || "").replace(/\D/g, "").replace(/^1(?=\d{10}$)/, "");
+const verifiedFields = {
+  department: "Team", jobTitle: "Title", website: "Website", salutation: "Salutation",
+  businessPhone: "Office phone", businessExtension: "Extension", mobilePhone: "Mobile phone",
+};
+async function defaultMailCode(crd, email) {
+  const saved = mailCodes.floorCodeFor({ crd, email });
+  if (saved === "BB") return "N";
+  if (["U", "NC", "N"].includes(saved)) return saved;
+  return (saved || await mailCodes.isSuppressed(email)) ? "U" : ACT_EMAIL_ONLY;
+}
 const text = (value) => String(value || "").trim();
 const norm = (value) => text(value).toLowerCase();
 const hash = (value) => crypto.createHash("sha256").update(value).digest("hex");
 const failure = (message, statusCode = 409) =>
   Object.assign(new Error(message), { statusCode, addressReviewSafe: true });
 
-function createService({ lookup, addressService, resolve, act, journal }) {
+function createService({ lookup, addressService, resolve, act, journal, mailCodeFor = defaultMailCode }) {
   const linked = lookup.contacts || {};
   const directory = lookup.crm_directory;
   const claimed = new Set(directory?.claimedCrds || []);
   const emails = new Set(directory?.emailHashes || []);
 
-  function search(query) {
+  function search(query, personOnly = false) {
     if (!directory) throw failure("ACT! contacts are unavailable until the next data refresh.", 503);
     const terms = norm(query).slice(0, 120).split(/\s+/).filter(Boolean);
     if (terms.join("").length < 2) throw failure("Enter at least two letters or numbers.", 400);
     const matches = directory.contacts.filter((row) => {
-      const searchable = norm([row.name, row.email, row.company, row.primary.city, row.primary.state].join(" "));
+      const fields = personOnly ? [row.name, row.email] : [row.name, row.email, row.company, row.primary.city, row.primary.state];
+      const searchable = norm(fields.join(" "));
       return terms.every((term) => searchable.includes(term));
     });
     return { contacts: matches.slice(0, 50), count: matches.length };
@@ -45,8 +59,22 @@ function createService({ lookup, addressService, resolve, act, journal }) {
     if (!lastName || lastAt < 1 || !/^(?:$|[\s,])/.test(suffix)
         || !core.validEmail(emailAddress) || !core.isExternal(emailAddress) || !words[0]) return null;
     const firstName = words[0];
-    return { firstName, lastName, fullName, emailAddress, company: text(approved.firm),
+    const candidate = lookup.contact_create_profiles?.[crd];
+    const profile = candidate?.emailHash === hash(emailAddress) ? candidate : {};
+    const draft = { firstName, lastName, fullName, emailAddress, company: text(approved.firm),
       customFields: { crd }, isPrivate: false };
+    for (const key of ["department", "jobTitle", "businessExtension"]) {
+      if (profile[key]) draft[key] = text(profile[key]);
+    }
+    for (const key of ["businessPhone", "mobilePhone"]) {
+      const phone = phoneDigits(profile[key]);
+      if (/^\d{10}$/.test(phone)) draft[key] = phone;
+    }
+    if (!draft.businessPhone) delete draft.businessExtension;
+    if (/^https?:\/\/[^/\s]+/i.test(profile.website || "")) draft.website = text(profile.website);
+    if (addresses.usable(profile.businessAddress)) draft.businessAddress = addresses.clean(profile.businessAddress);
+    if (approved.greetingName) draft.salutation = text(approved.greetingName);
+    return draft;
   }
 
   async function preview(crd) {
@@ -67,6 +95,7 @@ function createService({ lookup, addressService, resolve, act, journal }) {
     if (!draft || !act.configured()) return { status: "unlinked" };
     const created = await journal.creationStatus(crd);
     if (created) return { status: created.state === "verified" ? "added" : "pending" };
+    draft.customFields.email__y_n = await mailCodeFor(crd, draft.emailAddress);
     return { status: "unlinked", draft, revision: hash(JSON.stringify([lookup.identity_manifest_hash, draft])) };
   }
 
@@ -92,7 +121,20 @@ function createService({ lookup, addressService, resolve, act, journal }) {
             || text(record.customFields?.crd) !== crd)
           throw failure("Check the new contact in ACT! before trying again. The record could not be verified.", 502);
         await journal.finishCreation(crd, record.id);
-        return { status: "added", verified: true };
+        const problems = [];
+        for (const [key, label] of Object.entries(verifiedFields)) {
+          if (!state.draft[key]) continue;
+          const normalize = key.endsWith("Phone") ? phoneDigits : text;
+          if (normalize(record[key]) !== normalize(state.draft[key])) problems.push(label);
+        }
+        if (state.draft.businessAddress && !addresses.sameAddress(record.businessAddress, state.draft.businessAddress))
+          problems.push("Business address");
+        if (text(record.customFields?.email__y_n) !== state.draft.customFields.email__y_n)
+          problems.push("Mail Code");
+        return { status: "added", verified: true,
+          ...(record.businessAddress && addresses.usable(record.businessAddress)
+            ? { primary: addresses.clean(record.businessAddress) } : {}),
+          ...(problems.length ? { unverifiedFields: problems } : {}) };
       } catch {
         throw failure("ACT! did not confirm the result. Check the contact there before trying again.", 502);
       }

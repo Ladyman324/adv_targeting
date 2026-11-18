@@ -1128,7 +1128,9 @@
         <ul>${review.blocked.map((row) => `<li><b>${esc(row.name || row.email || row.crd || "Saved contact")}</b>
           <div>${esc(row.reason || localReasons[row.reasonCode] || "Verify the contact and current email address.")}
           ${row.reason && row.reasonCode ? ` <code>${esc(row.reasonCode)}</code>` : ""}</div>
-          ${row.nextStep ? `<div>${esc(row.nextStep)}</div>` : ""}</li>`).join("")}</ul></details>` : ""}
+          ${row.nextStep ? `<div>${esc(row.nextStep)}</div>` : ""}
+          ${sourceList?.id && row.crd && global.Dial?.removeFromList ? `<button type="button" class="email-small"
+            data-email="remove-review-contact" data-crd="${esc(row.crd)}">Remove from ${esc(sourceList.name || "saved list")}</button>` : ""}</li>`).join("")}</ul></details>` : ""}
       ${unavailable.length ? `<details><summary>${unavailable.length} waiting for approved material</summary>
         <ul>${unavailable.map((row) => `<li><b>${esc(row.name || row.email)}</b>
           <div>${row.unavailable.map((item) => esc(item.reason || materialNames.get(item.familyId) || item.familyId)).join("<br>")}</div>
@@ -1144,7 +1146,8 @@
       ${versions.size ? `<details><summary>Approved attachment versions</summary>
         <ul>${[...versions.entries()].map(([label, count]) => `<li>${esc(label)} ? ${count}</li>`).join("")}</ul></details>` : ""}
       ${!ready.length && unavailable.length ? '<p>Change the selected attachments to include more contacts.</p>' : ""}
-      ${held.length && ready.length ? `<p>${held.length} will be saved to Lists for follow-up when you prepare this batch.</p>` : ""}
+      ${held.length && ready.length ? `<p>${held.length} waiting contact${held.length === 1 ? "" : "s"} will be saved
+        to <b>Awaiting material</b> in Lists. ${sourceList?.id ? "The original list keeps everyone." : ""}</p>` : ""}
       <div class="email-material-review-actions">
         ${ready.length ? `<button type="button" class="ask-btn primary" data-email="prepare-reviewed">Prepare ${ready.length} email${ready.length === 1 ? "" : "s"}</button>` : ""}
         <button type="button" class="ask-btn ghost" data-email="edit-preparation">${recipients.length ? "Back to selection" : "Close"}</button>
@@ -1237,6 +1240,73 @@
     }
   }
 
+  const attachmentPlatforms = ["generic", "ml", "mswm", "rj", "ubs"];
+  const attachmentStatusLabels = { current: "Current", older: "Older approved",
+    partial: "Partial approval", unavailable: "Unavailable" };
+
+  function attachmentChips(getPlatform) {
+    return `<div class="email-attachment-platforms">${attachmentPlatforms.map((platform) => {
+      const { status, documents } = getPlatform(platform);
+      const editions = [...new Set((documents || []).map((doc) => doc.periodKey || doc.asOfDate).filter(Boolean))];
+      return `<span class="email-attachment-chip" data-status="${esc(status)}">
+        <b>${esc(channelLabel(platform))}</b><small>${esc(attachmentStatusLabels[status])}</small>
+        ${editions.length ? `<small>${esc(editions.join(" / "))}</small>` : ""}</span>`;
+    }).join("")}</div>`;
+  }
+
+  function attachmentVersion(doc, platform) {
+    const via = doc.channel === "generic" && platform !== "generic" ? "Generic approved for this platform" : "";
+    const date = [doc.periodKey, doc.asOfDate].filter(Boolean);
+    return [doc.name, [...new Set(date)].join(" / ") || "Date not recorded", via].filter(Boolean).join(" - ");
+  }
+
+  function platformAvailability(familyId, platform) {
+    return catalog.materialAvailability?.[familyId]?.[platform]
+      || { status: "unavailable", documents: [], unavailable: [""] };
+  }
+
+  function renderAttachmentReadiness() {
+    const host = document.getElementById("emailTemplateReadiness");
+    const { templateId, materialFamilyIds, attachmentIds } = preparationInputs();
+    const docs = catalog.documents || [];
+    const chosen = (catalog.templates || []).find((template) => template.id === templateId);
+    const suggestions = templateRequirements(chosen, docs);
+    const families = new Map(docs.filter((doc) => doc.familyId)
+      .map((doc) => [doc.familyId, doc.familyName || doc.name]));
+    const missing = suggestions.familyIds.filter((id) => !families.has(id));
+    const included = [...new Set([...materialFamilyIds, ...missing])];
+    if (!included.length && !attachmentIds.length && !suggestions.missingDocumentIds.length) {
+      host.hidden = true;
+      host.replaceChildren();
+      return;
+    }
+    const legacy = docs.filter((doc) => attachmentIds.includes(doc.id));
+    const byPlatform = (platform) => {
+      const selected = included.map((id) => ({
+        name: families.get(id) || id,
+        ...platformAvailability(id, platform),
+      }));
+      const status = selected.some((item) => item.status === "unavailable") || suggestions.missingDocumentIds.length
+        ? "unavailable" : selected.some((item) => item.status === "partial") ? "partial"
+        : selected.some((item) => item.status === "older") || legacy.some((doc) => materialStatus(doc) === "stale")
+          ? "older" : "current";
+      return { status, selected };
+    };
+    const open = host.querySelector("details")?.open;
+    host.hidden = false;
+    host.innerHTML = attachmentChips(byPlatform)
+      + `<details${open ? " open" : ""}><summary>Selected attachment versions and dates</summary>
+        ${attachmentPlatforms.map((platform) => `<div class="email-attachment-edition">
+          <b>${esc(channelLabel(platform))}</b><ul>
+          ${byPlatform(platform).selected.map((item) => item.documents.map((doc) =>
+            `<li>${esc(attachmentVersion(doc, platform))}</li>`).join("")
+            + (item.unavailable.length ? `<li>${esc(item.name)}: no approved version${
+              item.unavailable[0] ? ` for ${esc(item.unavailable.join(", ").toUpperCase())}` : ""}</li>` : "")).join("")}
+          ${legacy.map((doc) => `<li>${esc(attachmentVersion({ ...doc, channel: "" }, platform))}</li>`).join("")}
+          ${suggestions.missingDocumentIds.length ? "<li>Recommended attachment unavailable</li>" : ""}
+          </ul></div>`).join("")}</details>`;
+  }
+
   function setupView(){
     preparationReview = null;
     const templates = catalog.templates || [], docs = catalog.documents || [];
@@ -1251,13 +1321,13 @@
     });
     const families = [...familyMap.values()];
     const familyPicker = families.length ? '<fieldset class="email-docs email-families"><legend>Material series</legend>'
-      + families.map((f) => '<label data-family="' + esc(f.id) + '" data-current="' + (f.channels.size ? '1' : '0')
+      + families.map((f) => '<div class="email-material-row"><label data-family="' + esc(f.id) + '" data-current="' + (f.channels.size ? '1' : '0')
         + '"><input type="checkbox" class="email-family" value="' + esc(f.id) + '"'
         + (f.channels.size ? '' : ' disabled') + '><span><b>'
         + esc(f.name) + '</b><small>' + esc(f.category || 'Material') + ' / '
-        + (f.channels.size ? [...f.channels].map(channelLabel).map(esc).join(', ') : 'No approved sendable version')
-        + '</small></span></label>').join('')
-      + '<p>Choose the series once; the latest approved client-group version is selected per recipient.</p></fieldset>' : '';
+        + (f.channels.size ? 'Latest approved edition routes by recipient' : 'No approved sendable version')
+        + '</small></span></label>' + attachmentChips((platform) => platformAvailability(f.id, platform)) + '</div>').join('')
+      + '</fieldset>' : '';
     document.getElementById("emailBody").innerHTML = `<div class="email-setup">
       <p class="email-summary"><b id="emailKeptCount">${keptRecipients().length}</b> recipient${keptRecipients().length === 1 ? "" : "s"} · From <b>${esc(catalog.connection.mailbox)}</b></p>
       ${setupCapacityHtml()}
@@ -1266,6 +1336,7 @@
         : `<p class="email-error">There are no approved templates yet.${catalog.isAdmin
             ? ` Use <b>Manage templates</b> below to publish one.`
             : ` An email administrator needs to publish one before you can send.`}</p>`}
+      <div id="emailTemplateReadiness" class="email-template-readiness" hidden></div>
       <p id="emailTplNotes" class="email-tpl-notes"></p>
       <div class="email-docs"><b>Template preview</b>
         <p class="email-fine">Example wording before personalized emails are generated. Attachments are chosen below and cannot be changed after generation.</p>
@@ -1280,7 +1351,7 @@
         <button type="button" class="email-small" data-email="docs">Manage approved documents</button></p>` : ""}
       ${copyPicker()}
       ${followUpPicker()}
-      ${domainPicker()}
+      <div id="emailDomainPicker">${domainPicker()}</div>
       <p id="emailNotice" class="email-notice" role="status"></p>
       <div id="emailPreparationReview" class="email-material-review email-preparation-review" hidden></div>
       <button type="button" id="emailCreateButton" class="ask-btn primary" data-email="review-preparation"${
@@ -1324,6 +1395,7 @@
       showSelectionWarning();
     };
     const showSelectionWarning = () => {
+      renderAttachmentReadiness();
       const picker = document.getElementById("emailTemplate");
       const chosen = picker && templates.find((x) => x.id === picker.value);
       const suggestions = templateRequirements(chosen, docs);
@@ -3182,6 +3254,7 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
     document.getElementById("emailTitle").textContent = "Prepare email";
     if (!recipients.length) {
       document.getElementById("emailBody").innerHTML = `<div class="email-setup">
+        <p id="emailNotice" class="email-notice" role="status"></p>
         <div id="emailPreparationReview" class="email-material-review email-preparation-review"></div></div>`;
       showPreparationReview({ selected: savedListExclusions.length, blocked: savedListExclusions, eligible: [], preview: null });
       document.querySelector("#emailPreparationReview h4").focus();
@@ -4072,6 +4145,36 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
       const panel = document.getElementById("emailMaterialReview");
       if (panel) { panel.hidden = true; panel.innerHTML = ""; }
       materialReviewSnapshot = "";
+      return;
+    }
+    if (action === "remove-review-contact") {
+      const review = preparationReview, list = sourceList, crd = button.dataset.crd;
+      const row = review?.blocked.find((item) => String(item.crd) === crd);
+      if (preparationBusy || !list?.id || !row || !global.Dial?.removeFromList) return;
+      if (!global.confirm(`Remove ${row.name || "this contact"} from "${list.name || "saved list"}"?`)) return;
+      const newerOnly = !!document.getElementById("emailNewerOnly")?.checked;
+      preparationBusy = true;
+      button.disabled = true;
+      try {
+        await global.Dial.removeFromList(list.id, crd);
+        if (sourceList !== list || !button.isConnected) return;
+        const keep = (item) => String(item.contactId || item.crd) !== crd;
+        recipients = recipients.filter(keep);
+        savedListExclusions = savedListExclusions.filter(keep);
+        const count = document.getElementById("emailKeptCount");
+        if (count) count.textContent = keptRecipients().length;
+        const domains = document.getElementById("emailDomainPicker");
+        if (domains) domains.innerHTML = domainPicker();
+        paintMixed();
+        showPreparationReview({ ...review, selected: review.selected - 1, blocked: review.blocked.filter(keep),
+          key: JSON.stringify(preparationInputs()) }, newerOnly);
+        notice(`Removed ${row.name || "the contact"} from "${list.name || "saved list"}".`);
+      } catch (error) {
+        if (button.isConnected) notice(error.message, true);
+      } finally {
+        button.disabled = false;
+        preparationBusy = false;
+      }
       return;
     }
     if (action === "review-preparation") return prepareEmail(button, false);

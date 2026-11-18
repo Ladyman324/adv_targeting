@@ -6365,6 +6365,7 @@ scopeSel.addEventListener("change", () => switchScope(scopeSel.value));
 // out of scope for that reason; city / ZIP / state cover what a rep types.
 const searchBox = document.getElementById("globalSearch");
 const locOut = document.getElementById("locResults");
+const actOut = document.getElementById("actSearchResults");
 const globalOut = document.getElementById("globalResults");
 let locSug = [];
 
@@ -8609,6 +8610,7 @@ function clearSearch(redrawMap = false){
   advQuery = ""; locSug = [];
   locOut.innerHTML = ""; locOut.hidden = true;
   advOut.innerHTML = ""; advOut.hidden = true;
+  ActAddresses.searchInto(actOut, "");
   globalOut.hidden = true;
   if (redrawMap) redraw();
 }
@@ -8640,13 +8642,18 @@ function positionGlobalResults(){
   globalOut.style.width = `${Math.round(width)}px`;
 }
 
+function updateGlobalResults(){
+  globalOut.hidden = locOut.hidden && advOut.hidden && actOut.hidden;
+  positionGlobalResults();
+}
+
 function runSearch(){
   if (!searchBox.value.trim()){ clearSearch(); return; }
   renderLocSuggest();
   advQuery = searchBox.value.trim().toLowerCase();
   renderAdvisorResults();
-  globalOut.hidden = locOut.hidden && advOut.hidden;
-  positionGlobalResults();
+  ActAddresses.searchInto(actOut, advQuery, updateGlobalResults, () => { globalOut.hidden = true; });
+  updateGlobalResults();
 }
 
 // Anchored to a scrolling element, so it has to follow it rather than be set
@@ -8656,6 +8663,7 @@ addEventListener("resize", positionGlobalResults);
 
 searchBox.addEventListener("input", () => {
   clearTimeout(searchTimer);
+  ActAddresses.searchInto(actOut, "");
   if (!searchBox.value.trim()){
     const wasFocused = !!focusedAdvisorId;
     focusedAdvisorId = null; focusedAdvisorLabel = "";
@@ -8698,7 +8706,7 @@ searchBox.addEventListener("keydown", e => {
     }
     const first = locationLike
       ? locOut.querySelector(".lres")
-      : advOut.querySelector(".ares") || locOut.querySelector(".lres");
+      : advOut.querySelector(".ares") || actOut.querySelector("[data-act-hit]") || locOut.querySelector(".lres");
     if (first) first.click();
     else if (locationLike && SUPPORT.geo !== "ready")
       showNotice(SUPPORT.geo === "failed"
@@ -8712,7 +8720,8 @@ searchBox.addEventListener("keydown", e => {
 // to overwrite the box for both, which fought openNationalAdvisor's own
 // save/restore of the query across the scope switch.
 globalOut.addEventListener("click", e => {
-  if (!e.target.closest(".ares")) return;
+  if (!e.target.closest(".ares, .lres")) return;
+  ActAddresses.searchInto(actOut, "");
   locOut.innerHTML = ""; locOut.hidden = true;
   globalOut.hidden = true;
 });
@@ -9436,7 +9445,7 @@ function openAdvisorDetails(f, detailPush=true){
   // marks are appended as markup.
   const nameEl = document.getElementById("firmOverviewName");
   nameEl.textContent = p.n;
-  nameEl.insertAdjacentHTML("beforeend", flagMarks(p.id));
+  nameEl.insertAdjacentHTML("beforeend", flagMarks(p.id) + ActAddresses.badgeSlot(p.id));
   // the individual's own CRD is what a rep quotes on a call and pastes into the
   // CRM, so it belongs beside the name rather than only inside the IAPD link
   document.getElementById("firmOverviewMeta").textContent =

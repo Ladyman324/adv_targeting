@@ -177,6 +177,7 @@ async function catalog(who, opts) {
   ]);
   return { connection,
     templates: visibleTemplates(templates, !!(opts && opts.isAdmin)), documents, materialRoutes,
+    materialAvailability: materials.materialAvailability(documents),
     // Addresses a rep may copy, straight from the App Setting. Sent with the
     // catalog so the Settings picker cannot offer anything the server would
     // then refuse.

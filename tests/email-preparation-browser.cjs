@@ -12,7 +12,12 @@ const contacts = Array.from({ length: 9 }, (_, i) => ({
 const template = { id: "intro", name: "Introduction", subject: "Example", bodyText: "Hello",
   requiredMaterialFamilyIds: ["commentary"], requiredDocumentIds: [] };
 const doc = { id: "series-june", familyId: "commentary", familyName: "Quarterly commentary",
-  name: "June commentary", periodKey: "2026-Q2", channel: "generic", approved: true };
+  name: "June commentary", periodKind: "quarter", periodKey: "2026-Q2", asOfDate: "2026-06-30",
+  channel: "generic", approved: true };
+const documents = [doc, { ...doc, id: "ms-march", channel: "mswm", name: "March commentary",
+  periodKey: "2026-Q1", asOfDate: "2026-03-31" }];
+const materialAvailability = require("../api/shared/email-materials")
+  .materialAvailability(documents, Date.UTC(2026, 7, 10));
 
 (async () => {
   const browser = await chromium.launch({ headless: true, executablePath: process.env.CHROME_EXECUTABLE });
@@ -34,6 +39,10 @@ const doc = { id: "series-june", familyId: "commentary", familyName: "Quarterly 
             body: fs.readFileSync(path.join(web, url.pathname.slice(1))) });
         const input = route.request().postDataJSON();
         if (url.pathname === "/api/queue") {
+          if (route.request().method() === "PATCH") {
+            calls.push({ op: "remove_from_list", input });
+            return route.fulfill({ json: { id: "rotation", removed: true, items: [] } });
+          }
           assert.equal(route.request().method(), "PUT");
           calls.push({ op: "save_list", input });
           return failSave
@@ -43,7 +52,7 @@ const doc = { id: "series-june", familyId: "commentary", familyName: "Quarterly 
         assert.equal(url.pathname, "/api/email");
         const op = url.searchParams.get("op");
         calls.push({ op, input });
-        if (op === "catalog") return route.fulfill({ json: { templates: [template], documents: [doc],
+        if (op === "catalog") return route.fulfill({ json: { templates: [template], documents, materialAvailability,
           connection: { connected: true, mailbox: "rep@example.test", profile: {} }, limits: {}, policy: {}, isAdmin: true } });
         if (op === "daily_caps") return route.fulfill({ json: {
           defaultLimit: 50, maxLimit: 300, defaultIntervalSeconds: 10, maxIntervalSeconds: 300,
@@ -82,13 +91,23 @@ const doc = { id: "series-june", familyId: "commentary", familyName: "Quarterly 
         const selected = allExcluded ? [] : contacts;
         selected.sourceList = { id: "rotation", name: "Rotation" };
         selected.eligibilitySummary = { excluded: 1,
-          excludedContacts: [{ name: "Needs Review", reasonCode: "stale" }] };
+          excludedContacts: [{ crd: "999", name: "Needs Review", reasonCode: "email" }] };
         return EmailComposer.open(selected);
       }, { contacts, allExcluded });
       const review = page.locator("#emailPreparationReview");
       const reviewButton = page.getByRole("button", { name: "Review recipients" });
       await pick();
+      const readiness = page.locator("#emailTemplateReadiness");
+      const chips = readiness.locator(".email-attachment-chip");
+      assert.equal(await chips.count(), 5);
+      assert.equal(await chips.nth(0).getAttribute("data-status"), "current");
+      assert.equal(await chips.nth(2).getAttribute("data-status"), "older");
+      assert.equal(await chips.nth(4).getAttribute("data-status"), "unavailable");
+      await readiness.getByText("Selected attachment versions and dates").click();
+      await readiness.getByText("June commentary - 2026-Q2 / 2026-06-30").waitFor();
+      await page.locator(".email-material-row .email-attachment-chip").nth(2).getByText("2026-Q1").waitFor();
       await reviewButton.click();
+      await reviewButton.waitFor({ state: "hidden" });
       await review.getByRole("heading", { name: "10 contacts selected" }).waitFor();
       await review.getByText("1 need contact review").click();
       await review.getByText("Needs Review", { exact: true }).waitFor();
@@ -129,9 +148,25 @@ const doc = { id: "series-june", familyId: "commentary", familyName: "Quarterly 
       assert.deepEqual(writeOps[2].input.recipients.map((row) => row.contactId), ["104", "105", "106", "107", "108"]);
       assert.equal(Object.keys(writeOps[2].input.expectedMaterialSignatures).length, 5);
 
+      await page.evaluate(() => {
+        window.Dial = {
+          removeFromList: async (id, crd) => (await fetch("/api/queue", {
+            method: "PATCH", headers: { "content-type": "application/json" },
+            body: JSON.stringify({ id, crd, operation: "remove" }),
+          })).json(),
+        };
+        window.confirm = (message) => (window.removePrompt = message, true);
+      });
       await pick(true);
       await review.getByText("0 ready to prepare").waitFor();
       assert.equal(await review.getByRole("button", { name: /^Prepare/ }).count(), 0);
+      await review.getByText("1 need contact review").click();
+      await review.getByRole("button", { name: "Remove from Rotation" }).click();
+      await page.getByText('Removed Needs Review from "Rotation".').waitFor();
+      assert.equal(await page.evaluate(() => window.removePrompt), 'Remove Needs Review from "Rotation"?');
+      assert.deepEqual(calls.find((item) => item.op === "remove_from_list").input,
+        { id: "rotation", crd: "999", operation: "remove" });
+      await page.evaluate(() => { delete window.Dial; });
       await page.evaluate(() => EmailComposer.openAdmin("caps"));
       const row = page.locator('[data-cap-user="12"]');
       const nextRow = page.locator('[data-cap-user="13"]');

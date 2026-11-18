@@ -108,7 +108,7 @@ def activity_pairs(manifest: dict, approved: dict[str, str], rows=None, contacts
 
 def main() -> None:
     mapping, manifest = approved_pairs()
-    from act_address_review import build_address_reviews, build_crm_directory
+    from act_address_review import build_address_reviews, build_contact_create_profiles, build_crm_directory
     from build_contacts import load_rosters
     rows = source_rows(manifest)
     web = ROOT / 'webapp/data'
@@ -116,7 +116,9 @@ def main() -> None:
     employment = pd.read_parquet(ROOT / 'data/output/advisor_employments.parquet',
                                  columns=['advisor_crd', 'firm_crd']).fillna('')
     pairs = set(zip(employment['advisor_crd'].astype(str), employment['firm_crd'].astype(str)))
-    reviews = build_address_reviews(mapping, contacts, rows, load_rosters().to_dict('records'), pairs)
+    roster_rows = load_rosters().to_dict('records')
+    reviews = build_address_reviews(mapping, contacts, rows, roster_rows, pairs)
+    create_profiles = build_contact_create_profiles(mapping, contacts, roster_rows, pairs)
     directory = build_crm_directory(mapping, rows, json.loads((web / 'geo_index.json').read_text(encoding='utf-8'))['zips'])
     activity = activity_pairs(manifest, mapping, rows, contacts)
     payload = {
@@ -129,7 +131,8 @@ def main() -> None:
         "act_source_sha256": (manifest.get("actSource") or {}).get("sha256", ""),
         "contacts": mapping,
     }
-    payload.update(address_review=reviews, crm_directory=directory, activity_contacts=activity)
+    payload.update(address_review=reviews, crm_directory=directory, activity_contacts=activity,
+                   contact_create_profiles=create_profiles)
     payload['contact_source_sha256'] = sha256_file(
         ROOT / 'webapp' / 'data' / 'contacts.json')
     OUT.parent.mkdir(parents=True, exist_ok=True)

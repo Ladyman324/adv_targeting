@@ -8,7 +8,9 @@ import unittest
 import pandas as pd
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
-from act_address_review import build_address_reviews, build_crm_directory, usable
+from act_address_review import (
+    build_address_reviews, build_contact_create_profiles, build_crm_directory, usable,
+)
 from contact_work_locations import select_candidates
 
 
@@ -108,6 +110,22 @@ class ActAddressReviewTests(unittest.TestCase):
         self.assertNotIn("id", output["contacts"][1])
         self.assertEqual(output["claimedCrds"], ["2222222"])
         self.assertIn(hashlib.sha256(b"private@example.com").hexdigest(), output["emailHashes"])
+
+    def test_creation_fields_and_address_require_the_same_firm_and_email(self):
+        row = self.contacts["2066775"]
+        row.pop("aid")
+        row.update(t="high", tn="Advocate Partners", ti="Advisor", w="+12125550000",
+                   pu="https://example.com/chris")
+        def profiles():
+            return build_contact_create_profiles({}, self.contacts, self.roster, self.employment)
+        item = profiles()["2066775"]
+        self.assertEqual(item["department"], "Advocate Partners")
+        self.assertEqual(item["businessAddress"]["line2"], "Suite 3100")
+        self.assertEqual(item["emailHash"], hashlib.sha256(row["e"].encode()).hexdigest())
+        self.roster.append(dict(self.roster[0], location_street="Other Office"))
+        self.assertNotIn("businessAddress", profiles()["2066775"])
+        self.contacts["1234567"] = {"e": row["e"], "t": "review"}
+        self.assertEqual(profiles(), {})
 
     def test_partners_is_not_a_secondary_address(self):
         self.assertFalse(usable(self.act[0]["homeAddress"]))

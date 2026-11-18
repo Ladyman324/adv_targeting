@@ -8,7 +8,8 @@ const actor = { id: "rep-1" };
 const crd = "5551234";
 const name = "Jane Advisor";
 const email = "jane.advisor@firm.example";
-function fixture({ claimedCrds = [], emailHashes = [], duplicate = false, uncertain = false } = {}) {
+function fixture({ claimedCrds = [], emailHashes = [], duplicate = false, uncertain = false,
+  profile = {}, mailCode = "2", omitMailCode = false } = {}) {
   const calls = [];
   const history = new Map();
   const act = {
@@ -20,7 +21,8 @@ function fixture({ claimedCrds = [], emailHashes = [], duplicate = false, uncert
       assert.equal(draft.fullName, name);
       assert.equal(draft.emailAddress, email);
       if (uncertain) throw new Error("network timeout");
-      return { ...draft, id: "verified-guid" };
+      return { ...draft, id: "verified-guid",
+        ...(omitMailCode ? { customFields: { crd } } : {}) };
     },
   };
   const addressService = {
@@ -36,11 +38,12 @@ function fixture({ claimedCrds = [], emailHashes = [], duplicate = false, uncert
   const svc = context.createService({
     lookup: { contacts: { "2066775": "linked-guid" }, address_review: { "2066775": {} },
       identity_manifest_hash: "one", activity_contacts: { "123456": { id: "activity-only" } },
+      contact_create_profiles: { [crd]: profile },
       crm_directory: { claimedCrds, emailHashes, contacts: [
         { name: "Found in ACT", email: "crm@firm.example", company: "Firm", primary: { city: "Irvine" } },
       ] } },
     resolve: async () => ({ name, email, firm: "Firm", lastName: "Advisor" }),
-    addressService, act, journal,
+    addressService, act, journal, mailCodeFor: async () => mailCode,
   });
   return { svc, calls };
 }
@@ -49,6 +52,8 @@ test("CRM-only search returns a distinct contact, and activity-only links do not
   const { svc, calls } = fixture();
   assert.equal(svc.search("crm@firm.example").count, 1);
   assert.equal(svc.search("found irvine").contacts[0].name, "Found in ACT");
+  assert.equal(svc.search("found irvine", true).count, 0);
+  assert.equal(svc.search("found act", true).count, 1);
   assert.equal(svc.search("no such contact").count, 0);
   assert.deepEqual(await svc.preview("123456"), { status: "review" });
   assert.equal((await svc.preview("2066775")).primary.city, "New York");
@@ -71,6 +76,32 @@ test("confirmed creation uses server fields and refuses a second write", async (
   assert.equal((await svc.preview(crd)).status, "added");
   await assert.rejects(svc.change(actor, input), /changed/);
   assert.deepEqual(calls, ["check", "reserve", "create", "verify"]);
+});
+
+test("creation verifies the approved contact profile, defaults to email only, and reports missing CRM fields", async () => {
+  const businessAddress = { line1: "15 Main Street", city: "Atlanta", state: "GA", postalCode: "30303" };
+  const profile = { emailHash: crypto.createHash("sha256").update(email).digest("hex"),
+    department: "Advisory team", jobTitle: "Advisor", website: "https://firm.example/jane",
+    businessPhone: "+14045551234", businessExtension: "22", businessAddress };
+  const { svc } = fixture({ profile, omitMailCode: true });
+  const state = await svc.preview(crd);
+  assert.equal(state.draft.department, profile.department);
+  assert.equal(state.draft.jobTitle, profile.jobTitle);
+  assert.equal(state.draft.website, profile.website);
+  assert.equal(state.draft.businessPhone, "4045551234");
+  assert.equal(state.draft.businessExtension, "22");
+  assert.equal(state.draft.businessAddress.line1, businessAddress.line1);
+  assert.equal(state.draft.customFields.email__y_n, "2");
+  assert.equal(state.draft.referredBy, undefined);
+  const result = await svc.change(actor, { crd, action: "add_contact", confirmed: true, revision: state.revision });
+  assert.equal(result.primary.line1, businessAddress.line1);
+  assert.deepEqual(result.unverifiedFields, ["Mail Code"]);
+  assert.equal((await svc.preview(crd)).status, "added");
+  const different = fixture({ profile: { ...profile, emailHash: "mismatch" }, mailCode: "U" });
+  const draft = (await different.svc.preview(crd)).draft;
+  assert.equal(draft.department, undefined);
+  assert.equal(draft.businessAddress, undefined);
+  assert.equal(draft.customFields.email__y_n, "U");
 });
 
 test("snapshot conflicts, live duplicates and uncertain creates never authorize another create", async () => {

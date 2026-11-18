@@ -21,8 +21,8 @@
   form-action 'none';
   object-src 'none'">
 <link rel="manifest" href="manifest.webmanifest">
-<link rel="stylesheet" href="field.css?v=e086ea71d8">
-<link rel="stylesheet" href="email.css?v=e086ea71d8">
+<link rel="stylesheet" href="field.css?v=d0d9873916">
+<link rel="stylesheet" href="email.css?v=d0d9873916">
 </head>
 <body>
 
@@ -47,13 +47,14 @@
        Same radius search, different centre. -->
   <button id="placeBtn" type="button">Elsewhere</button>
   <input id="q" type="search" inputmode="search" autocomplete="off"
-         placeholder="Name or firm…" aria-label="Search by name or firm">
+         placeholder="Name or firm…" aria-label="Search advisors and ACT! contacts by name or firm">
 </div>
 <button type="button" class="set-btn act-directory-button" data-act-directory>Search ACT! contacts</button>
 <!-- Which point the distances are measured from. Only shown once a location is
      set, and it names the place: "12 within 25 miles" is ambiguous in exactly
      the situation this feature creates. -->
 <p id="whereNow" hidden></p>
+<section id="fieldActSearchResults" class="act-search-results" aria-label="ACT! search results" hidden></section>
 
 <!-- Chips rather than checkboxes: they read as "narrow this down", they are
      thumb-sized, and they show their state at a glance from a metre away. -->
@@ -124,12 +125,12 @@
   <div id="workInner"></div>
 </div>
 
-<script src="dial.js?v=e086ea71d8"></script>
-<script src="training.js?v=e086ea71d8"></script>
-<script src="asset-product-filters.js?v=e086ea71d8"></script>
-<script src="act-addresses.js?v=e086ea71d8"></script>
-<script src="field.js?v=e086ea71d8"></script>
-<script src="email.js?v=e086ea71d8"></script>
+<script src="dial.js?v=d0d9873916"></script>
+<script src="training.js?v=d0d9873916"></script>
+<script src="asset-product-filters.js?v=d0d9873916"></script>
+<script src="act-addresses.js?v=d0d9873916"></script>
+<script src="field.js?v=d0d9873916"></script>
+<script src="email.js?v=d0d9873916"></script>
 <!-- The service-worker registration moved into field.js. Keeping it inline
      would have required either 'unsafe-inline' or a hash in the CSP above,
      and 'unsafe-inline' is not a thing to spend on eight lines. -->
