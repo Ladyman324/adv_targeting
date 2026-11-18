@@ -1423,8 +1423,8 @@ function flagGlyphs(crd){
 /* Dense rows get one sibling action button rather than three nested buttons.
  * The active roles remain visible at a glance; the button opens the same direct
  * toggles used on a full contact card plus an explicit destination-list picker. */
-function personActionButton(crd, name){
-  return `<span class="person-quick">${flagGlyphs(crd)}
+function personActionButton(crd, name, showRoles = true){
+  return `<span class="person-quick">${showRoles ? flagGlyphs(crd) : ""}
     <button type="button" class="person-action-trigger" data-person-actions="${esc(crd)}"
       data-person-name="${esc(name || "")}" aria-haspopup="dialog" aria-expanded="false"
       title="Label or add ${esc(name || "this person")} to a list"
@@ -1803,9 +1803,10 @@ function contactBlock(p){
   // Queueing sits with the other actions rather than in a menu: deciding to
   // call someone happens at the same moment as reading their number, and a rep
   // building a list of thirty should not leave the card to do it.
+  const listActions = [];
   if (Dial.isDnc(p.id)) {
     const d = Dial.state.dnc.get(String(p.id)) || {};
-    rows.push(`<span class="contact-btn contact-btn-dnc"
+    listActions.push(`<span class="contact-btn contact-btn-dnc"
       title="Firm-wide do-not-call${d.by ? " — added by " + esc(d.by) : ""}">&#9940; Do not call</span>`);
   } else {
     const on = Dial.inQueue(p.id);
@@ -1813,16 +1814,15 @@ function contactBlock(p){
     // number, not how confidently they were matched. Keeping unconfirmed
     // records off the list is what stops the warning being left behind on the
     // card it was written for.
-    rows.push(unconfirmed
+    listActions.push(unconfirmed
       ? `<span class="contact-btn blocked" title="Unconfirmed match — confirm who this is before adding them to a call list.">&#43; Call list</span>`
       : `<button type="button" class="contact-btn contact-btn-queue${on ? " on" : ""}"
       data-queue-toggle="${esc(p.id)}"
       title="${on ? "Remove from the call list" : "Add to the call list"}"
       >${on ? "&#10003; On call list" : "&#43; Call list"}</button>`);
   }
-  rows.push(`<button type="button" class="contact-btn" data-person-actions="${esc(p.id)}"
-    data-person-name="${esc(p.n || "")}" aria-haspopup="dialog" aria-expanded="false"
-    aria-label="Choose a list for ${esc(p.n || "this person")}">&#43; Choose list&hellip;</button>`);
+  listActions.push(personActionButton(p.id, p.n, false));
+  rows.push(`<span class="contact-list-actions">${listActions.join("")}</span>`);
 
   return `<div class="contact-panel${unsure ? " contact-panel-review" : ""}">
       ${owner}${title}
@@ -9526,17 +9526,15 @@ function openAdvisorDetails(f, detailPush=true){
     ${barronsLine}
     ${forbesLine}
     ${roleLine}
-    <section class="profile-section"><h3>Firm</h3><div class="detail-list">
-      <button type="button" class="detail-row" data-firm-drill="${esc(p.fc)}"><span class="detail-row-main">
-        <b>${esc(p.f)}</b><small>CRD ${esc(p.fc)}${p.ra != null ? ` · ${fmtMoney(p.ra * 1e6)} total RAUM` : ""} · show this firm here</small></span><span class="detail-chevron">›</span></button>
-    ${roleRows}</div></section>
     ${at ? `<section class="profile-section"><h3>Location</h3><div class="detail-list">
       <button type="button" class="detail-row" data-a="${at.i}"><span class="detail-row-main"><b>${esc(p.a || "Filed office")}</b>
         <small>${esc([p.c, p.z].filter(Boolean).join(" "))} · ${at.ids.size.toLocaleString()} advisor${at.ids.size === 1 ? "" : "s"} at this address</small></span><span class="detail-chevron">›</span></button>
       ${bl ? `<button type="button" class="detail-row" data-a="${bl.i}" data-bldg="1"><span class="detail-row-main"><b>Whole building</b>
         <small>${bl.ids.size.toLocaleString()} advisors across ${bl.lines.size} filed address line${bl.lines.size === 1 ? "" : "s"}</small></span><span class="detail-chevron">›</span></button>` : ""}
       ${otherOfficeRows(p)}
-    </div><div id="advisorElsewhere" data-for="${esc(p.id)}"></div>${workingLocationNote(p)}${remoteNote(p)}${uncertainNote(p)}</section>` : ""}
+    </div><div id="advisorElsewhere" data-for="${esc(p.id)}"></div>
+      ${workingLocationNote(p)}${ActAddresses.officeSlot(p.id)}${remoteNote(p)}${uncertainNote(p)}</section>`
+      : ActAddresses.officeSlot(p.id)}
     <section class="profile-section"><h3>History${infoBox(
       "Current registration facts and registration history as filed with the SEC. Dates can differ by days from the advisor's actual start and finish.")}</h3>
       <div id="advisorHistory" data-for="${esc(p.id)}"><p class="profile-empty">Loading history…</p></div></section>
@@ -9555,12 +9553,19 @@ function openAdvisorDetails(f, detailPush=true){
       ${p.dr && p.dr.length
         ? `<p class="profile-warn">⚠ ${esc(p.dr.join(", "))}</p>`
         : `<p class="profile-empty">None reported.</p>`}</section>
-    <div class="profile-actions">
+    ${p.u || ADMIN ? `<div class="profile-actions">
       ${p.u ? `<a href="${esc(p.u)}" target="_blank" rel="noopener">Individual IAPD ↗</a>` : ""}
-      <a href="${firmIapdUrl(p.fc)}" target="_blank" rel="noopener">Firm IAPD ↗</a>
-      <button type="button" data-profile-advisors-scope="${esc(scope)}" data-profile-crd="${esc(p.fc)}">Show this firm's advisors</button>
       ${ADMIN ? `<button type="button" data-act-json="${esc(p.id)}">CRM record (JSON)</button>` : ""}
-    </div>`;
+    </div>` : ""}
+    <section class="profile-section"><h3>Firm</h3><div class="detail-list">
+      <button type="button" class="detail-row" data-firm-drill="${esc(p.fc)}"><span class="detail-row-main">
+        <b>${esc(p.f)}</b><small>CRD ${esc(p.fc)}${p.ra != null ? ` · ${fmtMoney(p.ra * 1e6)} total RAUM` : ""} · show this firm here</small></span><span class="detail-chevron">›</span></button>
+    ${roleRows}</div>
+      <div class="profile-actions advisor-firm-actions">
+        <a href="${firmIapdUrl(p.fc)}" target="_blank" rel="noopener">Firm IAPD ↗</a>
+        <button type="button" data-profile-advisors-scope="${esc(scope)}" data-profile-crd="${esc(p.fc)}">Show this firm's advisors</button>
+      </div>
+    </section>`;
   selectBuilding(buildingForRecord(at));
   fillCardHistory(historyFor);
   historyShard(p.id).then(shard => renderAdvisorHistory(p, shard[String(p.id)]));

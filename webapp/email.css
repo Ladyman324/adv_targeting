@@ -924,19 +924,24 @@
 .act-profile:has(.act-result:first-child:empty){margin:0}
 .act-profile p,.act-dialog p{margin:4px 0}
 .act-profile .act-status-note{color:var(--muted)}
-.act-office-used,.act-office-note{padding:6px 8px;border-radius:6px;background:var(--panel-2)}
-.act-office-used p,.act-office-note p{margin:2px 0}
+.act-office-alerts[hidden]{display:none}
+.act-office-note,.act-office-info{margin:8px 0 0;padding:8px 10px;border-radius:9px;
+  font-size:11.5px;line-height:1.5;overflow-wrap:anywhere}
+.act-office-note{border:1px solid color-mix(in srgb,#b13d49 38%,var(--hair));
+  background:color-mix(in srgb,#b13d49 9%,var(--panel))}
+.act-office-info{background:var(--panel-2);color:var(--muted)}
+.act-office-note p{margin:2px 0}
 .act-office-heading{display:flex;align-items:baseline;justify-content:space-between;gap:4px 10px;flex-wrap:wrap}
-.act-profile a.act-source-link{color:var(--ink);font-size:12px;text-decoration:underline;text-underline-offset:2px}
-.act-profile a.act-source-link:hover{color:var(--accent)}
+.act-office-note a.act-source-link{color:var(--ink);font-size:inherit;text-decoration:underline;text-underline-offset:2px}
+.act-office-note a.act-source-link:hover{color:var(--accent)}
 .act-chip{display:inline-block;padding:3px 8px;border-radius:999px;border:1px solid var(--hair);
   background:var(--panel-2);font-size:12px;font-weight:650;color:var(--ink)}
 .act-chip.yes{background:#e3f3eb;color:#176044;border-color:#9dc6b4}
-.act-office-note{margin-top:4px;border:1px solid var(--hair);background:var(--panel)}
-.act-profile button,.act-dialog button{width:auto;max-width:100%;margin:4px 0}
-.act-profile button{min-height:28px;height:auto;padding:4px 8px}
+.act-profile button,.act-office-note button,.act-dialog button{width:auto;max-width:100%;margin:4px 0}
+.act-profile button,.act-office-note button{min-height:28px;height:auto;padding:4px 8px}
 .email-setup #emailCreateButton[hidden]{display:none}
-.act-profile .act-result:empty{display:none}
+.act-profile .act-result:empty,.act-office-alerts .act-result:empty{display:none}
+.act-office-alerts .act-result{margin:6px 0 0;font-size:12px}
 .act-dialog{width:min(620px,calc(100% - 24px));max-height:85vh;overflow:auto;
   border:1px solid var(--hair);border-radius:12px;padding:16px;background:var(--panel);color:var(--ink)}
 .act-dialog::backdrop{background:#0007}

@@ -30,13 +30,23 @@
           <p class="act-result" role="status"></p></section>` : "";
   }
 
+  function officeSlot(crd) {
+    return /^\d{3,12}$/.test(String(crd))
+      ? `<div class="act-office-alerts" data-act-office="${esc(crd)}" hidden></div>` : "";
+  }
+
+  const resultSlot = '<p class="act-result" role="status"></p>';
+
   function render(state) {
-    const primary = state.primary && address(state.primary);
     const statusNote = ["review", "pending", "unknown"].includes(state.status) ? states[state.status] : "";
     return (state.draft ? '<button type="button" class="ask-btn" data-act-action="add_contact">Add contact to ACT!</button>' : "")
       + (statusNote ? `<p class="act-status-note">${esc(statusNote)}</p>` : "")
-      + (primary ? `<div class="act-office-used"><b>ACT! primary address</b><p>${esc(primary)}</p></div>` : "")
-      + (state.notice ? `<p>${esc(state.notice)}</p>` : "")
+      + (state.notice && state.status !== "linked" ? `<p>${esc(state.notice)}</p>` : "")
+      + resultSlot;
+  }
+
+  function renderOffices(state) {
+    return ((state.status === "linked" && state.notice) ? `<p class="act-office-info">${esc(state.notice)}</p>` : "")
       + (state.candidates || []).map((candidate) => {
         const city = place(candidate.address);
         const source = /^https?:\/\//i.test(candidate.url || "")
@@ -46,7 +56,7 @@
           <button type="button" class="ask-btn" data-act-action="replace_primary" data-candidate="${esc(candidate.id)}">
             Replace ACT! primary address with ${esc(city)}</button></div>`;
       }).join("")
-      + '<p class="act-result" role="status"></p>';
+      + resultSlot;
   }
 
   async function request(query, body, signal) {
@@ -115,9 +125,14 @@
     if (element.dataset.actMounted) return;
     element.dataset.actMounted = "1";
     const crd = element.dataset.actProfile;
+    const office = element.parentElement.querySelector(`[data-act-office="${crd}"]`);
     const update = (value) => {
       if (!element.isConnected) return;
       element.innerHTML = render(value);
+      if (office) {
+        office.innerHTML = renderOffices(value);
+        office.hidden = !value.candidates?.length && !(value.status === "linked" && value.notice);
+      }
       const header = root.document.querySelector(`[data-act-badge="${crd}"]`);
       if (header) header.outerHTML = badge(value.status, crd);
     };
@@ -126,7 +141,8 @@
     catch (error) { update({ status: "unknown", notice: error.message }); return; }
     update(state);
     let busy = false;
-    element.addEventListener("click", async (event) => {
+    const handleAction = async (event) => {
+      const host = event.currentTarget;
       const button = event.target.closest("[data-act-action]");
       if (!button || busy) return;
       const action = button.dataset.actAction;
@@ -135,25 +151,28 @@
       busy = true;
       try {
         if (!await confirmChange(action, state, candidate)) return;
-        const status = element.querySelector(".act-result");
-        status.textContent = "Saving to ACT!?";
+        const status = host.querySelector(".act-result");
+        status.textContent = "Saving to ACT!\u2026";
         try {
           const saved = await request("", { crd, action, candidateId: candidate?.id,
             revision: state.revision, confirmed: true });
           if (!saved.verified) throw new Error("ACT! could not verify this change.");
           state = { status: "linked", ...saved };
           update(state);
-          element.querySelector(".act-result").textContent = action === "add_contact"
+          host.hidden = false;
+          host.querySelector(".act-result").textContent = action === "add_contact"
             ? (saved.unverifiedFields?.length
               ? "Contact created. Review these fields in ACT!: " + saved.unverifiedFields.join(", ") + "."
               : "Contact created and verified in ACT!. The CRD link will be checked at the next refresh.")
             : "Primary address saved in ACT!. The map pin updates at the next refresh.";
         } catch (error) {
           status.textContent = error.message + " Reopen this profile to check the current ACT! record.";
-          element.querySelectorAll("[data-act-action]").forEach((item) => { item.disabled = true; });
+          host.querySelectorAll("[data-act-action]").forEach((item) => { item.disabled = true; });
         }
       } finally { busy = false; }
-    });
+    };
+    element.addEventListener("click", handleAction);
+    office?.addEventListener("click", handleAction);
   }
 
   function contactDetails(contact) {
@@ -208,7 +227,7 @@
     if (node.matches("[data-act-profile]")) mount(node);
     node.querySelectorAll("[data-act-profile]").forEach(mount);
   }
-  root.ActAddresses = { slot, badgeSlot, render, searchInto, setLocator: (callback) => { locate = callback; } };
+  root.ActAddresses = { slot, officeSlot, badgeSlot, render, searchInto, setLocator: (callback) => { locate = callback; } };
   if (root.document && root.MutationObserver) {
     const start = () => {
       scan(root.document.body);

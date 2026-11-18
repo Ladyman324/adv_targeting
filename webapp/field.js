@@ -489,6 +489,7 @@ function openSheet(r){
              Number(r[COL.team_size]) === 2 ? "" : "s"}`
         : r[COL.team])}
     ${row("Office", `${r[COL.city]}, ${r[COL.state]}${dist ? " — " + dist : ""}`)}
+    ${ActAddresses.officeSlot(r[COL.crd])}
     ${row("Phone", r[COL.phone_pretty]
         ? `${r[COL.phone_pretty]} (${isDirect(r) ? "Direct" : "Office"})` : "")}
     ${r[COL.email] ? `<p class="sheet-row"><span class="sheet-lab">Email</span>

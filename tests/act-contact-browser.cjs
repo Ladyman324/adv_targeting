@@ -49,22 +49,32 @@ const origin = "https://act-fixture.invalid";
       await page.goto(origin);
       await page.evaluate(() => {
         document.querySelector("main").innerHTML = ActAddresses.badgeSlot("2066775") + ActAddresses.slot("2066775")
-          + ActAddresses.badgeSlot("5551234") + ActAddresses.slot("5551234");
+          + '<section id="test-location"><p class="remote-note">Working office from ACT!.</p>'
+          + ActAddresses.officeSlot("2066775") + "</section>"
+          + ActAddresses.badgeSlot("5551234") + ActAddresses.slot("5551234") + ActAddresses.officeSlot("5551234");
         ActAddresses.setLocator(contact => { window.locatedContact = contact.name; });
       });
-      await page.getByText("UBS lists Austin, TX").waitFor();
+      const location = page.locator("#test-location");
+      await location.getByText("UBS lists Austin, TX").waitFor();
+      const workingOffice = await location.getByText("Working office from ACT!.", { exact: true }).boundingBox();
+      const discrepancy = await location.locator(".act-office-note").boundingBox();
+      assert.ok(discrepancy.y >= workingOffice.y + workingOffice.height);
       await page.locator(".act-badge.linked").waitFor();
       await page.locator(".act-badge.unlinked").waitFor();
       assert.equal(await page.getByRole("link", { name: /Source profile/ }).getAttribute("href"), "https://www.ubs.com/");
-      await page.getByText("1285 Avenue of the Americas", { exact: false }).waitFor();
-      const replace = page.getByRole("button", { name: "Replace ACT! primary address with Austin, TX" });
+      assert.equal(await page.getByText("1285 Avenue of the Americas", { exact: false }).count(), 0);
+      const replace = location.getByRole("button", { name: "Replace ACT! primary address with Austin, TX" });
       await replace.click();
+      const addressReview = page.getByRole("dialog", { name: "Replace ACT! primary address" });
+      await addressReview.getByText("1285 Avenue of the Americas", { exact: false }).waitFor();
+      await addressReview.getByText("401 West 4th Street", { exact: false }).waitFor();
       assert.equal(writes.length, 0);
       await page.getByRole("button", { name: "Continue" }).click();
       assert.equal(writes.length, 0);
       accept = true;
       await page.getByRole("button", { name: "Continue" }).click();
-      await page.getByText("Primary address saved in ACT!.", { exact: false }).waitFor();
+      await location.getByText("Primary address saved in ACT!.", { exact: false }).waitFor();
+      assert.equal(await location.locator(".act-office-note").count(), 0);
       assert.deepEqual(writes[0], { crd: "2066775", action: "replace_primary", candidateId: "ubs-austin",
         revision: "address-version", confirmed: true });
 
