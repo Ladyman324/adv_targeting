@@ -60,8 +60,7 @@ def approved_pairs() -> tuple[dict[str, str], dict]:
     return mapping, manifest
 
 
-def activity_pairs(manifest: dict, approved: dict[str, str]) -> dict[str, dict[str, str]]:
-    '''Unique recipient-email routes for ACT activity, not CRD identity authority.'''
+def source_rows(manifest):
     fact = manifest.get('actSource') or {}
     source = ROOT / 'data' / 'raw' / pathlib.Path(str(fact.get('file', ''))).name
     if not source.is_file() or sha256_file(source) != fact.get('sha256'):
@@ -69,8 +68,15 @@ def activity_pairs(manifest: dict, approved: dict[str, str]) -> dict[str, dict[s
     rows = json.loads(source.read_text(encoding='utf-8'))
     if not isinstance(rows, list) or len(rows) != int(fact.get('rows') or -1):
         raise SystemExit('ACT source row count does not match identity manifest')
-    contacts = json.loads((ROOT / 'webapp' / 'data' / 'contacts.json').read_text(
-        encoding='utf-8')).get('advisors') or {}
+    return rows
+
+
+def activity_pairs(manifest: dict, approved: dict[str, str], rows=None, contacts=None) -> dict[str, dict[str, str]]:
+    """Unique recipient-email routes for ACT activity, not CRD identity authority."""
+    if rows is None:
+        rows = source_rows(manifest)
+    if contacts is None:
+        contacts = json.loads((ROOT / 'webapp/data/contacts.json').read_text(encoding='utf-8')).get('advisors') or {}
 
     def personal(value: object) -> str:
         email = normalize_email(value)
@@ -102,7 +108,17 @@ def activity_pairs(manifest: dict, approved: dict[str, str]) -> dict[str, dict[s
 
 def main() -> None:
     mapping, manifest = approved_pairs()
-    activity = activity_pairs(manifest, mapping)
+    from act_address_review import build_address_reviews, build_crm_directory
+    from build_contacts import load_rosters
+    rows = source_rows(manifest)
+    web = ROOT / 'webapp/data'
+    contacts = json.loads((web / 'contacts.json').read_text(encoding='utf-8'))['advisors']
+    employment = pd.read_parquet(ROOT / 'data/output/advisor_employments.parquet',
+                                 columns=['advisor_crd', 'firm_crd']).fillna('')
+    pairs = set(zip(employment['advisor_crd'].astype(str), employment['firm_crd'].astype(str)))
+    reviews = build_address_reviews(mapping, contacts, rows, load_rosters().to_dict('records'), pairs)
+    directory = build_crm_directory(mapping, rows, json.loads((web / 'geo_index.json').read_text(encoding='utf-8'))['zips'])
+    activity = activity_pairs(manifest, mapping, rows, contacts)
     payload = {
         "note": ("contacts holds CRD-approved identity routes. activity_contacts "
                  "holds separate one-to-one exact-email routes for mirroring "
@@ -113,7 +129,7 @@ def main() -> None:
         "act_source_sha256": (manifest.get("actSource") or {}).get("sha256", ""),
         "contacts": mapping,
     }
-    payload['activity_contacts'] = activity
+    payload.update(address_review=reviews, crm_directory=directory, activity_contacts=activity)
     payload['contact_source_sha256'] = sha256_file(
         ROOT / 'webapp' / 'data' / 'contacts.json')
     OUT.parent.mkdir(parents=True, exist_ok=True)

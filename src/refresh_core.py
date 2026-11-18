@@ -267,7 +267,7 @@ def normalized_code_hash(path, relative):
     if relative in {"webapp/app.js", "webapp/field.js", "webapp/sw.js", "webapp/index.html", "webapp/field.html"}:
         text = content.decode("utf-8")
         text = re.sub(r'(const (?:DATA_VERSION|VERSION) = ")[^"\r\n]*(";)', r'\1<generated>\2', text)
-        text = re.sub(r'((?:app\.js|style\.css|field\.js|field\.css|email\.js|email\.css|dial\.js|training\.js|list_import\.js|asset-product-filters\.js)\?v=)[A-Za-z0-9._-]+', r'\1<generated>', text)
+        text = re.sub(r'((?:app\.js|style\.css|field\.js|field\.css|email\.js|email\.css|dial\.js|training\.js|list_import\.js|asset-product-filters\.js|act-addresses\.js)\?v=)[A-Za-z0-9._-]+', r'\1<generated>', text)
         content = text.encode("utf-8")
     return hashlib.sha256(content).hexdigest()
 

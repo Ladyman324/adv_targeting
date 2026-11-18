@@ -1,7 +1,7 @@
 """Build source-backed working offices for approved contact identities.
 
-This layer is separate from the SEC branch filing. A firm roster (or, absent
-one, the approved ACT! record) may tell us where a contact actually works.
+This layer is separate from the SEC branch filing. Prefer a verified ACT! primary
+address over the firm roster when both point to the current advisor and firm.
 Only an exact email/ACT-id link to an approved CRD AND a current SEC firm pair
 can change a map pin or sales territory. The original filing remains intact.
 
@@ -81,15 +81,16 @@ def source_record(row: dict, source: str, zips: dict) -> dict | None:
     if (math.isfinite(lat) and math.isfinite(lon)
             and miles(lat, lon, float(centroid[1]), float(centroid[2])) > 60):
         lat = lon = math.nan
-    return {"branch_street1": street, "branch_city": city,
+    return {"branch_street1": street,
+            "branch_street2": str(row.get("location_street2") or "").strip(), "branch_city": city,
             "branch_state": state, "branch_postal": postal,
             "lat": lat, "lon": lon, "location_source": source,
             "coordinate_origin": "published" if math.isfinite(lat) else ""}
 
 
 def select_candidates(contacts: dict, rosters: pd.DataFrame, act: list,
-                      employment: set, zips: dict) -> tuple[pd.DataFrame, list]:
-    """A unique email plus firm agreement, then approved ACT-id fallback."""
+                      employment: set, zips: dict, approved: dict | None = None) -> tuple[pd.DataFrame, list]:
+    """Prefer approved ACT primary, then a unique roster email and firm."""
     by_email: dict[str, set[str]] = collections.defaultdict(set)
     for crd, c in contacts.items():
         email = str(c.get("e") or "").strip().lower()
@@ -134,21 +135,28 @@ def select_candidates(contacts: dict, rosters: pd.DataFrame, act: list,
         options.sort(key=lambda o: math.isfinite(o["lat"]), reverse=True)
         chosen[pair] = options[0]
 
-    act_by_id = {str(row.get("id") or ""): row for row in act}
+    act_counts = collections.Counter(str(row.get("id") or "").lower() for row in act)
+    link_counts = collections.Counter(str(c.get("aid") or "").lower() for c in contacts.values())
+    act_by_id = {str(row.get("id") or "").lower(): row for row in act}
     for crd, c in contacts.items():
-        if c.get("src") != "CRM" or c.get("t") != "confirmed":
+        if c.get("t") != "confirmed":
             continue
         firm = str(c.get("fc") or "")
         pair = (str(crd), firm)
-        if pair in chosen or pair not in employment:
+        if pair not in employment:
             continue
-        raw = act_by_id.get(str(c.get("aid") or ""))
-        if not raw or str(raw.get("emailAddress") or "").strip().lower() != str(c.get("e") or "").strip().lower():
+        act_id = str(c.get("aid") or "").lower()
+        if (not act_id or act_counts[act_id] != 1 or link_counts[act_id] != 1
+                or (approved is not None and str(approved.get(str(crd), "")).lower() != act_id)):
+            continue
+        raw = act_by_id.get(act_id)
+        if not raw or raw.get("isPrivate") or raw.get("isActive") is False or (approved is None and str(raw.get("emailAddress") or "").strip().lower() != str(c.get("e") or "").strip().lower()):
             continue
         address = raw.get("businessAddress") or {}
         location = source_record({
             "city": address.get("city"), "state": address.get("state"),
             "location_street": address.get("line1"),
+            "location_street2": address.get("line2"),
             "location_zip": address.get("postalCode"),
             "location_lat": address.get("latitude"),
             "location_lon": address.get("longitude"),
@@ -312,7 +320,12 @@ def main(*, census: bool = False, google_max_calls: int = 0) -> None:
                     employment["firm_crd"].astype(str)))
     act_path = newest_act_pull()
     act = json.loads(act_path.read_text(encoding="utf-8")) if act_path else []
-    candidates, audit = select_candidates(contacts, load_rosters(), act, pairs, zips)
+    from build_act_lookup import approved_pairs
+    from contact_provenance import sha256_file
+    approved, manifest = approved_pairs()
+    if not act_path or sha256_file(act_path) != manifest["actSource"]["sha256"]:
+        raise RuntimeError("ACT locations require the snapshot pinned to the identity ledger")
+    candidates, audit = select_candidates(contacts, load_rosters(), act, pairs, zips, approved)
     if candidates.empty:
         raise RuntimeError("no approved source-backed working locations")
     # Use the existing SEC branch rows only as a carrier for firm scoring and
@@ -342,10 +355,10 @@ def main(*, census: bool = False, google_max_calls: int = 0) -> None:
     templates = branches.drop_duplicates(["advisor_crd", "firm_crd"])
     selected = templates.merge(candidates, on=["advisor_crd", "firm_crd"],
                                how="inner", suffixes=("", "_work"))
-    for col in ("branch_street1", "branch_city", "branch_state",
+    for col in ("branch_street1", "branch_street2", "branch_city", "branch_state",
                 "branch_postal", "lat", "lon"):
         selected[col] = selected.pop(col + "_work")
-    selected["branch_street2"] = ""
+    selected["branch_street2"] = selected["branch_street2"].fillna("")
     selected["location_source"] = selected["location_source"].astype(str)
     selected["matched"] = (selected["location_source"] + ": "
                            + selected["branch_street1"] + ", "

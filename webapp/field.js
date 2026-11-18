@@ -479,6 +479,7 @@ function openSheet(r){
   $("sheetInner").innerHTML = `
     <button id="sheetClose" aria-label="Close">&times;</button>
     <h2>${esc(r[COL.name])}${flagMarksField(r[COL.crd])}</h2>
+    ${ActAddresses.slot(r[COL.crd])}
     <div class="sub">${esc(r[COL.title] || "")}</div>
     ${owned}
     ${row("Firm", r[COL.firm])}

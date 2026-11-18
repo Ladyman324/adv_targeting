@@ -258,6 +258,23 @@ function relevantAumForFirm(crd, visible, placements=false){
 // Start where the first useful view will be. The old Georgia camera caused a
 // visible jump and fetched tiles discarded as soon as national data arrived.
 const map = L.map("map", { preferCanvas:true, zoomAnimation:false });
+let actContactMarker;
+ActAddresses.setLocator((contact) => {
+  if (actContactMarker) actContactMarker.remove();
+  const [lat, lon] = contact.coordinates;
+  map.setView([lat, lon], 13);
+  const marker = L.circleMarker([lat, lon], { radius: 9, color: "#165f68",
+    fillColor: "#37909b", fillOpacity: 1, weight: 2 }).addTo(map);
+  const a = contact.primary;
+  const office = [a.line1, a.line2, a.city, a.state, a.postalCode].filter(Boolean).join(", ");
+  actContactMarker = marker;
+  marker.bindPopup(`<b>${esc(contact.name)}</b><br>ACT! ? No matching CRD<br>${esc(office)}`).openPopup();
+  marker.once("popupclose", () => {
+    if (actContactMarker === marker) actContactMarker = null;
+    marker.remove();
+  });
+});
+
 if (continentalOnly) map.setView([39.5, -96.5], 4);
 else map.fitBounds([[17, -178], [72, -64]], {
   padding:[12,12], maxZoom:3, animate:false,
@@ -9495,6 +9512,7 @@ function openAdvisorDetails(f, detailPush=true){
     `<small>CRD ${esc(r.firmCrd)}${r.ctrl ? " · control person" : ""}</small></span>` +
     `<span class="detail-chevron">›</span></button>`).join("");
   document.getElementById("firmOverviewBody").innerHTML = `
+    ${ActAddresses.slot(p.id)}
     ${contactBlock(p)}
     ${barronsLine}
     ${forbesLine}

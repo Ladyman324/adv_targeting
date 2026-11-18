@@ -167,11 +167,12 @@ let token = "";
 let tokenAt = 0;
 const TOKEN_TTL_MS = 20 * 60 * 1000;
 
-async function authorize() {
+async function authorize(timeoutMs = 0) {
   if (token && Date.now() - tokenAt < TOKEN_TTL_MS) return token;
   const basic = Buffer.from(`${USER}:${PASSWORD}`).toString("base64");
   const r = await fetch(`${BASE}/authorize`, {
     headers: { Authorization: `Basic ${basic}`, "Act-Database-Name": DATABASE },
+    signal: timeoutMs ? AbortSignal.timeout(timeoutMs) : undefined,
   });
   if (!r.ok) throw new Error(`Act! authorize -> ${r.status}`);
   const t = (await r.text()).trim().replace(/^"|"$/g, "");
@@ -181,8 +182,8 @@ async function authorize() {
   return token;
 }
 
-async function call(method, url, body, attempt = 0) {
-  const t = await authorize();
+async function call(method, url, body, attempt = 0, timeoutMs = 0) {
+  const t = await authorize(timeoutMs);
   const r = await fetch(`${BASE}/${url.replace(/^\//, "")}`, {
     method,
     headers: {
@@ -190,6 +191,7 @@ async function call(method, url, body, attempt = 0) {
       "Content-Type": "application/json",
     },
     body: body === undefined ? undefined : JSON.stringify(body),
+    signal: timeoutMs ? AbortSignal.timeout(timeoutMs) : undefined,
   });
   if (r.status === 401 && attempt === 0) {
     // The cached token expired early. ONE retry -- and the counter is what makes
@@ -197,7 +199,7 @@ async function call(method, url, body, attempt = 0) {
     // guard at all, so a credential that kept being rejected looped until the
     // stack gave out instead of failing with a usable message.
     token = "";
-    return call(method, url, body, attempt + 1);
+    return call(method, url, body, attempt + 1, timeoutMs);
   }
   if (!r.ok) {
     throw new Error(`Act! ${method} ${url} -> ${r.status} ${(await r.text()).slice(0, 200)}`);
@@ -880,6 +882,46 @@ async function markHardBounce(crd, address, detail, approvedContactId = "") {
   return { ok: true, mailCode };
 }
 
+/* Address edits have a separate, approved-identity-only transport. Call/email
+ * activity matches never authorize a contact address change. */
+async function addressRecord(crd, expectedId, next) {
+  const mapping = contacts();
+  const id = mapping[String(crd)];
+  if (!configured() || (ONLY.size && !ONLY.has(String(crd))))
+    throw Object.assign(new Error("ACT! address updates are unavailable."), { statusCode: 503, addressReviewSafe: true });
+  if (!id || String(id).toLowerCase() !== String(expectedId).toLowerCase()
+      || Object.values(mapping).filter(value => String(value).toLowerCase() === String(id).toLowerCase()).length !== 1)
+    throw Object.assign(new Error("The approved ACT! link has changed. Reload this contact."), { statusCode: 409, addressReviewSafe: true });
+  return call(next === undefined ? "GET" : "PUT", "api/contacts/" + encodeURIComponent(id), next, 0, 20000);
+}
+
+// Run immediately before creating a contact. Include secondary addresses so a
+// mailbox already in ACT! never triggers an automatic merge or new contact.
+async function findContactDuplicates(crd, draft) {
+  if (!configured() || (ONLY.size && !ONLY.has(String(crd))))
+    throw new Error("ACT! contact creation is unavailable.");
+  const literal = (value) => "'" + String(value).replace(/'/g, "''") + "'";
+  const email = literal(draft.emailAddress);
+  const addresses = ["EmailAddress", "AltEmailAddress", "PersonalEmailAddress"].map(field => field + " eq " + email);
+  const names = "(FirstName eq " + literal(draft.firstName) + " and LastName eq " + literal(draft.lastName) + ")";
+  const query = new URLSearchParams({ $top: "1", $filter: [...addresses, names].join(" or ") });
+  const result = await call("GET", "api/contacts?" + query.toString(), undefined, 0, 20000);
+  const rows = Array.isArray(result) ? result : result?.value;
+  if (!Array.isArray(rows)) throw new Error("ACT! returned no usable duplicate check.");
+  return rows.length > 0;
+}
+
+async function addContact(crd, draft) {
+  if (!configured() || (ONLY.size && !ONLY.has(String(crd))) || contacts()[String(crd)])
+    throw new Error("ACT! contact creation is unavailable.");
+  const result = await call("POST", "api/contacts", draft, 0, 20000);
+  const id = String(result?.id || "");
+  if (!/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(id))
+    throw new Error("ACT! did not return a contact ID.");
+  return call("GET", "api/contacts/" + encodeURIComponent(id), undefined, 0, 20000);
+}
+
 module.exports = { configured, logCall, logEmail, historyFor, diagnose, contactStatus,
   markDoNotEmail, markHardBounce, actFields, actContact, setMailCode, MAIL_CODE_RANK,
+  addressRecord, findContactDuplicates, addContact,
                    RESULTS, PURPOSES };

@@ -890,3 +890,22 @@
 .signature-outlook-help { margin-top:12px; font-size:12px; }
 .signature-outlook-help summary { cursor:pointer; }
 [data-signature-designation] { display:block; max-width:100%; margin-top:6px; }
+
+.act-directory-button{margin:6px 0;align-self:flex-start}
+.act-profile{margin:8px 0 14px;font-size:13px}
+.act-profile p,.act-dialog p{margin:5px 0}
+.act-chip{display:inline-block;padding:3px 8px;border-radius:999px;border:1px solid var(--hair);
+  background:var(--panel-2);font-size:12px;font-weight:650;color:var(--ink)}
+.act-chip.yes{background:#e3f3eb;color:#176044;border-color:#9dc6b4}
+.act-office-note{margin:8px 0;padding:8px 10px;border-inline-start:3px solid var(--accent);background:var(--panel-2)}
+.act-profile button,.act-dialog button{width:auto;max-width:100%;margin:5px 0}
+.act-profile .act-result:empty{display:none}
+.act-dialog{width:min(620px,calc(100% - 24px));max-height:85vh;overflow:auto;
+  border:1px solid var(--hair);border-radius:12px;padding:16px;background:var(--panel);color:var(--ink)}
+.act-dialog::backdrop{background:#0007}
+.act-dialog header{display:flex;justify-content:space-between;gap:12px;align-items:flex-start}
+.act-dialog h2{font-size:17px;margin:0}
+.act-dialog input{display:block;box-sizing:border-box;width:100%;margin:6px 0;padding:8px;font:inherit}
+.act-directory-results{padding:0;list-style:none;overflow-wrap:anywhere}
+.act-directory-results li{padding:10px 0;border-top:1px solid var(--hair)}
+.act-directory-results h3{font-size:14px;margin:0 0 4px}

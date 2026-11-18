@@ -31,6 +31,7 @@ const SHELL = [
   "field.html",
   "field.css?v=" + VERSION,
   "field.js?v=" + VERSION,
+  "act-addresses.js?v=" + VERSION,
   "asset-product-filters.js?v=" + VERSION,
   "training.js?v=" + VERSION,
   "manifest.webmanifest",
