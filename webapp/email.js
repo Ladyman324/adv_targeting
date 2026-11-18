@@ -1450,7 +1450,7 @@
     } catch (e) { healthView(null, e.message, true); }
   }
 
-  async function openDailyCaps(message = "", bad = false) {
+  async function openDailyCaps() {
     document.getElementById("emailTitle").textContent = "Email sending limits";
     document.getElementById("emailBody").innerHTML = `<p class="email-next">Loading...</p>`;
     try {
@@ -1462,21 +1462,22 @@
         <p class="email-fine">The minimum gap between sends is ${data.defaultIntervalSeconds}
           seconds unless you set a slower pace below. This applies across that salesperson's
           batches and one-off sends; actual delivery may be later.</p>
-        ${message ? `<p class="${bad ? "email-error" : "email-ok"}">${esc(message)}</p>` : ""}
         ${data.reps.length ? data.reps.map((rep) => `<section class="email-health-rep" data-cap-user="${esc(rep.userId)}">
           <h3>${esc(rep.mailbox || rep.userId)}</h3>
-          <p class="email-fine">${rep.override ? `Custom limit set ${esc(String(rep.override.updatedUtc || "").slice(0, 10))}
+          <p class="email-fine" data-cap-summary>${rep.override ? `Custom limit set ${esc(String(rep.override.updatedUtc || "").slice(0, 10))}
             by ${esc(rep.override.by || "administrator")}` : "Using the normal limit"}</p>
           <label>Recipients per day
             <input class="email-cap-input" type="number" min="${data.defaultLimit}" max="${data.maxLimit}"
               step="1" value="${rep.limit}" required></label>
           <button type="button" class="ask-btn" data-email="cap-save">Save limit</button>
+          <p class="email-limit-save-status" data-cap-status role="status"></p>
           <label>Minimum seconds between sends
             <input class="email-interval-input" type="number"
               min="${data.defaultIntervalSeconds}" max="${data.maxIntervalSeconds}"
               step="1" value="${rep.intervalSeconds}" required></label>
           <button type="button" class="ask-btn" data-email="interval-save">Save pacing</button>
-          <p class="email-fine">${rep.intervalOverride
+          <p class="email-limit-save-status" data-interval-status role="status"></p>
+          <p class="email-fine" data-interval-summary>${rep.intervalOverride
             ? `Custom pacing set ${esc(String(rep.intervalOverride.updatedUtc || "").slice(0, 10))}
               by ${esc(rep.intervalOverride.by || "administrator")}`
             : "Using the normal pacing"}</p>
@@ -1487,6 +1488,38 @@
       document.getElementById("emailBody").innerHTML = `<div class="email-health">
         <p class="email-error">${esc(error.message)}</p>
         <button type="button" class="ask-btn" data-email="docs-back">Back</button></div>`;
+    }
+  }
+
+  async function saveMailboxLimit(button, setting) {
+    const row = button.closest("[data-cap-user]");
+    if (!row || button.getAttribute("aria-disabled") === "true") return;
+    const isCap = setting === "cap";
+    const input = row.querySelector(`.email-${setting}-input`);
+    if (!input.reportValidity()) return;
+
+    const status = row.querySelector(`[data-${setting}-status]`);
+    const summary = row.querySelector(`[data-${setting}-summary]`);
+    const field = isCap ? "limit" : "seconds";
+    const label = isCap ? "limit" : "pacing";
+    button.setAttribute("aria-disabled", "true");
+    input.readOnly = true;
+    status.classList.remove("bad");
+    status.textContent = "Saving?";
+    try {
+      const saved = await api(isCap ? "set_daily_cap" : "set_mailbox_interval",
+        { userId: row.dataset.capUser, [field]: input.valueAsNumber });
+      input.value = saved[field];
+      if (!saved.override) input.min = saved[field];
+      summary.textContent = saved.override ? `Using a custom ${label}` : `Using the normal ${label}`;
+      status.textContent = isCap ? "Daily limit saved." : "Minimum sending gap saved.";
+      void refreshCapacityStatus(true);
+    } catch (error) {
+      status.classList.add("bad");
+      status.textContent = error.message;
+    } finally {
+      input.readOnly = false;
+      button.removeAttribute("aria-disabled");
     }
   }
 
@@ -3470,42 +3503,8 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
   async function act(button) {
     const action = button.dataset.email;
     if (preparationWriting) return;
-    if (action === "cap-save") {
-      const row = button.closest("[data-cap-user]");
-      const userId = row && row.dataset.capUser;
-      const input = row && row.querySelector(".email-cap-input");
-      if (!userId || !input || !input.checkValidity()) {
-        if (input) input.reportValidity();
-        return;
-      }
-      button.disabled = true;
-      try {
-        await api("set_daily_cap", { userId, limit: Number(input.value) });
-        await loadCatalog().catch(() => {});
-        return openDailyCaps("Daily limit saved.");
-      } catch (error) {
-        button.disabled = false;
-        return openDailyCaps(error.message, true);
-      }
-    }
-    if (action === "interval-save") {
-      const row = button.closest("[data-cap-user]");
-      const userId = row && row.dataset.capUser;
-      const input = row && row.querySelector(".email-interval-input");
-      if (!userId || !input || !input.checkValidity()) {
-        if (input) input.reportValidity();
-        return;
-      }
-      button.disabled = true;
-      try {
-        await api("set_mailbox_interval", { userId, seconds: Number(input.value) });
-        await loadCatalog().catch(() => {});
-        return openDailyCaps("Minimum sending gap saved.");
-      } catch (error) {
-        button.disabled = false;
-        return openDailyCaps(error.message, true);
-      }
-    }
+    if (action === "cap-save") return saveMailboxLimit(button, "cap");
+    if (action === "interval-save") return saveMailboxLimit(button, "interval");
     if (action === "material-preview-close") { closeMaterialPreview(); return; }
     if (action === "material-preview-queue") {
       const row = materialQueue[Number(button.dataset.index)];

@@ -44,7 +44,16 @@ const doc = { id: "series-june", familyId: "commentary", familyName: "Quarterly 
         const op = url.searchParams.get("op");
         calls.push({ op, input });
         if (op === "catalog") return route.fulfill({ json: { templates: [template], documents: [doc],
-          connection: { connected: true, mailbox: "rep@example.test", profile: {} }, limits: {}, policy: {} } });
+          connection: { connected: true, mailbox: "rep@example.test", profile: {} }, limits: {}, policy: {}, isAdmin: true } });
+        if (op === "daily_caps") return route.fulfill({ json: {
+          defaultLimit: 50, maxLimit: 300, defaultIntervalSeconds: 10, maxIntervalSeconds: 300,
+          reps: Array.from({ length: 16 }, (_, i) => ({ userId: String(i), mailbox: "rep" + i + "@example.test",
+            limit: 50, intervalSeconds: 10 })),
+        } });
+        if (op === "set_daily_cap") return route.fulfill({ json: { limit: input.limit, override: input.limit } });
+        if (op === "set_mailbox_interval") return input.seconds === 37
+          ? route.fulfill({ status: 503, json: { error: "Pacing could not be saved." } })
+          : route.fulfill({ json: { seconds: input.seconds, override: input.seconds } });
         if (op === "check_recipients")
           return route.fulfill({ json: { checkedCount: 9, eligibleCount: 9, excluded: [] } });
         if (op === "preview_materials") {
@@ -123,9 +132,39 @@ const doc = { id: "series-june", familyId: "commentary", familyName: "Quarterly 
       await pick(true);
       await review.getByText("0 ready to prepare").waitFor();
       assert.equal(await review.getByRole("button", { name: /^Prepare/ }).count(), 0);
+      await page.evaluate(() => EmailComposer.openAdmin("caps"));
+      const row = page.locator('[data-cap-user="12"]');
+      const nextRow = page.locator('[data-cap-user="13"]');
+      const getScroll = () => page.locator("#emailBody").evaluate((el) => el.scrollTop);
+      await nextRow.getByLabel("Recipients per day").fill("73");
+      await row.getByLabel("Recipients per day").fill("80");
+      const saveLimit = row.getByRole("button", { name: "Save limit" });
+      await saveLimit.scrollIntoViewIfNeeded();
+      const limitScroll = await getScroll();
+      assert.ok(limitScroll > 0);
+      await saveLimit.click();
+      await row.getByRole("status").filter({ hasText: "Daily limit saved." }).waitFor();
+      assert.equal(await getScroll(), limitScroll);
+      assert.equal(await nextRow.getByLabel("Recipients per day").inputValue(), "73");
+      assert.equal(await saveLimit.evaluate((button) => button === document.activeElement), true);
+      const gap = row.getByLabel("Minimum seconds between sends");
+      const savePacing = row.getByRole("button", { name: "Save pacing" });
+      await gap.fill("37");
+      await savePacing.scrollIntoViewIfNeeded();
+      const paceScroll = await getScroll();
+      await savePacing.click();
+      await row.getByRole("status").filter({ hasText: "Pacing could not be saved." }).waitFor();
+      assert.equal(await getScroll(), paceScroll);
+      assert.equal(await gap.inputValue(), "37");
+      await gap.fill("25");
+      await savePacing.click();
+      await row.getByRole("status").filter({ hasText: "Minimum sending gap saved." }).waitFor();
+      assert.equal(await getScroll(), paceScroll);
+      assert.equal(await nextRow.getByLabel("Recipients per day").inputValue(), "73");
+      assert.equal(calls.filter(({ op }) => op === "daily_caps").length, 1);
       assert.deepEqual(dialogs, []);
       assert.deepEqual(errors, []);
-      console.log("PASS " + width + "px preparation review, stale results, hold-list failure/retry and all-excluded list");
+      console.log("PASS " + width + "px preparation review, stale results, hold-list retry and in-place sending limit saves");
       await page.close();
     }
   } finally { await browser.close(); }

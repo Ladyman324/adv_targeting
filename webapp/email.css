@@ -520,6 +520,9 @@
 .email-health-range .email-small.on{background:var(--accent);color:var(--accent-ink);
   border-color:transparent}
 .email-health-rep{margin:0 0 22px;padding:14px;border:1px solid var(--hair);border-radius:12px}
+.email-limit-save-status{min-height:1.4em;margin:4px 0 8px;font-size:12px;color:var(--accent)}
+.email-limit-save-status.bad{color:var(--warn)}
+.email-health-rep button[aria-disabled="true"]{opacity:.65;cursor:wait}
 
 .hz-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(128px,1fr));gap:8px;margin:10px 0}
 .hz{padding:10px 12px;border-radius:10px;background:var(--panel-2);
