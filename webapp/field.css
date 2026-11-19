@@ -88,20 +88,16 @@ body{
 
 /* Chips, not checkboxes: thumb-sized, and their state reads from a metre away
    on a phone held at arm's length in a car park. */
-#chips{display:flex; gap:8px; padding:4px 14px 10px; flex-wrap:wrap}
+#chips{display:flex; gap:6px; padding:4px 14px 10px}
 .chip{
-  font:inherit; font-size:12.5px; font-weight:650; height:34px; padding:0 14px;
+  font:inherit; font-size:12.5px; font-weight:650; min-height:38px;
+  min-width:0; padding:0 clamp(6px, 2.5vw, 14px); white-space:nowrap;
   border-radius:20px; border:1px solid var(--hair);
   background:var(--panel-2); color:var(--muted);
 }
 .chip.on{background:var(--accent); color:var(--accent-ink); border-color:transparent}
-#assetProducts{display:flex; align-items:center; gap:6px; flex-wrap:wrap;
-  padding:0 14px 10px}
-.asset-products-label{font-size:12.5px; color:var(--muted); font-weight:650}
-#assetProducts .chip{min-height:var(--tap); height:auto; padding:8px 12px}
-#assetProducts .chip:disabled{opacity:.5}
-#assetProducts .chip:focus-visible{outline:2px solid var(--accent); outline-offset:2px}
-#assetProductsHelp{flex-basis:100%; color:var(--muted); font-size:12px}
+.chip:disabled{opacity:.5}
+.chip:focus-visible{outline:2px solid var(--accent); outline-offset:2px}
 
 #status{margin:0; padding:10px 14px; font-size:13px; color:var(--muted)}
 
@@ -208,31 +204,24 @@ body{
 .sheet-hist:empty{display:none}
 
 #list{list-style:none; margin:0; padding:0 0 40px}
-#list li{
-  padding:12px 14px; border-bottom:1px solid var(--hair);
-  display:flex; gap:12px; align-items:flex-start;
-}
-.who{flex:1; min-width:0}
-/* Name and owner badge share a line. The NAME may truncate; the badge may not
-   -- flex:none is doing the real work here. */
-/* WRAPS rather than truncates. Badges are flex:none and a long name used to
-   give way to them on a single line -- correct for protecting the owner
-   initials, wrong in that "Christopher" became "Christo…" on exactly the
-   records carrying the most badges. Wrapping keeps both: the name takes as
-   many lines as it needs (capped at two), and badges fall to the next line
-   only when the name genuinely fills the row. */
-.nm-line{display:flex; align-items:baseline; gap:7px; min-width:0; flex-wrap:wrap}
-.nm{font-weight:650; font-size:15px; min-width:0; flex:1 1 auto;
-    white-space:normal; overflow-wrap:anywhere;
-    display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical;
-    overflow:hidden}
+#list li{position:relative; padding:9px 16px 5px; border-bottom:1px solid var(--hair)}
+.who{display:block; width:100%; border:0; padding:0; text-align:left;
+  font:inherit; color:inherit; background:transparent; cursor:pointer}
+.who::after{content:""; position:absolute; inset:0}
+.who:focus-visible::after{outline:2px solid var(--accent); outline-offset:-2px}
+#list .nm{margin-right:var(--tap); font-weight:650; font-size:16.5px; line-height:1.25;
+  overflow-wrap:anywhere; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical;
+  overflow:hidden}
 .sub{font-size:12.5px; color:var(--muted); margin-top:2px;
      overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
-.dist{font-size:12px; color:var(--muted); flex:none; padding-top:2px}
-/* An owned relationship is the one thing that should stop a rep dialling, so
-   it is a badge on the row rather than a detail inside the card. */
-/* Badges never shrink. The name gives way instead -- that is the whole point,
-   since the owner initials are the signal most worth not losing. */
+#list .sub,#list .dist{display:block; margin-top:4px; line-height:1.3}
+#list .sub{font-size:13px}
+#list .dist{font-size:12px; color:var(--muted); overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+#list .person-action-trigger{position:absolute; top:0; right:12px; z-index:1}
+.contact-bottom{display:flex; align-items:center; justify-content:space-between; gap:6px;
+  min-height:var(--tap); margin-top:2px}
+.contact-badges{display:flex; align-items:center; gap:4px; min-width:0; overflow:hidden}
+#list .contact-badges .badge{font-size:11px; letter-spacing:0; padding:1px 6px}
 .badge{flex:none; font-size:10.5px; font-weight:800; letter-spacing:.04em;
   padding:2px 7px; border-radius:20px; white-space:nowrap}
 .badge.owned{color:var(--warn);
@@ -245,19 +234,19 @@ body{
   border:1px solid color-mix(in srgb,var(--rank) 45%,transparent);
   background:color-mix(in srgb,var(--rank) 14%,transparent)}
 
-.acts{display:flex; gap:8px; flex:none}
+.acts{display:flex; gap:4px; flex:none}
 .acts a{
-  display:flex; align-items:center; justify-content:center;
-  width:var(--tap); height:var(--tap); border-radius:50%;
-  text-decoration:none; font-size:18px;
-  background:var(--accent); color:var(--accent-ink);
+  position:relative; z-index:1; display:grid; place-items:center;
+  width:var(--tap); height:var(--tap); border-radius:50%; text-decoration:none;
+  color:var(--accent);
 }
-/* Anything that does not reach the person directly is outlined, not filled --
-   same rule as the desktop panel, so "Direct" stays the only solid call. */
-.acts a.office{background:transparent; color:var(--accent);
-  box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--accent) 55%,transparent)}
-.acts a.mail{background:transparent; color:var(--muted);
-  box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--muted) 40%,transparent)}
+.acts a::before{content:""; position:absolute; inset:5px; border-radius:inherit;
+  background:color-mix(in srgb,currentColor 16%,transparent)}
+.acts a.office::before{background:transparent;
+  border:1px solid color-mix(in srgb,currentColor 45%,transparent)}
+.acts a.mail{color:var(--muted)}
+.acts svg{position:relative; width:19px; height:19px}
+.acts a:focus-visible{outline:2px solid currentColor; outline-offset:-1px}
 
 #sheet{
   position:fixed; inset:auto 0 0 0; z-index:20;
@@ -293,8 +282,12 @@ body{
 }
 .sheet-acts .ghost{background:transparent; color:var(--accent);
   box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--accent) 55%,transparent)}
-#sheetClose{position:absolute; right:14px; top:12px; background:none; border:0;
-  color:var(--muted); font-size:22px; line-height:1; padding:4px 8px}
+.field-sheet-heading{display:flex; align-items:flex-start; gap:10px}
+.field-sheet-heading :is(h2,h3){flex:1; min-width:0; overflow-wrap:anywhere}
+.field-sheet-close{flex:none; width:var(--tap); height:var(--tap); padding:0;
+  background:none; border:0; border-radius:8px; color:var(--muted); font-size:22px; line-height:1}
+.field-sheet-close:focus-visible{outline:2px solid var(--accent); outline-offset:2px}
+#sheet .contact-flags .flag-mark,.person-action-roles .flag-mark{margin:0}
 /* A suppressed number. It still READS -- a rep who gets a call back needs to
    recognise the name -- but it is a span, not a link, so nothing dials it, and
    the auto-dial timer finds no anchor to click. */
@@ -593,15 +586,20 @@ body{
 .person-action-dialog{width:min(520px,100%);max-height:82vh;overflow:auto;background:var(--panel);
   color:var(--ink);border-radius:14px 14px 8px 8px;padding:18px;box-sizing:border-box;
   box-shadow:0 -6px 30px rgba(0,0,0,.22)}
-.person-action-dialog h3{margin:0 0 12px;font-size:19px}
+.person-action-dialog h3{margin:8px 0 0;font-size:18px}
 .person-action-label{margin:13px 0 6px;color:var(--muted);font-size:11px;
   font-weight:750;text-transform:uppercase;letter-spacing:.04em}
 .person-action-roles .contact-flags{margin:0;gap:8px}
 .person-action-lists{display:grid;gap:7px}
 .person-action-lists button{display:flex;justify-content:space-between;align-items:center;
-  width:100%;min-height:var(--tap);padding:10px 12px;text-align:left}
+  gap:12px;width:100%;min-height:var(--tap);padding:10px 12px;text-align:left;
+  font:inherit;color:var(--ink);background:var(--panel-2);border:1px solid var(--hair);border-radius:8px}
+.person-action-lists button:disabled{opacity:.5}
+.person-action-lists button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.person-action-lists button span{min-width:0;overflow-wrap:anywhere}
 .person-action-lists small{color:var(--muted)}
-.person-action-status{min-height:18px;margin:8px 0;color:var(--accent);font-size:12px}
+.person-action-status{margin:8px 0 0;color:var(--accent);font-size:12px}
+.person-action-status:empty{margin:0}
 .mates li{display:flex;align-items:center}
 .mates .mate{flex:1;min-width:0;text-align:left}
 
@@ -972,6 +970,7 @@ body{
   min-height:var(--tap); padding:0 10px; border-radius:8px;
   border:1px solid var(--hair); background:var(--panel-2); color:inherit;
   font:inherit; font-size:12px}
+.work-acts button[data-work-action="done"]{color:var(--accent);font-weight:650}
 .work-acts button[disabled]{opacity:.5}
 .work-main:focus-visible,.work-acts button:focus-visible{
   outline:2px solid var(--accent); outline-offset:2px}

@@ -49,7 +49,7 @@ test('desktop EIC-assets filter trusts the canonical CRD book, not contact tm/ia
 test('Field App EIC-assets filter uses the same CRD-keyed book and fails closed while active', () => {
   const books = { roster: { t: 'high', n: 1, ix: [0] } };
   const context = {
-    BOOK_STATE: 'ready',
+    BOOK_STATE: 'ready', AssetProductFilters,
     COL: { crd: 0 },
     bookFor: (crd) => books[String(crd)] || null,
   };
@@ -88,7 +88,7 @@ test('asset filter readiness is visible and saved audiences cannot broaden', () 
   assert.notEqual(fieldLoaderStart, -1);
   assert.notEqual(fieldLoaderEnd, -1);
   const fieldLoader = field.slice(fieldLoaderStart, fieldLoaderEnd);
-  const fieldWiring = field.slice(field.indexOf('const product = e.target.closest("[data-asset-product]")'),
+  const fieldWiring = field.slice(field.indexOf('const chip = e.target.closest("[data-chip]")'),
     field.indexOf('const open = e.target.closest("[data-open]")'));
 
   assert.match(loader, /if \(assetsOnly\)[\s\S]*assetsOnly = false[\s\S]*showNotice/);
@@ -97,9 +97,8 @@ test('asset filter readiness is visible and saved audiences cannot broaden', () 
   assert.match(prepare, /f\.ownerOnly \|\| f\.rankedOnly \|\| needsAssets/);
   assert.match(prepare, /needsAssets && SUPPORT\.act !== "ready"/);
   assert.match(fieldLoader, /BOOK_STATE === "failed" && CHIPS\.assets[\s\S]*CHIPS\.assets = false/);
-  assert.match(fieldLoader, /EIC product filters were turned off/);
-  assert.match(fieldLoader, /assetProducts\.clear\(\)/);
-  assert.match(fieldWiring, /BOOK_STATE !== "ready"/);
+  assert.match(fieldLoader, /EIC Assets filter was turned off/);
+  assert.match(fieldWiring, /if \(chip\.disabled\) return/);
 });
 
 test('national EIC help separates mapped headline totals from source reconciliation', () => {

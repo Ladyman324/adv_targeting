@@ -81,7 +81,6 @@ const NAME_CACHE = new Map();      // shard key -> rows
 let searchSeq = 0;                 // guards against out-of-order responses
 
 const CHIPS = { direct: false, crm: false, assets: false, ranked: false };
-const assetProducts = new Set(); // canonical ACT book fields; empty + assets = Any EIC
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g,
@@ -116,19 +115,13 @@ let TERR = null;      // {states:{XX:{c,n,e}}, national:{...}}
 
 function syncAssetChip(){
   const ready = BOOK_STATE === "ready";
-  document.querySelectorAll('[data-asset-product]').forEach((chip) => {
-    const key = chip.dataset.assetProduct;
-    const selected = ready && CHIPS.assets
-      && (key === "any" ? !assetProducts.size : assetProducts.has(key));
-    chip.disabled = !ready;
-    chip.setAttribute("aria-pressed", String(selected));
-    chip.classList.toggle("on", selected);
-  });
-  const help = $("assetProductsHelp");
-  if (help) help.textContent = ready
-    ? "None selected includes prospects. MCV: Mid-Cap / unallocated in ACT!"
-    : BOOK_STATE === "failed" ? "EIC account-book data is unavailable; product filters are off."
-    : "Loading EIC account-book data...";
+  const chip = $("assetChip");
+  chip.disabled = !ready;
+  chip.setAttribute("aria-pressed", String(ready && CHIPS.assets));
+  chip.classList.toggle("on", ready && CHIPS.assets);
+  chip.title = ready ? "Show contacts with an approved EIC account book"
+    : BOOK_STATE === "failed" ? "EIC account-book data is unavailable"
+    : "Loading EIC account-book data";
 }
 
 async function loadExtras(){
@@ -143,17 +136,14 @@ async function loadExtras(){
   BOOK_STATE = BOOK ? "ready" : "failed";
   TERR = territories;
   const clearedAssets = BOOK_STATE === "failed" && CHIPS.assets;
-  if (BOOK_STATE === "failed") {
-    CHIPS.assets = false;
-    assetProducts.clear();
-  }
+  if (BOOK_STATE === "failed") CHIPS.assets = false;
   syncAssetChip();
   // This lookup is intentionally off the first-paint path. Reconcile an
   // already-visible list once it arrives so its filter and badge switch to the
   // same current book without requiring another search.
   if (ROWS.length) render(ROWS);
   if (clearedAssets)
-    $("status").textContent += " · EIC account-book data is unavailable; EIC product filters were turned off.";
+    $("status").textContent += " · EIC account-book data is unavailable; the EIC Assets filter was turned off.";
 }
 
 const bookFor = (crd) => (BOOK && BOOK.advisors[String(crd)]) || null;
@@ -227,7 +217,7 @@ const isDirect = (r) => REACHES_PERSON.has(r[COL.phone_kind]);
 // first. Splitting them makes the 2,926 reachable at all.
 const isCRM = (r) => !!r[COL.owner];
 function hasAssets(r){
-  return BOOK_STATE === "ready" && !!bookFor(r[COL.crd]);
+  return BOOK_STATE === "ready" && AssetProductFilters.matches(bookFor(r[COL.crd]));
 }
 const isRanked = (r) => r[COL.ranked] === 1;
 const rankedYear = (r) => COL.ranked_year == null ? null : (r[COL.ranked_year] || null);
@@ -235,13 +225,25 @@ const rankedYear = (r) => COL.ranked_year == null ? null : (r[COL.ranked_year] |
 function passes(r){
   if (CHIPS.direct && !isDirect(r)) return false;
   if (CHIPS.crm && !isCRM(r)) return false;
-  if (CHIPS.assets && (!hasAssets(r)
-      || !AssetProductFilters.matches(bookFor(r[COL.crd]), [...assetProducts]))) return false;
+  if (CHIPS.assets && !hasAssets(r)) return false;
   if (CHIPS.ranked && !isRanked(r)) return false;
   return true;
 }
 
 /* ---------- rendering --------------------------------------------------- */
+const FIELD_PHONE_ICON = `<svg viewBox="0 0 24 24" aria-hidden="true" fill="none"
+    stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M22 16.9v3a2 2 0 0 1-2.2 2 18.5 18.5 0 0 1-8.1-2.9
+    18 18 0 0 1-5.5-5.5 18.5 18.5 0 0 1-2.9-8.1A2 2 0 0 1 5.3 3h3
+    a2 2 0 0 1 2 1.7l.5 3a2 2 0 0 1-.5 2.1L9 11a14.5 14.5 0 0 0 5.5 5.5l1.2-1.2
+    a2 2 0 0 1 2.1-.5l2.5.5a2 2 0 0 1 1.7 1.6Z"/>
+</svg>`;
+const FIELD_MAIL_ICON = `<svg viewBox="0 0 24 24" aria-hidden="true" fill="none"
+    stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+  <rect x="3" y="5" width="18" height="14" rx="2"/>
+  <path d="m4 7 8 6 8-6"/>
+</svg>`;
+
 function render(rows, note){
   ROWS = rows;
   if (note !== undefined) { NOTE = note; limit = PAGE; }
@@ -261,11 +263,6 @@ function render(rows, note){
     const assetTotal = assetBook
       ? (assetBook.acv || 0) + (assetBook.lcv || 0) + (assetBook.mf || 0)
         + (assetBook.midcap || 0) : 0;
-    // Badges sit on the NAME line, not in the detail line. The owner used to be
-    // appended to "title · firm · city, state", a single truncating line -- so
-    // on exactly the records with a long title AND a long firm, the initials
-    // were the first thing ellipsed away. The one signal that should stop a rep
-    // dialling was the one most likely to be invisible.
     const badges = [
       r[COL.owner] ? `<span class="badge owned" title="EIC relationship owner">${esc(r[COL.owner])}</span>` : "",
       assetBook ? `<span class="badge money" title="${assetBook.t === "high"
@@ -276,29 +273,35 @@ function render(rows, note){
       // Swiping a row queues it, so the row has to be able to say it is queued.
       Dial.inQueue(r[COL.crd]) ? `<span class="badge queued" title="on the call list">&#10003;</span>` : "",
     ].join("");
-    const sub = [r[COL.title], r[COL.firm], `${r[COL.city]}, ${r[COL.state]}`]
-      .filter(Boolean).map(esc).join(" &middot; ");
+    const sub = [r[COL.title], r[COL.firm]].filter(Boolean).map(esc).join(" &middot; ");
+    const location = [r[COL.city], r[COL.state]].filter(Boolean).join(", ");
+    const where = [location, dist].filter(Boolean).map(esc).join(" &middot; ");
+    const name = esc(r[COL.name]);
     const telUrl = Dial.telHref(r[COL.crd], r[COL.phone]);
     const tel = !r[COL.phone] ? ""
       : !telUrl
-        ? `<span class="blocked" title="Do not call" aria-label="${esc(r[COL.name])} — do not call">&#9940;</span>`
-        : `<a class="${isDirect(r) ? "" : "office"}" href="${esc(telUrl)}"
-           data-call="${esc(r[COL.crd])}" aria-label="Call ${esc(r[COL.name])}">&#9742;</a>`;
+        ? `<span class="blocked" title="Do not call" aria-label="${name} &mdash; do not call">&#9940;</span>`
+        : `<a class="call${isDirect(r) ? "" : " office"}" href="${esc(telUrl)}"
+           data-call="${esc(r[COL.crd])}" aria-label="Call ${name}">${FIELD_PHONE_ICON}</a>`;
     const controlledEmail = r[COL.email]
       && Dial.tierCanEmail(r[COL.tier], r[COL.source] || "");
     const mail = !r[COL.email] ? "" : controlledEmail
       ? `<a class="mail" href="#" data-mail="${esc(r[COL.crd])}"
-           aria-label="Email ${esc(r[COL.name])}">&#9993;</a>`
+           aria-label="Email ${name}">${FIELD_MAIL_ICON}</a>`
       : `<a class="mail" href="mailto:${esc(r[COL.email])}"
            title="Opens outside the app; nothing is logged and app suppression controls do not apply"
-           aria-label="Open a raw email to ${esc(r[COL.name])}">&#9993;</a>`;
+           aria-label="Open a raw email to ${name}">${FIELD_MAIL_ICON}</a>`;
     return `<li>
-      <div class="who" data-open="${i}">
-        <div class="nm-line"><span class="nm">${esc(r[COL.name])}</span>${badges}</div>
-        <div class="sub">${sub}</div>
+      <button type="button" class="who" data-open="${i}">
+        <span class="nm">${name}</span>
+        ${sub ? `<span class="sub">${sub}</span>` : ""}
+        ${where ? `<span class="dist">${where}</span>` : ""}
+      </button>
+      ${fieldPersonActionButton(r[COL.crd], r[COL.name])}
+      <div class="contact-bottom">
+        <div class="contact-badges">${badges}</div>
+        <div class="acts">${tel}${mail}</div>
       </div>
-      <div class="dist">${dist}</div>
-      <div class="acts">${tel}${mail}${fieldPersonActionButton(r[COL.crd], r[COL.name])}</div>
     </li>`;
   }).join("");
   $("list")._shown = shown;
@@ -477,8 +480,10 @@ function openSheet(r){
     </details>` : "";
 
   $("sheetInner").innerHTML = `
-    <button id="sheetClose" aria-label="Close">&times;</button>
-    <h2>${esc(r[COL.name])}${flagMarksField(r[COL.crd])}${ActAddresses.badgeSlot(r[COL.crd])}</h2>
+    <div class="field-sheet-heading">
+      <h2>${esc(r[COL.name])}${flagMarksField(r[COL.crd])}${ActAddresses.badgeSlot(r[COL.crd])}</h2>
+      <button type="button" id="sheetClose" class="field-sheet-close" aria-label="Close contact">&times;</button>
+    </div>
     ${ActAddresses.slot(r[COL.crd])}
     <div class="sub">${esc(r[COL.title] || "")}</div>
     ${owned}
@@ -1104,20 +1109,22 @@ function openPersonActionsField(trigger){
   back._trigger = trigger;
   back.innerHTML = `<div class="person-action-dialog" role="dialog" aria-modal="true"
       aria-labelledby="personActionTitle">
-    <h3 id="personActionTitle">${esc(name)}</h3>
+    <div class="field-sheet-heading">
+      <h3 id="personActionTitle">${esc(name)}</h3>
+      <button type="button" class="field-sheet-close" data-person-close aria-label="Close list picker">&times;</button>
+    </div>
     <p class="person-action-label">Sales roles</p>
     <div class="person-action-roles">${flagMarksField(crd)}</div>
     <p class="person-action-label">Add to a call list</p>
     <div class="person-action-lists">${lists.length ? lists.map((list) =>
       `<button type="button" data-person-list="${esc(list.id)}"
-        data-person-crd="${esc(crd)}">${esc(list.name)} <small>${Number(list.count) || 0}</small></button>`).join("")
+        data-person-crd="${esc(crd)}"><span>${esc(list.name)}</span><small>${Number(list.count) || 0}</small></button>`).join("")
       : `<p class="lists-none">Create a call list first.</p>`}</div>
-    <p class="person-action-status" role="status" aria-live="polite"></p>
-    <button type="button" class="ghost" data-person-close>Close</button></div>`;
+    <p class="person-action-status" role="status"></p></div>`;
   personActionBack = back;
   trigger.setAttribute("aria-expanded", "true");
   document.body.appendChild(back);
-  back.querySelector(".flag-mark, [data-person-list], [data-person-close]")?.focus();
+  back.querySelector("[data-person-close]")?.focus();
 }
 
 document.addEventListener("keydown", (event) => {
@@ -1468,11 +1475,11 @@ function workActionHtml(action, entry, label){
   if (action === "mark_reviewed") return `<button type="button" data-work-action="mark_reviewed"
       data-crd="${crd}" aria-label="Mark ${who} reviewed">Reviewed</button>`;
   if (action === "done") return `<button type="button" data-work-action="done"
-      data-crd="${crd}" aria-label="Mark work for ${who} done">Done</button>`;
+      data-crd="${crd}" aria-label="Mark follow-up for ${who} done">Mark done</button>`;
   if (action === "dismiss_bounce") return `<button type="button" data-work-action="dismiss_bounce"
       data-crd="${crd}" aria-label="Confirm the address for ${who} is fine">Address OK</button>`;
   if (action === "snooze") return `<button type="button" data-work-action="snooze"
-      data-days="30" data-crd="${crd}" aria-label="Snooze ${who} for 30 days">Snooze</button>`;
+      data-days="30" data-crd="${crd}" aria-label="Snooze ${who} for 30 days">Snooze 30 days</button>`;
   return "";
 }
 
@@ -2634,27 +2641,10 @@ async function search(term){
 
 /* ---------- wiring -------------------------------------------------------- */
 document.addEventListener("click", (e) => {
-  const product = e.target.closest("[data-asset-product]");
-  if (product) {
-    if (BOOK_STATE !== "ready") {
-      syncAssetChip();
-      $("status").textContent = BOOK_STATE === "failed"
-        ? "EIC account-book data is unavailable; EIC product filters cannot be applied."
-        : "EIC account-book data is still loading; EIC product filters cannot be applied yet.";
-      return;
-    }
-    const next = AssetProductFilters.transition(CHIPS.assets, [...assetProducts], product.dataset.assetProduct);
-    CHIPS.assets = next.assetsOnly;
-    assetProducts.clear();
-    next.assetProducts.forEach((key) => assetProducts.add(key));
-    syncAssetChip();
-    limit = PAGE;
-    render(ROWS);
-    return;
-  }
   const chip = e.target.closest("[data-chip]");
   if (chip) {
     const k = chip.dataset.chip;
+    if (chip.disabled) return;
     CHIPS[k] = !CHIPS[k];
     chip.setAttribute("aria-pressed", String(CHIPS[k]));
     chip.classList.toggle("on", CHIPS[k]);
