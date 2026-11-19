@@ -358,6 +358,13 @@ class AzurePublisher:
             recipient_eligibility=self._last["recipient_eligibility"],baseline=adopted,publishedUtc=core.utc(),warnings=spec["warnings"])
         core.atomic_json(self.current_file,record);core.atomic_json(self.folder/"latest.json",record)
 
+    def retire_local_workspaces(self, spec):
+        from refresh_retention import maintain
+        report = maintain(self.root, apply=True, expected_run_id=spec["run_id"])
+        held = sum(row["status"] == "held" for row in report.get("workspaces", ()))
+        if held:
+            raise PublicationHeld("A local workspace could not be retired; see the retention report")
+
     def block(self,spec):
         record=core.read_json(self.current_file)
         record.update(blocked=True,recoveryRunId=spec["run_id"],updatedUtc=core.utc())

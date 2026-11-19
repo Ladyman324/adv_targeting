@@ -6,6 +6,7 @@ post-publication failures remain resumable without redeploying a verified app.
 """
 from __future__ import annotations
 import json
+import sys
 from pathlib import Path
 import refresh_core as core
 from refresh_publish_policy import minor_warnings, check_source_results
@@ -126,6 +127,12 @@ def publish(root, run_id, backend=None, config=None, gate=check_gate):
                     raise
                 backend.record_current(spec,adopted)
                 mark("completed",publishedUtc=core.utc(),baseline=adopted)
+                retain = getattr(backend, "retire_local_workspaces", None)
+                if retain:
+                    try:
+                        retain(spec)
+                    except Exception as error:
+                        print("[!] Local workspace retention needs review: " + type(error).__name__, file=sys.stderr)
                 return state
         except Exception as exc:
             if state.get("status") not in {"rolled_back","rollback_failed","published_adoption_failed"}:

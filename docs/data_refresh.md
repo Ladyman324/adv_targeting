@@ -468,13 +468,26 @@ space; do not rely on operating-system temporary-folder retention. For example:
 python src/refresh_data.py start --mode act-only --stage-parent '\\EIC-FS09\DATA\_Research\Power_BI\adv_targeting\data\refresh\workspaces'
 ```
 
-Retain the complete verified run directory and its workspace in place, together
-with candidate archives, comparison reports, publication receipt and committed
-code identity. The workspace contains raw snapshots, immutable source history,
-receipts and normalized SEC caches that the deployable archives do not contain.
-Keep restricted backups of these locations and the previous published baseline.
+Retain the live and immediate rollback workspaces in place. Keep their verified
+run directories with candidate archives, comparison reports, publication receipts
+and committed code identities. A workspace contains raw snapshots, immutable
+source history, receipts and normalized SEC caches that the deployable archives
+do not contain. Keep restricted backups of the live and previous published baselines.
 Moving a workspace changes recorded paths; do not edit manifests or transplant
 success markers to make a moved or modified workspace appear verified.
+
+After the publisher verifies and adopts a release, local retention examines
+the marked workspaces under `%LOCALAPPDATA%/EIC/AdvisorRefresh/workspaces`.
+It keeps the two newest local publications and protects the live and immediate
+rollback workspaces even when scheduled staging uses the share. It verifies
+older release packages and retires their local workspace copies. Unpublished
+builds qualify when their commit is included in the live release and every
+pinned input is verified in a retained workspace. Shared packages, receipts
+and run records stay available. The per-release `workspace-retention.json`
+report records removals, held workspaces and recovered disk space.
+
+Run `python src/refresh_retention.py` in the scheduled checkout to preview
+eligible workspaces. Add `--apply` to apply the same policy manually.
 
 Publication does not automatically adopt staged sources or generated data into
 the operational checkout. An ordinary new `start` reads that checkout, not the

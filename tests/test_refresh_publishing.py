@@ -60,6 +60,20 @@ class PublicationTests(unittest.TestCase):
         self.assertLess(backend.events.index("api_verify"),backend.events.index("static"))
         self.assertLess(backend.events.index("verify"),backend.events.index("receipt"))
         self.assertLess(backend.events.index("receipt"),backend.events.index("adopt"))
+    def test_retention_failure_keeps_the_published_release_completed(self):
+        backend = FakeBackend()
+        def retention(spec):
+            self.assertEqual(self.state()["status"], "completed")
+            self.assertEqual(backend.events[-1], "record")
+            raise OSError("fixture local cleanup failed")
+        backend.retire_local_workspaces = retention
+        with patch("sys.stderr") as stderr:
+            result = self.run_pub(backend)
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(self.state()["status"], "completed")
+        self.assertNotIn("rollback", backend.events)
+        self.assertTrue(stderr.write.called)
+
     def test_busy_window_defers_without_mutations(self):
         backend=FakeBackend(busy=True);result=self.run_pub(backend)
         self.assertEqual(result["status"],"deferred_busy")
