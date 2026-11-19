@@ -12,6 +12,15 @@ const title = "Senior Vice President and Managing Director of a Very Long Adviso
 const advisor = ["2612169", "Christopher (Andrew) Harbour", title, "Morgan Stanley", "Atlanta", "GA",
   "4045550101", "direct", "andrew@example.test", "confirmed", "crm", "MK", 1, 2026];
 const prospect = ["1234567", "Jane Prospect", "Financial Advisor", "Firm", "Atlanta", "GA"];
+const remote = ["2234567", "Avery Faraway", "Advisor", "Remote Advisory", "Seattle", "WA",
+  "2065550101", "direct", "avery@example.test", "confirmed", "crm"];
+const blocked = ["3234567", "Casey Faraway", "Advisor", "Separated Financial", "Seattle", "WA",
+  "2065550102", "direct", "", "confirmed"];
+const offscreen = ["4234567", "Zoe Faraway", "Advisor", "Travel Financial", "Denver", "CO",
+  "7205550101", "direct", "zoe@example.test", "confirmed"];
+const filler = Array.from({ length: 15 }, (_, i) =>
+  [String(5500000 + i), "Distant Faraway " + i, "Advisor", "Other Firm", "Seattle", "WA"]);
+const nationalHit = (row, cell) => [row[1], row[0], cell, row[4], row[5], ""];
 const entry = { advisorCrd: advisor[0], advisorEmail: advisor[8], reason: "reply_followup",
   reasonLabel: "Follow-up needed", actions: ["follow_up", "done", "snooze"] };
 
@@ -22,7 +31,7 @@ const entry = { advisorCrd: advisor[0], advisorEmail: advisor[8], reason: "reply
       const page = await browser.newPage({ viewport: { width, height: 750 }, hasTouch: true,
         isMobile: true, colorScheme: "dark", serviceWorkers: "block" });
       page.setDefaultTimeout(8000);
-      const errors = [], writes = [];
+      const errors = [], writes = [], tiles = [];
       let queue = [entry];
       page.on("pageerror", error => errors.push(error.message));
       await page.route("**/*", async route => {
@@ -41,7 +50,20 @@ const entry = { advisorCrd: advisor[0], advisorEmail: advisor[8], reason: "reply
           case "/api/queue": return json({ items: [], lists: [{ id: "custom", name: "Atlanta Rotation", count: 2 }] });
           case "/api/email": return url.searchParams.get("op") === "queue_work"
             ? json({ count: queue.length, entries: queue }) : json({ reps: [] });
-          case "/data/tile_index.json": return json({ columns, cells: [] });
+          case "/data/tile_index.json": return json({ columns, cells: ["seattle", "denver"] });
+          case "/data/name_index.json": return json({
+            columns: ["name", "crd", "cell", "city", "state", "alt"], shards: ["fa"], split: [],
+          });
+          case "/data/names/fa.json": return json({
+            rows: [remote, blocked, ...filler].map(row => nationalHit(row, "seattle"))
+              .concat([nationalHit(offscreen, "denver")]),
+          });
+          case "/data/tiles/seattle.json":
+            tiles.push("seattle");
+            return json({ rows: [remote, blocked, ...filler] });
+          case "/data/tiles/denver.json":
+            tiles.push("denver");
+            return json({ rows: [offscreen] });
           case "/data/act_assets.json": return json({ advisors: { [advisor[0]]: { acv: 1500000 } } });
           case "/api/contact-address": return json({ status: "unlinked", draft: {} });
           default: {
@@ -128,6 +150,28 @@ const entry = { advisorCrd: advisor[0], advisorEmail: advisor[8], reason: "reply
       await work.getByText("Mark done", { exact: true }).tap();
       await work.getByText(/Nothing waiting/).waitFor();
       assert.deepEqual(writes, [["/api/email", { op: "reply_state", crd: advisor[0], state: "done" }]]);
+      await work.getByRole("button", { name: "Close Needs attention" }).tap();
+
+      const search = page.locator("#q");
+      await page.evaluate(crd => Dial.state.dnc.set(crd, { by: "fixture" }), blocked[0]);
+      await search.fill("faraway");
+      const remoteRow = page.locator("#list > li").filter({ hasText: remote[1] });
+      await remoteRow.getByRole("link", { name: "Call " + remote[1] }).waitFor();
+      await remoteRow.getByRole("link", { name: "Email " + remote[1] }).waitFor();
+      const blockedRow = page.locator("#list > li").filter({ hasText: blocked[1] });
+      await blockedRow.locator(".blocked").waitFor();
+      assert.equal(await blockedRow.locator("a.call, a.mail").count(), 0);
+      assert.deepEqual(tiles, ["seattle"], "visible matches share a tile and offscreen details wait");
+      const offscreenRow = page.locator("#list > li").filter({ hasText: offscreen[1] });
+      await offscreenRow.scrollIntoViewIfNeeded();
+      await offscreenRow.getByRole("link", { name: "Call " + offscreen[1] }).waitFor();
+      await offscreenRow.getByRole("link", { name: "Email " + offscreen[1] }).waitFor();
+      assert.deepEqual(tiles, ["seattle", "denver"]);
+
+      await search.fill("remote advisory");
+      await remoteRow.getByRole("link", { name: "Email " + remote[1] }).waitFor();
+      assert.equal(await page.locator("#list > li").count(), 1, "firm result keeps its quick actions");
+      assert.ok(await remoteRow.getByRole("link", { name: "Call " + remote[1] }).isVisible());
       assert.deepEqual(errors, []);
       console.log("Field layout and queue actions verified at " + width
         + " px (sample row height " + Math.round(rowBox.height) + " px)");

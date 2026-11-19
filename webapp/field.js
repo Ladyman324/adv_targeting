@@ -30,6 +30,7 @@ Dial.setContactRouteVersion(DATA_VERSION);
 let INDEX = null;
 let COL = {};
 const TILE_CACHE = new Map();
+const TILE_REQUESTS = new Map();
 
 /* ---- TEMPORARY: field-view timing ----------------------------------------
  * The same instrument the desktop carries, so the two can be compared on the
@@ -79,6 +80,7 @@ let ME = null;
 let NAMES = null;                  // {shards:Set, split:Set, unplaced:n}
 const NAME_CACHE = new Map();      // shard key -> rows
 let searchSeq = 0;                 // guards against out-of-order responses
+let searchDetailsObserver = null;
 
 const CHIPS = { direct: false, crm: false, assets: false, ranked: false };
 
@@ -184,11 +186,17 @@ async function loadTiles(keys){
   const fresh = keys.filter((k) => !TILE_CACHE.has(k));
   const start = performance.now();
   await Promise.all(keys.map(async (k) => {
-    if (!TILE_CACHE.has(k)) {
-      const r = await fetch(dataUrl(`tiles/${k}.json`));
-      TILE_CACHE.set(k, r.ok ? (await r.json()).rows : []);
+    if (!TILE_CACHE.has(k) && !TILE_REQUESTS.has(k)) {
+      const request = (async () => {
+        const response = await fetch(dataUrl(`tiles/${k}.json`));
+        if (!response.ok) return [];
+        const { rows } = await response.json();
+        TILE_CACHE.set(k, rows);
+        return rows;
+      })().finally(() => TILE_REQUESTS.delete(k));
+      TILE_REQUESTS.set(k, request);
     }
-    out.push(...TILE_CACHE.get(k));
+    out.push(...(TILE_CACHE.get(k) || await TILE_REQUESTS.get(k)));
   }));
   // Cached calls cost nothing and would drown the useful ones in noise.
   if (fresh.length)
@@ -257,54 +265,9 @@ function render(rows, note){
     + (shown.length < matched.length
         ? ` &middot; showing ${shown.length.toLocaleString()}` : "");
 
-  $("list").innerHTML = shown.map((r, i) => {
-    const dist = HERE ? `${milesBetween(HERE.lat, HERE.lon, r).toFixed(1)} mi` : "";
-    const assetBook = bookFor(r[COL.crd]);
-    const assetTotal = assetBook
-      ? (assetBook.acv || 0) + (assetBook.lcv || 0) + (assetBook.mf || 0)
-        + (assetBook.midcap || 0) : 0;
-    const badges = [
-      r[COL.owner] ? `<span class="badge owned" title="EIC relationship owner">${esc(r[COL.owner])}</span>` : "",
-      assetBook ? `<span class="badge money" title="${assetBook.t === "high"
-        ? "Inferred ACT economic link; contact identity is evaluated separately"
-        : "EIC account book on file"}">${
-        assetTotal > 0 ? esc(money(assetTotal)) : "EIC book"}</span>` : "",
-      isRanked(r) ? `<span class="badge rank" title="Barron's or Forbes ranked${rankedYear(r) ? `; latest recognition ${esc(rankedYear(r))}` : ''}">&#9733;${rankedYear(r) ? ` ${esc(rankedYear(r))}` : ''}</span>` : "",
-      // Swiping a row queues it, so the row has to be able to say it is queued.
-      Dial.inQueue(r[COL.crd]) ? `<span class="badge queued" title="on the call list">&#10003;</span>` : "",
-    ].join("");
-    const sub = [r[COL.title], r[COL.firm]].filter(Boolean).map(esc).join(" &middot; ");
-    const location = [r[COL.city], r[COL.state]].filter(Boolean).join(", ");
-    const where = [location, dist].filter(Boolean).map(esc).join(" &middot; ");
-    const name = esc(r[COL.name]);
-    const telUrl = Dial.telHref(r[COL.crd], r[COL.phone]);
-    const tel = !r[COL.phone] ? ""
-      : !telUrl
-        ? `<span class="blocked" title="Do not call" aria-label="${name} &mdash; do not call">&#9940;</span>`
-        : `<a class="call${isDirect(r) ? "" : " office"}" href="${esc(telUrl)}"
-           data-call="${esc(r[COL.crd])}" aria-label="Call ${name}">${FIELD_PHONE_ICON}</a>`;
-    const controlledEmail = r[COL.email]
-      && Dial.tierCanEmail(r[COL.tier], r[COL.source] || "");
-    const mail = !r[COL.email] ? "" : controlledEmail
-      ? `<a class="mail" href="#" data-mail="${esc(r[COL.crd])}"
-           aria-label="Email ${name}">${FIELD_MAIL_ICON}</a>`
-      : `<a class="mail" href="mailto:${esc(r[COL.email])}"
-           title="Opens outside the app; nothing is logged and app suppression controls do not apply"
-           aria-label="Open a raw email to ${name}">${FIELD_MAIL_ICON}</a>`;
-    return `<li>
-      <button type="button" class="who" data-open="${i}">
-        <span class="nm">${name}</span>
-        ${sub ? `<span class="sub">${sub}</span>` : ""}
-        ${where ? `<span class="dist">${where}</span>` : ""}
-      </button>
-      ${fieldPersonActionButton(r[COL.crd], r[COL.name])}
-      <div class="contact-bottom">
-        <div class="contact-badges">${badges}</div>
-        <div class="acts">${tel}${mail}</div>
-      </div>
-    </li>`;
-  }).join("");
+  $("list").innerHTML = shown.map((r, i) => `<li>${contactRowHtml(r, i)}</li>`).join("");
   $("list")._shown = shown;
+  watchSearchDetails(shown);
 
   $("more").hidden = shown.length >= matched.length;
   if (!$("more").hidden) {
@@ -317,6 +280,86 @@ function render(rows, note){
   const next = RADII[radiusIdx + 1];
   $("wider").hidden = !HERE || !next;
   if (!$("wider").hidden) $("wider").textContent = `Search wider (${next} miles)`;
+}
+
+function contactRowHtml(r, i){
+  const dist = HERE && !r.remoteCell ? `${milesBetween(HERE.lat, HERE.lon, r).toFixed(1)} mi` : "";
+  const assetBook = bookFor(r[COL.crd]);
+  const assetTotal = assetBook
+    ? (assetBook.acv || 0) + (assetBook.lcv || 0) + (assetBook.mf || 0)
+      + (assetBook.midcap || 0) : 0;
+  const badges = [
+    r[COL.owner] ? `<span class="badge owned" title="EIC relationship owner">${esc(r[COL.owner])}</span>` : "",
+    assetBook ? `<span class="badge money" title="${assetBook.t === "high"
+      ? "Inferred ACT economic link; contact identity is evaluated separately"
+      : "EIC account book on file"}">${
+      assetTotal > 0 ? esc(money(assetTotal)) : "EIC book"}</span>` : "",
+    isRanked(r) ? `<span class="badge rank" title="Barron's or Forbes ranked${rankedYear(r) ? `; latest recognition ${esc(rankedYear(r))}` : ''}">&#9733;${rankedYear(r) ? ` ${esc(rankedYear(r))}` : ''}</span>` : "",
+    // Swiping a row queues it, so the row has to be able to say it is queued.
+    Dial.inQueue(r[COL.crd]) ? `<span class="badge queued" title="on the call list">&#10003;</span>` : "",
+  ].join("");
+  const sub = [r[COL.title], r[COL.firm]].filter(Boolean).map(esc).join(" &middot; ");
+  const location = [r[COL.city], r[COL.state]].filter(Boolean).join(", ");
+  const where = [location, dist].filter(Boolean).map(esc).join(" &middot; ");
+  const name = esc(r[COL.name]);
+  const telUrl = Dial.telHref(r[COL.crd], r[COL.phone]);
+  const tel = !r[COL.phone] ? ""
+    : !telUrl
+      ? `<span class="blocked" title="Do not call" aria-label="${name} &mdash; do not call">&#9940;</span>`
+      : `<a class="call${isDirect(r) ? "" : " office"}" href="${esc(telUrl)}"
+         data-call="${esc(r[COL.crd])}" aria-label="Call ${name}">${FIELD_PHONE_ICON}</a>`;
+  const controlledEmail = r[COL.email]
+    && Dial.tierCanEmail(r[COL.tier], r[COL.source] || "");
+  const mail = !r[COL.email] ? "" : controlledEmail
+    ? `<a class="mail" href="#" data-mail="${esc(r[COL.crd])}"
+         aria-label="Email ${name}">${FIELD_MAIL_ICON}</a>`
+    : `<a class="mail" href="mailto:${esc(r[COL.email])}"
+         title="Opens outside the app; nothing is logged and app suppression controls do not apply"
+         aria-label="Open a raw email to ${name}">${FIELD_MAIL_ICON}</a>`;
+  return `
+    <button type="button" class="who" data-open="${i}">
+      <span class="nm">${name}</span>
+      ${sub ? `<span class="sub">${sub}</span>` : ""}
+      ${where ? `<span class="dist">${where}</span>` : ""}
+    </button>
+    ${fieldPersonActionButton(r[COL.crd], r[COL.name])}
+    <div class="contact-bottom">
+      <div class="contact-badges">${badges}</div>
+      <div class="acts">${tel}${mail}</div>
+    </div>
+  `;
+}
+
+function watchSearchDetails(shown){
+  searchDetailsObserver?.disconnect();
+  searchDetailsObserver = null;
+  if (!shown.some(row => row.remoteCell)) return;
+  const list = $("list");
+  const seq = searchSeq;
+  const observer = new IntersectionObserver((entries) => {
+    for (const { isIntersecting, target } of entries) {
+      if (!isIntersecting || !target.isConnected || seq !== searchSeq) continue;
+      observer.unobserve(target);
+      const index = Number(target.querySelector("[data-open]").dataset.open);
+      const row = shown[index];
+      hydrate(row[COL.crd], row.remoteCell).then(full => {
+        if (!full || !target.isConnected || seq !== searchSeq || list._shown !== shown) return;
+        const rawIndex = ROWS.indexOf(row);
+        if (rawIndex < 0) return;
+        ROWS[rawIndex] = shown[index] = full;
+        const fresh = document.createElement("li");
+        fresh.innerHTML = contactRowHtml(full, index);
+        // Retain the row and its two buttons so loading does not steal focus
+        // or replace a list picker's trigger while the picker is open.
+        target.querySelector(".who").replaceChildren(...fresh.querySelector(".who").children);
+        target.querySelector(".contact-bottom").replaceWith(fresh.querySelector(".contact-bottom"));
+      }).catch(() => {}); // The hit still opens and can retry its detail lookup.
+    }
+  }, { rootMargin: "200px 0px" });
+  searchDetailsObserver = observer;
+  shown.forEach((row, index) => {
+    if (row.remoteCell) observer.observe(list.children[index]);
+  });
 }
 
 /* ---------- detail sheet ------------------------------------------------- */
@@ -2307,9 +2350,7 @@ async function loadShard(key){
   return NAME_CACHE.get(key);
 }
 
-// A search hit from the index carries only enough to list it. Opening the card
-// needs the full record, which lives in that advisor's tile -- so the tile is
-// fetched on tap rather than for every result.
+// Resolve the same versioned tile for search results, cards, and list routes.
 async function hydrate(crd, cell){
   const rows = await loadTiles([cell]);
   return rows.find((r) => r[COL.crd] === crd) || null;
@@ -2602,9 +2643,8 @@ async function search(term){
   if (HERE) local.sort((a, b) =>
     milesBetween(HERE.lat, HERE.lon, a) - milesBetween(HERE.lat, HERE.lon, b));
 
-  // Index records are shorter than tile rows. Padded to the same width with a
-  // marker in `crd`-adjacent slots so render() can treat them uniformly and
-  // simply show no call buttons -- the number lives in the tile.
+  // The name index gives us a hit immediately. Visible hits pull the rest of
+  // the row from their own tile, including the same routes used by Near me.
   const padded = national.map((r) => {
     const row = new Array(INDEX.columns.length).fill("");
     row[COL.crd]   = r[NAMES.C.crd];
@@ -2613,7 +2653,7 @@ async function search(term){
     row[COL.state] = r[NAMES.C.state];
     row[COL.assets] = 0;
     row[COL.ranked] = 0;
-    row.remoteCell = r[NAMES.C.cell];       // how to hydrate on tap
+    row.remoteCell = r[NAMES.C.cell];
     return row;
   });
 
@@ -2630,8 +2670,8 @@ async function search(term){
     // "nearby" would be a lie on a national miss -- with no local and no index
     // hit, nothing was scoped to a location in the first place.
     + (local.length && padded.length
-        ? ` &middot; ${local.length.toLocaleString()} nearby, ${padded.length.toLocaleString()} elsewhere`
-        : padded.length ? " nationally" : local.length ? " nearby" : "")
+        ? ` &middot; ${local.length.toLocaleString()} in loaded areas, ${padded.length.toLocaleString()} more nationwide`
+        : padded.length ? " nationally" : "")
     + (firmHits ? ` &middot; ${firmHits.toLocaleString()} by firm` : "")
     + (noArea ? " &middot; searching names only — firm search needs your area"
               : "")
@@ -2656,10 +2696,8 @@ document.addEventListener("click", (e) => {
   const open = e.target.closest("[data-open]");
   if (open) {
     const r = $("list")._shown[+open.dataset.open];
-    if (r.remoteCell && !r[COL.phone] && !r[COL.email]) {
-      // A national search hit: the tile carrying their phone and email has not
-      // been loaded yet.
-      hydrate(r[COL.crd], r.remoteCell).then((full) => openSheet(full || r));
+    if (r.remoteCell) {
+      hydrate(r[COL.crd], r.remoteCell).catch(() => null).then(full => openSheet(full || r));
     } else {
       openSheet(r);
     }
