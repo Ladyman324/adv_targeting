@@ -92,7 +92,8 @@ const TAG_BYTES = 16;
 function signToken(email, crd = "") {
   const key = boxKey();
   if (!key) return "";
-  const claim = `${norm(email)}|${String(crd || "").replace(/[^0-9]/g, "").slice(0, 12)}`;
+  const id = String(crd || "").trim();
+  const claim = `${norm(email)}|${/^\d{3,12}$/.test(id) ? id : ""}`;
   const iv = crypto.randomBytes(IV_BYTES);
   const cipher = crypto.createCipheriv("aes-256-gcm", key, iv);
   const sealed = Buffer.concat([cipher.update(claim, "utf8"), cipher.final()]);

@@ -204,3 +204,19 @@ test("teammates are server-authoritative CRD and email pairs", async () => {
     [{ crd: "102", email: "stranger@example.com" }]),
     (error) => error.code === "teammate_not_approved");
 });
+
+test("ACT-only recipient keys resolve the verified primary address without a CRD or ACT write route", async (t) => {
+  const directory = require("../shared/act-directory");
+  const key = "act-00000000000000000000000001";
+  const contact = { name:"Avery Example", greeting:"Avery", lastName:"Example",
+    company:"Saved company", firm:"Mapped Firm", email:"avery@advisor.example", emailApproved:true };
+  t.mock.method(directory, "get", id => id === key ? contact : null);
+  const result = await registry.verify(key, contact.email);
+  assert.equal(result.source, "act-only");
+  assert.equal(result.firm, "Mapped Firm");
+  assert.equal(result.actContactId, "");
+  assert.deepEqual(await registry.allowedTeammates(key), []);
+  await assert.rejects(registry.verify(key, "someone-else@advisor.example"), { code:"recipient_identity_changed" });
+  contact.emailApproved = false;
+  await assert.rejects(registry.resolve(key), { code:"recipient_not_approved" });
+});

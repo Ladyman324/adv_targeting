@@ -786,8 +786,14 @@ window.AdvisorEmailData = {
              teammates: mates.map((m) => m.email), teammatesFull: mates };
   },
   list: async () => {
+    const actContacts = await ActAddresses.loadListContacts(Dial.state.items);
+    const currentAct = new Map(actContacts.map(contact => [contact.contactKey, contact]));
     const out = [], excludedContacts = [];
-    for (const it of Dial.state.items) {
+    for (const saved of Dial.state.items) {
+      const contact = currentAct.get(saved.crd);
+      const it = ActAddresses.isContactKey(saved.crd)
+        ? contact ? ActAddresses.snapshot(contact) : { ...saved, emailConfirmed:false }
+        : saved;
       if (it.emailConfirmed !== true) {
         excludedContacts.push({ crd: it.crd, name: it.name, email: it.email,
           reasonCode: it.email ? "identity" : "email" });
@@ -796,7 +802,7 @@ window.AdvisorEmailData = {
       const row = rowByCrd(String(it.crd));
       const mates = await teammatesWithEmail(
         String(it.crd), row ? row[COL.state] : it.state, row ? row[COL.team_key] : "");
-      out.push({ ...it, firstName: (row && COL.sal != null && row[COL.sal]) || "",
+      out.push({ ...it, firstName: it.firstName || (row && COL.sal != null && row[COL.sal]) || "",
                  materialStrategies: materialStrategiesFor(it.crd),
                  teammates: mates.map((m) => m.email), teammatesFull: mates });
     }
@@ -1347,6 +1353,11 @@ async function ensureCurrentQueueRoute(item){
   if (routeChecks.has(key)) return;
   routeChecks.add(key);
   try {
+    if (ActAddresses.isContactKey(key)) {
+      const [contact] = await ActAddresses.loadListContacts([item]);
+      await Dial.reconcileRoute(key, contact ? ActAddresses.snapshot(contact) : null);
+      return;
+    }
     const current = rowByCrd(key)
       || await locateFlagged(key, item.name).catch(() => null);
     // A failed lookup remains stale and therefore non-dialable. Do not persist

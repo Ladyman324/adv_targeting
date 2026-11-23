@@ -5,6 +5,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const addresses = require("./act-address-review");
 const core = require("./email-core");
+const { indexDirectory } = require("./act-directory");
 
 const crdPattern = /^\d{3,12}$/;
 const mailCodes = require("./email-suppress");
@@ -31,6 +32,8 @@ function createService({ lookup, addressService, resolve, act, journal, mailCode
   const directory = lookup.crm_directory;
   const claimed = new Set(directory?.claimedCrds || []);
   const emails = new Set(directory?.emailHashes || []);
+  const contacts = indexDirectory(directory);
+  const lookupContacts = keys => keys.map(key => contacts.get(key)).filter(Boolean);
 
   function search(query, personOnly = false) {
     if (!directory) throw failure("ACT! contacts are unavailable until the next data refresh.", 503);
@@ -140,7 +143,7 @@ function createService({ lookup, addressService, resolve, act, journal, mailCode
       }
     });
   }
-  return { search, preview, change };
+  return { search, lookupContacts, preview, change };
 }
 
 let installed;

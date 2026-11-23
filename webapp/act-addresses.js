@@ -12,6 +12,7 @@
     unlinked: "Not in ACT!", pending: "ACT! addition needs verification", unknown: "ACT! status unavailable",
   };
   let locate;
+  let openFirm;
 
   function badge(state, crd = "") {
     const label = states[state] || "Checking ACT!";
@@ -175,15 +176,104 @@
     office?.addEventListener("click", handleAction);
   }
 
+  const directory = new Map();
+  const isContactKey = key => /^act-[a-f0-9]{26}$/.test(String(key || ""));
+  const current = key => directory.get(String(key));
+  function snapshot(contact) {
+    const dial = root.Dial;
+    return { crd: contact.contactKey, name: contact.name, firm: contact.firm || contact.company,
+      phone: contact.phone || "", phoneKind: "office", city: contact.primary?.city || "",
+      state: contact.primary?.state || "", email: contact.email || "",
+      identityApproved: true, contactTier: "confirmed", contactSource: "act-only",
+      emailConfirmed: contact.emailApproved === true, emailEligibilityKnown: true,
+      emailTierKey: dial.emailTierKey(), contactRouteVersion: dial.state.contactRouteVersion,
+      firstName: contact.greeting || "", lastName: contact.lastName || "", identityLabel: "ACT! contact",
+    };
+  }
+
+  async function loadListContacts(items) {
+    const keys = [...new Set(items.map(item => String(item.crd)).filter(isContactKey))];
+    const out = [];
+    for (let start = 0; start < keys.length; start += 50) {
+      const batch = keys.slice(start, start + 50);
+      const result = await request("?keys=" + encodeURIComponent(batch.join(",")));
+      batch.forEach(key => directory.delete(key));
+      for (const contact of result.contacts) {
+        directory.set(contact.contactKey, contact);
+        out.push(contact);
+      }
+    }
+    return out;
+  }
+
+  async function openByKey(key) {
+    const [contact] = await loadListContacts([{ crd: key }]);
+    if (!contact) throw new Error("This ACT! contact is no longer in the shared directory.");
+    contactDetails(contact);
+  }
+
   function contactDetails(contact) {
     const dialog = openDialog(contact.name);
     const body = dialog.querySelector(".act-dialog-body");
+    const dial = root.Dial;
+    const key = contact.contactKey;
+    const tel = key && dial?.state.ready && dial.telHref(key, contact.phone);
+    const firm = contact.firm || contact.company;
+    const firmLink = firm && /^\d+$/.test(contact.firmCrd || "") && openFirm
+      ? `<button type="button" class="ask-btn" data-act-firm>${esc(firm)}</button>` : esc(firm);
+    if (isContactKey(key)) directory.set(key, contact);
     body.innerHTML = `<p>${badge("linked")} ${chip("No matching CRD")}</p>
-      <p>${esc(contact.company)}</p><p>${esc(contact.email)}</p>
-      <p>${esc(address(contact.primary) || "No ACT! primary address on file")}</p>
-      ${locate && contact.coordinates ? '<button type="button" class="ask-btn" data-act-pin>Show on map</button>' : ""}`;
-    const pin = body.querySelector("[data-act-pin]");
-    if (pin) pin.onclick = () => { locate(contact); dialog.close(); };
+      ${contact.title ? `<p>${esc(contact.title)}</p>` : ""}
+      ${firm ? `<p><b>Firm</b> ${firmLink}${contact.firm ? ' <small>Matched by email domain</small>' : ""}</p>` : ""}
+      <p><b>Working office from ACT!</b> ${esc(address(contact.primary) || "Address unavailable")}</p>
+      ${contact.phone ? `<p><b>Phone</b> ${esc(contact.phone)}${!tel && dial?.isDnc(key) ? " ? Do not call" : ""}</p>` : ""}
+      ${contact.email ? `<p><b>Email</b> ${esc(contact.email)}${key && !contact.emailApproved ? " ? Needs review" : ""}</p>` : ""}
+      <div class="act-contact-actions">
+        ${tel ? `<a class="ask-btn" href="${esc(tel)}" data-act-call>Call</a>` : ""}
+        ${key && contact.emailApproved ? '<button type="button" class="ask-btn" data-act-email>Email</button>' : ""}
+        ${locate && contact.coordinates ? '<button type="button" class="ask-btn" data-act-pin>Show on map</button>' : ""}
+      </div>
+      ${key && dial ? '<div class="act-list-control"></div>' : ""}
+      <p class="act-result" role="status"></p>`;
+    const status = body.querySelector(".act-result");
+    body.querySelector("[data-act-pin]")?.addEventListener("click", () => { locate(contact); dialog.close(); });
+    body.querySelector("[data-act-firm]")?.addEventListener("click", () => { dialog.close(); openFirm(contact.firmCrd); });
+    body.querySelector("[data-act-call]")?.addEventListener("click", event => {
+      if (dial.isDnc(key)) {
+        event.preventDefault();
+        status.textContent = "This contact is on the do-not-call list.";
+        return;
+      }
+      dial.log({ crd:key, kind:"call", name:contact.name, firm:firm || "", phone:contact.phone,
+        phoneKind:"office" }).catch(() => {});
+    });
+    body.querySelector("[data-act-email]")?.addEventListener("click", () => {
+      dialog.close();
+      root.EmailComposer?.open([snapshot(contact)]);
+    });
+    const picker = body.querySelector(".act-list-control");
+    if (picker) {
+      const owner = root.AdvisorListWorkspace?.();
+      (owner ? dial.readLists(owner.id) : dial.loadLists()).then(lists => {
+        if (!dialog.isConnected) return;
+        const choices = lists.filter(list => !/^(?:role-|__)/.test(list.id));
+        picker.innerHTML = choices.length
+          ? `<label class="email-label">${owner ? `Add to ${esc(owner.email)}'s list` : "Add to a list"} <select>${choices.map(list =>
+              `<option value="${esc(list.id)}">${esc(list.name)}</option>`).join("")}</select></label>
+             <button type="button" class="ask-btn">Add</button>`
+          : '<p>Create a list in Lists first.</p>';
+        const add = picker.querySelector("button");
+        if (!add) return;
+        add.onclick = async () => {
+          add.disabled = true;
+          try {
+            const saved = await dial.addToList(picker.querySelector("select").value, snapshot(contact), owner?.id);
+            status.textContent = saved.added === false ? "Already on this list." : "Added to the list.";
+          } catch (error) { status.textContent = error.message; }
+          finally { add.disabled = false; }
+        };
+      }).catch(error => { status.textContent = error.message; });
+    }
   }
 
   const searches = new WeakMap();
@@ -227,7 +317,9 @@
     if (node.matches("[data-act-profile]")) mount(node);
     node.querySelectorAll("[data-act-profile]").forEach(mount);
   }
-  root.ActAddresses = { slot, officeSlot, badgeSlot, render, searchInto, setLocator: (callback) => { locate = callback; } };
+  root.ActAddresses = { slot, officeSlot, badgeSlot, render, searchInto,
+    isContactKey, current, snapshot, loadListContacts, openByKey, contactDetails,
+    setLocator: (callback, firmCallback) => { locate = callback; openFirm = firmCallback; } };
   if (root.document && root.MutationObserver) {
     const start = () => {
       scan(root.document.body);

@@ -111,6 +111,36 @@ class ActAddressReviewTests(unittest.TestCase):
         self.assertEqual(output["claimedCrds"], ["2222222"])
         self.assertIn(hashlib.sha256(b"private@example.com").hexdigest(), output["emailHashes"])
 
+    def test_crm_directory_uses_unique_primary_email_and_most_matched_firm(self):
+        def contact(key, email, **fields):
+            return {"id": key, "firstName": "Avery", "lastName": "Example",
+                    "emailAddress": email, **fields}
+
+        rows = [
+            contact("standalone", "avery@advisor.example", businessPhone="404-555-0101",
+                    businessExtension="51", salutation="Avery"),
+            contact("same_address", "shared@advisor.example"),
+            contact("alternate", "different@example.test", altEmailAddress="shared@advisor.example"),
+            contact("opt_out", "optout@advisor.example", customFields={"email__y_n": "NC"}),
+            contact("existing", "one@advisor.example"),
+            contact("phone_only", "", mobilePhone="404-555-0102"),
+        ]
+        advisors = {
+            "100": {"e": "one@advisor.example", "fc": "111", "cn": "Example Firm", "t": "confirmed"},
+            "200": {"e": "two@advisor.example", "fc": "111", "cn": "Example Firm", "t": "high"},
+            "300": {"e": "three@advisor.example", "fc": "222", "cn": "Other Firm", "t": "confirmed"},
+        }
+        result = build_crm_directory({}, rows, {}, advisors)
+        found = {row["email"]: row for row in result["contacts"]}
+        standalone = found["avery@advisor.example"]
+        self.assertEqual((standalone["firmCrd"], standalone["firm"]), ("111", "Example Firm"))
+        self.assertEqual(standalone["phone"], "+14045550101,,51")
+        self.assertTrue(standalone["emailApproved"])
+        self.assertRegex(standalone["contactKey"], r"^act-[0-9a-f]{26}$")
+        for email in ("shared@advisor.example", "optout@advisor.example", "one@advisor.example", ""):
+            self.assertFalse(found[email]["emailApproved"])
+        self.assertEqual(found[""]["phone"], "+14045550102")
+
     def test_creation_fields_and_address_require_the_same_firm_and_email(self):
         row = self.contacts["2066775"]
         row.pop("aid")

@@ -13,13 +13,18 @@
 
 const store = require("../shared/store");
 const listAccess = require("../shared/list-territory-access");
+const listDelegation = require("../shared/list-delegation");
 
 module.exports = async function (context, req) {
   try {
     const who = store.identity(req);
 
     if (req.method === "GET") {
-      return store.ok(context, { settings: await store.getSettings(who),
+      if (req.query?.listDelegates === "1") {
+        const grant = listDelegation.internalUser(who) ? await store.getListGrant(who.id) : null;
+        return store.ok(context, { listDelegates:(grant?.delegates || []).join(", ") });
+      }
+      return store.ok(context, { settings:await store.getSettings(who),
         features: { actEmailWrite: process.env.ACT_EMAIL_HISTORY_SYNC === "1",
           crossTerritoryLists: listAccess.hasCrossTerritoryListAccess(who) } });
     }
@@ -46,6 +51,13 @@ module.exports = async function (context, req) {
     // Named so a caller can see what it may send. Unknown keys are dropped
     // silently by putSettings, and reporting the accepted list here is what
     // makes that silence debuggable rather than mysterious.
+    const hasDelegates = Object.prototype.hasOwnProperty.call(body, "listDelegates");
+    if (hasDelegates && Object.keys(body).length !== 1)
+      throw Object.assign(new Error("Save list delegation separately from other preferences."), { statusCode:400 });
+    if (hasDelegates) {
+      const listDelegates = await store.saveListGrant(who, body.listDelegates);
+      return store.ok(context, { listDelegates });
+    }
     const saved = await store.putSettings(who, body);
     return store.ok(context, { ok: true, settings: saved,
                                features: { actEmailWrite: process.env.ACT_EMAIL_HISTORY_SYNC === "1",

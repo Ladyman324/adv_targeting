@@ -43,6 +43,8 @@ const origin = "https://act-fixture.invalid";
         }
         if (url.searchParams.has("search")) return route.fulfill({ json: { count: 1,
           contacts: [{ name: "ACT Only", email: "act@example.test", company: "Firm",
+            contactKey:"act-00000000000000000000000001", phone:"+14045550101",
+            emailApproved:true, greeting:"Avery", firm:"Example Advisors", firmCrd:"123456",
             primary, coordinates: [40.76, -73.98] }] } });
         return route.fulfill({ json: url.searchParams.get("crd") === "2066775" ? linked : unlinked });
       });
@@ -52,7 +54,13 @@ const origin = "https://act-fixture.invalid";
           + '<section id="test-location"><p class="remote-note">Working office from ACT!.</p>'
           + ActAddresses.officeSlot("2066775") + "</section>"
           + ActAddresses.badgeSlot("5551234") + ActAddresses.slot("5551234") + ActAddresses.officeSlot("5551234");
-        ActAddresses.setLocator(contact => { window.locatedContact = contact.name; });
+        ActAddresses.setLocator(contact => { window.locatedContact = contact.name; },
+          crd => { window.firmOpened = crd; });
+        window.Dial = { state:{ ready:true, contactRouteVersion:"test-release" }, emailTierKey:() => "test-policy",
+          telHref:(_key, phone) => "tel:" + phone,
+          loadLists:async () => [{id:"current", name:"Call list"}],
+          addToList:async (id, row) => { window.addedTo = [id, row]; return { added:true }; } };
+        window.EmailComposer = { open:async recipients => { window.emailOpened = recipients; } };
       });
       const location = page.locator("#test-location");
       await location.getByText("UBS lists Austin, TX").waitFor();
@@ -93,6 +101,21 @@ const origin = "https://act-fixture.invalid";
       await page.locator("#actTestSearch").getByRole("button", { name: /ACT Only/ }).click();
       const contactDialog = page.getByRole("dialog", { name: "ACT Only" });
       await contactDialog.getByText("No matching CRD").waitFor();
+      const call = contactDialog.getByRole("link", { name:"Call" });
+      assert.equal(await call.getAttribute("href"), "tel:+14045550101");
+      await contactDialog.getByRole("button", { name:"Add", exact:true }).click();
+      await contactDialog.getByText("Added to the list.").waitFor();
+      const added = await page.evaluate(() => window.addedTo);
+      assert.equal(added[0], "current");
+      assert.equal(added[1].emailConfirmed, true);
+      await contactDialog.getByRole("button", { name:"Email", exact:true }).click();
+      const opened = await page.evaluate(() => window.emailOpened);
+      assert.equal(opened[0].crd, added[1].crd);
+      assert.equal(opened[0].firstName, "Avery");
+      await page.locator("#actTestSearch").getByRole("button", { name:/ACT Only/ }).click();
+      await contactDialog.getByRole("button", { name:"Example Advisors" }).click();
+      assert.equal(await page.evaluate(() => window.firmOpened), "123456");
+      await page.locator("#actTestSearch").getByRole("button", { name:/ACT Only/ }).click();
       await contactDialog.getByRole("button", { name: "Show on map" }).click();
       assert.equal(await page.evaluate(() => window.locatedContact), "ACT Only");
       const scrolls = await page.evaluate(() => {

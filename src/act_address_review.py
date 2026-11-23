@@ -7,7 +7,7 @@ import json
 import math
 import re
 
-from identity_normalize import normalize_crd, normalize_email
+from identity_normalize import is_generic_email, normalize_crd, normalize_email
 
 from geography_integrity import USPS_REGIONS
 
@@ -122,9 +122,49 @@ def build_contact_create_profiles(mapping, contacts, roster_rows, employment):
     return profiles
 
 
-def build_crm_directory(mapping, rows, zips):
+_PERSONAL_DOMAINS = {"aol.com", "gmail.com", "googlemail.com", "hotmail.com", "icloud.com",
+                     "live.com", "msn.com", "outlook.com", "proton.me", "protonmail.com", "yahoo.com"}
+
+
+def _firm_domains(advisors):
+    votes = defaultdict(Counter)
+    names = defaultdict(Counter)
+    for row in advisors.values():
+        email = normalize_email(row.get("e"))
+        firm = normalize_crd(row.get("fc"))
+        if not email or not firm or row.get("t") not in {"confirmed", "high"}:
+            continue
+        domain = email.rsplit("@", 1)[1]
+        if domain in _PERSONAL_DOMAINS:
+            continue
+        votes[domain][firm] += 1
+        name = text(row.get("cn"))
+        if name:
+            names[firm][name] += 1
+    result = {}
+    for domain, counts in votes.items():
+        leaders = counts.most_common(2)
+        firm, count = leaders[0]
+        if len(leaders) == 1 or count > leaders[1][1]:
+            result[domain] = (firm, names[firm].most_common(1)[0][0] if names[firm] else "")
+    return result
+
+
+def build_crm_directory(mapping, rows, zips, advisors=None):
     """Project shared, active CRM contacts separately from the advisor universe."""
     from contact_work_locations import source_record
+    from contact_normalization import normalize_phone
+    from preferred_names import clean_act_salutation
+    from build_act_mail_codes import NO_EMAIL
+    advisors = advisors or {}
+    domains = _firm_domains(advisors)
+    advisor_emails = {normalize_email(row.get("e")) for row in advisors.values()}
+    email_owners = defaultdict(set)
+    for i, row in enumerate(rows):
+        for field in ("emailAddress", "altEmailAddress", "personalEmailAddress"):
+            email = normalize_email(row.get(field))
+            if email:
+                email_owners[email].add(i)
     linked = {text(value).lower() for value in mapping.values()}
     counts = Counter(text(row.get("id")).lower() for row in rows)
     contacts, claimed, email_hashes = [], set(), set()
@@ -140,7 +180,7 @@ def build_crm_directory(mapping, rows, zips):
         key = text(row.get("id")).lower()
         primary = normalize_email(row.get("emailAddress"))
         name = text(row.get("fullName")) or text(f"{row.get('firstName') or ''} {row.get('lastName') or ''}")
-        if not (key and counts[key] == 1 and primary and name) or key in linked:
+        if not (key and counts[key] == 1 and name) or key in linked:
             continue
         if row.get("isPrivate") or row.get("isUser") or row.get("isActive") is False:
             continue
@@ -151,7 +191,24 @@ def build_crm_directory(mapping, rows, zips):
             "location_lat": raw.get("latitude"), "location_lon": raw.get("longitude")}, "ACT", zips)
         coords = [point["lat"], point["lon"]] if point and all(
             math.isfinite(point[k]) for k in ("lat", "lon")) else None
-        contacts.append({"name": name, "email": primary, "company": text(row.get("company")),
+        firm_id, firm_name = domains.get(primary.rsplit("@", 1)[-1], ("", ""))
+        greeting = clean_act_salutation(row.get("salutation")) or clean_act_salutation(row.get("firstName"))
+        phone = normalize_phone(row.get("businessPhone")) or normalize_phone(row.get("mobilePhone"))
+        number, _, extension = phone.partition("x")
+        if len(number) == 10:
+            number = "+1" + number
+        separate_ext = text(row.get("businessExtension")) if row.get("businessPhone") else ""
+        if not extension and re.fullmatch(r"[0-9]{1,8}", separate_ext):
+            extension = separate_ext
+        approved = bool(not crd and primary and not is_generic_email(primary)
+                        and len(email_owners[primary]) == 1
+                        and primary not in advisor_emails and greeting
+                        and text(custom.get("email__y_n")).upper() not in NO_EMAIL)
+        contacts.append({"contactKey": "act-" + hashlib.sha256(key.encode()).hexdigest()[:26],
+                         "name": name, "email": primary, "company": text(row.get("company")),
+                         "firmCrd": firm_id, "firm": firm_name, "title": text(row.get("jobTitle")),
+                         "phone": number + (",," + extension if number and extension else ""),
+                         "emailApproved": approved, "greeting": greeting, "lastName": text(row.get("lastName")),
                          "primary": office, "coordinates": coords})
     contacts.sort(key=lambda row: (row["name"].casefold(), row["email"]))
     return {"contacts": contacts, "claimedCrds": sorted(claimed), "emailHashes": sorted(email_hashes)}

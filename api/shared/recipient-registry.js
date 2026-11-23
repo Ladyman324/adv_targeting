@@ -314,6 +314,17 @@ async function load(options = {}) {
 async function resolve(crd, options = {}) {
   const id = String(crd || "").trim();
   if (!id) throw failure(400, "recipient_crd_required", "Every advisor recipient needs a CRD.");
+  const directory = require("./act-directory");
+  if (directory.isContactKey(id)) {
+    const contact = directory.get(id);
+    if (!contact?.emailApproved || !core.validEmail(contact.email))
+      throw failure(409, "recipient_not_approved", "This ACT! contact does not have an approved primary email.",
+        "act_contact_email_not_approved");
+    return { crd: id, email: norm(contact.email), name: contact.name, greetingName: contact.greeting,
+      lastName: contact.lastName, firm: contact.firm || contact.company, tier: "confirmed",
+      source: "act-only", actContactId: "", teammates: [], registryHash: RELEASE_DESCRIPTOR.registryContentHash,
+      routingHash: sha256({ contactKey: id, email: norm(contact.email) }) };
+  }
   const manifest = cache ? null : await loadManifest(options);
   const index = cache || await loadShard(shardKey(id), manifest, options);
   const record = index.recipients.get(id);
@@ -325,7 +336,7 @@ async function resolve(crd, options = {}) {
 async function verify(crd, email, options = {}) {
   const record = await resolve(crd, options);
   if (record.email !== norm(email)) throw failure(409, "recipient_identity_changed",
-    `The approved email for CRD ${record.crd} no longer matches this message.`);
+    "The approved email for this contact no longer matches this message.");
   return record;
 }
 async function allowedTeammates(crd, options = {}) {

@@ -371,6 +371,18 @@ async function deleteQueue(who, id) {
 // Only these fields, whatever the client sends. A queue row is not a place to
 // accumulate whatever the calling page happened to have in scope.
 function snapshot(it) {
+  const directory = require("./act-directory");
+  if (directory.isContactKey(it?.crd)) {
+    const contact = directory.get(it.crd);
+    it = { ...it,
+      name:contact?.name || it.name, firm:contact?.firm || contact?.company || "",
+      city:contact?.primary?.city || "", state:contact?.primary?.state || "",
+      phone:contact?.phone || "", phoneKind:"office", email:contact?.email || "",
+      identityApproved:!!contact, unconfirmed:!contact, emailConfirmed:contact?.emailApproved === true,
+      emailEligibilityKnown:true, contactTier:contact ? "confirmed" : "", contactSource:"act-only",
+      routeIssue:contact ? "" : "missing",
+    };
+  }
   return {
     crd: clean(it && it.crd, 32),
     name: clean(it && it.name, 120),
@@ -401,7 +413,7 @@ function snapshot(it) {
 
 async function putQueue(who, opts) {
   const client = await table("queue");
-  const { id, name, items, cursor, cycle, cycleStartedUtc, etag } = opts || {};
+  const { id, name, items, cursor, cycle, cycleStartedUtc, etag, createOnly } = opts || {};
   const valid = (items || []).filter((it) => it && it.crd);
   if (valid.length > MAX_QUEUE) {
     const err = new Error("A list can hold at most " + MAX_QUEUE + " people.");
@@ -444,7 +456,7 @@ async function putQueue(who, opts) {
       throw e;
     }
   } else {
-    const r = await client.upsertEntity(entity, "Replace");
+    const r = await (createOnly ? client.createEntity(entity) : client.upsertEntity(entity, "Replace"));
     written = { ...entity, etag: (r && r.etag) || "" };
   }
   return { ...summarise(written), items: savedItems,
@@ -462,9 +474,10 @@ async function mutateQueueMember(who, id, operation, itemOrCrd) {
   }
   const key = listId(id);
   const rawItem = op === "add" ? itemOrCrd : null;
-  const crd = clean(op === "add" && rawItem ? rawItem.crd : itemOrCrd, 32);
-  if (!crd) { const err = new Error("An advisor CRD is required."); err.statusCode = 400; throw err; }
-  if (op === "add" && (rawItem.unconfirmed || rawItem.identityApproved !== true)) {
+  const crd = clean(op === "add" ? rawItem?.crd : itemOrCrd, 32);
+  if (!crd) { const err = new Error("A contact ID is required."); err.statusCode = 400; throw err; }
+  const item = op === "add" && require("./act-directory").isContactKey(crd) ? snapshot(rawItem) : rawItem;
+  if (op === "add" && (item.unconfirmed || item.identityApproved !== true)) {
     const err = new Error("Only confirmed contact matches can be added to a call list.");
     err.statusCode = 409; throw err;
   }
@@ -492,7 +505,7 @@ async function mutateQueueMember(who, id, operation, itemOrCrd) {
     }
 
     const anchor = items[Number(existing.cursor) || 0];
-    if (op === "add") items.push(snapshot(rawItem));
+    if (op === "add") items.push(snapshot(item));
     else items.splice(index, 1);
     if (items.length > MAX_QUEUE) {
       const err = new Error(`A call list can hold at most ${MAX_QUEUE} people.`);
@@ -931,6 +944,37 @@ async function putSettings(who, patch) {
   return getSettings(who);
 }
 
+const LIST_DELEGATES = "list-delegates";
+const listDelegation = require("./list-delegation");
+function listGrant(entity) {
+  return { id:entity.partitionKey, email:entity.email, delegates:String(entity.delegates || "").split(",").filter(Boolean) };
+}
+
+async function getListGrant(ownerId) {
+  const client = await table("settings");
+  try { return listGrant(await client.getEntity(ownerId, LIST_DELEGATES)); }
+  catch (error) { if (error.statusCode !== 404) throw error; return null; }
+}
+
+async function saveListGrant(who, value) {
+  const delegates = listDelegation.delegates(value, who);
+  const client = await table("settings");
+  await client.upsertEntity({ partitionKey:who.id, rowKey:LIST_DELEGATES,
+    email:listDelegation.emailOf(who), delegates:delegates.join(",") }, "Replace");
+  return delegates.join(", ");
+}
+
+async function delegatedListOwners(who) {
+  if (!listDelegation.internalUser(who)) return [];
+  const client = await table("settings");
+  const owners = [];
+  for await (const entity of client.listEntities({ queryOptions:{ filter:"RowKey eq 'list-delegates'" } })) {
+    const grant = listGrant(entity);
+    if (listDelegation.canUse(who, grant)) owners.push({ id:grant.id, email:grant.email });
+  }
+  return owners.sort((a, b) => a.email.localeCompare(b.email));
+}
+
 /* ---------- http helpers -------------------------------------------------- */
 function ok(context, body) {
   context.res = {
@@ -958,6 +1002,6 @@ module.exports = {
   getQueue, putQueue, listQueues, deleteQueue, mutateQueueMember, listDnc, addDnc,
   getAudience, putAudience, listAudiences, deleteAudience,
   listFlags, setFlag,
-  getSettings, putSettings, SETTING_KEYS,
+  getSettings, putSettings, SETTING_KEYS, getListGrant, saveListGrant, delegatedListOwners,
   ok, fail, MAX_QUEUE, DEFAULT_LIST,
 };

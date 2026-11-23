@@ -959,7 +959,7 @@
     return `<fieldset class="email-copy"><legend>Copy someone on this batch</legend>
       ${colleagues.length ? `<label class="email-label">An EIC colleague
         <select id="ccColleague"><option value="">Nobody</option>${colleagues.map((r) =>
-          `<option value="${esc(r.address)}">${esc(r.name)}</option>`).join("")}</select></label>`
+          `<option value="${esc(r.address)}">${esc(r.name)}${r.address === sourceList?.ownerEmail ? " (list owner)" : ""}</option>`).join("")}</select></label>`
         : `<p class="email-fine">No internal recipients are configured, so there is
            nobody to copy. An administrator sets <code>EMAIL_INTERNAL_RECIPIENTS</code>
            on the Function App.</p>`}
@@ -4156,7 +4156,7 @@ ${body.value}`.matchAll(/\{\{\s*image:([^}]+)\s*\}\}/gi)]
       preparationBusy = true;
       button.disabled = true;
       try {
-        await global.Dial.removeFromList(list.id, crd);
+        await global.Dial.removeFromList(list.id, crd, list.ownerId);
         if (sourceList !== list || !button.isConnected) return;
         const keep = (item) => String(item.contactId || item.crd) !== crd;
         recipients = recipients.filter(keep);

@@ -259,21 +259,47 @@ function relevantAumForFirm(crd, visible, placements=false){
 // visible jump and fetched tiles discarded as soon as national data arrived.
 const map = L.map("map", { preferCanvas:true, zoomAnimation:false });
 let actContactMarker;
+const listActMarkers = L.layerGroup().addTo(map);
+
+function actOnlyMarker(contact){
+  return L.circleMarker(contact.coordinates, { radius: 8, color: "#165f68",
+    fillColor: "#37909b", fillOpacity: 1, weight: 2 })
+    .bindTooltip(contact.name ? esc(contact.name) : "ACT! contact")
+    .on("click", () => ActAddresses.contactDetails(contact));
+}
+
+function visibleListActContacts(){
+  if (!mapListFilter || scope === "US" || !map.hasLayer(listActMarkers)) return [];
+  const bounds = map.getBounds();
+  return listActMarkers.getLayers().filter(marker => bounds.contains(marker.getLatLng()))
+    .map(marker => marker.actContact);
+}
+
+function renderListActContacts(){
+  listActMarkers.clearLayers();
+  if (!mapListFilter || scope === "US") return;
+  const states = scope.startsWith("T:") ? TERRITORIES[scope.slice(2)] : [scope];
+  for (const contact of mapListFilter.actContacts) {
+    if (!contact.coordinates || !states?.includes(contact.primary?.state)
+        || (selectedFirms.length && !selectedFirms.includes(contact.firmCrd))
+        || excludedFirms.has(contact.firmCrd) || (contactableOnly && !contact.phone && !contact.emailApproved)
+        || selectsOnly || aumSel.size || rankedOnly || ownerOnly || roleSel.size || assetsOnly
+        || !passesContinental({ _state:contact.primary.state })
+        || lastCalled || lastEmailed || joinedFirm || reg !== "all"
+        || !pointInLasso(...contact.coordinates))
+      continue;
+    const marker = actOnlyMarker(contact);
+    marker.actContact = contact;
+    listActMarkers.addLayer(marker);
+  }
+}
+
 ActAddresses.setLocator((contact) => {
   if (actContactMarker) actContactMarker.remove();
   const [lat, lon] = contact.coordinates;
   map.setView([lat, lon], 13);
-  const marker = L.circleMarker([lat, lon], { radius: 9, color: "#165f68",
-    fillColor: "#37909b", fillOpacity: 1, weight: 2 }).addTo(map);
-  const a = contact.primary;
-  const office = [a.line1, a.line2, a.city, a.state, a.postalCode].filter(Boolean).join(", ");
-  actContactMarker = marker;
-  marker.bindPopup(`<b>${esc(contact.name)}</b><br>ACT! ? No matching CRD<br>${esc(office)}`).openPopup();
-  marker.once("popupclose", () => {
-    if (actContactMarker === marker) actContactMarker = null;
-    marker.remove();
-  });
-});
+  actContactMarker = actOnlyMarker(contact).addTo(map);
+}, crd => openFirmOverview(crd));
 
 if (continentalOnly) map.setView([39.5, -96.5], 4);
 else map.fitBounds([[17, -178], [72, -64]], {
@@ -1450,16 +1476,17 @@ function openPersonActions(trigger){
   const name = trigger.dataset.personName || advisorDisplayName(crd) || `CRD ${crd}`;
   // Standing role lists are projections of the toggles above, not ordinary
   // destinations. Manually adding here would be silently undone on rebuild.
-  const lists = (Dial.state.lists || []).filter((list) => !standingKindOf(list.id));
+  const lists = currentWorkspaceLists().filter(list => !standingKindOf(list.id));
   const back = document.createElement("div");
   back.className = "ask-back person-action-back";
   back._trigger = trigger;
+  back._workspace = listWorkspace;
   back.innerHTML = `<div class="ask person-action-dialog" role="dialog" aria-modal="true"
       aria-labelledby="personActionTitle">
     <h3 id="personActionTitle">${esc(name)}</h3>
     <p class="person-action-label">Sales roles</p>
     <div class="person-action-roles">${flagMarks(crd)}</div>
-    <p class="person-action-label">Add to a call list</p>
+    <p class="person-action-label">${listWorkspace ? `Add to ${esc(listWorkspace.owner.email)}'s lists` : "Add to a list"}</p>
     <div class="person-action-lists">${lists.length ? lists.map((list) =>
       `<button type="button" class="ask-btn" data-person-list="${esc(list.id)}"
         data-person-crd="${esc(crd)}">${esc(list.name)} <small>${Number(list.count) || 0}</small></button>`).join("")
@@ -1506,6 +1533,7 @@ document.addEventListener("click", async (event) => {
   event.preventDefault();
   event.stopImmediatePropagation();
   const status = personActionBack.querySelector(".person-action-status");
+  const workspace = personActionBack._workspace;
   listButton.disabled = true;
   if (status) status.textContent = "Adding...";
   try {
@@ -1513,11 +1541,12 @@ document.addEventListener("click", async (event) => {
     const snapshot = dialSnapshot(listButton.dataset.personCrd);
     if (!snapshot.identityApproved)
       throw new Error("Confirmed contact details are not available for this person yet.");
-    const result = await Dial.addToList(listButton.dataset.personList, snapshot);
+    const result = await Dial.addToList(listButton.dataset.personList, snapshot, workspace?.owner.id);
     if (status) status.textContent = result && result.added === false
       ? "Already on that list." : "Added.";
-    await Dial.loadLists();
-    const current = (Dial.state.lists || []).find((list) => list.id === listButton.dataset.personList);
+    if (workspace) await refreshDelegatedLists(workspace);
+    else await Dial.loadLists();
+    const current = (workspace?.lists || Dial.state.lists).find(list => list.id === listButton.dataset.personList);
     const count = listButton.querySelector("small");
     if (count && current) count.textContent = Number(current.count) || 0;
     renderDialer();
@@ -2143,6 +2172,10 @@ let dialMenuOpen = false;          // the ⋮ list menu
 // from geographic tiles and cannot open a record it has no tile for, so a list
 // built here has to carry enough to dial from a phone in a car park.
 function dialSnapshot(id){
+  if (ActAddresses.isContactKey(id)) {
+    const contact = ActAddresses.current(id);
+    if (contact) return ActAddresses.snapshot(contact);
+  }
   const c = contactFor(id);
   const f = ALL.find(x => String(x.properties.id) === String(id));
   const p = f ? f.properties : null;
@@ -2194,10 +2227,11 @@ function dialSnapshot(id){
 }
 
 let desktopRouteReconcile = null;
-function reconcileDesktopDialRoutes(){
+function reconcileDesktopDialRoutes(refreshAct = false){
   if (!CONTACTS_READY || !Dial.state.ready) return Promise.resolve(false);
   if (!Dial.state.items.some((item) =>
-      item.contactRouteVersion !== DATA_VERSION
+      (refreshAct && ActAddresses.isContactKey(item.crd))
+      || item.contactRouteVersion !== DATA_VERSION
       // The rule that decided this proof, not just the data behind it. Without
       // it, widening who may be emailed reached new lists only: every saved
       // item still matched the current data build, so nothing looked stale and
@@ -2207,8 +2241,11 @@ function reconcileDesktopDialRoutes(){
       || (item.identityApproved !== true && !item.routeIssue)))
     return Promise.resolve(false);
   if (desktopRouteReconcile) return desktopRouteReconcile;
-  desktopRouteReconcile = Dial.reconcileRoutes((saved) =>
-      contactFor(saved.crd) ? dialSnapshot(saved.crd) : null)
+  desktopRouteReconcile = (async () => {
+    await ActAddresses.loadListContacts(Dial.state.items);
+    return Dial.reconcileRoutes(saved =>
+      (contactFor(saved.crd) || ActAddresses.current(saved.crd)) ? dialSnapshot(saved.crd) : null);
+  })()
     .finally(() => { desktopRouteReconcile = null; });
   return desktopRouteReconcile;
 }
@@ -2269,7 +2306,7 @@ const materialStrategiesFor = (crd) => {
 window.AdvisorEmailData = {
   recipientFor: (id) => {
     const snap = dialSnapshot(id);
-    return !snap.emailConfirmed ? null : { ...snap, firstName: greetingFor(id),
+    return !snap.emailConfirmed ? null : { ...snap, firstName: snap.firstName || greetingFor(id),
       materialStrategies: materialStrategiesFor(id),
       teammates: teammateEmails(id), teammatesFull: teammatesOf(id) };
   },
@@ -2283,13 +2320,13 @@ window.AdvisorEmailData = {
     }
     if (!CONTACTS_READY)
       throw new Error("Contact data is unavailable. Please click Email list again to retry loading. No recipients have been excluded.");
-    try { await reconcileDesktopDialRoutes(); }
+    try { await reconcileDesktopDialRoutes(true); }
     catch {
       throw new Error("The saved list could not be refreshed. Please click Email list again to retry. No recipients have been excluded.");
     }
     const routes = Dial.state.items.map((item) => ({ item, status: Dial.emailRouteStatus(item) }));
     const out = routes.filter(({ status }) => status.ok)
-      .map(({ item: it }) => ({ ...it, firstName: greetingFor(it.crd),
+      .map(({ item: it }) => ({ ...it, firstName: ActAddresses.current(it.crd)?.greeting || greetingFor(it.crd),
         materialStrategies: materialStrategiesFor(it.crd),
         identityLabel: Dial.identityTierLabel(it.contactTier, it.contactSource),
         teammates: teammateEmails(it.crd), teammatesFull: teammatesOf(it.crd) }));
@@ -2662,6 +2699,48 @@ async function recordDialOutcome(disposition){
  * viewport, deduped by CRD. Two definitions of "current selection" would
  * eventually disagree, and the disagreement would be silent.
  */
+let mapListFilter = null;
+
+async function filterMapByList(id, ownerId){
+  const saved = await Dial.readList(id, ownerId);
+  const items = saved.items || [];
+  if (!items.length) throw new Error("This list is empty.");
+  const actContacts = await ActAddresses.loadListContacts(items);
+  if (scope === "US") {
+    const states = items.map(item => item.state).filter(state => STATE_NAMES[state]);
+    const target = states[0] && locationScope(states[0]);
+    if (!target) throw new Error("Choose a state or sales territory to view this list on the map.");
+    const result = await switchScope(target);
+    if (result.status !== "applied") throw new Error("The list's map area could not be loaded.");
+  }
+  selectsOnly = false;
+  syncTargetingUI();
+  actContactMarker?.remove();
+  actContactMarker = null;
+  mapListFilter = { name:saved.name, ownerId, ids:new Set(items.map(item => String(item.crd))), actContacts };
+  closeListManager();
+  redraw();
+  if (!visibleListActContacts().length)
+    reportFilterReach("No members of this list have pins in the current area.", saved.name);
+}
+
+async function saveListInView(){
+  const filter = mapListFilter;
+  const owner = listWorkspace?.owner;
+  if ((!filter && !owner) || scope === "US") return;
+  const ids = visibleAdvisorIds();
+  if (!ids.length) return showNotice("No list members are visible in this map view.");
+  if (ids.length > Dial.MAX_QUEUE) return showNotice("Zoom in to select at most 1,000 contacts.");
+  const name = prompt("Name the new list", `${filter?.name || scopeLabel(scope)} - in view`);
+  if (!name?.trim()) return;
+  if (!await loadContacts()) throw new Error("Contact details could not be loaded.");
+  const items = ids.map(dialSnapshot).filter(item => !item.unconfirmed && !Dial.isDnc(item.crd));
+  if (!items.length) return showNotice("No available list members are visible in this map view.");
+  const saved = await Dial.saveNewList(name.trim(), items, filter?.ownerId || owner?.id);
+  showNotice(`Saved ${saved.count.toLocaleString()} contacts to "${saved.name}".`);
+  await openListManager();
+}
+
 function visibleAdvisorIds(){
   const bounds = map.getBounds();
   const seen = new Set();
@@ -2672,6 +2751,7 @@ function visibleAdvisorIds(){
     if (!bounds.contains([lat, lon])) continue;
     seen.add(String(p.id));
   }
+  for (const contact of visibleListActContacts()) seen.add(contact.contactKey);
   return [...seen];
 }
 
@@ -2768,7 +2848,7 @@ function captureAudienceDefinition(){
 }
 async function saveCurrentAudience(){
   if (scope === "US") return showNotice("Choose a state or sales territory before saving. The national layer contains offices, not advisor identities.");
-  if (lassoPolygon) return showNotice("Clear the map lasso before saving. A movable map shape is not a stable audience rule.");
+  if (lassoPolygon || mapListFilter) return showNotice("Clear the lasso or saved-list filter before saving dynamic audience rules.");
   const name = prompt("Name this dynamic audience", `${scopeLabel(scope)} prospects`);
   if (!name || !name.trim()) return;
   const description = prompt("Optional description", "") || "";
@@ -2929,7 +3009,7 @@ function paintAudiencePreview(){
 }
 
 function listRowActions(l){
-  const cur = l.id === Dial.state.listId;
+  const cur = !listWorkspace && l.id === Dial.state.listId;
   return `<li class="lists-row${cur ? " on" : ""}">
     <span class="lists-main">
       <b>${esc(l.name)}</b>
@@ -2938,10 +3018,12 @@ function listRowActions(l){
       + `${cur ? " &middot; open" : ""}</small>
     </span>
     <span class="lists-acts">
-      <button type="button" class="ask-btn primary" data-lists="call" data-id="${esc(l.id)}"
-        ${l.count ? "" : "disabled"}>Call</button>
+      ${!listWorkspace ? `<button type="button" class="ask-btn primary" data-lists="call" data-id="${esc(l.id)}"
+        ${l.count ? "" : "disabled"}>Call</button>` : ""}
       <button type="button" data-lists="email" data-id="${esc(l.id)}"
         ${l.count ? "" : "disabled"}>Email</button>
+      <button type="button" data-lists="filter-map" data-id="${esc(l.id)}"
+        ${l.count ? "" : "disabled"}>Filter Map</button>
       <button type="button" data-lists="export" data-id="${esc(l.id)}"
         ${l.count ? "" : "disabled"}>Export CSV</button>
       <button type="button" data-lists="edit-open" data-id="${esc(l.id)}"
@@ -2958,6 +3040,102 @@ let listsBack = null;
 let listsEditMode = false;   // showing who is on the open list, not every list
 let listsReturnFocus = null;
 let listImport = null;
+let listOwners = [];
+let listWorkspace = null;
+let delegatedEdit = null;
+
+const currentWorkspaceLists = () => listWorkspace ? listWorkspace.lists : (Dial.state.lists || []);
+window.AdvisorListWorkspace = () => listWorkspace?.owner;
+
+function listWorkspacePicker(){
+  if (!listOwners.length && !listWorkspace) return "";
+  return `<label class="email-label">List workspace
+    <select id="listWorkspace"><option value="">My lists</option>${listOwners.map(owner =>
+      `<option value="${esc(owner.id)}"${listWorkspace?.owner.id === owner.id ? " selected" : ""}>${esc(owner.email)}</option>`).join("")}</select></label>`;
+}
+
+async function refreshDelegatedLists(workspace){
+  workspace.lists = await Dial.readLists(workspace.owner.id);
+}
+
+async function emailDelegatedList(saved, owner){
+  if (!await loadContacts()) throw new Error("Contact details could not be loaded. Retry email preparation.");
+  await ActAddresses.loadListContacts(saved.items || []);
+  const recipients = [], excludedContacts = [];
+  for (const item of saved.items || []) {
+    const snap = dialSnapshot(item.crd);
+    if (!snap.emailConfirmed || !snap.email) {
+      excludedContacts.push({ crd:item.crd, name:item.name, email:item.email,
+        reasonCode:snap.email ? "identity" : "email" });
+      continue;
+    }
+    recipients.push({ ...snap, firstName:snap.firstName || greetingFor(item.crd),
+      materialStrategies:materialStrategiesFor(item.crd), teammates:teammateEmails(item.crd),
+      teammatesFull:teammatesOf(item.crd) });
+  }
+  recipients.eligibilitySummary = { excludedContacts };
+  recipients.sourceList = { id:saved.id, name:saved.name, ownerId:owner.id, ownerEmail:owner.email };
+  closeListManager();
+  await EmailComposer.open(recipients);
+}
+
+async function manageDelegatedList(action, id, summary, workspace){
+  const owner = workspace.owner;
+  if (action === "new") {
+    const name = listsBack.querySelector(".ask-name").value.trim() || defaultListName();
+    await Dial.saveNewList(name, [], owner.id);
+  } else if (action === "edit-drop" && delegatedEdit) {
+    delegatedEdit = await Dial.removeFromList(delegatedEdit.id, id, owner.id);
+    await refreshDelegatedLists(workspace);
+    if (listWorkspace === workspace) paintListEdit();
+    return;
+  } else if (!summary) return;
+  else if (action === "drop") {
+    if (!confirm(`Delete "${summary.name}" from ${owner.email}'s lists?`)) return;
+    await Dial.deleteSavedList(id, owner.id);
+  } else {
+    const saved = await Dial.readList(id, owner.id);
+    if (action === "edit-open") {
+      delegatedEdit = saved;
+      listsEditMode = true;
+      return paintListEdit();
+    }
+    if (action === "email") return emailDelegatedList(saved, owner);
+    if (action === "rename") {
+      const name = prompt("Name for this list", saved.name)?.trim();
+      if (!name || name === saved.name) return;
+      await Dial.updateSavedList(saved, { name }, owner.id);
+    }
+    if (action === "empty") {
+      if (!confirm(`Remove everyone from "${saved.name}"?`)) return;
+      await Dial.updateSavedList(saved, { items:[], cursor:0 }, owner.id);
+    }
+  }
+  await refreshDelegatedLists(workspace);
+  if (listWorkspace === workspace) paintListManager();
+}
+
+document.addEventListener("change", async event => {
+  const picker = event.target.closest("#listWorkspace");
+  if (!picker || !listsBack) return;
+  const dialog = listsBack;
+  const owner = listOwners.find(entry => entry.id === picker.value);
+  picker.disabled = true;
+  try {
+    const workspace = owner ? { owner, lists:await Dial.readLists(owner.id) } : null;
+    if (listsBack !== dialog) return;
+    listWorkspace = workspace;
+    listsEditMode = false;
+    delegatedEdit = null;
+    if (mapListFilter) { mapListFilter = null; redraw(); }
+    paintListManager();
+    refreshActiveFilters();
+    focusListDialog("#listWorkspace");
+  } catch (error) {
+    picker.value = listWorkspace?.owner.id || "";
+    showNotice(error.message || "This list workspace could not be opened.");
+  } finally { picker.disabled = false; }
+});
 
 function focusListDialog(selector){
   if (!listsBack) return;
@@ -2990,7 +3168,16 @@ async function openListManager(){
   paintListManager();
   // Refreshed rather than trusted: the counts in Dial.state.lists are summaries
   // last fetched who-knows-when, and this screen exists to be believed.
-  const results = await Promise.allSettled([Dial.loadLists(), loadDynamicAudiences()]);
+  const results = await Promise.allSettled([Dial.loadLists(), loadDynamicAudiences(), Dial.listOwners()]);
+  if (results[2].status === "fulfilled") {
+    listOwners = results[2].value;
+    if (listWorkspace && !listOwners.some(owner => owner.id === listWorkspace.owner.id)) {
+      listWorkspace = null;
+      mapListFilter = null;
+      redraw();
+    }
+  }
+  if (listWorkspace) await refreshDelegatedLists(listWorkspace);
   audienceProblem = results[1].status === "rejected" ? results[1].reason.message : "";
   paintListManager();
 }
@@ -3023,7 +3210,8 @@ function closeListManager(){
 // abandoned rather than corrected.
 function paintListEdit(){
   if (!listsBack) return;
-  const S = Dial.state, items = S.items || [];
+  const S = delegatedEdit && listWorkspace ? { listName:delegatedEdit.name, items:delegatedEdit.items } : Dial.state;
+  const items = S.items || [];
   listsBack.innerHTML =
     `<div class="ask lists" role="dialog" aria-modal="true" aria-label="Edit list">`
     + `<h3>${esc(S.listName || "This list")}</h3>`
@@ -3033,7 +3221,9 @@ function paintListEdit(){
         ? `<ul class="lists-ul">${items.map((it) =>
             `<li class="lists-row"><span class="lists-main"><b>${esc(it.name || "Unnamed")}</b>`
             + `<small>${esc(it.firm || it.companyName || "")}</small></span>`
-            + `<span class="lists-acts"><button type="button" class="ask-btn grave" `
+            + `<span class="lists-acts">`
+            + (ActAddresses.isContactKey(it.crd) ? `<button type="button" data-lists="act-contact" data-id="${esc(it.crd)}">View contact</button>` : "")
+            + `<button type="button" class="ask-btn grave" `
             + `data-lists="edit-drop" data-id="${esc(it.crd)}">Remove</button></span></li>`).join("")}</ul>`
         : `<p>Nobody on this list yet.</p>`)
     + `<p class="dial-menu-note">To add people, use the lasso or bulk add on the map.</p>`
@@ -3439,13 +3629,15 @@ function paintListManager(){
   if (!listsBack) return;
   if (listImport) return paintListImporter();
   if (listsEditMode) return paintListEdit();
-  const ls = (Dial.state.lists || []).filter((list) => !standingKindOf(list.id));
+  const ls = currentWorkspaceLists().filter(list => !standingKindOf(list.id));
   listsBack.innerHTML =
     `<div class="ask lists lists-workspace" role="dialog" aria-modal="true" aria-label="Lists and saved audiences">`
     + `<div class="lists-title"><div><h3>Lists</h3><p>Save reusable rules, then create a frozen call list or prepare an email from reviewed contacts.</p>`
     + `<p class="lists-email-capacity" data-email-capacity-status>Checking daily email capacity…</p></div>`
     + `<button type="button" class="ask-btn ghost" data-lists="close">Close</button></div>`
-    + `<section class="lists-section"><h4>Smart views</h4><p class="lists-section-note">Live views from labels you applied. Membership updates automatically.</p>`
+    + listWorkspacePicker()
+    + (listWorkspace ? '<p class="lists-section-note">Email uses your connected mailbox.</p>' : "")
+    + (!listWorkspace ? (`<section class="lists-section"><h4>Smart views</h4><p class="lists-section-note">Live views from labels you applied. Membership updates automatically.</p>`
     /* The two standing lists.
      *
      * DERIVED, not stored: they are whoever currently carries the flag, so
@@ -3455,9 +3647,9 @@ function paintListManager(){
      * object underneath, only the flags.
      */
     + flagListRows() + `</section>`
-    + `<section class="lists-section"><h4>Dynamic audiences</h4><p class="lists-section-note">Saved map rules. Preview current matches before preparing a channel-specific list.</p>${dynamicAudienceRows()}</section>`
+    + `<section class="lists-section"><h4>Dynamic audiences</h4><p class="lists-section-note">Saved map rules. Preview current matches before preparing a channel-specific list.</p>${dynamicAudienceRows()}</section>`) : "")
     + `<section class="lists-section"><h4>Static contact lists</h4><p class="lists-section-note">Frozen working lists used for calls or email, limited to 1,000 people per list.</p>`
-    + `<button type="button" class="ask-btn list-import-start" data-lists="import-open">Import email list</button>`
+    + (!listWorkspace ? `<button type="button" class="ask-btn list-import-start" data-lists="import-open">Import email list</button>` : "")
     + (ls.length
         ? `<ul class="lists-ul">${ls.map(listRowActions).join("")}</ul>`
         : `<p class="lists-none">No static contact lists of your own yet.</p>`)
@@ -3475,20 +3667,40 @@ document.addEventListener("click", async e => {
   if (!b || !listsBack) return;
   const act = b.dataset.lists;
   const id = b.dataset.id;
-  const l = (Dial.state.lists || []).find(x => x.id === id);
+  const l = currentWorkspaceLists().find(x => x.id === id);
   try {
     if (act === "close") { listsEditMode = false; return closeListManager(); }
+    if (act === "act-contact") {
+      await ActAddresses.openByKey(id);
+      return;
+    }
+    if (act === "filter-map" && l) {
+      b.disabled = true;
+      try { await filterMapByList(id, listWorkspace?.owner.id); }
+      finally { b.disabled = false; }
+      return;
+    }
     if (act === "export") {
       if (!l) return;
       b.disabled = true;
       try {
         if (!await loadContacts()) throw new Error("Contact details could not be loaded. Retry the export.");
         // Read the complete saved list without switching the active calling queue.
-        const response = await fetch(`/api/queue?id=${encodeURIComponent(id)}`, { credentials:"same-origin", cache:"no-store" });
-        const saved = await response.json();
-        if (!response.ok) throw new Error(saved.error || "This list could not be exported.");
+        const saved = await Dial.readList(id, listWorkspace?.owner.id);
+        await ActAddresses.loadListContacts(saved.items || []);
         exportContactList(saved.name || l.name, saved.items || []);
       } finally { b.disabled = false; }
+      return;
+    }
+    if (act === "edit-back") {
+      listsEditMode = false;
+      delegatedEdit = null;
+      return paintListManager();
+    }
+    if (listWorkspace) {
+      b.disabled = true;
+      try { await manageDelegatedList(act, id, l, listWorkspace); }
+      finally { b.disabled = false; }
       return;
     }
     if (act === "flag-export") {
@@ -3509,7 +3721,6 @@ document.addEventListener("click", async e => {
     }
     if (act === "import-save") return saveListImport();
     if (act === "import-exceptions") return downloadListImportExceptions();
-    if (act === "edit-back") { listsEditMode = false; return paintListManager(); }
     if (act === "audience-back") { audiencePreview = null; return paintListManager(); }
     if (act === "audience-open") {
       const data = await audienceCall(`${AUDIENCE_API}?id=${encodeURIComponent(id)}`);
@@ -4464,8 +4675,10 @@ function catalogInternal(){
   return (window.EmailComposer && EmailComposer.internalRecipients()) || [];
 }
 
+let listDelegatesDraft = null;
 function openSettings(){
   if (setBack) return;
+  listDelegatesDraft = null;
   const request = ++settingsCatalogRequest;
   setBack = document.createElement("div");
   setBack.className = "ask-back";
@@ -4478,6 +4691,11 @@ function openSettings(){
   settingsCatalogError = "";
   paintSettings();
   Dial.loadSettings().then(() => { if (setBack && request === settingsCatalogRequest) paintSettings(); });
+  Dial.readListDelegates().then(value => {
+    if (!setBack || request !== settingsCatalogRequest) return;
+    listDelegatesDraft = value;
+    paintSettings();
+  }).catch(() => {});
   if (!ME) Dial.whoAmI().then((p) => { ME = p; paintSettings(); });
   if (window.EmailComposer && EmailComposer.loadSettingsData)
     EmailComposer.loadSettingsData().then((data) => {
@@ -4529,6 +4747,13 @@ function paintSettings(){
     + (Dial.state.lists || []).map(l => `<option value="${esc(l.id)}"`
         + `${g("defaultListId") === l.id ? " selected" : ""}>${esc(l.name)}</option>`).join("")
     + `</select></label>`
+
+    + `<div class="set-row set-block"><label for="setListDelegates">List delegates</label>
+      <p class="set-sub">Let EIC colleagues create, edit, and prepare email for your static contact lists. Enter their EIC addresses separated by commas.</p>
+      <div class="set-actions"><input id="setListDelegates" value="${esc(listDelegatesDraft || "")}"
+        placeholder="name@eicatlanta.com" maxlength="1000"${listDelegatesDraft === null ? " disabled" : ""}>
+        <button type="button" class="ask-btn" data-set="save-list-delegates"${listDelegatesDraft === null ? " disabled" : ""}>Save delegates</button></div>
+      <p class="set-saved" id="listDelegatesStatus" role="status"></p></div>`
 
     /* Copy me / copy a colleague.
      *
@@ -4709,6 +4934,20 @@ document.addEventListener("click", async e => {
   }
   if (e.target.closest("#workQueueBtn")) { openWorkQueue(); return; }
   if (e.target.closest("#settingsBtn")) { openSettings(); return; }
+  const saveDelegates = e.target.closest('[data-set="save-list-delegates"]');
+  if (saveDelegates && setBack) {
+    saveDelegates.disabled = true;
+    const input = document.getElementById("setListDelegates");
+    const status = document.getElementById("listDelegatesStatus");
+    try {
+      listDelegatesDraft = await Dial.saveListDelegates(input.value);
+      input.value = listDelegatesDraft;
+      status.textContent = "Delegates saved.";
+    } catch (error) {
+      status.textContent = error.message || "List delegates could not be saved.";
+    } finally { saveDelegates.disabled = false; }
+    return;
+  }
   if (e.target.closest('[data-set="freshness"]')) { closeSettings(); openDataFreshness(); return; }
   // Confirmed, because this signs out of Microsoft in this browser, not just the
   // app -- a mis-click costs a sign-in everywhere, and that is worth one question.
@@ -4722,6 +4961,10 @@ document.addEventListener("click", async e => {
     return;
   }
   if (e.target.closest('[data-set="close"]')) { closeSettings(); return; }
+});
+
+document.addEventListener("input", e => {
+  if (setBack && e.target.id === "setListDelegates") listDelegatesDraft = e.target.value;
 });
 
 document.addEventListener("change", e => {
@@ -4781,6 +5024,14 @@ async function bulkQueue(ids, what){
 }
 
 document.addEventListener("click", async e => {
+  const saveVisible = e.target.closest("#saveListInView");
+  if (saveVisible) {
+    saveVisible.disabled = true;
+    try { await saveListInView(); }
+    catch (error) { showNotice(error.message || "The visible contacts could not be saved."); }
+    finally { saveVisible.disabled = false; }
+    return;
+  }
   if (e.target.closest("#queueVisible") || e.target.closest("#queueVisibleMobile")){
     await bulkQueue(visibleAdvisorIds(), "in view");
     return;
@@ -6075,6 +6326,7 @@ function applyScopeUI(){
 }
 
 function renderAll(fit, transition=null){
+  renderListActContacts();
   if (scope === "US") renderNational(fit ? "national" : false);
   else renderMarkers(fit, transition);
   refreshPanel();
@@ -6082,6 +6334,7 @@ function renderAll(fit, transition=null){
 
 // one redraw entry point so every control works in either scope
 function redraw(fit){
+  renderListActContacts();
   clearUnreachableActivitySelections();
   if (scope === "US") renderNational(fit); else renderMarkers(fit);
   refreshPanel();
@@ -6178,6 +6431,10 @@ function revealAdvisor(feature, label){
 }
 
 async function openAdvisorAnywhere(crd, state){
+  if (ActAddresses.isContactKey(crd)) {
+    await ActAddresses.openByKey(crd);
+    return true;
+  }
   const here = ALL.find(x => String(x.properties.id) === String(crd));
   if (here) {
     // Already in scope, so no territory change -- but still move to them. A
@@ -6807,6 +7064,7 @@ function passesTargeting(p){
   return passesRaum(p);                           // unknown RAUM drops out when bounded
 }
 function passesBase(p, skipActivity=null){
+  if (mapListFilter && !mapListFilter.ids.has(String(p.id))) return false;
   // Exclusion belongs HERE, not in passesFilters: the firm list, the KPI counts
   // and the markers are all built from passesBase, so an excluded firm put only
   // in passesFilters stayed in the list and the counts never moved.
@@ -8408,6 +8666,12 @@ function refreshActiveFilters(){
     add(`${selectedFirms.length} selected firm${selectedFirms.length === 1 ? "" : "s"}`, "firms");
   if (focusedAdvisorId) add(`Focused on ${focusedAdvisorLabel}`, "advisor");
   if (lassoPolygon) add("Map lasso", "lasso");
+  if (mapListFilter) add(`List: ${mapListFilter.name}${scope === "US" ? " (choose an area)" : ""}`, "list");
+  document.getElementById("saveListInView").hidden = (!mapListFilter && !listWorkspace) || scope === "US";
+  document.getElementById("clearMapList").hidden = !mapListFilter;
+  const listsButton = document.getElementById("listsBtn");
+  listsButton.textContent = listWorkspace ? `Lists ? ${listWorkspace.owner.email.split("@")[0]}` : "Lists";
+  listsButton.setAttribute("aria-label", listWorkspace ? `Lists for ${listWorkspace.owner.email}` : "Lists and saved audiences");
   if (raumActive())
     add(`Firm AUM ${[...aumSel].map(key => AUM_BANDS[key].label).join(", ")}`, "raum");
   if (selectsOnly) add("Reports selecting outside managers", "selects");
@@ -8459,6 +8723,7 @@ function syncFilterButtons(){
 }
 
 function resetAllFilters(){
+  mapListFilter = null;
   reg = "all"; roleSel.clear(); lastEmailed = ""; lastCalled = ""; joinedFirm = "";
   emailScope = "me"; callScope = "me"; activityOptionCache.clear();
   ownerOnly = false;
@@ -8475,6 +8740,7 @@ function resetAllFilters(){
 }
 
 document.getElementById("resetAll").addEventListener("click", resetAllFilters);
+document.getElementById("clearMapList").addEventListener("click", () => { mapListFilter = null; redraw(); });
 document.getElementById("listsBtn").addEventListener("click", () => {
   listsEditMode = false; audiencePreview = null;
   openListManager().catch(error => showNotice(error.message || "Lists could not be opened."));
@@ -8486,6 +8752,7 @@ document.getElementById("activeFilters").addEventListener("click", e => {
   if (key === "firms"){ selectedFirms = []; firmColor = {}; document.getElementById("clearFirms").hidden = true; }
   if (key === "advisor"){ focusedAdvisorId = null; focusedAdvisorLabel = ""; }
   if (key === "lasso") clearLasso(false);
+  if (key === "list") mapListFilter = null;
   if (key === "selects"){ selectsOnly = false; selectsBox.checked = false; selectsBox.closest(".switch").classList.remove("on"); }
   if (key === "raum"){ aumSel.clear(); syncTargetingUI(); }
   if (key === "roles") roleSel.clear();
@@ -9859,6 +10126,11 @@ function exportContactList(name, items){
   const pins = new Map(ALL.map(feature => [String(feature.properties.id), feature.properties]));
   const rows = items.map(item => {
     const id = String(item.crd || item.contactId || "");
+    const act = ActAddresses.current(id);
+    if (ActAddresses.isContactKey(id))
+      return [name, act?.name || item.name, "", act?.firm || item.firm, act?.email || "", item.email || "",
+        act?.phone || "", "", item.phone || "", act?.primary?.line1 || "", act?.primary?.city || item.city || "",
+        act?.primary?.state || item.state || "", act?.primary?.postalCode || "", act?.greeting || "", "ACT! contact", ""];
     const contact = contactFor(id) || {}, pin = pins.get(id) || {};
     return [name, advisorDisplayName(id, item.name) || item.name || `CRD ${id}`, id,
       contact.cn || item.firm || pin.f || "", contact.e || "", item.email || "",

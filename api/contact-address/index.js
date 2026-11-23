@@ -10,6 +10,12 @@ module.exports = async function (context, req) {
     const crm = contextService.service();
     if (req.method === "GET") {
       const query = req.query || {};
+      if (query.keys !== undefined) {
+        const keys = String(query.keys).split(",");
+        if (keys.length > 50) throw Object.assign(new Error("Look up at most 50 ACT! contacts at a time."),
+          { statusCode: 400, addressReviewSafe: true });
+        return store.ok(context, { contacts: crm.lookupContacts(keys) });
+      }
       return store.ok(context, query.search !== undefined
         ? crm.search(String(query.search), query.mode === "person") : await crm.preview(String(query.crd || "")));
     }

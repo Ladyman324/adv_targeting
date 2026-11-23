@@ -79,13 +79,14 @@ const profile = { displayName: "Example Rep", mail: "rep@example.test", jobTitle
       const app = fs.readFileSync(path.join(root,"webapp/app.js"),"utf8").replace(/\r\n/g,"\n");
       const rowStart = app.indexOf("function listRowActions(l){");
       const rowSource = app.slice(rowStart,app.indexOf("\n}",rowStart)+2);
-      const markup = new Function("Dial","esc",rowSource + "\nreturn listRowActions({id:'rotation',name:'Clients and top prospects',count:25});")(
-        { state:{ listId:"other" } },value => String(value));
+      const markup = new Function("Dial","esc","listWorkspace",rowSource + "\nreturn listRowActions({id:'rotation',name:'Clients and top prospects',count:25});")(
+        { state:{ listId:"other" } },value => String(value),null);
       await page.evaluate(markup => {
         const panel = document.createElement("div"); panel.className = "ask lists lists-workspace";
         panel.style.cssText = "margin:8px;max-width:calc(100vw - 16px);box-sizing:border-box";
         panel.innerHTML = '<ul class="lists-ul">' + markup + '</ul>'; document.body.appendChild(panel);
       },markup);
+      assert.equal(await page.getByRole("button", { name:"Filter Map", exact:true }).count(), 1);
       const exportButton = page.getByRole("button",{name:"Export CSV",exact:true});
       await exportButton.scrollIntoViewIfNeeded();
       const rect = await exportButton.boundingBox();

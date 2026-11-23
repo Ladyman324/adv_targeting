@@ -270,6 +270,38 @@
    */
   const ACTIVE_KEY = "advisorMap.activeList.v1";
 
+  function workspaceQueue(ownerId, id) {
+    const query = new URLSearchParams();
+    if (ownerId) query.set("owner", ownerId);
+    if (id) query.set("id", id);
+    return query.size ? `${API.queue}?${query}` : API.queue;
+  }
+
+  const readList = (id, ownerId) => call(workspaceQueue(ownerId, id));
+  const readLists = ownerId => call(workspaceQueue(ownerId)).then(data => data.lists || []);
+  const listOwners = () => call(`${API.queue}?delegated=1`).then(data => data.owners || []);
+  const readListDelegates = () => call(`${API.settings}?listDelegates=1`).then(data => data.listDelegates || "");
+  const saveListDelegates = value => call(API.settings, { method:"PUT", body:JSON.stringify({ listDelegates:value }) })
+    .then(data => data.listDelegates || "");
+
+  function updateSavedList(saved, patch, ownerId) {
+    return call(workspaceQueue(ownerId, saved.id), { method:"PUT", body:JSON.stringify({ ...saved, ...patch }) });
+  }
+
+  function deleteSavedList(id, ownerId) {
+    return call(workspaceQueue(ownerId, id), { method:"DELETE" });
+  }
+
+  async function saveNewList(name, items, ownerId) {
+    const id = "l" + crypto.randomUUID().replace(/-/g, "");
+    const saved = await call(workspaceQueue(ownerId), {
+      method: "PUT",
+      body: JSON.stringify({ id, name, items, cursor: 0, cycle: 1 }),
+    });
+    if (!ownerId) await loadLists();
+    return saved;
+  }
+
   async function loadLists() {
     const d = await call(API.queue);
     state.lists = d.lists || [];
@@ -649,6 +681,7 @@
   };
   const identityTierLabel = (tier, source) => {
     const t = normPolicyValue(tier), s = normPolicyValue(source);
+    if (s === "act-only") return "ACT! contact";
     if (t === "confirmed") return s === "crm" || s === "act" ? "ACT-confirmed CRD" : "Firm-stated CRD";
     if (t === "high") return "High-confidence roster match";
     if (t === "review") return "Unconfirmed research match";
@@ -716,6 +749,8 @@
         unconfirmed: !approved,
         identityApproved: approved,
         emailConfirmed,
+        contactTier: current.contactTier || before.contactTier || "",
+        contactSource: current.contactSource || before.contactSource || "",
         emailEligibilityKnown: true,
         contactRouteVersion: state.contactRouteVersion,
         emailTierKey: emailTierKey(),
@@ -793,13 +828,14 @@
              max: MAX_QUEUE };
   }
 
-  async function mutateListMember(listId, operation, value) {
+  async function mutateListMember(listId, operation, value, ownerId) {
     const id = String(listId || "");
     if (!id) throw new Error("Choose a call list first.");
     const body = operation === "add"
       ? { id, operation, item: value }
       : { id, operation, crd: String(value || "") };
-    const q = await call(API.queue, { method: "PATCH", body: JSON.stringify(body) });
+    const q = await call(workspaceQueue(ownerId), { method: "PATCH", body: JSON.stringify(body) });
+    if (ownerId) return q;
     const summary = state.lists.find((l) => l.id === q.id);
     if (summary) {
       summary.count = Number(q.count) || 0;
@@ -836,14 +872,14 @@
     return result;
   }
 
-  async function addToList(listId, item) {
+  async function addToList(listId, item, ownerId) {
     if (!item || !item.crd) return { added: false };
-    return mutateListMember(listId, "add", item);
+    return mutateListMember(listId, "add", item, ownerId);
   }
 
-  async function removeFromList(listId, crd) {
+  async function removeFromList(listId, crd, ownerId) {
     if (!crd) return { removed: false };
-    return mutateListMember(listId, "remove", crd);
+    return mutateListMember(listId, "remove", crd, ownerId);
   }
   async function remove(crd) {
     const i = idx(crd);
@@ -1571,8 +1607,8 @@ A do-not-call is firm-wide and permanent, and cannot be added `
     refreshQueue, refreshDnc, dropSuppressed,
     isKeyContact, isDueDiligence, isScheduler, flagsOf, setFlag, fetchFlags,
     flagMembersOf, flaggedByMe, flaggedByOthers,
-    loadSettings, saveSettings, setting,
-    loadLists, openList, createList, replaceList, renameList, deleteList, startCycle,
+    loadSettings, saveSettings, setting, readListDelegates, saveListDelegates,
+    loadLists, readList, readLists, listOwners, updateSavedList, deleteSavedList, saveNewList, openList, createList, replaceList, renameList, deleteList, startCycle,
     refreshProgress, preferredListId,
     // How far through this pass the rep is. Derived, never stored.
     progress: () => ({ done: state.done.size, total: state.items.length,

@@ -1045,6 +1045,13 @@ body.scope-pending #map{cursor:progress}
   font-size:13px;
 }
 #dialer[hidden]{display:none}
+#mapLists{position:fixed;right:14px;bottom:25px;z-index:890;display:flex;gap:6px;align-items:center;
+  flex-wrap:wrap;justify-content:flex-end;max-width:calc(100vw - 28px)}
+#mapLists .ask-btn{width:auto;margin:0;background:var(--panel);box-shadow:var(--shadow)}
+#mapLists .ask-btn[hidden]{display:none}
+#setListDelegates{font:inherit;min-width:12rem;max-width:100%;flex:1;padding:8px;
+  border:1px solid var(--hair);border-radius:7px;background:var(--panel);color:var(--ink)}
+@media (max-width:760px){#mapLists{bottom:calc(25px + env(safe-area-inset-bottom))}}
 /* Sticky, not merely first: the toggles must stay reachable however far the
  * dock is scrolled, because they are what closes what is below them. */
 #dialerBar{position:sticky; top:0; z-index:2; background:var(--panel)}

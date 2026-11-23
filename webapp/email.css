@@ -947,6 +947,9 @@
 .act-dialog::backdrop{background:#0007}
 .act-dialog header{display:flex;justify-content:space-between;gap:12px;align-items:flex-start}
 .act-dialog h2{font-size:17px;margin:0}
+.act-contact-actions,.act-list-control{display:flex;align-items:end;flex-wrap:wrap;gap:8px;margin-top:8px}
+.act-contact-actions a{display:inline-flex;align-items:center;width:auto;text-decoration:none}
+.act-list-control label{margin:0;min-width:12rem;flex:1}
 .act-create-fields{display:grid;grid-template-columns:max-content minmax(0,1fr);
   gap:3px 10px;font-size:13px}
 .act-create-fields dt{color:var(--muted)}

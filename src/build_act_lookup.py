@@ -119,7 +119,9 @@ def main() -> None:
     roster_rows = load_rosters().to_dict('records')
     reviews = build_address_reviews(mapping, contacts, rows, roster_rows, pairs)
     create_profiles = build_contact_create_profiles(mapping, contacts, roster_rows, pairs)
-    directory = build_crm_directory(mapping, rows, json.loads((web / 'geo_index.json').read_text(encoding='utf-8'))['zips'])
+    directory = build_crm_directory(mapping, rows,
+                                    json.loads((web / 'geo_index.json').read_text(encoding='utf-8'))['zips'],
+                                    contacts)
     activity = activity_pairs(manifest, mapping, rows, contacts)
     payload = {
         "note": ("contacts holds CRD-approved identity routes. activity_contacts "
