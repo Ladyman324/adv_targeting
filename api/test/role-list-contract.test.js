@@ -48,7 +48,7 @@ test("role projections have reserved ids and name aliases are migration-only", (
     assert.match(source, /ROLE_LIST_IDS = \{ key: "role-key", dd: "role-analyst", scheduler: "role-scheduler" \}/);
     assert.match(source, /const legacy = LEGACY_ROLE_IDS\[id\]/);
     assert.match(source, /STANDING_NAMES\[String\(l\.name \|\| ""\)/);
-    assert.match(source, /filter\(\(list\) => !standingKindOf\(list\.id\)\)/);
+    assert.match(source, /filter\(\(?list\)? => !standingKindOf\(list\.id\)\)/);
   }
 });
 

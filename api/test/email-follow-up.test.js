@@ -135,6 +135,7 @@ function desktopEmailListFixture() {
     reconcileDesktopDialRoutes: () => new Promise((resolve) => { finishReconcile = resolve; }),
     Dial: { state: { items: [{ crd: "1", email: "one@example.com" }], listId: "L", listName: "Leaders" },
       emailRouteStatus: () => ({ ok: ctx.CONTACTS_READY }), identityTierLabel: () => "Approved" },
+    ActAddresses: { current: () => null },
     greetingFor: () => "One", materialStrategiesFor: () => [], teammateEmails: () => [], teammatesOf: () => [],
   });
   vm.runInContext("async function list() {" + source.slice(start + "  list: async () => {".length, end) + "\n}", ctx);
@@ -474,13 +475,14 @@ test("Step 3 presents one continuous reply with an Outlook-style quoted original
   assert.doesNotMatch(preview, /signatureHtml \|\| ""\}<\/div>/);
 });
 
-test("desktop and Field expose email history immediately between Lists and Settings", () => {
-  for (const file of ["index.html", "field.html"]) {
-    const html = fs.readFileSync(path.resolve(__dirname, "../../webapp", file), "utf8");
-    const list = html.indexOf('id="listsBtn"'), history = html.indexOf('data-email="history"', list);
-    assert.ok(list >= 0 && history > list && history < html.indexOf('id="settingsBtn"', list));
-    assert.equal((html.match(/id="settingsBtn"/g) || []).length, 1);
-  }
+test("desktop keeps email history beside Settings and Lists in the map controls", () => {
+  const desktop = fs.readFileSync(path.resolve(__dirname, "../../webapp/index.html"), "utf8");
+  assert.match(desktop, /data-email="history"[\s\S]*?id="settingsBtn"/);
+  assert.match(desktop, /<nav id="mapLists"[\s\S]*?id="listsBtn"[\s\S]*?<\/nav>/);
+  assert.equal((desktop.match(/id="settingsBtn"/g) || []).length, 1);
+  const field = fs.readFileSync(path.resolve(__dirname, "../../webapp/field.html"), "utf8");
+  assert.match(field, /id="listsBtn"[\s\S]*?data-email="history"[\s\S]*?id="settingsBtn"/);
+  assert.equal((field.match(/id="settingsBtn"/g) || []).length, 1);
 });
 
 test("follow-up editor and history expose setup and draft-discard routes", () => {

@@ -14,6 +14,7 @@ function harness(extra = {}) {
     URL: { createObjectURL: blob => { downloads.push(blob); return "blob:test"; }, revokeObjectURL() {} },
     setTimeout: fn => fn(), showNotice: text => notices.push(text), ALL: [],
     contactFor: () => null, advisorDisplayName: (_id, fallback) => fallback,
+    ActAddresses: { current: () => null, isContactKey: () => false },
     ...extra,
   };
   vm.createContext(env); vm.runInContext(code, env);
@@ -80,8 +81,12 @@ test("saved-list export reads the selected list without opening it, changing mem
   const calls = [], button = { dataset: { lists: "export", id: "rotation" } };
   const state = { listId: "currently-calling", cursor: 9, lists: [{ id: "rotation", name: "Rotation", count: 1 }] };
   const env = { document: { addEventListener: (_type, fn) => { listener = fn; } }, listsBack: {},
-    Dial: { state }, loadContacts: async () => ({}),
-    fetch: async (url, options) => { calls.push({ url, options }); return { ok: true, json: async () => ({ name: "Rotation", items: [{ crd: "1" }] }) }; },
+    currentWorkspaceLists: () => state.lists, listWorkspace: null,
+    Dial: { state, readList: async (id, owner) => {
+      calls.push({ id, owner });
+      return { name: "Rotation", items: [{ crd: "1" }] };
+    } }, loadContacts: async () => ({}),
+    ActAddresses: { loadListContacts: async () => [] },
     exportContactList: (name, items) => { exported = { name, items }; },
     showNotice: assert.fail, encodeURIComponent,
   };
@@ -89,8 +94,6 @@ test("saved-list export reads the selected list without opening it, changing mem
   await listener({ target: { closest: () => button } });
   assert.equal(exported.name, "Rotation"); assert.equal(exported.items.length, 1);
   assert.equal(state.listId, "currently-calling"); assert.equal(state.cursor, 9);
-  assert.equal(calls.length, 1); assert.equal(calls[0].url, "/api/queue?id=rotation");
-  assert.equal(calls[0].options.credentials, "same-origin");
-  assert.equal(calls[0].options.method, undefined, "the only request is a GET");
+  assert.deepEqual(calls, [{ id: "rotation", owner: undefined }]);
   assert.equal(button.disabled, false);
 });
