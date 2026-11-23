@@ -290,8 +290,6 @@
 .email-plan-days li b{font-variant-numeric:tabular-nums}
 .email-plan-note,.email-plan-wait{margin:7px 0 0;font-size:11.5px;line-height:1.4;color:var(--muted)}
 .email-plan-error{margin:8px 0 0;font-size:12px;line-height:1.45;color:var(--warn)}
-.lists-email-capacity{margin:5px 0 0!important;font-size:11.5px!important;font-weight:650;color:var(--accent)!important}
-.lists-email-capacity.bad{color:var(--warn)!important}
 
 /* Remove-from-batch sits with the pager, not in the footer: it acts on the
    person named beside it, and belongs where that name is. */

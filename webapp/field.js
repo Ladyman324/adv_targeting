@@ -785,11 +785,11 @@ window.AdvisorEmailData = {
              materialStrategies: materialStrategiesFor(crd),
              teammates: mates.map((m) => m.email), teammatesFull: mates };
   },
-  list: async () => {
-    const actContacts = await ActAddresses.loadListContacts(Dial.state.items);
+  list: async (savedList = { id:Dial.state.listId, name:Dial.state.listName, items:Dial.state.items }) => {
+    const actContacts = await ActAddresses.loadListContacts(savedList.items);
     const currentAct = new Map(actContacts.map(contact => [contact.contactKey, contact]));
     const out = [], excludedContacts = [];
-    for (const saved of Dial.state.items) {
+    for (const saved of savedList.items) {
       const contact = currentAct.get(saved.crd);
       const it = ActAddresses.isContactKey(saved.crd)
         ? contact ? ActAddresses.snapshot(contact) : { ...saved, emailConfirmed:false }
@@ -806,9 +806,9 @@ window.AdvisorEmailData = {
                  materialStrategies: materialStrategiesFor(it.crd),
                  teammates: mates.map((m) => m.email), teammatesFull: mates });
     }
-    out.eligibilitySummary = { selected: Dial.state.items.length, included: out.length,
-      excluded: excludedContacts.length, excludedContacts };
-    out.sourceList = { id: Dial.state.listId, name: Dial.state.listName };
+    out.eligibilitySummary = { selected:savedList.items.length, included:out.length,
+      excluded:excludedContacts.length, excludedContacts };
+    if (savedList.id) out.sourceList = { id:savedList.id, name:savedList.name };
     return out;
   },
 };
@@ -866,7 +866,14 @@ let sessPurpose = "";
 let adhocPurpose = "";
 let listMenuOpen = false;          // the ⋮ list menu
 let listsOpen = false;             // the full list-management sheet
-let listsMode = "all";             // "all" = every list, "edit" = who is on this one
+let fieldList = null;
+let fieldListQuery = "";
+let fieldListType = "all";
+let fieldMemberQuery = "";
+let fieldListScroll = 0;
+let fieldListReturn = "";
+let fieldListRequest = 0;
+let fieldListsError = "";
 let listsReturnFocus = null;
 let savedAudiences = [];           // summaries only; fetched when Lists is opened
 let audiencesLoading = false;      // never part of field startup or nearby search
@@ -909,41 +916,82 @@ function sinceText(iso){
   return `on ${String(iso).slice(0, 10)}`;
 }
 
-/* ---------- list management ----------------------------------------------
- * The bar's <select> switches lists; that is all it does. Rename, empty and
- * delete lived on the ⋮ menu and applied only to whichever list was OPEN, so
- * tidying up three stale lists meant opening each one first -- which is also
- * how a rep empties the list they meant to keep.
- *
- * This shows every list at once and acts on the row under the thumb. "Call" is
- * the primary action on each, because picking up a saved list and working it
- * from wherever you are standing is the reason lists exist at all.
- */
-// Editing membership was the gap: a rep could rename, empty or delete a list,
-// but not see who was on it or take one person off. "Empty" was the only tool
-// for "this one shouldn't be here", which is why lists got abandoned instead of
-// corrected.
+/* ---------- list management ---------------------------------------------- */
+function fieldListHeader(title){
+  return `<button type="button" id="listsClose" aria-label="Close">&times;</button>
+    <h2 id="listsTitle" tabindex="-1">${esc(title)}</h2>`;
+}
+function fieldListNotice(){
+  return `<p id="fieldListNotice" class="lists-error" role="status"${fieldListsError ? "" : " hidden"}>${esc(fieldListsError)}</p>`;
+}
+function reportFieldListError(error){
+  fieldListsError = error.message || "That action could not be completed.";
+  const notice = $("fieldListNotice");
+  if (notice) { notice.hidden = false; notice.textContent = fieldListsError; }
+}
 function renderListEdit(){
-  const S = Dial.state;
-  const items = S.items || [];
-  $("listsInner").innerHTML = `
-    <button id="listsClose" aria-label="Close">&times;</button>
-    <h2>${esc(S.listName || "This list")}</h2>
-    <p class="lm-note">${items.length} ${items.length === 1 ? "person" : "people"}.
-      Removing someone here does not delete any call history, and does not add
-      them to do-not-call.</p>
-    ${items.length ? `<ul class="lists-ul">${items.map((it) => `
-      <li class="lists-row">
-        <span class="lists-main"><b>${esc(it.name || "Unnamed")}</b>
-          <small>${esc(it.firm || it.companyName || "")}</small></span>
-        ${fieldPersonActionButton(it.crd, it.name || "Unnamed")}
-        <span class="lists-acts">
-          <button class="grave" data-ledit="drop" data-crd="${esc(it.crd)}">Remove</button>
-        </span>
-      </li>`).join("")}</ul>` : `<p class="lists-none">Nobody on this list yet.</p>`}
-    <p class="lm-note">To add people, use <b>Add</b> on a contact card, or the bulk
-      add button on the map.</p>
-    <div class="lists-new"><button data-ledit="back">Back to all lists</button></div>`;
+  const list = fieldList;
+  const n = list.items.length;
+  const disabled = n ? "" : " disabled";
+  $("listsInner").innerHTML = fieldListHeader(list.name) + `
+    <div class="field-list-toolbar">
+      <button type="button" data-ledit="back">← Lists</button>
+      <span class="lm-note">${n.toLocaleString()} contacts${list.smart ? " · Smart view" : ""}</span>
+    </div>
+    <div class="field-list-toolbar">
+      <button type="button" data-lists="${list.smart ? "flag-call" : "call"}" data-id="${esc(list.id || "")}" data-kind="${esc(list.smart || "")}"${disabled}>Start calling</button>
+      <button type="button" data-lists="email"${disabled}>Prepare email</button>
+      ${list.smart ? "" : `<details class="field-list-options"><summary aria-label="List actions">⋯</summary>
+        <div class="field-list-toolbar">
+          <button type="button" data-lists="rename">Rename</button>
+          <button type="button" data-lists="empty"${disabled}>Clear contacts</button>
+          <button type="button" class="grave" data-lists="drop">Delete list</button>
+        </div></details>`}
+    </div>
+    <input type="search" id="fieldMemberSearch" value="${esc(fieldMemberQuery)}" placeholder="Search members" aria-label="Search members">
+    ${fieldListNotice()}
+    <div id="fieldMemberRows"></div>`;
+  renderFieldMemberRows();
+}
+function renderFieldMemberRows(){
+  const q = fieldMemberQuery.trim().toLowerCase();
+  const rows = fieldList.items.filter(it => [it.name, it.firm, it.city, it.state]
+    .some(value => String(value || "").toLowerCase().includes(q)));
+  const host = $("fieldMemberRows");
+  host.innerHTML = rows.length ? `<ul class="lists-ul">${rows.map(it => `
+    <li class="lists-row field-list-member">
+      <button type="button" class="field-list-open" data-ledit="member" data-crd="${esc(it.crd)}">
+        <b>${esc(it.name || "Unnamed")}</b><small>${esc(it.firm || "")}</small></button>
+      ${fieldPersonActionButton(it.crd, it.name || "Unnamed")}
+      ${fieldList.smart ? "" : `<button type="button" class="field-list-remove" data-ledit="drop" data-crd="${esc(it.crd)}" aria-label="Remove ${esc(it.name || "contact")}">Remove</button>`}
+    </li>`).join("")}</ul>` : `<p class="lists-none">${fieldList.items.length ? "No members match your search." : "This list has no members yet."}</p>`;
+  if (host.firstElementChild) host.firstElementChild.scrollTop = fieldListScroll;
+}
+async function selectFieldList(id){
+  const request = ++fieldListRequest;
+  const saved = await Dial.readList(id);
+  if (!listsOpen || request !== fieldListRequest) return;
+  fieldList = saved;
+  fieldMemberQuery = "";
+  fieldListScroll = 0;
+  fieldListsError = "";
+  renderLists();
+  $("listsTitle")?.focus();
+}
+async function openFieldListMember(crd){
+  const item = fieldList.items.find(row => String(row.crd) === crd);
+  if (!item) return;
+  fieldListScroll = $("fieldMemberRows")?.firstElementChild?.scrollTop || 0;
+  if (ActAddresses.isContactKey(crd)) {
+    await ActAddresses.openByKey(crd);
+    return;
+  }
+  const row = rowByCrd(crd) || await locateFlagged(crd, item.name);
+  if (!row) throw new Error("This advisor's contact card is unavailable.");
+  fieldListReturn = crd;
+  listsOpen = false;
+  renderLists();
+  openSheet(row);
 }
 
 function relativeAudienceUpdated(iso){
@@ -974,28 +1022,11 @@ function audienceSummaries(payload){
   });
 }
 
-function dynamicAudienceRows(){
-  if (audiencesLoading) return `<p class="lists-none" role="status">Loading saved audiences...</p>`;
-  if (audiencesError) return `<p class="lists-error" role="status">${esc(audiencesError)}
-    <button type="button" data-audiences-retry>Try again</button></p>`;
-  if (!savedAudiences.length) return `<p class="lists-none">No saved dynamic audiences yet.</p>`;
-  return `<ul class="lists-ul audience-list">${savedAudiences.map((a) => `
-    <li class="lists-row audience-row">
-      <span class="lists-main"><span class="list-title-line"><b>${esc(a.name)}</b>
-        <span class="list-type dynamic">Dynamic</span></span>
-        <small>${a.count == null ? "Live membership" : `${a.count} currently eligible`} &middot; ${esc(a.scope)}
-          ${a.updatedUtc ? ` &middot; ${esc(relativeAudienceUpdated(a.updatedUtc))}` : ""}</small>
-        <span class="audience-criteria">${esc(a.criteria)}</span></span>
-      <a class="audience-open" href="index.html?audience=${encodeURIComponent(a.id)}#audience"
-         aria-label="Open ${esc(a.name)} in the full map">Open in full map</a>
-    </li>`).join("")}</ul>`;
-}
-
 async function loadAudienceSummaries(force = false){
   if (audiencesLoading || (audiencesLoaded && !force)) return;
   audiencesLoading = true;
   audiencesError = "";
-  renderLists();
+  renderFieldDirectoryRows();
   try {
     const response = await fetch("/api/audiences", { headers: { Accept: "application/json" } });
     const body = await response.json().catch(() => ({}));
@@ -1006,8 +1037,7 @@ async function loadAudienceSummaries(force = false){
     audiencesError = err && err.message ? err.message : "Saved audiences could not be loaded.";
   } finally {
     audiencesLoading = false;
-    renderLists();
-    if (listsOpen && !$("lists").contains(document.activeElement)) $("listsClose")?.focus();
+    renderFieldDirectoryRows();
   }
 }
 
@@ -1015,48 +1045,57 @@ function renderLists(){
   const el = $("lists");
   el.hidden = !listsOpen;
   if (!listsOpen) return;
-  if (listsMode === "edit") return renderListEdit();
-  const S = Dial.state;
-  const ls = (S.lists || []).filter((list) => !standingKindOf(list.id));
-  $("listsInner").innerHTML = `
-    <button id="listsClose" aria-label="Close">&times;</button>
-    <h2 id="listsTitle">Lists &amp; audiences</h2>
-    <section class="list-section" aria-labelledby="roleViewsTitle">
-      <h3 id="roleViewsTitle">Role smart views</h3>
-      <p class="list-section-note">Your role labels, ready to turn into a calling queue.</p>
-      <ul class="lists-ul">${flagListRowsField()}</ul>
-    </section>
-    <section class="list-section" aria-labelledby="callListsTitle">
-      <h3 id="callListsTitle">Active &amp; static call lists</h3>
-    ${ls.length ? `<ul class="lists-ul">${ls.map((l) => `
-      <li class="lists-row${l.id === S.listId ? " on" : ""}">
-        <span class="lists-main"><span class="list-title-line"><b>${esc(l.name)}</b>
-          <span class="list-type ${l.id === S.listId ? "active" : "static"}">${l.id === S.listId ? "Active" : "Static"}</span></span>
-          <small>${l.count} ${l.count === 1 ? "person" : "people"}`
-          + `${l.cycle > 1 ? ` &middot; pass ${l.cycle}` : ""}`
-          + `${l.id === S.listId ? " &middot; open" : ""}</small></span>
-        <span class="lists-acts">
-          <button class="primary" data-lists="call" data-id="${esc(l.id)}"
-            ${l.count ? "" : "disabled"}>Call</button>
-          <button data-lists="rename" data-id="${esc(l.id)}">Rename</button>
-          <button data-lists="empty" data-id="${esc(l.id)}"
-            ${l.count ? "" : "disabled"}>Empty</button>
-          <button class="grave" data-lists="drop" data-id="${esc(l.id)}">Delete</button>
-        </span>
-      </li>`).join("")}</ul>` : `<p class="lists-none">No call lists yet.</p>`}
-    <div class="lists-new">
-      <input id="listsName" type="text" placeholder="Name for a new list"
-        value="${esc(defaultListName())}" aria-label="Name for a new list">
-      <button data-lists="new">Create</button>
+  if (fieldList) return renderListEdit();
+  $("listsInner").innerHTML = fieldListHeader("Lists") + `
+    <div class="field-list-toolbar"><button type="button" data-lists="new">New list</button></div>
+    <div class="field-list-toolbar">
+      <input type="search" id="fieldListsSearch" value="${esc(fieldListQuery)}" placeholder="Search lists" aria-label="Search lists">
+      <select id="fieldListsType" aria-label="List type">
+        ${[["all","All types"],["list","Lists"],["smart","Smart views"],["filter","Saved filters"]]
+          .map(([value,label]) => `<option value="${value}"${value === fieldListType ? " selected" : ""}>${label}</option>`).join("")}
+      </select>
     </div>
-    <p class="lm-note">Your call history is kept whatever you do here.</p>
-    </section>
-    <section class="list-section" aria-labelledby="audiencesTitle">
-      <h3 id="audiencesTitle">Saved dynamic audiences</h3>
-      <p class="list-section-note">Live filter views are managed in the full map. Opening this section never loads their members.</p>
-      ${dynamicAudienceRows()}
-    </section>`;
+    ${fieldListNotice()}<div id="fieldDirectoryRows"></div>`;
+  renderFieldDirectoryRows();
 }
+function renderFieldDirectoryRows(){
+  const host = $("fieldDirectoryRows");
+  if (!host || !listsOpen || fieldList) return;
+  const entries = (Dial.state.lists || []).filter(list => !standingKindOf(list.id)).map(list => ({
+    id:list.id, name:list.name, type:"list", action:"view", subtitle:`List · ${list.count} contacts${list.id === Dial.state.listId ? " · Call queue" : ""}`,
+  }));
+  for (const [kind, , label] of FLAG_SETS)
+    entries.push({ id:kind, name:label, type:"smart", action:"smart", subtitle:`Smart view · ${flaggedField(kind).length} contacts` });
+  for (const a of savedAudiences)
+    entries.push({ id:a.id, name:a.name, type:"filter", subtitle:`Saved filter · ${a.scope}` });
+  const q = fieldListQuery.trim().toLowerCase();
+  const rows = entries.filter(row => (fieldListType === "all" || row.type === fieldListType)
+    && row.name.toLowerCase().includes(q));
+  host.innerHTML = (rows.length ? `<ul class="lists-ul">${rows.map(row => `<li class="lists-row">${row.type === "filter"
+    ? `<a class="field-list-open" href="index.html?audience=${encodeURIComponent(row.id)}#audience">
+      <b>${esc(row.name)}</b><small>${esc(row.subtitle)} · Open in full map</small></a>`
+    : `<button type="button" class="field-list-open" data-lists="${row.action}" data-id="${esc(row.id)}">
+      <b>${esc(row.name)}</b><small>${esc(row.subtitle)}</small></button>`}</li>`).join("")}</ul>`
+    : `<p class="lists-none">${q ? "No lists match your search." : "No lists in this view."}</p>`)
+    + (["all","filter"].includes(fieldListType) ? (audiencesLoading
+      ? '<p class="lists-none" role="status">Loading saved filters…</p>' : audiencesError
+      ? `<p class="lists-error" role="status">${esc(audiencesError)} <button type="button" data-audiences-retry>Try again</button></p>` : "") : "");
+}
+document.addEventListener("input", event => {
+  if (event.target.id === "fieldListsSearch") {
+    fieldListQuery = event.target.value;
+    renderFieldDirectoryRows();
+  } else if (event.target.id === "fieldMemberSearch" && fieldList) {
+    fieldMemberQuery = event.target.value;
+    fieldListScroll = 0;
+    renderFieldMemberRows();
+  }
+});
+document.addEventListener("change", event => {
+  if (event.target.id !== "fieldListsType") return;
+  fieldListType = event.target.value;
+  renderFieldDirectoryRows();
+});
 
 /* KEY CONTACTS and DUE DILIGENCE, as two standing lists on the phone.
  *
@@ -1177,7 +1216,7 @@ function openPersonActionsField(trigger){
 }
 
 document.addEventListener("keydown", (event) => {
-  if (!personActionBack && listsOpen) {
+  if (!personActionBack && listsOpen && !event.target.closest("dialog[open]")) {
     if (event.key === "Escape") {
       event.preventDefault();
       $("listsClose")?.click();
@@ -1368,9 +1407,9 @@ async function ensureCurrentQueueRoute(item){
   }
 }
 
-async function dialableFlagged(kind){
+async function dialableFlagged(kind, people = flaggedField(kind)){
   const out = [];
-  for (const person of flaggedField(kind)) {
+  for (const person of people) {
     if (person.row && person.row[COL.phone]) { out.push(snapshotOf(person.row)); continue; }
     const full = await locateFlagged(person.crd, person.name).catch(() => null);
     if (full && full[COL.phone]) out.push(snapshotOf(full));
@@ -1393,22 +1432,6 @@ async function openFlagListField(kind, { start = false } = {}){
 const FLAG_SETS = Object.entries(FIELD_ROLE_META)
   .map(([kind, meta]) => [kind, meta.symbol, meta.label]);
 
-function flagListRowsField(){
-  return FLAG_SETS.map(([kind, icon, label]) => {
-    const people = flaggedField(kind);
-    return `<li class="lists-row flag-list">
-      <span class="lists-main"><b>${icon} ${label}</b>
-        <small>${people.length} ${people.length === 1 ? "person" : "people"}`
-      + `${people.length ? "" : " &middot; mark someone at your desk"}</small></span>
-      <span class="lists-acts">
-        <button class="primary" data-lists="flag-call" data-kind="${kind}"
-          ${people.length ? "" : "disabled"}>Call</button>
-        <button data-lists="flag-show" data-kind="${kind}"
-          ${people.length ? "" : "disabled"}>Show</button>
-      </span></li>`;
-  }).join("");
-}
-
 function defaultListName(){
   return `List ${new Date().toLocaleDateString(undefined, { month: "short", day: "numeric" })}`;
 }
@@ -1420,24 +1443,83 @@ async function openLists(){
   // Refreshed rather than trusted. The counts in Dial.state.lists were last
   // fetched at some point in the past, and a screen whose whole job is to say
   // how big each list is has to be believable.
-  try { await Dial.loadLists(); } catch { /* stale is still legible */ }
-  renderLists();
-  $("listsClose")?.focus();
+  $("listsTitle")?.focus();
+  try { await Dial.loadLists(); } catch (error) { reportFieldListError(error); }
+  renderFieldDirectoryRows();
   // Summary fetch is triggered by opening this sheet, never by field startup.
   // The phone keeps its nearby-search first paint and never downloads audience
   // membership or evaluates dynamic filters.
   loadAudienceSummaries().catch(() => {});
 }
 
-// Rename, empty and delete all write to whichever list is OPEN, so acting on
-// another one means opening it and putting the rep back afterwards. They did
-// not ask to be moved off the list they were working.
-async function onOtherList(id, fn){
-  const was = Dial.state.listId;
-  if (was !== id) await Dial.openList(id);
-  await fn();
-  if (was !== id) await Dial.openList(was);
-  await Dial.loadLists();
+async function handleFieldListAction(button){
+  const { lists:action, id, kind } = button.dataset;
+  const list = fieldList;
+  button.disabled = true;
+  try {
+    if (action === "view") return await selectFieldList(id);
+    if (action === "new") {
+      const name = prompt("Name for the new list", defaultListName())?.trim();
+      if (name) await selectFieldList((await Dial.saveNewList(name, [])).id);
+      return;
+    }
+    if (action === "smart") {
+      fieldList = { name:FIELD_ROLE_META[id].label, smart:id, items:flaggedField(id) };
+      fieldMemberQuery = "";
+      fieldListScroll = 0;
+      renderLists();
+      $("listsTitle")?.focus();
+      return;
+    }
+    if (!list) return;
+    if (action === "call" || action === "flag-call") {
+      if (!Dial.state.ready) throw new Error("The call queue is loading. Try again in a moment.");
+      if (Dial.state.problem) throw new Error(Dial.state.problem);
+      if (!await Dial.confirmCallSwitch(action === "call" ? id : undefined)) return;
+      if (action === "flag-call" || id !== Dial.state.listId) Dial.cancelAuto();
+      if (action === "flag-call") {
+        const contacts = (await dialableFlagged(kind, list.items)).filter(item => !item.unconfirmed && !Dial.isDnc(item.crd));
+        if (!contacts.length || contacts.length > Dial.MAX_QUEUE)
+          throw new Error(`This view has ${contacts.length} callable contacts. A queue needs 1 to ${Dial.MAX_QUEUE}.`);
+        const saved = await Dial.saveNewList(list.name, contacts);
+        await Dial.openList(saved.id, { resume:false });
+      } else if (id !== Dial.state.listId) {
+        await Dial.openList(id, { resume:false });
+      }
+      Dial.start();
+      listsOpen = false;
+    } else if (action === "email") {
+      const saved = list.smart ? { items:await Promise.all(list.items.map(async item => {
+        const row = item.row || rowByCrd(item.crd) || await locateFlagged(item.crd, item.name);
+        return row ? snapshotOf(row) : item;
+      })) } : await Dial.readList(list.id);
+      const recipients = await window.AdvisorEmailData.list(saved);
+      listsOpen = false;
+      renderLists();
+      return await EmailComposer.open(recipients);
+    } else {
+      const saved = await Dial.readList(list.id);
+      if (action === "rename") {
+        const name = prompt("Name for this list", saved.name)?.trim();
+        if (!name || name === saved.name) return;
+        fieldList = await Dial.updateSavedList(saved, { name });
+      }
+      if (action === "empty") {
+        if (!confirm(`Clear all ${saved.count} contacts from "${saved.name}"?`)) return;
+        if (Dial.state.listId === list.id) Dial.pause();
+        fieldList = await Dial.updateSavedList(saved, { items:[], cursor:0 });
+      }
+      if (action === "drop") {
+        if (!confirm(`Delete "${saved.name}"? ${saved.count} contacts.`)) return;
+        if (Dial.state.listId === list.id) Dial.pause();
+        await Dial.deleteList(list.id);
+        fieldList = null;
+      }
+    }
+    renderLists();
+    renderDial();
+  } catch (error) { reportFieldListError(error); }
+  finally { button.disabled = false; }
 }
 
 /* ---------- the full history ----------------------------------------------
@@ -2762,7 +2844,18 @@ document.addEventListener("click", (e) => {
     return;
   }
 
-  if (e.target.closest("#sheetClose")) { $("sheet").hidden = true; return; }
+  if (e.target.closest("#sheetClose")) {
+    $("sheet").hidden = true;
+    if (fieldListReturn) {
+      const id = fieldListReturn;
+      fieldListReturn = "";
+      listsOpen = true;
+      renderLists();
+      [...$("lists").querySelectorAll('[data-ledit="member"]')].find(button => button.dataset.crd === id)
+        ?.focus({ preventScroll:true });
+    }
+    return;
+  }
 
   const call = e.target.closest("[data-call]");
   if (call) {
@@ -2895,27 +2988,29 @@ document.addEventListener("click", (e) => {
   if (e.target.closest("#qMenu")) { listMenuOpen = !listMenuOpen; renderDial(); return; }
   if (e.target.closest("#lmAll")) {
     listMenuOpen = false;
-    listsMode = "all";
+    fieldList = null;
+    fieldListsError = "";
     renderDial();
     openLists();
     return;
   }
   if (e.target.closest("#listsBtn")) {
-    listsMode = "all";
+    fieldList = null;
+    fieldListsError = "";
     openLists();
     return;
   }
   if (e.target.closest("#lmEdit")) {
     listMenuOpen = false;
-    listsMode = "edit";
-    listsOpen = true;
     renderDial();
-    renderLists();
+    openLists();
+    selectFieldList(Dial.state.listId).catch(reportFieldListError);
     return;
   }
   if (e.target.closest("#listsClose")) {
     listsOpen = false;
-    listsMode = "all";
+    fieldList = null;
+    ++fieldListRequest;
     renderLists();
     if (listsReturnFocus && listsReturnFocus.isConnected) listsReturnFocus.focus();
     listsReturnFocus = null;
@@ -2927,14 +3022,22 @@ document.addEventListener("click", (e) => {
     return;
   }
   const ledit = e.target.closest("[data-ledit]");
-  if (ledit) {
-    if (ledit.dataset.ledit === "back") { listsMode = "all"; openLists(); return; }
-    const crd = ledit.dataset.crd;
-    // Dial.remove already anchors on the person rather than the index, so
-    // taking someone out from above the cursor does not skip whoever is next.
-    Dial.remove(crd)
-      .then(() => { renderListEdit(); renderDial(); })
-      .catch((err) => alert(err.message || "That person could not be removed."));
+  if (ledit && fieldList) {
+    const action = ledit.dataset.ledit, crd = ledit.dataset.crd;
+    if (action === "back") {
+      fieldList = null;
+      fieldListsError = "";
+      renderLists();
+      $("fieldListsSearch")?.focus();
+    } else if (action === "member") openFieldListMember(crd).catch(reportFieldListError);
+    else if (action === "drop" && confirm("Remove this contact from the list?")) {
+      const list = fieldList;
+      fieldListScroll = $("fieldMemberRows")?.firstElementChild?.scrollTop || 0;
+      Dial.removeFromList(list.id, crd).then(saved => {
+        if (fieldList !== list) return;
+        fieldList = saved; renderListEdit(); renderDial();
+      }).catch(reportFieldListError);
+    }
     return;
   }
 
@@ -3084,77 +3187,7 @@ document.addEventListener("click", (e) => {
 
   const lb = e.target.closest("[data-lists]");
   if (lb) {
-    const act = lb.dataset.lists;
-    const id = lb.dataset.id;
-    const l = (Dial.state.lists || []).find((x) => x.id === id);
-    const fail = (err) => { dialErr = err.message || "That could not be saved.";
-                            renderDial(); };
-    if (act === "new") {
-      const box = document.getElementById("listsName");
-      const name = ((box && box.value) || "").trim() || defaultListName();
-      Dial.createList(name)
-        .then(() => Dial.loadLists())
-        .then(() => { renderLists(); renderDial(); })
-        .catch(fail);
-      return;
-    }
-    /* BEFORE the `if (!l) return` below, deliberately.
-     *
-     * A flag list has no list id -- it is built from the flags as they stand
-     * right now -- so it would fall straight through that guard and the tap
-     * would do nothing at all, silently. That is the same shape as the bug
-     * that hid the teammate picker.
-     *
-     * A SNAPSHOT into an ordinary list, matching the desk: a session that
-     * reordered itself because somebody starred a contact elsewhere would lose
-     * the rep's place mid-call.
-     */
-    if (act === "flag-call" || act === "flag-show") {
-      const kind = lb.dataset.kind;
-      const label = (FIELD_ROLE_META[kind] || FIELD_ROLE_META.key).label;
-      if (act === "flag-show") {
-        const names = flaggedField(kind).map((x) => x.name);
-        dialErr = `${label}: ${names.join(", ")}`;
-        renderDial();
-        return;
-      }
-      lb.disabled = true;
-      lb.textContent = "Finding…";
-      openFlagListField(kind, { start: true }).then(() => {
-        listsOpen = false;
-        renderLists(); renderDial();
-      }).catch((err) => { renderLists(); fail(err); });
-      return;
-    }
-    if (!l) return;
-    if (act === "call") {
-      // Open it AND start. Opening alone would close this sheet onto the same
-      // bar the rep was looking at before, with no sign the tap landed.
-      listsOpen = false;
-      Dial.openList(id).then(() => { Dial.start(); renderLists(); renderDial(); })
-        .catch(fail);
-      return;
-    }
-    if (act === "rename") {
-      const name = prompt("Name for this list", l.name);
-      if (!name || !name.trim() || name.trim() === l.name) return;
-      onOtherList(id, () => Dial.renameList(name.trim()))
-        .then(() => { renderLists(); renderDial(); }).catch(fail);
-      return;
-    }
-    if (act === "empty") {
-      if (!confirm(`Remove all ${l.count} people from "${l.name}"?\n\n`
-                   + `The list stays; your call history is kept.`)) return;
-      onOtherList(id, () => Dial.clear())
-        .then(() => { renderLists(); renderDial(); }).catch(fail);
-      return;
-    }
-    if (act === "drop") {
-      if (!confirm(`Delete the list "${l.name}"?\n\nYour call history is kept.`)) return;
-      Dial.deleteList(id).then(() => Dial.loadLists())
-        .then(() => { renderLists(); renderDial(); }).catch(fail);
-      return;
-    }
+    if (!lb.disabled) handleFieldListAction(lb);
     return;
   }
   if (e.target.closest("#lmRename")) {

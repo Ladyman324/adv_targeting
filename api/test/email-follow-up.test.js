@@ -475,10 +475,10 @@ test("Step 3 presents one continuous reply with an Outlook-style quoted original
   assert.doesNotMatch(preview, /signatureHtml \|\| ""\}<\/div>/);
 });
 
-test("desktop keeps email history beside Settings and Lists in the map controls", () => {
+test("desktop keeps Lists and email history beside Settings in the header", () => {
   const desktop = fs.readFileSync(path.resolve(__dirname, "../../webapp/index.html"), "utf8");
   assert.match(desktop, /data-email="history"[\s\S]*?id="settingsBtn"/);
-  assert.match(desktop, /<nav id="mapLists"[\s\S]*?id="listsBtn"[\s\S]*?<\/nav>/);
+  assert.match(desktop, /<header>[\s\S]*?id="listsBtn"[\s\S]*?data-email="history"[\s\S]*?id="settingsBtn"[\s\S]*?<\/header>/);
   assert.equal((desktop.match(/id="settingsBtn"/g) || []).length, 1);
   const field = fs.readFileSync(path.resolve(__dirname, "../../webapp/field.html"), "utf8");
   assert.match(field, /id="listsBtn"[\s\S]*?data-email="history"[\s\S]*?id="settingsBtn"/);

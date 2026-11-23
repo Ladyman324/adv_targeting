@@ -23,7 +23,7 @@ test("cross-territory list access is a separate exact-email entitlement", () => 
 test("CSV imports and dynamic audiences use the same non-admin territory policy", () => {
   const app = fs.readFileSync(path.resolve(__dirname, "../../webapp/app.js"), "utf8");
   const policySource = app.slice(app.indexOf("function audienceTerritoryPolicy(preview){"),
-    app.indexOf("\nfunction dynamicAudienceRows(){"));
+    app.indexOf("\nfunction paintAudiencePreview(){"));
   const policy = new Function("ME", "SALES_TERRITORY", "Dial", "esc",
     policySource + "\nreturn audienceTerritoryPolicy;")(
     { userDetails: "hjudge@eicatlanta.com" },

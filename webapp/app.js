@@ -275,19 +275,23 @@ function visibleListActContacts(){
     .map(marker => marker.actContact);
 }
 
+function listActContactPassesFilters(contact){
+  const states = scope.startsWith("T:") ? TERRITORIES[scope.slice(2)] : [scope];
+  const state = contact.primary?.state;
+  return states?.includes(state)
+    && (!selectedFirms.length || selectedFirms.includes(contact.firmCrd))
+    && !excludedFirms.has(contact.firmCrd) && (!contactableOnly || contact.phone || contact.emailApproved)
+    && !selectsOnly && !aumSel.size && !rankedOnly && !ownerOnly && !roleSel.size && !assetsOnly
+    && passesContinental({ _state:state })
+    && !lastCalled && !lastEmailed && !joinedFirm && reg === "all"
+    && (!lassoPolygon || (contact.coordinates && pointInLasso(...contact.coordinates)));
+}
+
 function renderListActContacts(){
   listActMarkers.clearLayers();
   if (!mapListFilter || scope === "US") return;
-  const states = scope.startsWith("T:") ? TERRITORIES[scope.slice(2)] : [scope];
   for (const contact of mapListFilter.actContacts) {
-    if (!contact.coordinates || !states?.includes(contact.primary?.state)
-        || (selectedFirms.length && !selectedFirms.includes(contact.firmCrd))
-        || excludedFirms.has(contact.firmCrd) || (contactableOnly && !contact.phone && !contact.emailApproved)
-        || selectsOnly || aumSel.size || rankedOnly || ownerOnly || roleSel.size || assetsOnly
-        || !passesContinental({ _state:contact.primary.state })
-        || lastCalled || lastEmailed || joinedFirm || reg !== "all"
-        || !pointInLasso(...contact.coordinates))
-      continue;
+    if (!contact.coordinates || !listActContactPassesFilters(contact)) continue;
     const marker = actOnlyMarker(contact);
     marker.actContact = contact;
     listActMarkers.addLayer(marker);
@@ -1484,6 +1488,8 @@ function openPersonActions(trigger){
   back.innerHTML = `<div class="ask person-action-dialog" role="dialog" aria-modal="true"
       aria-labelledby="personActionTitle">
     <h3 id="personActionTitle">${esc(name)}</h3>
+    <button type="button" class="ask-btn" data-map-pick="${esc(crd)}" aria-pressed="${mapSelectedIds.has(crd)}">
+      ${mapSelectedIds.has(crd) ? "Remove from map selection" : "Select for map action"}</button>
     <p class="person-action-label">Sales roles</p>
     <div class="person-action-roles">${flagMarks(crd)}</div>
     <p class="person-action-label">${listWorkspace ? `Add to ${esc(listWorkspace.owner.email)}'s lists` : "Add to a list"}</p>
@@ -1526,6 +1532,17 @@ document.addEventListener("click", async (event) => {
     event.preventDefault();
     event.stopImmediatePropagation();
     closePersonActions();
+    return;
+  }
+  const pick = event.target.closest("[data-map-pick]");
+  if (pick) {
+    const id = pick.dataset.mapPick;
+    if (mapSelectedIds.has(id)) mapSelectedIds.delete(id);
+    else mapSelectedIds.add(id);
+    const selected = mapSelectedIds.has(id);
+    pick.textContent = selected ? "Remove from map selection" : "Select for map action";
+    pick.setAttribute("aria-pressed", String(selected));
+    refreshActiveFilters();
     return;
   }
   const listButton = event.target.closest("[data-person-list]");
@@ -2701,8 +2718,8 @@ async function recordDialOutcome(disposition){
  */
 let mapListFilter = null;
 
-async function filterMapByList(id, ownerId){
-  const saved = await Dial.readList(id, ownerId);
+async function filterMapByList(id, ownerId, snapshot){
+  const saved = snapshot || await Dial.readList(id, ownerId);
   const items = saved.items || [];
   if (!items.length) throw new Error("This list is empty.");
   const actContacts = await ActAddresses.loadListContacts(items);
@@ -2717,42 +2734,190 @@ async function filterMapByList(id, ownerId){
   syncTargetingUI();
   actContactMarker?.remove();
   actContactMarker = null;
-  mapListFilter = { name:saved.name, ownerId, ids:new Set(items.map(item => String(item.crd))), actContacts };
+  mapListFilter = { id, name:saved.name, ownerId, ids:new Set(items.map(item => String(item.crd))), actContacts };
   closeListManager();
   redraw();
   if (!visibleListActContacts().length)
     reportFilterReach("No members of this list have pins in the current area.", saved.name);
 }
 
-async function saveListInView(){
-  const filter = mapListFilter;
+const mapSelectedIds = new Set();
+
+function mapListScopes(selected = mapSelectedIds){
+  const bounds = map.getBounds();
+  const inView = new Set();
+  const matches = new Set();
+  if (scope !== "US") {
+    for (const feature of ALL) {
+      const p = feature.properties;
+      if (!passesFilters(p)) continue;
+      const id = String(p.id);
+      matches.add(id);
+      const coordinates = feature.geometry?.coordinates;
+      if (coordinates && bounds.contains([coordinates[1], coordinates[0]])) inView.add(id);
+    }
+    for (const contact of mapListFilter?.actContacts || []) {
+      if (!listActContactPassesFilters(contact)) continue;
+      matches.add(contact.contactKey);
+      if (contact.coordinates && bounds.contains(contact.coordinates)) inView.add(contact.contactKey);
+    }
+  }
+  return { selected:[...selected].map(String), inView:[...inView], matches:[...matches] };
+}
+
+async function openMapListAction(selected, preset){
+  const groups = mapListScopes(selected);
   const owner = listWorkspace?.owner;
-  if ((!filter && !owner) || scope === "US") return;
-  const ids = visibleAdvisorIds();
-  if (!ids.length) return showNotice("No list members are visible in this map view.");
-  if (ids.length > Dial.MAX_QUEUE) return showNotice("Zoom in to select at most 1,000 contacts.");
-  const name = prompt("Name the new list", `${filter?.name || scopeLabel(scope)} - in view`);
-  if (!name?.trim()) return;
-  if (!await loadContacts()) throw new Error("Contact details could not be loaded.");
-  const items = ids.map(dialSnapshot).filter(item => !item.unconfirmed && !Dial.isDnc(item.crd));
-  if (!items.length) return showNotice("No available list members are visible in this map view.");
-  const saved = await Dial.saveNewList(name.trim(), items, filter?.ownerId || owner?.id);
-  showNotice(`Saved ${saved.count.toLocaleString()} contacts to "${saved.name}".`);
-  await openListManager();
+  const host = document.createElement("dialog");
+  host.className = "map-list-action ask";
+  host.setAttribute("aria-labelledby", "mapListActionTitle");
+  const scopes = [["selected","Selected"],["inView","In map view"],["matches","All matches"]];
+  const origin = scopeLabel(scope);
+  const suggested = (mapListFilter?.name || origin) + " shortlist";
+  let choice = preset || (groups.selected.length ? "selected" : "");
+  let preparing = false;
+  host.innerHTML = `<form><div class="lists-title"><h3 id="mapListActionTitle">Add to list</h3>
+    <button type="button" class="ask-btn ghost" data-map-list-action="close">Close</button></div>
+    ${owner ? `<p>${esc(owner.email)}’s lists</p>` : ""}
+    <label>Contacts<select class="ask-name" id="mapListScope">
+      <option value="">Choose which contacts</option>
+      ${scopes.filter(([key]) => key !== "selected" || groups.selected.length)
+        .map(([key,label]) => `<option value="${key}"${choice === key ? " selected" : ""}>${label} · ${groups[key].length.toLocaleString()}</option>`).join("")}
+    </select></label>
+    <p id="mapListCount" role="status"></p>
+    <label>Destination<select class="ask-name" id="mapListDestination"><option value="">New list</option>
+      ${currentWorkspaceLists().filter(list => !standingKindOf(list.id)).map(list =>
+        `<option value="${esc(list.id)}">${esc(list.name)} · ${list.count.toLocaleString()}</option>`).join("")}
+    </select></label>
+    <label id="mapListNameLabel">List name<input class="ask-name" id="mapListName" maxlength="60" value="${esc(suggested.slice(0,60))}"></label>
+    <div class="list-toolbar">
+      <button type="submit" class="ask-btn primary" id="mapListSave"></button>
+      ${owner ? "" : `<button type="button" class="ask-btn" data-map-list-action="call"></button>
+        <button type="button" class="ask-btn" data-map-list-action="email"></button>`}
+    </div><p id="mapListError" role="alert" hidden></p>
+  </form>`;
+  const scopeSelect = host.querySelector("#mapListScope");
+  const dest = host.querySelector("#mapListDestination");
+  const save = host.querySelector("#mapListSave");
+  const call = host.querySelector('[data-map-list-action="call"]');
+  const email = host.querySelector('[data-map-list-action="email"]');
+  const errorBox = host.querySelector("#mapListError");
+  const update = () => {
+    choice = scopeSelect.value;
+    const count = groups[choice]?.length || 0;
+    const noun = count === 1 ? "contact" : "contacts";
+    host.querySelector("#mapListCount").textContent = choice === "inView"
+      ? `${count.toLocaleString()} of ${groups.matches.length.toLocaleString()} contacts in map view`
+      : choice ? `${count.toLocaleString()} ${choice === "selected" ? "selected" : "matching"} ${noun}` : "";
+    host.querySelector("#mapListNameLabel").hidden = !!dest.value;
+    save.textContent = (dest.value ? "Add" : "Save") + (count ? ` ${count.toLocaleString()} ${noun}` : "");
+    if (call) call.textContent = count ? `Call these ${count.toLocaleString()}` : "Start calling";
+    if (email) email.textContent = count ? `Prepare email for ${count.toLocaleString()}` : "Prepare email";
+    for (const button of [save, call, email].filter(Boolean))
+      button.disabled = preparing || !count || count > Dial.MAX_QUEUE;
+    errorBox.hidden = !choice || count <= Dial.MAX_QUEUE;
+    errorBox.textContent = errorBox.hidden ? "" : `Choose a group of at most ${Dial.MAX_QUEUE.toLocaleString()} contacts.`;
+  };
+  const perform = async (action) => {
+    if (!groups[choice]?.length || preparing) return;
+    const ids = groups[choice].slice();
+    if (ids.length > Dial.MAX_QUEUE) return;
+    const destination = dest.value;
+    const name = host.querySelector("#mapListName").value.trim();
+    if (action === "save" && !destination && !name) {
+      errorBox.hidden = false; errorBox.textContent = "Enter a name for the new list."; return;
+    }
+    preparing = true;
+    scopeSelect.disabled = dest.disabled = true;
+    update();
+    try {
+      await dialReady;
+      if (action !== "email" && Dial.state.problem) throw new Error(Dial.state.problem);
+      if (action === "call" && !await Dial.confirmCallSwitch()) return;
+      if (!await loadContacts()) throw new Error("Contact details could not be loaded.");
+      const actContacts = await ActAddresses.loadListContacts(ids.map(crd => ({ crd })));
+      const currentAct = new Map(actContacts.map(contact => [contact.contactKey, contact]));
+      const items = ids.map(crd => {
+        const act = currentAct.get(crd);
+        if (act) return ActAddresses.snapshot(act);
+        if (ActAddresses.isContactKey(crd)) return { crd, name:"ACT! contact", unconfirmed:true };
+        return dialSnapshot(crd);
+      });
+      if (action === "email") {
+        host.close();
+        return await emailSavedList({ items }, null, currentAct);
+      }
+      if (action === "call") {
+        const started = await startListFromContacts(items, `${origin} · ${ids.length} selected`);
+        if (started) host.close();
+        return;
+      }
+      const available = items.filter(item => !item.unconfirmed && !Dial.isDnc(item.crd));
+      const skipped = items.length - available.length;
+      if (!available.length) throw new Error("This group has no contacts that can be added.");
+      if (skipped && !confirm(`Save ${available.length} of ${items.length} contacts? ${skipped} are suppressed or need identity review.`)) return;
+      let saved, added, duplicates = 0;
+      if (destination) {
+        const existing = await Dial.readList(destination, owner?.id);
+        if (!existing.etag) throw new Error("This list could not be loaded. Choose a current list.");
+        const merged = mergeListContacts(existing.items, available);
+        if (merged.items.length > Dial.MAX_QUEUE)
+          throw new Error(`This list can hold at most ${Dial.MAX_QUEUE.toLocaleString()} contacts.`);
+        ({ added, duplicates } = merged);
+        saved = added ? await Dial.updateSavedList(existing, { items:merged.items }, owner?.id) : existing;
+        updateListDetail(saved);
+      } else {
+        saved = await Dial.saveNewList(name, available, owner?.id);
+        added = saved.count;
+      }
+      if (owner) await refreshDelegatedLists(listWorkspace);
+      if (listsBack && !listDetail) paintListDirectoryRows();
+      host.close();
+      showNotice(`${added.toLocaleString()} added to “${saved.name}”`
+        + (destination ? ` · ${duplicates.toLocaleString()} already on the list` : "")
+        + (skipped ? ` · ${skipped.toLocaleString()} excluded` : ""));
+    } catch (error) {
+      if (!host.open) showNotice(error.message || "The selected contacts could not be processed.");
+      else { errorBox.hidden = false; errorBox.textContent = error.message || "The selected contacts could not be processed."; }
+    } finally {
+      preparing = false;
+      scopeSelect.disabled = dest.disabled = false;
+      const message = errorBox.hidden ? "" : errorBox.textContent;
+      update();
+      if (message) { errorBox.textContent = message; errorBox.hidden = false; }
+    }
+  };
+  host.addEventListener("change", update);
+  host.addEventListener("submit", event => { event.preventDefault(); void perform("save"); });
+  host.addEventListener("click", event => {
+    const action = event.target.closest("[data-map-list-action]")?.dataset.mapListAction;
+    if (action === "close" && !preparing) host.close();
+    if (action === "call" || action === "email") void perform(action);
+  });
+  host.addEventListener("cancel", event => { if (preparing) event.preventDefault(); });
+  host.addEventListener("close", () => host.remove(), { once:true });
+  document.body.appendChild(host);
+  update();
+  host.showModal();
+  scopeSelect.focus();
+}
+
+function mergeListContacts(existing, selected){
+  const seen = new Set(existing.map(item => String(item.crd)));
+  const items = existing.slice();
+  let added = 0;
+  for (const item of selected) {
+    const id = String(item.crd);
+    if (seen.has(id)) continue;
+    seen.add(id);
+    items.push(item);
+    added++;
+  }
+  return { items, added, duplicates:selected.length - added };
 }
 
 function visibleAdvisorIds(){
-  const bounds = map.getBounds();
-  const seen = new Set();
-  for (const f of ALL){
-    const p = f.properties;
-    if (!passesFilters(p)) continue;
-    const [lon, lat] = f.geometry.coordinates;
-    if (!bounds.contains([lat, lon])) continue;
-    seen.add(String(p.id));
-  }
-  for (const contact of visibleListActContacts()) seen.add(contact.contactKey);
-  return [...seen];
+  return mapListScopes().inView;
 }
 
 /* Where should a bulk add land?
@@ -2875,6 +3040,7 @@ async function applyAudienceDefinition(audience){
     const result = await switchScope(target);
     if (!result || result.status !== "applied") throw new Error(`Could not load ${definition.scope.label || target}.`);
   }
+  mapListFilter = null;
   selectedFirms = Array.isArray(f.selectedFirms) ? f.selectedFirms.map(String) : [];
   selectsOnly = !!f.selectsOnly;
   selectsBox.checked = selectsOnly;
@@ -2981,14 +3147,6 @@ function audienceTerritoryPolicy(preview){
   return { kind:"unassigned", rows:[], outside:preview.matches,
     text:`No sales territory is assigned to this account${email ? ` (${esc(email)})` : ""}. Snapshot creation is disabled; ask an administrator to assign the account before using dynamic audiences.` };
 }
-function dynamicAudienceRows(){
-  if (audienceProblem) return `<p class="lists-none">${esc(audienceProblem)}</p>`;
-  if (!dynamicAudiences.length) return `<p class="lists-none">No dynamic audiences saved yet. Use <b>save as audience</b> beside Active filters.</p>`;
-  return `<ul class="lists-ul">${dynamicAudiences.map(a => `<li class="lists-row audience-row">
-    <span class="lists-main"><b>${esc(a.name || "Untitled audience")}</b><small>Dynamic &middot; ${esc(a.scopeLabel || (a.definition && a.definition.scope && a.definition.scope.label) || "saved scope")}${a.description ? ` &middot; ${esc(a.description)}` : ""}</small></span>
-    <span class="lists-acts"><button type="button" class="ask-btn primary" data-lists="audience-open" data-id="${esc(a.id)}">Preview</button><button type="button" class="grave" data-lists="audience-drop" data-id="${esc(a.id)}">Delete</button></span>
-  </li>`).join("")}</ul>`;
-}
 function paintAudiencePreview(){
   const p = audiencePreview;
   if (!listsBack || !p) return;
@@ -2997,52 +3155,34 @@ function paintAudiencePreview(){
   const policy = audienceTerritoryPolicy(p);
   const readyCall = policy.rows.filter(row => row.callable).length;
   const readyEmail = policy.rows.filter(row => row.emailable).length;
-  listsBack.innerHTML = `<div class="ask lists lists-workspace" role="dialog" aria-modal="true" aria-label="Dynamic audience preview">
-    <div class="lists-title"><div><span class="list-type dynamic">Dynamic audience</span><h3>${esc(p.audience.name)}</h3><p>${esc(p.audience.description || "Updates when source data or saved rules change.")}</p></div><button type="button" class="ask-btn ghost" data-lists="close">Close</button></div>
+  listsBack.innerHTML = `<div class="ask lists lists-workspace" aria-label="Saved filter preview">
+    <div class="lists-title"><div><span class="list-type dynamic">Saved filter</span><h3>${esc(p.audience.name)}</h3><p>${esc(p.audience.description || "Updates when source data or saved rules change.")}</p></div><button type="button" class="ask-btn ghost" data-lists="close">Close</button></div>
     <div class="audience-counts"><span><b>${p.matches.toLocaleString()}</b> matches</span><span><b>${p.callable.toLocaleString()}</b> callable</span><span><b>${p.emailable.toLocaleString()}</b> emailable</span><span class="excluded"><b>${p.excluded.toLocaleString()}</b> no usable route</span></div>
     <p class="audience-owner"><b>${policy.text}</b><br>Advisor territory coverage: ${owners.size ? [...owners].map(([n,c]) => `${esc(n)} (${c})`).join("; ") : "assignment information unavailable"}. Raw channel counts above describe the full audience; snapshot actions below use ${policy.kind === "territory" ? "only this account's assigned territory" : policy.kind === "national" || policy.kind === "cross_territory" ? "all matches with normal advisor ownership retained" : "no matches until list access is assigned"}.</p>
     <p class="dial-menu-note">Ready for a new snapshot: ${readyCall.toLocaleString()} callable; ${readyEmail.toLocaleString()} emailable${policy.outside ? `; ${policy.outside.toLocaleString()} outside-territory matches excluded before channel checks` : ""}.</p>
     ${p.excluded ? `<p class="dial-menu-note">Review: ${p.dnc.toLocaleString()} do-not-call; ${p.identity.toLocaleString()} with non-actionable identity evidence; ${p.excluded.toLocaleString()} with neither a callable nor emailable route. Excluded contacts remain in the match count and never enter the call snapshot.</p>` : ""}
-    <div class="lists-preview-actions"><button type="button" class="ask-btn" data-lists="audience-back">Back to lists</button><button type="button" class="ask-btn" data-lists="audience-queue"${readyCall ? "" : " disabled"}>Create call list</button><button type="button" class="ask-btn primary" data-lists="audience-email"${readyEmail ? "" : " disabled"}>Prepare email batch</button></div>
+    <div class="lists-preview-actions">
+      <button type="button" class="ask-btn" data-lists="audience-back">Back to lists</button>
+      <button type="button" class="ask-btn" data-lists="audience-map">View on map</button>
+      <button type="button" class="ask-btn" data-lists="audience-save"${policy.rows.length ? "" : " disabled"}>Save as list</button>
+      <button type="button" class="ask-btn" data-lists="audience-queue"${readyCall ? "" : " disabled"}>Create call list</button>
+      <button type="button" class="ask-btn primary" data-lists="audience-email"${readyEmail ? "" : " disabled"}>Prepare email</button>
+      <button type="button" class="ask-btn grave" data-lists="audience-drop" data-id="${esc(p.audience.id)}">Delete saved filter</button>
+    </div>
   </div>`;
   focusListDialog('[data-lists="audience-back"]');
 }
 
-function listRowActions(l){
-  const cur = !listWorkspace && l.id === Dial.state.listId;
-  return `<li class="lists-row${cur ? " on" : ""}">
-    <span class="lists-main">
-      <b>${esc(l.name)}</b>
-      <small>Static &middot; ${l.count} ${l.count === 1 ? "person" : "people"}`
-      + `${l.cycle > 1 ? ` &middot; pass ${l.cycle}` : ""}`
-      + `${cur ? " &middot; open" : ""}</small>
-    </span>
-    <span class="lists-acts">
-      ${!listWorkspace ? `<button type="button" class="ask-btn primary" data-lists="call" data-id="${esc(l.id)}"
-        ${l.count ? "" : "disabled"}>Call</button>` : ""}
-      <button type="button" data-lists="email" data-id="${esc(l.id)}"
-        ${l.count ? "" : "disabled"}>Email</button>
-      <button type="button" data-lists="filter-map" data-id="${esc(l.id)}"
-        ${l.count ? "" : "disabled"}>Filter Map</button>
-      <button type="button" data-lists="export" data-id="${esc(l.id)}"
-        ${l.count ? "" : "disabled"}>Export CSV</button>
-      <button type="button" data-lists="edit-open" data-id="${esc(l.id)}"
-        ${l.count ? "" : "disabled"}>Edit</button>
-      <button type="button" data-lists="rename" data-id="${esc(l.id)}">Rename</button>
-      <button type="button" data-lists="empty" data-id="${esc(l.id)}"
-        ${l.count ? "" : "disabled"}>Empty</button>
-      <button type="button" class="grave" data-lists="drop" data-id="${esc(l.id)}">Delete</button>
-    </span>
-  </li>`;
-}
-
 let listsBack = null;
-let listsEditMode = false;   // showing who is on the open list, not every list
 let listsReturnFocus = null;
 let listImport = null;
 let listOwners = [];
 let listWorkspace = null;
-let delegatedEdit = null;
+let listDetail = null;
+let listSelectionRequest = 0;
+let listMemberReturn = null;
+let listDirectory = { query:"", type:"all", scroll:0, problem:"", loading:false };
+let listExpanded = false;
 
 const currentWorkspaceLists = () => listWorkspace ? listWorkspace.lists : (Dial.state.lists || []);
 window.AdvisorListWorkspace = () => listWorkspace?.owner;
@@ -3058,61 +3198,34 @@ async function refreshDelegatedLists(workspace){
   workspace.lists = await Dial.readLists(workspace.owner.id);
 }
 
-async function emailDelegatedList(saved, owner){
+async function emailSavedList(saved, owner, currentAct){
   if (!await loadContacts()) throw new Error("Contact details could not be loaded. Retry email preparation.");
-  await ActAddresses.loadListContacts(saved.items || []);
+  if (!currentAct) {
+    const actContacts = await ActAddresses.loadListContacts(saved.items);
+    currentAct = new Map(actContacts.map(contact => [contact.contactKey, contact]));
+  }
   const recipients = [], excludedContacts = [];
   for (const item of saved.items || []) {
-    const snap = dialSnapshot(item.crd);
-    if (!snap.emailConfirmed || !snap.email) {
-      excludedContacts.push({ crd:item.crd, name:item.name, email:item.email,
-        reasonCode:snap.email ? "identity" : "email" });
+    const contact = currentAct.get(String(item.crd));
+    const current = contact ? ActAddresses.snapshot(contact) : contactFor(item.crd) ? dialSnapshot(item.crd) : null;
+    const snap = Dial.currentRoute(item, current);
+    const status = Dial.emailRouteStatus(snap);
+    if (!status.ok) {
+      excludedContacts.push({ crd:item.crd, name:item.name, email:item.email, reasonCode:status.reason });
       continue;
     }
-    recipients.push({ ...snap, firstName:snap.firstName || greetingFor(item.crd),
+    recipients.push({ ...snap, firstName:contact?.greeting || greetingFor(item.crd),
+      ...(contact ? { lastName:contact.lastName || "", identityLabel:"ACT! contact" }
+        : { identityLabel:Dial.identityTierLabel(snap.contactTier, snap.contactSource) }),
       materialStrategies:materialStrategiesFor(item.crd), teammates:teammateEmails(item.crd),
       teammatesFull:teammatesOf(item.crd) });
   }
-  recipients.eligibilitySummary = { excludedContacts };
-  recipients.sourceList = { id:saved.id, name:saved.name, ownerId:owner.id, ownerEmail:owner.email };
+  recipients.eligibilitySummary = { selected:saved.items.length, included:recipients.length,
+    excluded:excludedContacts.length, excludedContacts };
+  if (saved.id) recipients.sourceList = { id:saved.id, name:saved.name,
+    ...(owner ? { ownerId:owner.id, ownerEmail:owner.email } : {}) };
   closeListManager();
   await EmailComposer.open(recipients);
-}
-
-async function manageDelegatedList(action, id, summary, workspace){
-  const owner = workspace.owner;
-  if (action === "new") {
-    const name = listsBack.querySelector(".ask-name").value.trim() || defaultListName();
-    await Dial.saveNewList(name, [], owner.id);
-  } else if (action === "edit-drop" && delegatedEdit) {
-    delegatedEdit = await Dial.removeFromList(delegatedEdit.id, id, owner.id);
-    await refreshDelegatedLists(workspace);
-    if (listWorkspace === workspace) paintListEdit();
-    return;
-  } else if (!summary) return;
-  else if (action === "drop") {
-    if (!confirm(`Delete "${summary.name}" from ${owner.email}'s lists?`)) return;
-    await Dial.deleteSavedList(id, owner.id);
-  } else {
-    const saved = await Dial.readList(id, owner.id);
-    if (action === "edit-open") {
-      delegatedEdit = saved;
-      listsEditMode = true;
-      return paintListEdit();
-    }
-    if (action === "email") return emailDelegatedList(saved, owner);
-    if (action === "rename") {
-      const name = prompt("Name for this list", saved.name)?.trim();
-      if (!name || name === saved.name) return;
-      await Dial.updateSavedList(saved, { name }, owner.id);
-    }
-    if (action === "empty") {
-      if (!confirm(`Remove everyone from "${saved.name}"?`)) return;
-      await Dial.updateSavedList(saved, { items:[], cursor:0 }, owner.id);
-    }
-  }
-  await refreshDelegatedLists(workspace);
-  if (listWorkspace === workspace) paintListManager();
 }
 
 document.addEventListener("change", async event => {
@@ -3125,8 +3238,10 @@ document.addEventListener("change", async event => {
     const workspace = owner ? { owner, lists:await Dial.readLists(owner.id) } : null;
     if (listsBack !== dialog) return;
     listWorkspace = workspace;
-    listsEditMode = false;
-    delegatedEdit = null;
+    ++listSelectionRequest;
+    listDetail = null;
+    audiencePreview = null;
+    listDirectory = { query:"", type:"all", scroll:0, problem:"", loading:false };
     if (mapListFilter) { mapListFilter = null; redraw(); }
     paintListManager();
     refreshActiveFilters();
@@ -3137,49 +3252,61 @@ document.addEventListener("change", async event => {
   } finally { picker.disabled = false; }
 });
 
-function focusListDialog(selector){
-  if (!listsBack) return;
-  const target = listsBack.querySelector(selector ||
-    '[data-lists="audience-open"], [data-lists="flag-call"]:not([disabled]), .ask-name, [data-lists="close"]');
-  if (target) target.focus();
+function focusListDialog(selector = '[data-lists="close"]'){
+  listsBack?.querySelector(selector)?.focus({ preventScroll:true });
+}
+
+function mountListWorkspace(){
+  if (listsBack) return listsBack;
+  listsReturnFocus = document.activeElement;
+  listsBack = document.createElement("aside");
+  listsBack.id = "listsWorkspacePanel";
+  listsBack.className = "list-drawer";
+  listsBack.setAttribute("aria-label", "Lists workspace");
+  listsBack.addEventListener("keydown", event => {
+    if (event.key === "Escape" && !event.defaultPrevented && !event.target.closest("details[open]")) {
+      event.preventDefault();
+      closeListManager();
+    }
+  });
+  document.body.appendChild(listsBack);
+  document.getElementById("listsBtn").setAttribute("aria-expanded", "true");
+  return listsBack;
 }
 
 async function openListManager(){
   if (listsBack) return;
-  listsReturnFocus = document.activeElement;
-  listsBack = document.createElement("div");
-  listsBack.className = "ask-back";
-  document.body.appendChild(listsBack);
-  const onKey = (e) => {
-    if (e.key === "Escape") { e.preventDefault(); closeListManager(); return; }
-    if (e.key !== "Tab" || !listsBack) return;
-    const focusable = [...listsBack.querySelectorAll(
-      'button:not([disabled]),[href],input:not([disabled]),select:not([disabled]),textarea:not([disabled])')];
-    if (!focusable.length) return;
-    const first = focusable[0], last = focusable[focusable.length - 1];
-    if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
-    else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
-  };
-  document.addEventListener("keydown", onKey);
-  listsBack._onKey = onKey;
-  listsBack.addEventListener("click", (e) => {
-    if (e.target === listsBack) closeListManager();
-  });
+  const panel = mountListWorkspace();
+  listDirectory.loading = true;
   paintListManager();
-  // Refreshed rather than trusted: the counts in Dial.state.lists are summaries
-  // last fetched who-knows-when, and this screen exists to be believed.
+  focusListDialog(listDetail || audiencePreview ? 'h3' : '#listDirectorySearch');
   const results = await Promise.allSettled([Dial.loadLists(), loadDynamicAudiences(), Dial.listOwners()]);
+  if (listsBack !== panel) return;
   if (results[2].status === "fulfilled") {
     listOwners = results[2].value;
     if (listWorkspace && !listOwners.some(owner => owner.id === listWorkspace.owner.id)) {
       listWorkspace = null;
+      listDetail = null;
       mapListFilter = null;
       redraw();
     }
   }
-  if (listWorkspace) await refreshDelegatedLists(listWorkspace);
+  listDirectory.loading = false;
+  listDirectory.problem = results[0].status === "rejected" ? results[0].reason.message : "";
   audienceProblem = results[1].status === "rejected" ? results[1].reason.message : "";
-  paintListManager();
+  if (listWorkspace) {
+    try { await refreshDelegatedLists(listWorkspace); }
+    catch (error) {
+      listDirectory.problem = error.message;
+      listWorkspace.lists = [];
+      listDetail = null;
+    }
+  }
+  if (listsBack !== panel || listImport || listDetail || audiencePreview) return;
+  // Update the results without disturbing a search in progress.
+  const workspace = listsBack.querySelector("[data-list-owner-picker]");
+  if (workspace) workspace.innerHTML = listWorkspacePicker();
+  paintListDirectoryRows();
 }
 
 async function openAudienceFromLink(id){
@@ -3195,41 +3322,131 @@ async function openAudienceFromLink(id){
   } catch (error) { closeListManager(); showNotice(error.message || "That saved audience could not be opened."); }
 }
 
-function closeListManager(){
+function closeListManager(restoreFocus = true){
   if (!listsBack) return;
-  document.removeEventListener("keydown", listsBack._onKey);
+  captureListScroll();
+  ++listSelectionRequest;
   listsBack.remove();
   listsBack = null;
+  document.getElementById("listsBtn").setAttribute("aria-expanded", "false");
   const restore = listsReturnFocus;
   listsReturnFocus = null;
-  if (restore && restore.isConnected && typeof restore.focus === "function") restore.focus();
+  if (restoreFocus) (restore?.isConnected ? restore : document.getElementById("listsBtn"))
+    .focus({ preventScroll:true });
 }
 
-// Membership editing was missing on both sides: "Empty" was the only answer to
-// "this one person shouldn't be here", so a list with one bad entry got
-// abandoned rather than corrected.
+function captureListScroll(){
+  const rows = listsBack?.querySelector(".list-scroll");
+  if (rows) (listDetail || listDirectory).scroll = rows.scrollTop;
+}
+
+function paintListMemberRows(){
+  if (!listDetail || !listsBack) return;
+  const { items, query, order, selected, smart } = listDetail;
+  const key = query.toLowerCase().trim();
+  const rows = items.filter(item => !key || [item.name, item.firm, item.city, item.state]
+    .some(value => String(value || "").toLowerCase().includes(key)));
+  if (order === "name") rows.sort((a,b) => (a.name || "").localeCompare(b.name || ""));
+  if (order === "firm") rows.sort((a,b) => (a.firm || "").localeCompare(b.firm || "")
+    || (a.name || "").localeCompare(b.name || ""));
+  const body = listsBack.querySelector(".list-scroll");
+  body.innerHTML = rows.length ? `<ul class="lists-ul">${rows.map(it =>
+    `<li class="lists-row">
+      ${smart ? "" : `<input type="checkbox" data-list-member-select="${esc(it.crd)}"
+        aria-label="Select ${esc(it.name || it.crd)}"${selected.has(String(it.crd)) ? " checked" : ""}>`}
+      <button type="button" class="list-open" data-lists="member" data-id="${esc(it.crd)}">
+        <b>${esc(it.name || "Unnamed")}</b>
+        <small>${esc([it.firm, [it.city,it.state].filter(Boolean).join(", ")].filter(Boolean).join(" · "))}</small>
+      </button></li>`).join("")}</ul>`
+    : `<p class="lists-none">${items.length ? "No members match your search." : "This list has no members yet."}</p>`;
+  body.scrollTop = listDetail.scroll;
+  const select = listsBack.querySelector("[data-lists='select-members']");
+  if (select) {
+    select.disabled = !rows.length;
+    select.dataset.mode = rows.length && rows.every(item => selected.has(String(item.crd))) ? "none" : "all";
+    select.textContent = select.dataset.mode === "none" ? "Clear shown selection" : `Select ${rows.length} shown`;
+  }
+  paintListSelection();
+}
+
+function paintListSelection(){
+  const status = listsBack?.querySelector("[data-list-selection]");
+  if (!status || !listDetail) return;
+  const count = listDetail.selected.size;
+  status.textContent = count ? `${count.toLocaleString()} selected` : "";
+  const remove = listsBack.querySelector("[data-lists='remove-members']");
+  const use = listsBack.querySelector("[data-lists='use-selected']");
+  if (remove) {
+    remove.hidden = use.hidden = !count;
+    remove.textContent = `Remove ${count.toLocaleString()}`;
+  }
+}
+
 function paintListEdit(){
+  const d = listDetail;
+  if (!listsBack || !d) return;
+  const n = d.items.length;
+  const owner = listWorkspace?.owner;
+  const id = esc(d.id);
+  const disabled = n ? "" : " disabled";
+  listsBack.innerHTML = `<div class="ask lists lists-workspace" aria-labelledby="listsWorkspaceTitle">
+    <div class="list-toolbar">
+      <button type="button" class="ask-btn ghost" data-lists="edit-back">← Lists</button>
+      <button type="button" class="ask-btn ghost" data-lists="expand">${listExpanded ? "Dock" : "Expand"}</button>
+      <button type="button" class="ask-btn ghost" data-lists="close">Close</button>
+    </div>
+    <h3 id="listsWorkspaceTitle" tabindex="-1">${esc(d.name)}</h3>
+    <p class="list-meta">${owner ? `${esc(owner.email)} · ` : ""}${n.toLocaleString()} ${n === 1 ? "contact" : "contacts"}${d.smart ? " · Smart view" : ""}</p>
+    <div class="list-toolbar">
+      ${d.smart ? `<button type="button" class="ask-btn primary" data-lists="flag-call" data-kind="${esc(d.smart)}"${disabled}>Start calling</button>`
+        : !owner ? `<button type="button" class="ask-btn primary" data-lists="call" data-id="${id}"${disabled}>Start calling</button>` : ""}
+      <button type="button" class="ask-btn" data-lists="email" data-id="${id}"${disabled}>Prepare email</button>
+      <button type="button" class="ask-btn" data-lists="filter-map" data-id="${id}"${disabled}>View on map</button>
+      <button type="button" class="ask-btn" data-lists="export" data-id="${id}"${disabled}>Export CSV</button>
+      ${d.smart ? "" : `<details class="list-options"><summary class="ask-btn" aria-label="List actions">⋯</summary>
+        <div>
+          <button type="button" class="ask-btn" data-lists="rename" data-id="${id}">Rename</button>
+          <button type="button" class="ask-btn" data-lists="duplicate" data-id="${id}">Duplicate</button>
+          <button type="button" class="ask-btn" data-lists="empty" data-id="${id}"${disabled}>Clear contacts</button>
+          <button type="button" class="ask-btn grave" data-lists="drop" data-id="${id}">Delete list</button>
+        </div></details>`}
+    </div>
+    <div class="list-toolbar">
+      <input type="search" id="listMemberSearch" class="ask-name" value="${esc(d.query)}" placeholder="Search members" aria-label="Search members">
+      <select id="listMemberSort" class="ask-name" aria-label="Sort members">
+        <option value="saved">List order</option><option value="name"${d.order === "name" ? " selected" : ""}>Name</option>
+        <option value="firm"${d.order === "firm" ? " selected" : ""}>Firm</option>
+      </select>
+    </div>
+    ${d.smart ? "" : `<div class="list-toolbar list-selection"><button type="button" class="ask-btn ghost" data-lists="select-members"></button>
+      <span data-list-selection role="status"></span>
+      <button type="button" class="ask-btn" data-lists="use-selected" hidden>Use selected</button>
+      <button type="button" class="ask-btn grave" data-lists="remove-members" hidden></button></div>`}
+    <div class="list-scroll"></div>
+  </div>`;
+  paintListMemberRows();
+}
+
+async function selectSavedList(id){
   if (!listsBack) return;
-  const S = delegatedEdit && listWorkspace ? { listName:delegatedEdit.name, items:delegatedEdit.items } : Dial.state;
-  const items = S.items || [];
-  listsBack.innerHTML =
-    `<div class="ask lists" role="dialog" aria-modal="true" aria-label="Edit list">`
-    + `<h3>${esc(S.listName || "This list")}</h3>`
-    + `<p class="dial-menu-note">${items.length} ${items.length === 1 ? "person" : "people"}. `
-    + `Removing someone keeps their call history and does not add them to do-not-call.</p>`
-    + (items.length
-        ? `<ul class="lists-ul">${items.map((it) =>
-            `<li class="lists-row"><span class="lists-main"><b>${esc(it.name || "Unnamed")}</b>`
-            + `<small>${esc(it.firm || it.companyName || "")}</small></span>`
-            + `<span class="lists-acts">`
-            + (ActAddresses.isContactKey(it.crd) ? `<button type="button" data-lists="act-contact" data-id="${esc(it.crd)}">View contact</button>` : "")
-            + `<button type="button" class="ask-btn grave" `
-            + `data-lists="edit-drop" data-id="${esc(it.crd)}">Remove</button></span></li>`).join("")}</ul>`
-        : `<p>Nobody on this list yet.</p>`)
-    + `<p class="dial-menu-note">To add people, use the lasso or bulk add on the map.</p>`
-    + `<button type="button" class="ask-btn" data-lists="edit-back">Back to all lists</button>`
-    + `<button type="button" class="ask-btn ghost" data-lists="close">Close</button></div>`;
-  focusListDialog('[data-lists="edit-drop"], [data-lists="edit-back"]');
+  const request = ++listSelectionRequest;
+  const owner = listWorkspace?.owner;
+  captureListScroll();
+  const saved = await Dial.readList(id, owner?.id);
+  if (!listsBack || request !== listSelectionRequest || owner !== listWorkspace?.owner) return;
+  listDetail = { ...saved, query:"", order:"saved", selected:new Set(), scroll:0 };
+  audiencePreview = null;
+  paintListEdit();
+  focusListDialog("#listsWorkspaceTitle");
+}
+
+function updateListDetail(saved){
+  if (listDetail?.id !== saved.id) return;
+  captureListScroll();
+  const present = new Set(saved.items.map(item => String(item.crd)));
+  const selected = new Set([...listDetail.selected].filter(id => present.has(id)));
+  listDetail = { ...listDetail, ...saved, selected };
+  if (listsBack) paintListEdit();
 }
 
 /* Key contacts and due-diligence contacts, as two standing lists.
@@ -3278,28 +3495,6 @@ async function openFlagList(kind, { start = false } = {}){
   if (start) Dial.start();
   renderDialer();
   return true;
-}
-
-function flagListRows(){
-  const sets = Object.entries(ROLE_META).map(([kind, meta]) => [kind, meta.symbol, meta.label]);
-  return `<ul class="lists-ul">` + sets.map(([kind, icon, label]) => {
-    const people = flaggedAdvisors(kind);
-    const callable = people.filter(p => p.callable).length;
-    return `<li class="lists-row flag-list">
-      <span class="lists-main"><b>${icon} ${label}</b>
-        <small>Smart view &middot; ${people.length} ${people.length === 1 ? "person" : "people"}`
-      + `${people.length && callable !== people.length
-            ? ` &middot; ${callable} with a number` : ""}`
-      + `${people.length ? "" : " &middot; mark someone on their card"}</small></span>
-      <span class="lists-acts">
-        <button type="button" class="ask-btn primary" data-lists="flag-call"
-          data-kind="${kind}"${callable ? "" : " disabled"}>Call</button>
-        <button type="button" data-lists="flag-export" data-kind="${kind}"
-          ${people.length ? "" : "disabled"}>Export CSV</button>
-        <button type="button" data-lists="flag-show" data-kind="${kind}"
-          ${people.length ? "" : "disabled"}>Show</button>
-      </span></li>`;
-  }).join("") + `</ul>`;
 }
 
 function listImportPlan(){
@@ -3383,7 +3578,7 @@ function paintListImporter(){
       + ' people | ' + esc(territory) + '</span></li>';
   }
   listsBack.innerHTML =
-    '<div class="ask lists lists-workspace list-import-workspace" role="dialog" aria-modal="true" aria-label="Import email list">'
+    '<div class="ask lists lists-workspace list-import-workspace" aria-label="Import email list">'
     + '<div class="lists-title"><div><h3>Import email list</h3>'
     + '<p>Match email addresses to current app contacts, then review the territory lists before saving.</p></div>'
     + '<button type="button" class="ask-btn ghost" data-lists="import-back">Back to lists</button></div>'
@@ -3625,279 +3820,361 @@ async function saveListImport(){
   }
 }
 
+function paintListDirectoryRows(){
+  const host = listsBack?.querySelector(".list-directory-rows");
+  if (!host) return;
+  const entries = currentWorkspaceLists().filter(list => !standingKindOf(list.id)).map(list => ({
+    id:list.id, name:list.name, type:"list", action:"edit-open",
+    subtitle:`${list.count.toLocaleString()} ${list.count === 1 ? "contact" : "contacts"}${!listWorkspace && list.id === Dial.state.listId ? " · Call queue" : ""}`,
+  }));
+  if (!listWorkspace) {
+    for (const audience of dynamicAudiences)
+      entries.push({ id:audience.id, name:audience.name || "Untitled filter", type:"filter",
+        action:"audience-open", subtitle:audience.scopeLabel || audience.definition?.scope?.label || "" });
+    for (const [kind, meta] of Object.entries(ROLE_META)) {
+      const count = flaggedAdvisors(kind).length;
+      entries.push({ id:kind, name:meta.label, type:"smart", action:"smart-open",
+        subtitle:`${count.toLocaleString()} ${count === 1 ? "contact" : "contacts"}` });
+    }
+  }
+  const search = listDirectory.query.toLowerCase().trim();
+  const rows = entries.filter(entry => (listDirectory.type === "all" || entry.type === listDirectory.type)
+    && entry.name.toLowerCase().includes(search));
+  const labels = { list:"List", filter:"Saved filter", smart:"Smart view" };
+  host.innerHTML = (listDirectory.problem ? `<p class="lists-none" role="alert">${esc(listDirectory.problem)}
+    <button type="button" class="ask-btn" data-lists="retry">Retry</button></p>` : "")
+    + (!listWorkspace && audienceProblem && ["all", "filter"].includes(listDirectory.type) ?
+      `<p class="lists-none" role="alert">${esc(audienceProblem)}
+      <button type="button" class="ask-btn" data-lists="retry">Retry</button></p>` : "")
+    + (rows.length ? `<ul class="lists-ul">${rows.map(entry => `<li class="lists-row">
+      <button type="button" class="list-open" data-lists="${entry.action}" data-id="${esc(entry.id)}"><b>${esc(entry.name)}</b>
+        <small>${labels[entry.type]}${entry.subtitle ? ` · ${esc(entry.subtitle)}` : ""}</small></button>
+    </li>`).join("")}</ul>` : listDirectory.loading ? "" : `<p class="lists-none">${search
+      ? "No lists match your search." : "No lists in this view."}</p>`);
+  const status = listsBack.querySelector("[data-list-directory-status]");
+  if (status) status.textContent = listDirectory.loading ? "Loading lists…" : "";
+  host.scrollTop = listDirectory.scroll;
+}
+
 function paintListManager(){
   if (!listsBack) return;
+  listsBack.classList.toggle("expanded", listExpanded);
   if (listImport) return paintListImporter();
-  if (listsEditMode) return paintListEdit();
-  const ls = currentWorkspaceLists().filter(list => !standingKindOf(list.id));
-  listsBack.innerHTML =
-    `<div class="ask lists lists-workspace" role="dialog" aria-modal="true" aria-label="Lists and saved audiences">`
-    + `<div class="lists-title"><div><h3>Lists</h3><p>Save reusable rules, then create a frozen call list or prepare an email from reviewed contacts.</p>`
-    + `<p class="lists-email-capacity" data-email-capacity-status>Checking daily email capacity…</p></div>`
-    + `<button type="button" class="ask-btn ghost" data-lists="close">Close</button></div>`
-    + listWorkspacePicker()
-    + (listWorkspace ? '<p class="lists-section-note">Email uses your connected mailbox.</p>' : "")
-    + (!listWorkspace ? (`<section class="lists-section"><h4>Smart views</h4><p class="lists-section-note">Live views from labels you applied. Membership updates automatically.</p>`
-    /* The two standing lists.
-     *
-     * DERIVED, not stored: they are whoever currently carries the flag, so
-     * marking somebody a key contact puts them here and unmarking takes them
-     * out, with no list to maintain and nothing to fall out of step. That is
-     * also why they cannot be renamed, emptied or deleted -- there is no list
-     * object underneath, only the flags.
-     */
-    + flagListRows() + `</section>`
-    + `<section class="lists-section"><h4>Dynamic audiences</h4><p class="lists-section-note">Saved map rules. Preview current matches before preparing a channel-specific list.</p>${dynamicAudienceRows()}</section>`) : "")
-    + `<section class="lists-section"><h4>Static contact lists</h4><p class="lists-section-note">Frozen working lists used for calls or email, limited to 1,000 people per list.</p>`
-    + (!listWorkspace ? `<button type="button" class="ask-btn list-import-start" data-lists="import-open">Import email list</button>` : "")
-    + (ls.length
-        ? `<ul class="lists-ul">${ls.map(listRowActions).join("")}</ul>`
-        : `<p class="lists-none">No static contact lists of your own yet.</p>`)
-    + `<div class="lists-new">`
-    + `<input class="ask-name" type="text" placeholder="Name for a new list" `
-    + `value="${esc(defaultListName())}" aria-label="Name for a new list">`
-    + `<button type="button" class="ask-btn" data-lists="new">Create</button></div>`
-    + `<p class="dial-menu-note">Your call history is kept whatever you do here.</p></section></div>`;
-  window.dispatchEvent(new CustomEvent("emailcapacityrequest"));
-  focusListDialog();
+  if (audiencePreview) return paintAudiencePreview();
+  if (listDetail) return paintListEdit();
+  listsBack.innerHTML = `<div class="ask lists lists-workspace" aria-labelledby="listsWorkspaceTitle">
+    <div class="lists-title"><h3 id="listsWorkspaceTitle" tabindex="-1">Lists</h3>
+      <button type="button" class="ask-btn ghost" data-lists="close">Close</button></div>
+    <div data-list-owner-picker>${listWorkspacePicker()}</div>
+    <div class="list-toolbar">
+      <button type="button" class="ask-btn primary" data-lists="new">New list</button>
+      ${listWorkspace ? "" : `<button type="button" class="ask-btn" data-lists="import-open">Import emails</button>`}
+      <button type="button" class="ask-btn ghost" data-lists="expand">${listExpanded ? "Dock" : "Expand"}</button>
+    </div>
+    <div class="list-toolbar">
+      <input type="search" id="listDirectorySearch" class="ask-name" value="${esc(listDirectory.query)}" placeholder="Search lists" aria-label="Search lists">
+      ${listWorkspace ? "" : `<select id="listDirectoryType" class="ask-name" aria-label="List type">
+        ${[["all","All types"],["list","Lists"],["filter","Saved filters"],["smart","Smart views"]]
+          .map(([type,label]) => `<option value="${type}"${type === listDirectory.type ? " selected" : ""}>${label}</option>`).join("")}
+      </select>`}
+    </div>
+    <p class="list-load-status" data-list-directory-status role="status"></p>
+    <div class="list-scroll list-directory-rows"></div>
+  </div>`;
+  paintListDirectoryRows();
 }
+
+document.addEventListener("input", e => {
+  if (!listsBack?.contains(e.target)) return;
+  if (e.target.id === "listDirectorySearch") {
+    listDirectory.query = e.target.value;
+    listDirectory.scroll = 0;
+    paintListDirectoryRows();
+  } else if (e.target.id === "listMemberSearch" && listDetail) {
+    listDetail.query = e.target.value;
+    listDetail.scroll = 0;
+    paintListMemberRows();
+  }
+});
+
+document.addEventListener("change", e => {
+  if (!listsBack?.contains(e.target)) return;
+  if (e.target.id === "listDirectoryType") {
+    listDirectory.type = e.target.value;
+    listDirectory.scroll = 0;
+    paintListDirectoryRows();
+  } else if (e.target.id === "listMemberSort" && listDetail) {
+    listDetail.order = e.target.value;
+    listDetail.scroll = 0;
+    paintListMemberRows();
+  } else if (e.target.dataset.listMemberSelect && listDetail) {
+    const id = e.target.dataset.listMemberSelect;
+    if (e.target.checked) listDetail.selected.add(id);
+    else listDetail.selected.delete(id);
+    const boxes = [...listsBack.querySelectorAll("[data-list-member-select]")];
+    const toggle = listsBack.querySelector('[data-lists="select-members"]');
+    toggle.dataset.mode = boxes.every(box => box.checked) ? "none" : "all";
+    toggle.textContent = toggle.dataset.mode === "none" ? "Clear shown selection" : `Select ${boxes.length} shown`;
+    paintListSelection();
+  }
+});
 
 document.addEventListener("click", async e => {
   const b = e.target.closest("[data-lists]");
-  if (!b || !listsBack) return;
+  if (!b || !listsBack || b.disabled) return;
   const act = b.dataset.lists;
   const id = b.dataset.id;
   const l = currentWorkspaceLists().find(x => x.id === id);
+  const owner = listWorkspace?.owner;
+  const detail = listDetail;
+  b.disabled = true;
   try {
-    if (act === "close") { listsEditMode = false; return closeListManager(); }
-    if (act === "act-contact") {
-      await ActAddresses.openByKey(id);
+    if (act === "close") return closeListManager();
+    if (act === "retry") { closeListManager(); return await openListManager(); }
+    if (act === "expand") {
+      captureListScroll();
+      listExpanded = !listExpanded;
+      paintListManager();
+      return focusListDialog('[data-lists="expand"]');
+    }
+    if (act === "edit-back" || act === "audience-back") {
+      ++listSelectionRequest;
+      listDetail = null;
+      audiencePreview = null;
+      paintListManager();
+      return focusListDialog("#listDirectorySearch");
+    }
+    if (act === "edit-open" && l) return await selectSavedList(id);
+    if (act === "smart-open") {
+      ++listSelectionRequest;
+      captureListScroll();
+      const kind = id, meta = ROLE_META[kind];
+      if (!meta) return;
+      listDetail = { id:ROLE_LIST_IDS[kind], name:meta.label, smart:kind, items:flaggedAdvisors(kind),
+        query:"", order:"saved", selected:new Set(), scroll:0 };
+      paintListEdit();
+      return focusListDialog("#listsWorkspaceTitle");
+    }
+    if (act === "member" && detail) return await openListMember(id, detail);
+    if (act === "select-members" && detail) {
+      const select = b.dataset.mode === "all";
+      for (const box of listsBack.querySelectorAll("[data-list-member-select]")) {
+        const key = box.dataset.listMemberSelect;
+        if (select) detail.selected.add(key);
+        else detail.selected.delete(key);
+      }
+      captureListScroll();
+      return paintListMemberRows();
+    }
+    if (act === "use-selected" && detail?.selected.size) return await openMapListAction(detail.selected, "selected");
+    if (act === "remove-members" && detail?.selected.size) {
+      const removed = new Set(detail.selected);
+      if (!confirm(`Remove ${removed.size} of ${detail.items.length} contacts from "${detail.name}"${owner ? ` in ${owner.email}'s lists` : ""}?`)) return;
+      const anchor = detail.items[detail.cursor];
+      const items = detail.items.filter(item => !removed.has(String(item.crd)));
+      const anchored = anchor ? items.indexOf(anchor) : -1;
+      const removedBefore = detail.items.slice(0, detail.cursor).filter(item => removed.has(String(item.crd))).length;
+      const cursor = anchored < 0 ? Math.min(items.length, Math.max(0, (detail.cursor || 0) - removedBefore)) : anchored;
+      // Only the stored fields, plus the version read with this selection.
+      const saved = await Dial.updateSavedList(detail, { items, cursor }, owner?.id);
+      if (listDetail === detail) updateListDetail(saved);
+      if (owner && listWorkspace) await refreshDelegatedLists(listWorkspace);
       return;
     }
-    if (act === "filter-map" && l) {
-      b.disabled = true;
-      try { await filterMapByList(id, listWorkspace?.owner.id); }
-      finally { b.disabled = false; }
-      return;
-    }
+    if (act === "filter-map" && (l || detail?.smart))
+      return await filterMapByList(id, owner?.id, detail?.smart ? detail : null);
     if (act === "export") {
-      if (!l) return;
-      b.disabled = true;
-      try {
-        if (!await loadContacts()) throw new Error("Contact details could not be loaded. Retry the export.");
-        // Read the complete saved list without switching the active calling queue.
-        const saved = await Dial.readList(id, listWorkspace?.owner.id);
-        await ActAddresses.loadListContacts(saved.items || []);
-        exportContactList(saved.name || l.name, saved.items || []);
-      } finally { b.disabled = false; }
-      return;
-    }
-    if (act === "edit-back") {
-      listsEditMode = false;
-      delegatedEdit = null;
-      return paintListManager();
-    }
-    if (listWorkspace) {
-      b.disabled = true;
-      try { await manageDelegatedList(act, id, l, listWorkspace); }
-      finally { b.disabled = false; }
-      return;
-    }
-    if (act === "flag-export") {
+      if (!l && !detail?.smart) return;
       if (!await loadContacts()) throw new Error("Contact details could not be loaded. Retry the export.");
-      const kind = b.dataset.kind;
-      exportContactList((ROLE_META[kind] || ROLE_META.key).label,
-        flaggedAdvisors(kind).map(person => dialSnapshot(person.crd)));
+      const saved = detail?.smart ? detail : await Dial.readList(id, owner?.id);
+      await ActAddresses.loadListContacts(saved.items || []);
+      exportContactList(saved.name || l.name, saved.items || []);
       return;
     }
-    if (act === "import-open") {
+    if (act === "email" && (l || detail?.smart))
+      return await emailSavedList(detail?.smart ? { items:detail.items } : await Dial.readList(id, owner?.id), owner);
+    if (act === "call" && l && !owner) {
+      await dialReady;
+      if (Dial.state.problem) throw new Error(Dial.state.problem);
+      if (!await Dial.confirmCallSwitch(id)) return;
+      if (id !== Dial.state.listId) {
+        Dial.cancelAuto();
+        await Dial.openList(id, { resume:false });
+      }
+      Dial.start();
+      renderDialer();
+      return closeListManager(false);
+    }
+    if (act === "flag-call" && detail?.smart && !owner) {
+      await dialReady;
+      if (!await Dial.confirmCallSwitch()) return;
+      if (!await loadContacts()) throw new Error("Contact details could not be loaded.");
+      const items = detail.items.map(item => dialSnapshot(item.crd));
+      return await startListFromContacts(items, detail.name);
+    }
+    if (act === "new" || (act === "duplicate" && l)) {
+      const name = prompt(act === "new" ? "Name for the new list" : "Name for the copied list",
+        act === "new" ? defaultListName() : `${l.name.slice(0, 53)} Copy`)?.trim();
+      if (!name) return;
+      const items = act === "new" ? [] : (await Dial.readList(id, owner?.id)).items;
+      const saved = await Dial.saveNewList(name, items, owner?.id);
+      if (owner && listWorkspace) await refreshDelegatedLists(listWorkspace);
+      return await selectSavedList(saved.id);
+    }
+    if (l && ["rename","empty","drop"].includes(act)) {
+      const saved = await Dial.readList(id, owner?.id);
+      const where = owner ? ` in ${owner.email}'s lists` : "";
+      if (act === "rename") {
+        const name = prompt("Name for this list", saved.name)?.trim();
+        if (!name || name === saved.name) return;
+        updateListDetail(await Dial.updateSavedList(saved, { name }, owner?.id));
+      } else {
+        if (!confirm(`${act === "empty" ? "Clear all contacts from" : "Delete"} "${saved.name}"${where}? ${saved.items.length} contacts.`)) return;
+        if (act === "empty") {
+          if (!owner && Dial.state.listId === id) Dial.pause();
+          updateListDetail(await Dial.updateSavedList(saved, { items:[], cursor:0 }, owner?.id));
+        } else {
+          if (owner) await Dial.deleteSavedList(id, owner.id);
+          else {
+            if (Dial.state.listId === id) Dial.pause();
+            await Dial.deleteList(id);
+          }
+          listDetail = null;
+          paintListManager();
+        }
+      }
+      if (owner && listWorkspace) {
+        await refreshDelegatedLists(listWorkspace);
+        if (!listDetail) paintListManager();
+      }
+      renderDialer();
+      return;
+    }
+    if (owner) return;
+    if (act === "import-open" || act === "import-reset") {
+      captureListScroll();
       listImport = { name:"", split:true, ranked:false, role:"", created:new Set(), busy:false };
       paintListImporter(); return focusListDialog("#listImportFile");
     }
     if (act === "import-back") { listImport = null; return paintListManager(); }
-    if (act === "import-reset") {
-      listImport = { name:"", split:true, ranked:false, role:"", created:new Set(), busy:false };
-      paintListImporter(); return focusListDialog("#listImportFile");
-    }
-    if (act === "import-save") return saveListImport();
+    if (act === "import-save") return await saveListImport();
     if (act === "import-exceptions") return downloadListImportExceptions();
-    if (act === "audience-back") { audiencePreview = null; return paintListManager(); }
     if (act === "audience-open") {
+      captureListScroll();
+      const request = ++listSelectionRequest;
       const data = await audienceCall(`${AUDIENCE_API}?id=${encodeURIComponent(id)}`);
       const audience = data.audience || data;
+      if (!listsBack || request !== listSelectionRequest || listWorkspace) return;
       await applyAudienceDefinition(audience);
       await prepareAudiencePreviewData(audience);
+      if (!listsBack || request !== listSelectionRequest || listWorkspace) return;
       audiencePreview = currentAudiencePreview(audience);
       return paintAudiencePreview();
     }
+    if (act === "audience-map" && audiencePreview) {
+      await applyAudienceDefinition(audiencePreview.audience);
+      return closeListManager();
+    }
     if (act === "audience-drop") {
       const audience = dynamicAudiences.find(x => x.id === id);
-      if (!audience || !confirm(`Delete the dynamic audience "${audience.name}"?\n\nExisting call lists are not affected.`)) return;
+      if (!audience || !confirm(`Delete the saved filter "${audience.name}"?`)) return;
       await audienceCall(`${AUDIENCE_API}?id=${encodeURIComponent(id)}`, { method:"DELETE" });
-      await loadDynamicAudiences(); return paintListManager();
+      await loadDynamicAudiences();
+      audiencePreview = null;
+      return paintListManager();
     }
-    if (act === "audience-queue" || act === "audience-email") {
-      if (!audiencePreview) return;
-      const channel = act === "audience-email" ? "email" : "call";
+    if (["audience-save","audience-queue","audience-email"].includes(act) && audiencePreview) {
+      const channel = act === "audience-email" ? "email" : act === "audience-queue" ? "call" : "";
       const policy = audienceTerritoryPolicy(audiencePreview);
-      if (policy.kind === "unassigned") return showNotice("No sales territory is assigned to this account, so this snapshot cannot be created.");
-      if (policy.kind === "cross_territory" && !confirm("This snapshot may span sales territories. Review the advisor territory coverage above and coordinate with the assigned salespeople before outreach. Continue?")) return;
-      const eligible = policy.rows.filter(x => channel === "email" ? x.emailable : x.callable).map(x => x.item);
-      if (eligible.length > Dial.MAX_QUEUE) {
-        showNotice(`This audience has ${eligible.length.toLocaleString()} ${channel === "email" ? "emailable" : "callable"} people in the permitted snapshot scope; a static list holds ${Dial.MAX_QUEUE}. Refine the saved filters so contacts are not selected arbitrarily.`);
-        return;
-      }
-      const name = prompt(`Name this static ${channel === "email" ? "email" : "call"} list`, audiencePreview.audience.name) || "";
-      if (!name.trim()) return;
-      await Dial.createList(name.trim());
-      const result = await Dial.addMany(eligible, { phoneOnly:channel === "call" });
-      closeListManager(); renderDialer();
-      if (channel === "email") {
-        const openEmail = document.querySelector('[data-email="open-list"]');
-        if (!openEmail) return showNotice(`Created "${name.trim()}" with ${result.added.toLocaleString()} emailable people, but the email composer could not be opened.`);
-        openEmail.click();
-      } else showNotice(`Created "${name.trim()}" with ${result.added.toLocaleString()} callable people.`);
-      return;
-    }
-    /* "Edit who's on it" for a list that is NOT open.
-     *
-     * The list manager could rename, empty and delete any list but could only
-     * EDIT the open one -- that action lived solely in the dialer's own menu.
-     * So tidying a list you were not working meant opening it first, which
-     * moves the rep off the list they were actually calling.
-     *
-     * Opens it, edits, and the existing edit-back returns here.
-     */
-    if (act === "edit-open") {
-      if (!l) return;
-      if (l.id !== Dial.state.listId) await Dial.openList(l.id);
-      listsEditMode = true;
-      paintListEdit();
-      renderDialer();
-      return;
-    }
-    if (act === "edit-drop") {
-      // Dial.remove anchors on the person rather than the index, so taking
-      // someone out from above the cursor does not skip whoever is next.
-      await Dial.remove(id);
-      paintListEdit();
-      renderDialer();
-      return;
-    }
-    if (act === "new"){
-      const name = listsBack.querySelector(".ask-name").value.trim() || defaultListName();
-      await Dial.createList(name);
-      await Dial.loadLists();
-      paintListManager();
-      renderDialer();
-      return;
-    }
-    /* ABOVE the `if (!l) return` guard, and it must stay there.
-     *
-     * A flag row carries data-kind and NO data-id, so `l` is undefined and the
-     * guard swallowed the click: Call and Show did nothing at all, silently.
-     * The field view has the same handler and the same guard, and the comment
-     * there says exactly this -- it was written while fixing it, and this copy
-     * was never checked.
-     */
-    /* "Call" on a flag list builds a queue from the flags as they are RIGHT NOW.
-     *
-     * Deliberately a snapshot into an ordinary list rather than a live view: a
-     * call session that reordered itself because somebody starred a contact in
-     * another tab would lose the rep's place. The list is named for the flag, so
-     * it is obvious where it came from and safe to delete afterwards.
-     */
-    if (act === "flag-call" || act === "flag-show"){
-      const kind = b.dataset.kind;
-      const label = (ROLE_META[kind] || ROLE_META.key).label;
-      const everyone = flaggedAdvisors(kind);
-      /* SHOW does not need a phone number.
-       *
-       * The "nobody has a number" check used to run before this branch, so
-       * asking who is on the list was refused whenever none of them were
-       * callable -- which is the moment a rep most wants to look, because the
-       * list is not behaving as expected. Only CALL needs numbers. */
-      if (act === "flag-show"){
-        closeListManager();
-        showNotice(everyone.length
-          ? `${label}: ${everyone.map(p => p.name).join(", ")}`
-          : `You have not marked anybody as ${label.toLowerCase()} yet.`);
-        return;
-      }
-      if (!everyone.some(p => p.callable)) {
-        showNotice(`Nobody on ${label} has a number on file.`); return;
-      }
-      closeListManager();
-      try { await openFlagList(kind, { start: true }); }
-      catch (err) { showNotice(err.message || "That list could not be built."); }
-      return;
-    }
-    if (!l) return;
-    if (act === "call"){
-      // Open it AND start, which is the whole reason a rep comes here. Opening
-      // without starting would leave them looking at the same dock they were
-      // looking at before, wondering whether the click landed.
-      closeListManager();
-      await Dial.openList(id);
-      Dial.start();
-      renderDialer();
-      return;
-    }
-    if (act === "email") {
-      try {
-        closeListManager();
-        if (id !== Dial.state.listId) await Dial.openList(id);
-        renderDialer();
-        const openEmail = document.querySelector('[data-email="open-list"]');
-        if (!openEmail) {
-          showNotice(`Opened "${l.name}", but the email review could not be opened.`);
-          return;
-        }
-        openEmail.click();
-      } catch (error) {
-        showNotice(error.message || `The list "${l.name}" could not be opened for email review.`);
-      }
-      return;
-    }
-    if (act === "rename"){
-      const name = prompt("Name for this list", l.name);
-      if (!name || !name.trim() || name.trim() === l.name) return;
-      // renameList writes to whichever list is OPEN, so a rename of some other
-      // list has to open it first. Restored afterwards: a rep tidying up their
-      // lists has not asked to be moved off the one they were working.
-      const was = Dial.state.listId;
-      await Dial.openList(id);
-      await Dial.renameList(name.trim());
-      if (was !== id) await Dial.openList(was);
-      await Dial.loadLists();
-      paintListManager();
-      renderDialer();
-      return;
-    }
-    if (act === "empty"){
-      if (!confirm(`Remove all ${l.count} people from "${l.name}"?\n\n`
-                   + `The list stays; your call history is kept.`)) return;
-      const was = Dial.state.listId;
-      await Dial.openList(id);
-      await Dial.clear();
-      if (was !== id) await Dial.openList(was);
-      await Dial.loadLists();
-      paintListManager();
-      renderDialer();
-      return;
-    }
-    if (act === "drop"){
-      if (!confirm(`Delete the list "${l.name}"?\n\nYour call history is kept.`)) return;
-      await Dial.deleteList(id);
-      await Dial.loadLists();
-      paintListManager();
-      renderDialer();
-      return;
+      if (policy.kind === "unassigned") return showNotice("No sales territory is assigned to this account, so this list cannot be created.");
+      if (policy.kind === "cross_territory" && !confirm("This selection may span sales territories. Review the advisor territory coverage before outreach. Continue?")) return;
+      const eligible = policy.rows.filter(x => (!channel || (channel === "email" ? x.emailable : x.callable))
+        && !x.dnc && !x.item.unconfirmed).map(x => x.item);
+      if (eligible.length > Dial.MAX_QUEUE || !eligible.length)
+        return showNotice(`This selection has ${eligible.length.toLocaleString()} available contacts. A list needs 1 to ${Dial.MAX_QUEUE}. Refine the saved filters and try again.`);
+      const name = prompt("Name for the new list", audiencePreview.audience.name)?.trim();
+      if (!name) return;
+      const saved = await Dial.saveNewList(name, eligible);
+      if (channel === "email") return await emailSavedList(saved);
+      showNotice(`Saved ${saved.count.toLocaleString()} contacts to "${saved.name}".`);
+      return await selectSavedList(saved.id);
     }
   } catch (err) {
-    showNotice(err.message || "That could not be saved.");
+    showNotice(err.message || "That action could not be completed.");
+  } finally {
+    b.disabled = false;
   }
 });
+
+async function openListMember(id, detail){
+  const item = detail.items.find(member => String(member.crd) === id);
+  if (!item) return;
+  closeListManager(false);
+  if (ActAddresses.isContactKey(id)) {
+    try {
+      await ActAddresses.openByKey(id);
+      const dialog = document.querySelector("dialog.act-dialog[open]");
+      if (dialog) {
+        dialog.addEventListener("close", () => restoreListMember(id), { once:true });
+        return;
+      }
+    } finally {
+      if (!document.querySelector("dialog.act-dialog[open]")) restoreListMember(id);
+    }
+    return;
+  }
+  const feature = ALL.find(entry => String(entry.properties.id) === id);
+  listMemberReturn = id;
+  detailsHistory = [];
+  if (feature) {
+    openAdvisorDetails(feature, false);
+    detailsBack.focus();
+    return;
+  }
+  try {
+    if (await openAdvisorAnywhere(id, item.state || contactFor(id)?.cs)) {
+      detailsBack.focus();
+      return;
+    }
+  } catch (error) { showNotice(error.message || "The contact card could not be opened."); }
+  listMemberReturn = null;
+  restoreListMember(id);
+}
+
+function restoreListMember(id){
+  mountListWorkspace();
+  paintListManager();
+  const button = [...listsBack.querySelectorAll('[data-lists="member"]')].find(b => b.dataset.id === id);
+  (button || listsBack.querySelector('[data-lists="close"]'))?.focus({ preventScroll:true });
+}
+
+function returnFromListMember(){
+  if (!listMemberReturn) return false;
+  const id = listMemberReturn;
+  listMemberReturn = null;
+  closeDetails();
+  restoreListMember(id);
+  return true;
+}
+
+async function startListFromContacts(contacts, name){
+  if (Dial.state.problem) throw new Error(Dial.state.problem);
+  const items = contacts.filter(item => item.phone && !item.unconfirmed
+    && !Dial.isDnc(item.crd) && Dial.routeStatus(item).ok);
+  if (!items.length || items.length > Dial.MAX_QUEUE)
+    throw new Error(`This selection has ${items.length.toLocaleString()} callable contacts. A queue needs 1 to ${Dial.MAX_QUEUE}.`);
+  if (items.length < contacts.length && !confirm(`Start a queue for ${items.length} of ${contacts.length} contacts? `
+    + `${contacts.length - items.length} lack a current phone route or are suppressed.`)) return false;
+  Dial.cancelAuto();
+  const saved = await Dial.saveNewList(name, items);
+  await Dial.openList(saved.id, { resume:false });
+  Dial.start();
+  closeListManager(false);
+  renderDialer();
+  showNotice(`Opened "${saved.name}" with ${items.length.toLocaleString()} callable contacts.`
+    + (contacts.length > items.length ? ` ${contacts.length - items.length} need a current phone route or are suppressed.` : ""));
+  return true;
+}
 
 /* ---- preferences ---------------------------------------------------------
  * Short on purpose. Every row is something a rep sets ONCE and then benefits
@@ -5024,16 +5301,10 @@ async function bulkQueue(ids, what){
 }
 
 document.addEventListener("click", async e => {
-  const saveVisible = e.target.closest("#saveListInView");
-  if (saveVisible) {
-    saveVisible.disabled = true;
-    try { await saveListInView(); }
-    catch (error) { showNotice(error.message || "The visible contacts could not be saved."); }
-    finally { saveVisible.disabled = false; }
-    return;
-  }
-  if (e.target.closest("#queueVisible") || e.target.closest("#queueVisibleMobile")){
-    await bulkQueue(visibleAdvisorIds(), "in view");
+  const add = e.target.closest("#addMapToList, #queueVisibleMobile, #saveListInView");
+  if (add) {
+    try { await openMapListAction(undefined, add.id === "saveListInView" ? "inView" : ""); }
+    catch (error) { showNotice(error.message || "Could not open the map contact selection."); }
     return;
   }
   // Same list the drawer is showing, which is only correct because that list
@@ -5115,14 +5386,19 @@ document.addEventListener("click", async e => {
     renderDialer();
   } else if (act === "lists") {
     dialMenuOpen = false;
-    listsEditMode = false;
     renderDialer();
     await openListManager();
   } else if (act === "edit") {
     dialMenuOpen = false;
-    listsEditMode = true;
     renderDialer();
+    if (listWorkspace) {
+      listWorkspace = null;
+      listDetail = null;
+      if (mapListFilter?.ownerId) { mapListFilter = null; redraw(); }
+      refreshActiveFilters();
+    }
     await openListManager();
+    await selectSavedList(Dial.state.listId);
   } else if (act === "rename") {
     // Dial.state, not S. `S` is a local of renderDialer(), and reading it from
     // here threw a ReferenceError inside an async handler -- which rejects
@@ -5774,12 +6050,15 @@ function captureDetailMap(){
 }
 
 function syncDetailsHeader(){
-  detailsBack.hidden = !detailsHistory.length;
+  detailsBack.hidden = !detailsHistory.length && !listMemberReturn;
+  detailsBack.textContent = listMemberReturn ? "← List" : "← Back";
+  detailsBack.setAttribute("aria-label", listMemberReturn ? "Back to list" : "Back to previous details");
   detailsDrawer.hidden = false;
   map.closePopup();
 }
 
 function beginDetails(entry, push=true){
+  if (push && listsBack) closeListManager(false);
   if (push && detailsCurrent && detailKey(detailsCurrent) !== detailKey(entry))
     detailsHistory.push({ entry:detailsCurrent, map:captureDetailMap() });
   detailsCurrent = entry;
@@ -5848,7 +6127,9 @@ function closeDetails(){
   syncDetailHash(null);
 }
 
-detailsBack.addEventListener("click", goBackDetails);
+detailsBack.addEventListener("click", () => {
+  if (detailsHistory.length || !returnFromListMember()) goBackDetails();
+});
 
 function productNarrative(product){
   if (product === "sma_led") return "The reported asset mix suggests an equity SMA may be the more natural opening conversation.";
@@ -6711,14 +6992,7 @@ lassoControl.onAdd = () => {
   const div = L.DomUtil.create("div", "leaflet-bar lasso-control");
   div.innerHTML = `<button id="lassoBtn" type="button" title="Draw a geographic selection">Lasso</button>` +
     `<button id="clearLasso" type="button" title="Clear geographic selection" hidden>Clear</button>` +
-    // PHONE ONLY, and it sits here because this is the only chrome the map keeps
-    // at that width. The desktop button lives in the stats bar, and the stats
-    // bar is display:none under 760px -- so bulk queueing, the single fastest
-    // way to build a list, disappeared on the device most likely to want a list
-    // built quickly. Same handler, same "advisors in view" predicate; CSS
-    // decides which of the two is on screen so neither can drift.
-    `<button id="queueVisibleMobile" type="button" class="lasso-queue"
-       title="Add the advisors in view to the call list">&#43;&#9742;</button>`;
+    `<button id="queueVisibleMobile" type="button" class="lasso-queue">Add to list</button>`;
   L.DomEvent.disableClickPropagation(div);
   L.DomEvent.disableScrollPropagation(div);
   return div;
@@ -8667,10 +8941,14 @@ function refreshActiveFilters(){
   if (focusedAdvisorId) add(`Focused on ${focusedAdvisorLabel}`, "advisor");
   if (lassoPolygon) add("Map lasso", "lasso");
   if (mapListFilter) add(`List: ${mapListFilter.name}${scope === "US" ? " (choose an area)" : ""}`, "list");
-  document.getElementById("saveListInView").hidden = (!mapListFilter && !listWorkspace) || scope === "US";
+  const mapAdd = document.getElementById("addMapToList");
+  mapAdd.hidden = scope === "US" && !mapSelectedIds.size;
+  document.getElementById("queueVisibleMobile").hidden = mapAdd.hidden;
+  document.getElementById("saveListInView").hidden = !mapListFilter || scope === "US";
+  if (mapSelectedIds.size) add(`${mapSelectedIds.size} selected for a list`, "list-selected");
   document.getElementById("clearMapList").hidden = !mapListFilter;
   const listsButton = document.getElementById("listsBtn");
-  listsButton.textContent = listWorkspace ? `Lists ? ${listWorkspace.owner.email.split("@")[0]}` : "Lists";
+  listsButton.textContent = "Lists";
   listsButton.setAttribute("aria-label", listWorkspace ? `Lists for ${listWorkspace.owner.email}` : "Lists and saved audiences");
   if (raumActive())
     add(`Firm AUM ${[...aumSel].map(key => AUM_BANDS[key].label).join(", ")}`, "raum");
@@ -8742,7 +9020,8 @@ function resetAllFilters(){
 document.getElementById("resetAll").addEventListener("click", resetAllFilters);
 document.getElementById("clearMapList").addEventListener("click", () => { mapListFilter = null; redraw(); });
 document.getElementById("listsBtn").addEventListener("click", () => {
-  listsEditMode = false; audiencePreview = null;
+  if (listsBack) return closeListManager();
+  if (listMemberReturn) return returnFromListMember();
   openListManager().catch(error => showNotice(error.message || "Lists could not be opened."));
 });
 document.getElementById("saveAudience").addEventListener("click", saveCurrentAudience);
@@ -8751,6 +9030,7 @@ document.getElementById("activeFilters").addEventListener("click", e => {
   const key = button.dataset.clearFilter;
   if (key === "firms"){ selectedFirms = []; firmColor = {}; document.getElementById("clearFirms").hidden = true; }
   if (key === "advisor"){ focusedAdvisorId = null; focusedAdvisorLabel = ""; }
+  if (key === "list-selected") mapSelectedIds.clear();
   if (key === "lasso") clearLasso(false);
   if (key === "list") mapListFilter = null;
   if (key === "selects"){ selectsOnly = false; selectsBox.checked = false; selectsBox.closest(".switch").classList.remove("on"); }
@@ -10007,7 +10287,9 @@ document.addEventListener("click", e => {
     focusFirmNational(crd, false);
   }
 });
-document.getElementById("firmOverviewClose").addEventListener("click", () => closeFirmOverview());
+document.getElementById("firmOverviewClose").addEventListener("click", () => {
+  if (!returnFromListMember()) closeFirmOverview();
+});
 window.addEventListener("popstate", openFirmFromHash);
 window.addEventListener("hashchange", openFirmFromHash);
 // Arriving from the field view a second time only changes the hash -- no

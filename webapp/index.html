@@ -30,8 +30,8 @@
   <link rel="stylesheet" href="vendor/leaflet.css">
   <link rel="stylesheet" href="vendor/MarkerCluster.css">
   <link rel="stylesheet" href="vendor/MarkerCluster.Default.css">
-  <link rel="stylesheet" href="style.css?v=891365749d">
-  <link rel="stylesheet" href="email.css?v=891365749d">
+  <link rel="stylesheet" href="style.css?v=e094316ae5">
+  <link rel="stylesheet" href="email.css?v=e094316ae5">
 </head>
 <body>
   <div id="app">
@@ -55,6 +55,8 @@
           <button id="workQueueBtn" type="button" class="settings-btn"
                   title="Needs attention — follow-ups and email issues"
                   aria-label="Needs attention">&#9873;</button>
+          <button id="listsBtn" type="button" class="settings-btn lists-header-btn"
+                  aria-controls="listsWorkspacePanel" aria-expanded="false">Lists</button>
           <button type="button" class="settings-btn lists-header-btn" data-email="history"
                   title="Email history" aria-label="Email history">Email history</button>
           <button id="settingsBtn" type="button" class="settings-btn"
@@ -87,6 +89,7 @@
           <div class="filter-head">
             <span class="label">Active filters</span>
             <span class="filter-head-actions">
+              <button id="addMapToList" class="mini" type="button" hidden>Add to list</button>
               <button id="saveAudience" class="mini" type="button">save as audience</button>
               <button id="resetAll" class="mini" hidden>reset all</button>
             </span>
@@ -285,11 +288,6 @@
         <strong id="kpiAdvisors">&mdash;</strong>
         <button type="button" id="exportAdvisors" class="stat-export" title="Export advisors in view to Excel-compatible CSV"
                 aria-label="Export advisors in view to Excel-compatible CSV">CSV</button>
-        <!-- Bulk queueing shares the export's selection rule: the advisors passing the current filters inside the
-             viewport. One predicate, so the two can never disagree about what
-             "what I am looking at" means. -->
-        <button id="queueVisible" class="stat-export" title="Add the advisors in view to the call list"
-                aria-label="Add the advisors in view to the call list">&#43;&#9742;</button>
       </div>
       <div class="stat"><span class="stat-label">Offices</span><strong id="kpiOffices">&mdash;</strong></div>
       <div class="stat">
@@ -347,8 +345,7 @@
          until something is queued. -->
     <nav id="mapLists" aria-label="Map lists">
       <button type="button" id="clearMapList" class="ask-btn" hidden>Clear list filter</button>
-      <button type="button" id="saveListInView" class="ask-btn" hidden>Save visible as list</button>
-      <button id="listsBtn" type="button" class="ask-btn" aria-label="Lists and saved audiences">Lists</button>
+      <button type="button" id="saveListInView" class="ask-btn" hidden>Use contacts in view</button>
     </nav>
     <aside id="dialer" hidden aria-label="Call list">
       <div id="dialerBar"></div>
@@ -376,12 +373,12 @@
   <script src="vendor/leaflet-heat.js"></script>
   <!-- Shared with the field view: one definition of what a call outcome is,
        one queue, one do-not-call list. Loaded before app.js, which uses it. -->
-  <script src="dial.js?v=891365749d"></script>
-  <script src="training.js?v=891365749d"></script>
-  <script src="list_import.js?v=891365749d"></script>
-  <script src="asset-product-filters.js?v=891365749d"></script>
-  <script src="act-addresses.js?v=891365749d"></script>
-  <script src="app.js?v=891365749d"></script>
-  <script src="email.js?v=891365749d"></script>
+  <script src="dial.js?v=e094316ae5"></script>
+  <script src="training.js?v=e094316ae5"></script>
+  <script src="list_import.js?v=e094316ae5"></script>
+  <script src="asset-product-filters.js?v=e094316ae5"></script>
+  <script src="act-addresses.js?v=e094316ae5"></script>
+  <script src="app.js?v=e094316ae5"></script>
+  <script src="email.js?v=e094316ae5"></script>
 </body>
 </html>

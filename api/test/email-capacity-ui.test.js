@@ -109,10 +109,10 @@ test("capacity details stay in scrollable content and the sticky footer stays co
   assert.match(css, /\.email-list \.email-jump\{[^}]*overflow-y:auto;overflow-x:hidden/s);
 });
 
-test("desktop Lists shows one compact capacity line and Field inherits the shared emailer", () => {
-  assert.match(app, /data-email-capacity-status/);
-  assert.match(app, /emailcapacityrequest/);
-  assert.equal((app.match(/data-email-capacity-status/g) || []).length, 1);
+test("daily email capacity is shown inside preparation on desktop and Field", () => {
+  assert.match(email, /setupCapacityHtml\(\)/);
+  assert.match(email, /capacityPlanCardHtml\(/);
+  assert.doesNotMatch(app, /data-email-capacity-status/);
   assert.match(field, /<script src="email\.js\?/);
   assert.match(field, /<link rel="stylesheet" href="email\.css\?/);
   assert.doesNotMatch(field, /data-email-capacity-status/);

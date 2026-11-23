@@ -525,12 +525,36 @@ body{
   color:var(--muted); text-transform:uppercase; letter-spacing:.055em}
 .list-section-note{margin:4px 0 8px; color:var(--muted); font-size:11.5px}
 #listsClose{
-  position:absolute; top:10px; right:12px; width:34px; height:34px;
+  position:absolute; top:6px; right:8px; width:44px; height:44px;
   font-size:22px; line-height:1; color:var(--muted);
   background:transparent; border:0}
 /* The sheet scrolls, but a long membership list pushed the create/back
    controls below the fold. Give the list its own scroll region so the actions
    stay reachable. */
+
+.field-list-toolbar{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin:8px 0}
+.field-list-toolbar button,.field-list-toolbar select,#fieldMemberSearch,#fieldListsSearch,.field-list-options summary{
+  min-height:44px;padding:0 10px;border:1px solid var(--line);border-radius:8px;font:inherit;
+  background:var(--panel-2);color:var(--ink)}
+.field-list-toolbar input{flex:1;min-width:100px}
+#fieldMemberSearch{width:100%;box-sizing:border-box}
+.field-list-toolbar button:disabled{opacity:.5}
+.field-list-options{position:relative}
+.field-list-options summary{display:grid;place-items:center;cursor:pointer}
+.field-list-options summary::-webkit-details-marker{display:none}
+.field-list-options>div{position:absolute;right:0;top:100%;z-index:2;min-width:128px;display:grid;
+  padding:6px;margin:0;border:1px solid var(--line);border-radius:8px;background:var(--panel)}
+.field-list-open{display:block;flex:1;min-width:0;min-height:44px;padding:8px;border:0;
+  background:transparent;color:var(--ink);font:inherit;text-align:left;text-decoration:none;overflow-wrap:anywhere}
+.field-list-open small{display:block;margin-top:2px;color:var(--muted);font-size:12px}
+.field-list-open:focus-visible,.field-list-toolbar :focus-visible{outline:2px solid var(--accent)}
+.field-list-member{display:flex;align-items:center;gap:6px}
+.field-list-remove{min-height:44px;padding:0 8px;border:0;border-radius:8px;color:var(--warn);
+  background:var(--panel-2);font:inherit;font-size:12px}
+@media (max-width:600px){
+  #lists{inset:0;width:auto;max-height:none;border-radius:0}
+  #listsInner{padding-bottom:env(safe-area-inset-bottom)}
+}
 .lists-ul{list-style:none; margin:0; padding:0; max-height:56vh;
   overflow-y:auto; -webkit-overflow-scrolling:touch}
 .lists-row{
@@ -1011,3 +1035,14 @@ body{
   width:100%; box-sizing:border-box; margin:8px 0 0; padding:0 10px;
   height:var(--tap); border-radius:9px; border:1px solid var(--hair);
   background:var(--panel-2); color:var(--ink); font:inherit; font-size:16px}
+
+.queue-switch{box-sizing:border-box;width:min(400px,calc(100vw - 24px));border:1px solid var(--hair);
+  border-radius:12px;padding:16px;background:var(--panel);color:var(--ink);box-shadow:0 12px 32px #0006;font:inherit}
+.queue-switch::backdrop{background:#10182080}
+.queue-switch h3{margin:0}
+.queue-switch p{font-size:13px;color:var(--muted);overflow-wrap:anywhere}
+.queue-switch-actions{display:flex;flex-wrap:wrap;gap:8px}
+.queue-switch button{min-height:44px;padding:0 9px;border:1px solid var(--hair);border-radius:8px;
+  background:var(--panel-2);color:var(--ink);font:inherit;cursor:pointer}
+.queue-switch button[value="continue"]{border-color:var(--accent)}
+.queue-switch button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}

@@ -81,7 +81,7 @@ test("saved-list export reads the selected list without opening it, changing mem
   const calls = [], button = { dataset: { lists: "export", id: "rotation" } };
   const state = { listId: "currently-calling", cursor: 9, lists: [{ id: "rotation", name: "Rotation", count: 1 }] };
   const env = { document: { addEventListener: (_type, fn) => { listener = fn; } }, listsBack: {},
-    currentWorkspaceLists: () => state.lists, listWorkspace: null,
+    currentWorkspaceLists: () => state.lists, listWorkspace: null, listDetail: null,
     Dial: { state, readList: async (id, owner) => {
       calls.push({ id, owner });
       return { name: "Rotation", items: [{ crd: "1" }] };

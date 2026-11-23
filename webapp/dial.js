@@ -269,6 +269,7 @@
    * added to, or worked from two devices in the same afternoon.
    */
   const ACTIVE_KEY = "advisorMap.activeList.v1";
+  const sessionKey = () => `advisorMap.callSession.${state.user?.id || state.user?.name || ""}`;
 
   function workspaceQueue(ownerId, id) {
     const query = new URLSearchParams();
@@ -284,8 +285,13 @@
   const saveListDelegates = value => call(API.settings, { method:"PUT", body:JSON.stringify({ listDelegates:value }) })
     .then(data => data.listDelegates || "");
 
-  function updateSavedList(saved, patch, ownerId) {
-    return call(workspaceQueue(ownerId, saved.id), { method:"PUT", body:JSON.stringify({ ...saved, ...patch }) });
+  async function updateSavedList(saved, patch, ownerId) {
+    const { id, name, items, cursor, cycle, cycleStartedUtc, etag } = saved;
+    const q = await call(workspaceQueue(ownerId, id), {
+      method:"PUT", body:JSON.stringify({ id, name, items, cursor, cycle, cycleStartedUtc, etag, ...patch }),
+    });
+    syncSavedList(q, ownerId);
+    return q;
   }
 
   function deleteSavedList(id, ownerId) {
@@ -309,13 +315,16 @@
     return state.lists;
   }
 
-  // Falls back to the most recently touched list, which is what makes the
-  // phone pick up where the desk left off without storing a per-device
-  // preference anywhere.
+  // A live or paused session on this browser takes precedence over the
+  // account's starting list. Progress itself comes from the shared call log.
+  function savedSessionId() {
+    try { return state.user ? localStorage.getItem(sessionKey()) || "" : ""; }
+    catch { return ""; }
+  }
+
   function preferredListId() {
-    // The ACCOUNT's choice first, because that is the one the rep made on
-    // purpose. localStorage is second: it records where this device last was,
-    // which is the right answer only when nothing has been chosen deliberately.
+    const session = savedSessionId();
+    if (session && state.lists.some(l => l.id === session)) return session;
     const pinned = setting("defaultListId");
     if (pinned && state.lists.some((l) => l.id === pinned)) return pinned;
     let saved = "";
@@ -324,7 +333,7 @@
     return (state.lists[0] && state.lists[0].id) || state.defaultId;
   }
 
-  async function openList(id) {
+  async function openList(id, { resume = state.running } = {}) {
     /* A rep who switches lists while working is still working.
      *
      * running was cleared unconditionally here, which ENDED the session: the
@@ -340,8 +349,11 @@
      * This cannot dial anyone by surprise: auto-dial is armed only after an
      * outcome is logged (armAutoDial in each view), never by start().
      */
-    const wasRunning = state.running;
     const q = await call(`${API.queue}?id=${encodeURIComponent(id)}`);
+    if (q.id !== state.listId) {
+      cancelAuto();
+      try { if (state.user && savedSessionId() !== q.id) localStorage.removeItem(sessionKey()); } catch {}
+    }
     state.listId = q.id;
     state.listName = q.name;
     state.cycle = q.cycle || 1;
@@ -356,7 +368,7 @@
     await refreshProgress();
     // AFTER dropSuppressed(), so a session never resumes onto somebody who has
     // just been removed from the new list for being on do-not-call.
-    if (wasRunning) start();
+    if (resume) start();
     emit();
     return q;
   }
@@ -723,10 +735,7 @@
    * view. A missing/demoted record is explicitly non-dialable; a changed phone
    * replaces the old number before proof is renewed. save:false exists for
    * tests and batching -- reconcileRoutes writes the list once. */
-  async function reconcileRoute(crd, current, opts) {
-    const i = idx(crd);
-    if (i === -1) return { changed: false, status: { ok: false, reason: "missing" } };
-    const before = state.items[i];
+  function currentRoute(before, current) {
     let after;
     if (!current || String(current.crd) !== String(before.crd)) {
       after = { ...before, identityApproved: false, emailConfirmed: false,
@@ -757,6 +766,14 @@
         routeIssue: approved ? "" : "identity",
       };
     }
+    return after;
+  }
+
+  async function reconcileRoute(crd, current, opts) {
+    const i = idx(crd);
+    if (i === -1) return { changed: false, status: { ok: false, reason: "missing" } };
+    const before = state.items[i];
+    const after = currentRoute(before, current);
     const changed = JSON.stringify(before) !== JSON.stringify(after);
     if (changed) state.items[i] = after;
     if (changed && (!opts || opts.save !== false)) await save();
@@ -835,20 +852,54 @@
       ? { id, operation, item: value }
       : { id, operation, crd: String(value || "") };
     const q = await call(workspaceQueue(ownerId), { method: "PATCH", body: JSON.stringify(body) });
-    if (ownerId) return q;
+    syncSavedList(q, ownerId);
+    return q;
+  }
+
+  function syncSavedList(q, ownerId) {
+    if (ownerId) return;
     const summary = state.lists.find((l) => l.id === q.id);
     if (summary) {
-      summary.count = Number(q.count) || 0;
-      summary.updatedUtc = q.updatedUtc || summary.updatedUtc;
-      summary.etag = q.etag || summary.etag;
+      const { items, ...fields } = q;
+      Object.assign(summary, fields);
     }
     if (q.id === state.listId) {
+      state.listName = q.name || state.listName;
       state.items = Array.isArray(q.items) ? q.items : state.items;
       state.cursor = Math.max(0, Math.min(Number(q.cursor) || 0, state.items.length));
       state.etag = q.etag || state.etag;
+      const members = new Set(state.items.map(item => String(item.crd)));
+      for (const id of state.done.keys()) {
+        if (!members.has(id)) state.done.delete(id);
+      }
+      if (state.pending && state.pending.crd !== state.items[state.cursor]?.crd) cancelAuto();
     }
     emit();
-    return q;
+  }
+
+  function confirmCallSwitch(id) {
+    const inProgress = state.running || (state.done.size < state.items.length
+      && (state.done.size > 0 || savedSessionId() === state.listId));
+    if (id === state.listId || !inProgress) return Promise.resolve(true);
+    return new Promise(resolve => {
+      const dialog = document.createElement("dialog");
+      dialog.className = "queue-switch";
+      dialog.setAttribute("aria-labelledby", "queueSwitchTitle");
+      dialog.innerHTML = `<form method="dialog">
+        <h3 id="queueSwitchTitle">Switch call queues?</h3>
+        <p></p><div class="queue-switch-actions">
+          <button value="continue" autofocus>Continue current queue</button>
+          <button value="switch">Switch queue</button>
+        </div></form>`;
+      dialog.querySelector("p").textContent = `You can resume “${state.listName}” later from Lists.`;
+      dialog.addEventListener("close", () => {
+        const switchQueue = dialog.returnValue === "switch";
+        dialog.remove();
+        resolve(switchQueue);
+      }, { once:true });
+      document.body.appendChild(dialog);
+      dialog.showModal();
+    });
   }
 
   /* Replace a derived role list in one shared path for desk and phone.
@@ -949,6 +1000,7 @@
     if (next === -1) return false;        // everyone done; the UI offers a cycle
     state.cursor = next;
     state.running = true;
+    try { if (state.user) localStorage.setItem(sessionKey(), state.listId); } catch {}
     emit();
     return true;
   }
@@ -959,7 +1011,12 @@
   // rang seven seconds later anyway. A rep who explicitly stops must not place a
   // call -- that is the exact accident this feature has to be safe against.
   function pause() { cancelAuto(); state.running = false; emit(); }
-  function end() { cancelAuto(); state.running = false; emit(); }
+  function end() {
+    cancelAuto();
+    state.running = false;
+    try { if (state.user) localStorage.removeItem(sessionKey()); } catch {}
+    emit();
+  }
 
   const current = () => (state.running ? state.items[state.cursor] || null : null);
   const remaining = () => Math.max(0, state.items.length - state.cursor);
@@ -1598,8 +1655,8 @@ A do-not-call is firm-wide and permanent, and cannot be added `
       const i = listeners.indexOf(fn); if (i !== -1) listeners.splice(i, 1); }; },
     add, addMany, addToList, removeFromList, remove, clear, move, inQueue, isDnc, telHref,
     setContactRouteVersion, routeStatus, emailRouteStatus, setEmailPolicy,
-    tierCanEmail, emailTierKey, identityTierLabel, reconcileRoute, reconcileRoutes,
-    start, pause, end, current, remaining, advance, requeue, back, canBack,
+    tierCanEmail, emailTierKey, identityTierLabel, currentRoute, reconcileRoute, reconcileRoutes,
+    start, pause, end, current, remaining, advance, requeue, back, canBack, confirmCallSwitch,
     // What was recorded for this person on this pass, if anything. Drives the
     // "you logged X" line, so a correction is made knowingly.
     lastOutcome: (crd) => state.done.get(String(crd)) || null,

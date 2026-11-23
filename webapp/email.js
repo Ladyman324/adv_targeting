@@ -47,7 +47,6 @@
   let deliveryPlanLoading = false;
   let deliveryPlanTimer = null;
   let deliveryPlanSequence = 0;
-  let catalogLoadedAt = 0;
   let settingsInternalRecipients = null;
   global.addEventListener("beforeunload", (event) => {
     if (!approvalPending && !approvalPreparing && !approvalSubmitting) return;
@@ -203,22 +202,6 @@
     </section>`;
   }
 
-  function paintCapacityStatuses() {
-    const text = capacityStatusText();
-    for (const el of document.querySelectorAll("[data-email-capacity-status]")) {
-      el.textContent = capacityAvailable()
-        ? `Email capacity: ${text} · Resets at midnight Eastern.`
-        : `${text} Direct sending waits until it can be checked.`;
-      el.classList.toggle("bad", !capacityAvailable());
-    }
-  }
-
-  async function refreshCapacityStatus(force = false) {
-    try {
-      if (force || !catalog || Date.now() - catalogLoadedAt > 30000) await loadCatalog();
-      else paintCapacityStatuses();
-    } catch { paintCapacityStatuses(); }
-  }
 
   function dateFromPlanDay(day) {
     if (!day) return null;
@@ -728,8 +711,6 @@
 
   async function loadCatalog() {
     catalog = await api("catalog", null, "GET");
-    catalogLoadedAt = Date.now();
-    paintCapacityStatuses();
     if (global.Dial && catalog && catalog.recipientEligibility)
       global.Dial.setEmailPolicy(catalog.recipientEligibility);
     return catalog;
@@ -1585,7 +1566,7 @@
       if (!saved.override) input.min = saved[field];
       summary.textContent = saved.override ? `Using a custom ${label}` : `Using the normal ${label}`;
       status.textContent = isCap ? "Daily limit saved." : "Minimum sending gap saved.";
-      void refreshCapacityStatus(true);
+      void loadCatalog().catch(() => {});
     } catch (error) {
       status.classList.add("bad");
       status.textContent = error.message;
@@ -4764,10 +4745,9 @@ They stay on your call list and keep their history — this only takes them out 
    * harmless -- the file picker beside it still works, and the server validates
    * every document id regardless of what the client offered. */
   const documents = () => (catalog && catalog.documents) || [];
-  global.addEventListener("emailcapacityrequest", () => refreshCapacityStatus());
   global.EmailComposer = { open, openHistory, openAdmin, openFollowUp, openMailboxConnection,
                            openBatch: (id) => openBatchById(id, true), isAdmin, loadSettingsData,
-                           internalRecipients, documents, refreshCapacityStatus, mountSignatureSettings };
+                           internalRecipients, documents, mountSignatureSettings };
   global.DirectSendOps = { accept: acceptDirect, watch: watchDirect,
                            pending: pendingDirect, resume: resumeDirect };
   setTimeout(resumeDirect, 0);

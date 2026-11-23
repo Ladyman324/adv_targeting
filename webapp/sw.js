@@ -24,7 +24,7 @@
  * VERSION is rewritten by web_assets.py from a hash of the shell files, so a
  * deploy invalidates the cache. Never edit it by hand.
  */
-const VERSION = "19e57192e2";
+const VERSION = "1ff7332741";
 const CACHE = `field-shell-${VERSION}`;
 
 const SHELL = [

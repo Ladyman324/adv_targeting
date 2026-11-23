@@ -485,10 +485,13 @@ def _bulk_destination():
     src = (WEB / "app.js").read_text(encoding="utf-8")
     body = src.split("async function bulkQueue(", 1)[-1].split("\n}", 1)[0]
     guarded = "Dial.state.items.length" in body and "askDestination(" in body
-    # And every bulk path must go through that one function.
+    # Firm and location shortcuts still use the call-list safeguard. The
+    # map-wide picker captures a scope and requires an explicit queue switch.
     paths = len(re.findall(r"\bawait bulkQueue\(", src))
-    return (guarded and paths >= 3,
-            f"guarded={guarded}, {paths} bulk paths route through bulkQueue()")
+    picker = src.split("async function openMapListAction(", 1)[-1].split("\n}", 1)[0]
+    scoped = "groups[choice].slice()" in picker and "await Dial.confirmCallSwitch()" in picker
+    return (guarded and paths >= 2 and scoped,
+            f"guarded={guarded}, {paths} call-list shortcuts, scoped map selection={scoped}")
 
 
 # ---------------------------------------------------------------------------
