@@ -30,10 +30,29 @@
   <link rel="stylesheet" href="vendor/leaflet.css">
   <link rel="stylesheet" href="vendor/MarkerCluster.css">
   <link rel="stylesheet" href="vendor/MarkerCluster.Default.css">
-  <link rel="stylesheet" href="style.css?v=e094316ae5">
-  <link rel="stylesheet" href="email.css?v=e094316ae5">
+  <link rel="stylesheet" href="style.css?v=41181ea7e6">
+  <link rel="stylesheet" href="email.css?v=41181ea7e6">
 </head>
 <body>
+  <svg class="action-icon-library" width="0" height="0" aria-hidden="true" focusable="false">
+    <symbol id="icon-action-call" viewBox="0 0 24 24">
+      <path d="M22 16.9v3a2 2 0 0 1-2.2 2A18 18 0 0 1 2.1 4.2 2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7l.5 3a2 2 0 0 1-.6 2.1L7.7 10a14 14 0 0 0 6.3 6.3l1.2-1.3a2 2 0 0 1 2.1-.6l3 .5a2 2 0 0 1 1.7 2Z"/>
+    </symbol>
+    <symbol id="icon-action-email" viewBox="0 0 24 24">
+      <rect x="3" y="5" width="18" height="14" rx="2"/>
+      <path d="m4 7 8 6 8-6"/>
+    </symbol>
+    <symbol id="icon-action-map" viewBox="0 0 24 24">
+      <path d="M19 10c0 5-7 10-7 10S5 15 5 10a7 7 0 1 1 14 0Z"/>
+      <circle cx="12" cy="10" r="2.3"/>
+    </symbol>
+    <symbol id="icon-action-csv" viewBox="0 0 24 24">
+      <path d="M12 3v11m-4-4 4 4 4-4M4 15v4a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-4"/>
+    </symbol>
+    <symbol id="icon-action-add" viewBox="0 0 24 24">
+      <path d="M4 6h16M4 11h11M4 16h7m6-3v8m-4-4h8"/>
+    </symbol>
+  </svg>
   <div id="app">
     <aside id="panel">
       <header>
@@ -89,8 +108,6 @@
           <div class="filter-head">
             <span class="label">Active filters</span>
             <span class="filter-head-actions">
-              <button id="addMapToList" class="mini" type="button" hidden>Add to list</button>
-              <button id="saveAudience" class="mini" type="button">save as audience</button>
               <button id="resetAll" class="mini" hidden>reset all</button>
             </span>
           </div>
@@ -286,17 +303,13 @@
           </span>
         </span>
         <strong id="kpiAdvisors">&mdash;</strong>
-        <button type="button" id="exportAdvisors" class="stat-export" title="Export advisors in view to Excel-compatible CSV"
-                aria-label="Export advisors in view to Excel-compatible CSV">CSV</button>
       </div>
-      <div class="stat"><span class="stat-label">Offices</span><strong id="kpiOffices">&mdash;</strong></div>
-      <div class="stat">
-        <span class="stat-label">Firms</span>
-        <strong id="kpiFirms">&mdash;</strong>
-        <!-- Firm export remains hidden; exportFirms() remains in app.js
-        <button id="exportFirms" class="stat-export" ...>&#8623;</button> -->
+      <div class="stat-actions" role="group" aria-label="Map actions">
+        <button type="button" id="exportAdvisors" class="action-icon-btn" title="Download advisors in view"
+                aria-label="Download advisors in view as CSV"><svg aria-hidden="true"><use href="#icon-action-csv"/></svg>CSV</button>
+        <button type="button" id="addMapToList" class="action-icon-btn" aria-haspopup="dialog"><svg aria-hidden="true"><use href="#icon-action-add"/></svg>Add to List</button>
       </div>
-      <div class="stat">
+      <div class="stat stat-market-start">
         <span class="stat-label">AUM
           <span class="info-wrap">
             <button type="button" class="info-button" aria-label="How AUM, equities, and funds or ETFs are calculated">i</button>
@@ -347,7 +360,7 @@
       <button type="button" id="clearMapList" class="ask-btn" hidden>Clear list filter</button>
       <button type="button" id="saveListInView" class="ask-btn" hidden>Use contacts in view</button>
     </nav>
-    <aside id="dialer" hidden aria-label="Call list">
+    <aside id="dialer" hidden aria-label="Call queue">
       <div id="dialerBar"></div>
       <div id="dialerMenu" hidden></div>
       <div id="dialerQueue" hidden></div>
@@ -373,12 +386,12 @@
   <script src="vendor/leaflet-heat.js"></script>
   <!-- Shared with the field view: one definition of what a call outcome is,
        one queue, one do-not-call list. Loaded before app.js, which uses it. -->
-  <script src="dial.js?v=e094316ae5"></script>
-  <script src="training.js?v=e094316ae5"></script>
-  <script src="list_import.js?v=e094316ae5"></script>
-  <script src="asset-product-filters.js?v=e094316ae5"></script>
-  <script src="act-addresses.js?v=e094316ae5"></script>
-  <script src="app.js?v=e094316ae5"></script>
-  <script src="email.js?v=e094316ae5"></script>
+  <script src="dial.js?v=41181ea7e6"></script>
+  <script src="training.js?v=41181ea7e6"></script>
+  <script src="list_import.js?v=41181ea7e6"></script>
+  <script src="asset-product-filters.js?v=41181ea7e6"></script>
+  <script src="act-addresses.js?v=41181ea7e6"></script>
+  <script src="app.js?v=41181ea7e6"></script>
+  <script src="email.js?v=41181ea7e6"></script>
 </body>
 </html>

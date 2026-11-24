@@ -63,3 +63,26 @@ test("adding 24 contacts to a list with six already on it appends 18 in order", 
   assert.equal(result.items[0], existing[0]);
   assert.equal(result.items[6], proposed[6]);
 });
+
+test("dynamic lists require regional filter rules that can be reapplied", () => {
+  const context = { scope:"US", lassoPolygon:null, mapListFilter:null };
+  vm.createContext(context);
+  vm.runInContext(section("function dynamicAudienceIssue(", "async function saveDynamicList("), context);
+  assert.match(context.dynamicAudienceIssue(), /Choose a state or sales territory/);
+  context.scope = "GA";
+  assert.equal(context.dynamicAudienceIssue(), "");
+  context.lassoPolygon = [[33, -84]];
+  assert.match(context.dynamicAudienceIssue(), /Clear the lasso or list filter/);
+  context.lassoPolygon = null;
+  context.mapListFilter = { id:"list-1" };
+  assert.match(context.dynamicAudienceIssue(), /Clear the lasso or list filter/);
+});
+
+test("desktop summary offers one map export and the unified Add to List entry", () => {
+  const html = fs.readFileSync(path.join(__dirname, "../../webapp/index.html"), "utf8");
+  const summary = html.split('id="statsBar"')[1].split('id="mapLists"')[0];
+  assert.match(summary, /id="exportAdvisors"[^>]*[\s\S]*?href="#icon-action-csv"/);
+  assert.match(summary, /id="addMapToList"[^>]*[\s\S]*?href="#icon-action-add"/);
+  assert.doesNotMatch(summary, /id="kpiOffices"|id="kpiFirms"/);
+  assert.equal((html.match(/id="addMapToList"/g) || []).length, 1);
+});

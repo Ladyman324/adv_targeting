@@ -31,7 +31,7 @@ body{font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-se
 
 /* one source of truth for the sidebar width -- the stats strip and the details
    panel both position against it */
-:root{--panel-w:420px;--filter-control-w:216px}
+:root{--panel-w:420px;--filter-control-w:216px;--dialer-width:340px}
 #app{display:grid;grid-template-columns:var(--panel-w) 1fr;height:100vh;position:relative}
 #map{height:100vh;background:var(--panel-2)}
 .scope-loading{position:absolute;z-index:1240;top:64px;right:14px;
@@ -137,7 +137,6 @@ body.scope-pending #map{cursor:progress}
 .filter-state[hidden]{display:none}
 .filter-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:var(--space-tight)}
 .filter-head-actions{display:flex;align-items:center;gap:8px}
-#saveAudience{color:var(--accent);font-weight:650}
 .active-filters{display:flex;gap:var(--space-tight);flex-wrap:wrap;min-height:18px}
 .filter-chip{font:inherit;font-size:10.5px;color:var(--ink);background:var(--panel-2);
   border:1px solid var(--hair);border-radius:999px;padding:3px 7px;cursor:pointer}
@@ -436,10 +435,7 @@ body.scope-pending #map{cursor:progress}
 .lasso-control button:hover{background:var(--panel-2);color:var(--accent)}
 .lasso-control button.on{background:var(--accent);color:var(--accent-ink)}
 .lasso-control button[hidden]{display:none}
-/* Bulk add lives in the stats bar on a desktop, and the stats bar is hidden
-   under 760px -- so on a phone this is the ONLY way to queue what is on
-   screen. Hidden above that width rather than duplicated, so the two can never
-   be on screen at once saying the same thing twice. */
+/* Keep map list actions available when the desktop summary is hidden. */
 .lasso-queue{display:none!important}
 @media (max-width:760px){
   .lasso-queue{display:block!important; font-size:15px; letter-spacing:-.03em}
@@ -998,23 +994,29 @@ body.scope-pending #map{cursor:progress}
 /* Counts and allocated asset values share a banner but are different kinds of
    measures; a quiet divider makes that grouping explicit without adding a
    second floating panel. */
-.stat:nth-of-type(4){border-left:2px solid var(--muted);padding-left:18px}
+.stat-market-start{border-left:2px solid var(--muted);padding-left:18px}
 .stat-label{display:inline-flex;align-items:center;gap:3px;color:var(--muted);
   font-size:9.5px;font-weight:700;line-height:1;text-transform:uppercase;letter-spacing:.08em;
   white-space:nowrap}
 .stat strong{flex:0 0 auto;color:var(--ink);font-size:13px;font-weight:680;line-height:1.2;
   font-variant-numeric:tabular-nums;white-space:nowrap}
-/* Against the count it produces, so the number beside it is the row count. */
-.stat-export{font:inherit;font-size:13px;line-height:1;color:var(--muted);background:none;
-  border:0;padding:1px 3px;border-radius:5px;cursor:pointer}
-.stat-export:hover,.stat-export:focus-visible{color:var(--accent);background:var(--panel-2);outline:none}
+.stat-actions{display:flex;align-items:center;gap:5px}
+.action-icon-library{position:absolute;pointer-events:none}
+.action-icon-btn{display:inline-flex;align-items:center;justify-content:center;gap:5px;
+  padding:0 8px;height:28px;white-space:nowrap;border:1px solid var(--hair);border-radius:7px;
+  font:inherit;font-size:11.5px;font-weight:650;color:var(--ink);background:var(--panel-2);cursor:pointer}
+.action-icon-btn svg{width:14px;height:14px;flex:none;fill:none;stroke:currentColor;
+  stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+.action-icon-btn:hover:not(:disabled){color:var(--accent);border-color:var(--accent)}
+.action-icon-btn:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.action-icon-btn:disabled{opacity:.45;cursor:default}
 .stats-status{flex-basis:100%;margin:1px 0 0;font-size:10px;line-height:1.35;color:var(--muted)}
 .stats-status[hidden]{display:none}
 .stats-bar .info-popover{top:calc(100% + 6px)}
 
 @media (max-width:760px){
   .stats-bar{left:12px;right:12px;width:min(780px,calc(100% - 24px))}
-  .stat:nth-of-type(4){border-left:0;padding-left:0}
+  .stat-market-start{border-left:0;padding-left:0}
   .scope-loading{top:64px;right:10px;max-width:calc(100vw - 20px)}
 }
 
@@ -1038,7 +1040,7 @@ body.scope-pending #map{cursor:progress}
  * button you can reach to close it. */
 #dialer{
   position:fixed; left:calc(var(--panel-w) + 14px); bottom:14px; z-index:900;
-  width:340px; max-width:calc(100vw - var(--panel-w) - 28px);
+  width:var(--dialer-width); max-width:calc(100vw - var(--panel-w) - 28px);
   max-height:calc(100vh - 28px); overflow-y:auto; overscroll-behavior:contain;
   background:var(--panel); border:1px solid var(--hair); border-radius:14px;
   box-shadow:var(--shadow);
@@ -1067,16 +1069,17 @@ body.scope-pending #map{cursor:progress}
   background:var(--panel-2); border-bottom:1px solid var(--hair);
 }
 .dial-row{display:flex; align-items:center; gap:8px; min-width:0}
-/* The list name gets the top row to itself and the menu sits at its end. */
-.dial-row-top .dial-list{flex:1 1 auto}
+/* Keep the queue label, progress and list picker together in the dock. */
+.dial-queue-picker{display:grid;flex:1 1 auto;min-width:0;gap:4px}
+.dial-queue-label{display:flex;align-items:center;gap:6px;flex-wrap:wrap;font-size:11px}
+.dial-queue-picker .dial-list{width:100%;min-width:0}
+.dial-paused{font-size:10.5px;color:var(--warn);font-weight:650}
 .dial-row-top .dial-btn{margin-left:auto}
 /* Actions read left to right, with the primary last where the eye finishes. */
 .dial-row-actions{flex-wrap:wrap}
 .dial-row-actions .dial-btn.primary{margin-left:auto}
 /* The controls that must always be reachable never shrink. */
 #dialerBar .dial-btn{flex:0 0 auto}
-.dial-count{flex:0 1 auto; min-width:0; font-weight:650;
-  overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
 .dial-problem{flex:1; color:var(--warn,#e0a53a); font-weight:650;
   overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
 .dial-collapse{
@@ -1255,8 +1258,7 @@ body.scope-pending #map{cursor:progress}
   padding:0 4px; border-radius:7px; border:1px solid var(--hair);
   background:var(--panel); color:var(--ink);
 }
-.dial-count{flex:0 1 auto; min-width:0; font-size:12px; font-weight:650;
-  color:var(--muted); text-align:right; white-space:nowrap}
+.dial-count{color:var(--muted);white-space:nowrap}
 
 /* Back, and the prior outcome, in the dock. */
 .dial-sess-head{gap:8px}
@@ -1373,26 +1375,42 @@ body.scope-pending #map{cursor:progress}
 .map-list-action form>label{display:block;margin:10px 0;font-size:12px;color:var(--muted)}
 .map-list-action [hidden]{display:none}
 .map-list-action .list-toolbar{margin-top:10px}
-#queueVisibleMobile[hidden]{display:none}
+.map-list-action #mapListRules{margin-top:5px}
 .list-drawer{position:fixed;z-index:1350;top:62px;right:14px;bottom:76px;
   width:min(420px,calc(100vw - var(--panel-w) - 28px))}
 .list-drawer.expanded{width:min(850px,calc(100vw - var(--panel-w) - 28px))}
+@media (min-width:1224px){
+  body:has(#dialer:not([hidden])) .list-drawer.expanded{
+    width:min(850px,calc(100vw - var(--panel-w) - var(--dialer-width) - 42px))}
+}
+@media (min-width:761px) and (max-width:1223px){
+  body:has(.list-drawer) #dialer{max-height:min(220px,32vh)}
+  body:has(#dialer:not([hidden])) .list-drawer{bottom:calc(min(220px,32vh) + 28px)}
+}
 body:has(.list-drawer) #firmOverview{visibility:hidden}
 .list-drawer .ask.lists.lists-workspace{box-sizing:border-box;width:100%;height:100%;max-height:none;
   gap:8px;box-shadow:var(--shadow),inset 0 0 0 1px var(--hair)}
 .list-drawer .lists-title{margin:0;padding:0 0 6px;gap:10px;align-items:center}
+.list-drawer .ask.lists.list-member-workspace{overflow:visible}
+.list-member-title{display:flex;align-items:flex-start;gap:8px}
+.list-member-title>div{flex:1;min-width:0}
+.list-member-title h3{overflow-wrap:anywhere}
+.list-member-actions{gap:5px}
+.list-member-actions .action-icon-btn{height:30px}
+.list-member-actions .action-icon-btn.primary{background:var(--accent);color:var(--accent-ink);border-color:transparent}
 .list-drawer .list-meta{margin:0 0 2px}
 .list-toolbar{display:flex;align-items:center;flex-wrap:wrap;gap:6px}
 .list-toolbar .ask-btn,.list-drawer .lists-none .ask-btn{width:auto;margin:0}
 .list-toolbar .ask-name{width:auto;min-width:0;margin:0}
 .list-toolbar input[type=search]{flex:1 1 12ch}
-.list-options{position:relative}
-.list-options summary{display:grid;place-items:center;cursor:pointer}
+.list-options{position:relative;flex:none}
+.list-options summary{display:grid;place-items:center;cursor:pointer;width:30px;height:30px;margin:0;padding:0;
+  list-style:none;font-size:17px;line-height:1}
 .list-options summary::-webkit-details-marker{display:none}
-.list-options > div{position:absolute;right:0;top:100%;z-index:4;min-width:142px;
+.list-options > div{position:absolute;right:0;top:calc(100% + 5px);z-index:5;min-width:150px;
   display:grid;gap:4px;padding:5px;border:1px solid var(--hair);border-radius:8px;
-  background:var(--panel);box-shadow:var(--shadow)}
-.list-options .ask-btn{text-align:left}
+  background:var(--panel);box-shadow:var(--shadow);max-height:50vh;overflow:auto}
+.list-options .ask-btn{text-align:left;margin:0}
 .list-selection{min-height:34px}
 [data-list-selection]{font-size:12px;color:var(--muted)}
 .list-toolbar .ask-btn[hidden],.list-load-status:empty{display:none}
@@ -1401,9 +1419,19 @@ body:has(.list-drawer) #firmOverview{visibility:hidden}
 .list-open{appearance:none;background:none;border:0;border-radius:6px;flex:1;text-align:left;
   min-width:0;padding:9px 8px;font:inherit;color:var(--ink);cursor:pointer}
 .list-open:hover,.list-open:focus-visible{background:var(--panel-2);color:var(--accent)}
+.list-open[aria-current="true"]{background:color-mix(in srgb,var(--accent) 10%,var(--panel));
+  box-shadow:inset 2px 0 var(--accent)}
+.list-entry-title{display:flex;align-items:baseline;gap:5px 8px;flex-wrap:wrap}
+.list-entry-title>b{flex:1 1 auto;min-width:0}
+.list-usage{display:inline-flex;gap:4px;flex-wrap:wrap;white-space:nowrap}
+.list-usage>span{padding:2px 5px;border:1px solid var(--hair);border-radius:5px;
+  font-size:10px;line-height:1.1;font-weight:650;color:var(--muted)}
+.list-usage [data-list-on-map]{color:var(--accent)}
+.list-usage[hidden],.list-usage>span[hidden]{display:none}
 .list-open:focus-visible,.list-toolbar :focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
 .list-open b,.list-open small{display:block;overflow-wrap:anywhere}
-.list-open small{margin-top:2px;color:var(--muted);font-size:11.5px}
+.list-open b{font-size:12px;line-height:1.25}
+.list-open small{margin-top:2px;color:var(--muted);font-size:10.5px;line-height:1.3}
 .list-drawer .list-scroll input[type=checkbox]{margin:0 3px 0 7px;accent-color:var(--accent)}
 .list-drawer [data-list-owner-picker]:empty{display:none}
 .list-drawer .email-label{margin:0}
@@ -1411,7 +1439,7 @@ body:has(.list-drawer) #firmOverview{visibility:hidden}
 @media (max-width:760px){
   .list-drawer,.list-drawer.expanded{top:62px;right:0;left:0;bottom:0;width:100%}
   .list-drawer .ask.lists.lists-workspace{border-radius:12px 12px 0 0;padding:12px}
-  .list-toolbar .ask-btn,.list-open{min-height:44px}
+  .list-toolbar .ask-btn,.list-open,.list-member-actions .action-icon-btn{min-height:44px}
 }
 .lists-title{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;
   padding-bottom:12px;border-bottom:1px solid var(--hair)}

@@ -38,7 +38,7 @@ function setup(){
   vm.createContext(context);
   vm.runInContext(between('const assetProductToggle =','const ownerBox =')
     +between('function passesHasAssets(','function passesContinental(')
-    +between('function captureAudienceDefinition(','async function saveCurrentAudience(')
+    +between('function captureAudienceDefinition(','function dynamicAudienceIssue(')
     +between('async function applyAudienceDefinition(','function currentAudiencePreview(')
     +between('function captureAdvisorFilters(','function refill(')
     +between('function resetAllFilters(','document.getElementById("resetAll")')

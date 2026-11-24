@@ -90,3 +90,49 @@ test("the active work list and remaining contact survive reload with a different
   reloaded.end();
   assert.equal(reloaded.preferredListId(), "active");
 });
+
+test("a queue paused before the first completed contact is still in progress", async () => {
+  const storage = new Map();
+  const { Dial } = browserDial(storage);
+  await Dial.init();
+  Dial.state.done.clear();
+  assert.equal(Dial.queueInProgress(), false);
+  assert.equal(Dial.start(), true);
+  Dial.pause();
+  assert.equal(Dial.progress().done, 0);
+  assert.equal(Dial.queueInProgress(), true);
+  assert.equal(Dial.state.running, false);
+});
+
+test("map and call badges are independent and use the correct owner's list", () => {
+  const app = fs.readFileSync(path.join(__dirname, "../../webapp/app.js"), "utf8");
+  const code = app.slice(app.indexOf("function listUsage("), app.indexOf("function listUsageBadges("));
+  const context = {
+    listWorkspace:null, scope:"GA", mapListFilter:{ id:"map-list" },
+    Dial:{ state:{ listId:"queue-list" } },
+    ROLE_LIST_IDS:{ key:"role-key" },
+    standingKindOf:id => id === "role-key" ? "key" : "",
+  };
+  vm.createContext(context);
+  vm.runInContext(code, context);
+  const usage = (type, id) => JSON.parse(JSON.stringify(context.listUsage(type, id)));
+  assert.deepEqual(usage("list", "browsed-list"), { onMap:false, inQueue:false });
+  assert.deepEqual(usage("list", "map-list"), { onMap:true, inQueue:false });
+  assert.deepEqual(usage("list", "queue-list"), { onMap:false, inQueue:true });
+
+  context.mapListFilter = { id:"queue-list" };
+  assert.deepEqual(usage("list", "queue-list"), { onMap:true, inQueue:true });
+  context.listWorkspace = { owner:{ id:"other-rep" } };
+  assert.deepEqual(usage("list", "queue-list"), { onMap:false, inQueue:false });
+  context.mapListFilter.ownerId = "other-rep";
+  assert.deepEqual(usage("list", "queue-list"), { onMap:true, inQueue:false });
+  context.scope = "US";
+  assert.deepEqual(usage("list", "queue-list"), { onMap:false, inQueue:false });
+
+  context.listWorkspace = null;
+  context.scope = "GA";
+  context.Dial.state.listId = "role-key";
+  context.mapListFilter = { id:"role-key" };
+  assert.deepEqual(usage("smart", "key"), { onMap:true, inQueue:true });
+  assert.deepEqual(usage("filter", "role-key"), { onMap:false, inQueue:false });
+});

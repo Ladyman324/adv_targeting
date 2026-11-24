@@ -877,10 +877,13 @@
     emit();
   }
 
-  function confirmCallSwitch(id) {
-    const inProgress = state.running || (state.done.size < state.items.length
+  function queueInProgress() {
+    return state.running || (state.done.size < state.items.length
       && (state.done.size > 0 || savedSessionId() === state.listId));
-    if (id === state.listId || !inProgress) return Promise.resolve(true);
+  }
+
+  function confirmCallSwitch(id) {
+    if (id === state.listId || !queueInProgress()) return Promise.resolve(true);
     return new Promise(resolve => {
       const dialog = document.createElement("dialog");
       dialog.className = "queue-switch";
@@ -1656,7 +1659,7 @@ A do-not-call is firm-wide and permanent, and cannot be added `
     add, addMany, addToList, removeFromList, remove, clear, move, inQueue, isDnc, telHref,
     setContactRouteVersion, routeStatus, emailRouteStatus, setEmailPolicy,
     tierCanEmail, emailTierKey, identityTierLabel, currentRoute, reconcileRoute, reconcileRoutes,
-    start, pause, end, current, remaining, advance, requeue, back, canBack, confirmCallSwitch,
+    start, pause, end, current, remaining, advance, requeue, back, canBack, queueInProgress, confirmCallSwitch,
     // What was recorded for this person on this pass, if anything. Drives the
     // "you logged X" line, so a correction is made knowingly.
     lastOutcome: (crd) => state.done.get(String(crd)) || null,
