@@ -1814,14 +1814,14 @@ def _act_assets_national():
         problems.append("every account is marked shared, which cannot be right")
 
     # Labelled, not merely correct.
-    if 'id="eicScope"' not in html:
-        problems.append("the scope badge is gone; a national figure would sit unlabelled "
-                        "among viewport figures")
-    if "United States" not in body:
-        problems.append("renderEicNational no longer names the scope it is showing")
-    # And the badge must come OFF again when a viewport figure replaces it.
-    viewport = re.search(r"function renderEicAssets\(ids\)\{.*?const seen = new Set\(\);", app, re.S)
-    if not viewport or "eicScope" not in viewport.group(0):
+    scope_badge = re.search(r'<[^>]+\bid="eicScope"[^>]*>', html)
+    if not scope_badge or 'title="United States"' not in scope_badge.group():
+        problems.append("the national scope badge no longer identifies the United States")
+    if 'scope.textContent = "US"' not in body or "scope.hidden = false" not in body:
+        problems.append("renderEicNational no longer displays the national scope badge")
+    # The regional renderer must clear the badge before showing in-view totals.
+    viewport = re.search(r"function renderEicAssets\(ids\)\{.*?\n\}", app, re.S)
+    if not viewport or 'getElementById("eicScope").hidden = true' not in viewport.group():
         problems.append("renderEicAssets does not clear the badge, so a state figure "
                         "would keep the 'United States' label")
 
@@ -1940,11 +1940,15 @@ def _flag_lists_parity():
                         f"vs field {sorted(field_labels)}; openList resolves by name, so "
                         f"this makes two lists off one star")
 
-    # Both must actually offer the actions, not just define the strings.
-    for name, src in (("desk", desk), ("field", field)):
-        for action in ("flag-call", "flag-show"):
-            if action not in src:
-                problems.append(f"{name} has no {action} control")
+    # The Lists directory opens role-based Smart Views on both surfaces.
+    for name, src, action, variable in (
+        ("desk", desk, "smart-open", "act"),
+        ("field", field, "smart", "action"),
+    ):
+        if f'type:"smart", action:"{action}"' not in src or f'{variable} === "{action}"' not in src:
+            problems.append(f"{name} cannot open a role-based Smart View")
+        if "flag-call" not in src:
+            problems.append(f"{name} cannot call a role-based Smart View")
 
     # And the field view must not need a loaded tile to dial one, which is the
     # same defect the teammate picker had.
