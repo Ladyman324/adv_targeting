@@ -85,12 +85,12 @@ test("desktop summary offers one map export and the unified Add to List entry", 
   assert.match(summary, /id="addMapToList"[^>]*[\s\S]*?href="#icon-action-add"/);
   assert.ok(summary.indexOf('id="kpiAdvisors"') < summary.indexOf('id="addMapToList"'));
   assert.ok(summary.indexOf('id="addMapToList"') < summary.indexOf('id="exportAdvisors"'));
-  assert.match(summary, /Opportunity[\s\S]*?id="estimatedAum"[\s\S]*?id="eicAcv"[\s\S]*?id="eicLcv"[\s\S]*?id="eicMf"[\s\S]*?id="eicMidcap"/);
-  assert.doesNotMatch(summary, /id="kpiOffices"|id="kpiFirms"/);
+  assert.match(summary, /Relevant AUM[\s\S]*?id="estimatedAum"[\s\S]*?id="eicAcv"[\s\S]*?id="eicLcv"[\s\S]*?id="eicMf"[\s\S]*?id="eicMidcap"/);
+  assert.doesNotMatch(summary, /id="kpiOffices"|id="kpiFirms"|class="info-button"/);
   assert.equal((html.match(/id="addMapToList"/g) || []).length, 1);
 });
 
-test("Opportunity combines the unrounded product estimates and preserves their detail", () => {
+test("Relevant AUM combines the unrounded product estimates and preserves their detail", () => {
   const elements = { estimatedAum:{}, estimatedAumHelp:{} };
   const context = {
     document:{ getElementById:id => elements[id] },

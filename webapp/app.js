@@ -528,9 +528,8 @@ let activeInfoWrap = null;
 
 function positionFloatingInfo(){
   if (!activeInfoWrap || floatingInfo.hidden) return;
-  const button = activeInfoWrap.querySelector(".info-button, .switch");
-  if (!button) return;
-  const anchor = button.getBoundingClientRect();
+  const trigger = activeInfoWrap.querySelector(".info-button, .switch") || activeInfoWrap;
+  const anchor = trigger.getBoundingClientRect();
   const box = floatingInfo.getBoundingClientRect();
   const margin = 12, gap = 7;
   let left = Math.max(margin, Math.min(anchor.left, window.innerWidth - box.width - margin));
@@ -578,10 +577,10 @@ function hideFloatingInfo(){
 let infoSeq = 0;
 function linkInfoAria(wrap){
   const source = wrap.querySelector(".info-popover");
-  const button = wrap.querySelector(".info-button, .switch input");
-  if (!source || !button) return;
+  const trigger = wrap.querySelector(".info-button, .switch input") || wrap;
+  if (!source || trigger.tabIndex < 0) return;
   if (!source.id) source.id = `infoPopover${++infoSeq}`;
-  button.setAttribute("aria-describedby", source.id);
+  trigger.setAttribute("aria-describedby", source.id);
 }
 document.addEventListener("mouseover", e => {
   const wrap = e.target.closest?.(".info-wrap");
@@ -8278,7 +8277,7 @@ function renderEstimatedAum(estimate){
     ? "In the national view, each firm's pool is allocated by its share of firm-office advisor placements in the current viewport; the lightweight national layer does not carry advisor identities."
     : "In detailed views, each firm's pool is allocated by distinct mapped advisors in the current viewport divided by that firm's distinct mapped advisors nationally.";
   document.getElementById("estimatedAumHelp").textContent =
-    `Opportunity combines ${fmtMoney(estimate.equities)} in equities and ${fmtMoney(estimate.funds)} in funds or ETFs. Total regulatory AUM allocated to this view is ${fmtMoney(estimate.aum)}. ` +
+    `Relevant AUM combines ${fmtMoney(estimate.equities)} in equities and ${fmtMoney(estimate.funds)} in funds or ETFs. Total regulatory AUM allocated to this view is ${fmtMoney(estimate.aum)}. ` +
     `The product pools use ADV Item 5.K percentages applied to non-pooled regulatory AUM. Equities means exchange-traded equity securities. Funds/ETFs means securities issued by registered investment companies or BDCs. ` +
     `${geography} Allocations are capped at 100% and summed across firms. ` +
     `These are directional opportunity estimates—not actual product holdings—and discretionary share is not applied because the ADV does not cross-tab it by asset type. ` +
@@ -8360,8 +8359,8 @@ function refreshPanelNational(){
       : "Office detail is still loading.");
     document.getElementById("estimatedAum").textContent = "—";
     document.getElementById("estimatedAumHelp").textContent = NAT_DETAIL_ERROR
-      ? "Estimated national opportunity is unavailable because firm-office detail could not be loaded."
-      : "Estimated national opportunity will appear when firm-office detail finishes loading.";
+      ? "National Relevant AUM is unavailable because firm-office detail could not be loaded."
+      : "National Relevant AUM will appear when firm-office detail finishes loading.";
     // Never leave the regional viewport's EIC book under a national map.
     renderEicNational();
     FIRMS = [];

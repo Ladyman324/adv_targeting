@@ -985,40 +985,42 @@ body.scope-pending #map{cursor:progress}
 .stats-bar{--stats-right:14px;position:absolute;top:12px;left:calc(var(--panel-w) + 12px);right:var(--stats-right);
   z-index:1250;box-sizing:border-box;width:max-content;
   max-width:calc(100% - var(--panel-w) - 12px - var(--stats-right));margin-inline:auto;
-  display:grid;gap:6px;padding:6px 10px;border:1px solid var(--hair);border-radius:11px;
+  display:grid;gap:4px;padding:5px 16px;border:1px solid var(--hair);border-radius:11px;
   background:color-mix(in srgb,var(--panel) 94%,transparent);
   backdrop-filter:blur(6px);box-shadow:var(--shadow)}
-.stats-toolbar{display:flex;align-items:stretch;justify-content:center;flex-wrap:wrap;gap:6px 11px}
-.stats-primary,.stats-assets,.stats-strategies{display:flex;align-items:stretch;gap:10px}
-.stats-primary{flex:none}
-.stats-assets{border-left:1px solid var(--hair);padding-left:11px}
-.stats-strategies{gap:11px}
-.stats-toolbar .stat{display:grid;align-content:center;justify-items:center;gap:3px;min-width:0;text-align:center}
-.stat-label{display:inline-flex;align-items:center;gap:3px;color:var(--muted);
-  font-size:9.5px;font-weight:700;line-height:1;text-transform:uppercase;letter-spacing:.05em;white-space:nowrap}
-.stat strong{color:var(--ink);font-size:13px;font-weight:680;line-height:1.2;
-  font-variant-numeric:tabular-nums;white-space:nowrap}
-.stats-assets .stat-label{font-size:9px}
-.stats-assets .stat strong{font-size:11.5px}
-.stat-opportunity strong{font-weight:740}
-.stats-strategies .stat strong{color:color-mix(in srgb,var(--ink) 87%,var(--muted))}
-.stat-actions{display:flex;align-items:stretch;gap:5px}
-.stats-bar .action-icon-btn{height:auto;min-height:30px}
-@media (min-width:1530px){
+.stats-toolbar{display:grid;justify-items:center;gap:4px;min-width:0}
+.stats-primary,.stats-assets,.stats-strategies{display:flex;align-items:center;justify-content:center}
+.stats-primary{gap:16px}
+.stats-assets,.stats-strategies{flex-wrap:wrap;gap:4px 12px;max-width:100%}
+.stats-strategies{border-inline-start:1px solid color-mix(in srgb,var(--muted) 55%,transparent);padding-inline-start:12px}
+.stats-toolbar .stat{display:inline-flex;align-items:baseline;gap:5px;white-space:nowrap}
+.stats-toolbar .stat:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:2px}
+.stat-label{display:inline-flex;align-items:baseline;gap:3px;color:var(--muted);
+  font-size:10px;font-weight:700;line-height:1;text-transform:uppercase}
+.stat strong{color:var(--ink);font-size:12px;font-weight:740;line-height:16px;font-variant-numeric:tabular-nums}
+.stat-advisors strong{font-size:15px;line-height:18px}
+.stat-relevant strong{font-size:13px}
+.stat-actions{display:flex;align-items:center;gap:6px}
+.stats-bar .action-icon-btn{height:25px;padding:0 7px}
+@media (min-width:1420px){
   body:has(.list-drawer:not(.expanded)) #statsBar{--stats-right:calc(var(--list-drawer-width) + 26px)}
 }
-@media (min-width:1590px){
+@media (min-width:1480px){
   body:has(#firmOverview:not([hidden])):not(:has(.list-drawer)) #statsBar{
     --stats-right:calc(var(--firm-drawer-width) + 26px)}
 }
-@media (min-width:1960px){
+@media (min-width:1850px){
   body:has(.list-drawer.expanded) #statsBar{--stats-right:calc(var(--list-full-width) + 26px)}
 }
-@media (max-width:850px){
+@media (max-width:1024px){
   .stats-bar{padding-inline:8px}
-  .stats-assets,.stats-strategies{gap:5px}
-  .stats-assets{padding-left:5px}
-  .stats-assets .stat-label{font-size:8.5px;letter-spacing:.025em}
+  .stats-primary{gap:10px}
+  .stats-assets,.stats-strategies{column-gap:8px}
+  .stats-strategies{padding-inline-start:8px}
+}
+@media (max-width:850px){
+  .stats-strategies{display:contents}
+  .stat-relevant{border-inline-end:1px solid color-mix(in srgb,var(--muted) 55%,transparent);padding-inline-end:8px}
 }
 .action-icon-library{position:absolute;pointer-events:none}
 .action-icon-btn{display:inline-flex;align-items:center;justify-content:center;gap:5px;
@@ -1031,7 +1033,6 @@ body.scope-pending #map{cursor:progress}
 .action-icon-btn:disabled{opacity:.45;cursor:default}
 .stats-status{contain:inline-size;margin:1px 0 0;font-size:10px;line-height:1.35;color:var(--muted)}
 .stats-status[hidden]{display:none}
-.stats-bar .info-popover{top:calc(100% + 6px)}
 
 @media (max-width:760px){
   .scope-loading{top:64px;right:10px;max-width:calc(100vw - 20px)}
