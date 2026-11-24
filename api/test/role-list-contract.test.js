@@ -39,8 +39,10 @@ test("dynamic audiences distinguish personal ownership from advisor territory co
 });
 test("building rosters can sort by team and show job titles instead of registration badges", () => {
   assert.match(desk, /data-roster-sort="team"/);
-  assert.match(desk, /contactFor\(x\.properties\.id\)\?\.tn/);
-  assert.match(desk, /contact\.ti/);
+  const roster = desk.slice(desk.indexOf("function renderLocationAdvisor("), desk.indexOf("function loadRosterActStatuses("));
+  assert.match(roster, /const contact = contactFor\(p\.id\)/);
+  assert.match(roster, /team:String\(contact\.tn/);
+  assert.match(roster, /contact\.ti/);
   assert.doesNotMatch(desk, /const bits = \[\s*p\.d \? "Dually registered" : "RIA-only"/);
 });
 test("role projections have reserved ids and name aliases are migration-only", () => {

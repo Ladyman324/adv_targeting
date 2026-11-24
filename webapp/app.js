@@ -161,7 +161,7 @@ let callScope = "me";               // me | team: whose calls Last called reads
 // sources loads on its own, so a team view costs nothing until it is asked for.
 const newActivitySource = () => ({ rows:new Map(), state:"idle", promise:null }); // idle | loading | ready | failed
 const ACTIVITY = {
-  email:{ me:newActivitySource(), team:newActivitySource() },
+  email:{ me:{ ...newActivitySource(), replies:new Map() }, team:newActivitySource() },
   call:{ me:newActivitySource(), team:newActivitySource() },
 };
 const activityScope = kind => kind === 'email' ? emailScope : callScope;
@@ -835,13 +835,14 @@ function barronsTitle(entry){
 
 // The compact badge used on rosters and lists, where vertical space is scarce
 // and the point is only that this person is worth a call.
-function barronsTag(advisorId){
+function barronsTag(advisorId, compact=false){
   const hits = barronsFor(advisorId);
   if (!hits.length) return "";
   const best = hits[0];
   const more = hits.length > 1 ? ` +${hits.length - 1}` : "";
-  const tip = hits.map(barronsTitle).join(" · ");
-  return `<span class="rbar" title="${esc(tip)}">BARRON'S ${esc(barronsRankText(best))}${best.year ? ` (${esc(best.year)})` : ""}${more}</span>`;
+  const tip = hits.map(hit => `${barronsTitle(hit)} · ${barronsRankText(hit)}`).join(" · ");
+  const label = compact ? (best.rank ? `#${best.rank}` : "") : barronsRankText(best);
+  return `<span class="rbar" title="${esc(tip)}">BARRON'S${label ? ` ${esc(label)}` : ""}${!compact && best.year ? ` (${esc(best.year)})` : ""}${compact ? "" : more}</span>`;
 }
 
 // ---- Forbes rankings ----
@@ -880,7 +881,7 @@ function forbesBest(hits){
     (b.confirmed - a.confirmed) || (a.rank - b.rank))[0];
 }
 
-function forbesTag(advisorId){
+function forbesTag(advisorId, compact=false){
   const hits = forbesFor(advisorId);
   if (!hits.length) return "";
   const best = forbesBest(hits);
@@ -888,9 +889,10 @@ function forbesTag(advisorId){
   // "≈" is not decoration: it marks an inferred match, and it carries the
   // distinction without relying on colour alone.
   const mark = best.confirmed ? "" : "≈";
-  const tip = hits.map(h => `${h.full}${h.confirmed ? "" : " (matched on name, firm and location)"}`).join(" · ");
+  const tip = hits.map(h => `${h.full}${h.rank ? ` · #${h.rank}` : ""}${h.year ? ` (${h.year})` : ""}${h.confirmed ? "" : " (matched on name, firm and location)"}`).join(" · ");
+  const label = compact ? (best.rank ? `#${best.rank}` : "") : best.label;
   return `<span class="rfor${best.confirmed ? "" : " rfor-inferred"}" title="${esc(tip)}">` +
-         `${mark}FORBES ${esc(best.label)}${best.year ? ` (${esc(best.year)})` : ""}${more}</span>`;
+         `${mark}FORBES${label ? ` ${esc(label)}` : ""}${!compact && best.year ? ` (${esc(best.year)})` : ""}${compact ? "" : more}</span>`;
 }
 
 /* ---- contact details ------------------------------------------------------
@@ -1048,9 +1050,9 @@ function contactFor(advisorId){
  * more often than SEC geography, is private to the signed-in rep, and must not
  * make the national map wait. Each endpoint returns one CRD/timestamp pair,
  * never message text, call notes, or raw event history. */
-function fillActivityMap(target, payload){
+function fillActivityMap(target, entries){
   target.clear();
-  for (const row of (payload && payload.entries) || []) {
+  for (const row of entries || []) {
     const crd = String(row && row[0] || "");
     const at = Date.parse(String(row && row[1] || ""));
     if (crd && Number.isFinite(at)) target.set(crd, at);
@@ -1079,7 +1081,11 @@ function loadActivitySource(kind, which, signal=null){
       if (!response.ok) throw new Error(`${response.status}`);
       return response.json();
     })
-    .then(payload => { fillActivityMap(source.rows, payload); source.state = "ready"; })
+    .then(payload => {
+      fillActivityMap(source.rows, payload.entries);
+      if (source.replies) fillActivityMap(source.replies, payload.replyEntries);
+      source.state = "ready";
+    })
     .catch(error => {
       if (error && error.name === "AbortError") { source.state = "idle"; throw error; }
       source.state = "failed";
@@ -1511,7 +1517,12 @@ function openPersonActions(trigger){
 
 document.addEventListener("keydown", (event) => {
   if (!personActionBack) return;
-  if (event.key === "Escape") return closePersonActions();
+  if (event.key === "Escape") {
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    closePersonActions();
+    return;
+  }
   if (event.key !== "Tab") return;
   const focusable = [...personActionBack.querySelectorAll(
     'button:not([disabled]),[href],input:not([disabled]),select:not([disabled]),textarea:not([disabled])')];
@@ -2028,15 +2039,16 @@ function contactMarks(advisorId){
     assets: SUPPORT.act === "ready" && !!bookFor(advisorId),
   };
 }
-function contactDots(advisorId){
+function contactDots(advisorId, includeOwner=true){
   const m = contactMarks(advisorId);
-  if (!m.reach && !m.owned && !m.assets) return "";
+  const owned = includeOwner && m.owned;
+  if (!m.reach && !owned && !m.assets) return "";
   const bits = [];
   // Glyphs, not colour alone -- these have to survive a colourblind reader and
   // a 6px dot on a busy basemap.
   if (m.reach) bits.push(`<span class="pin-dot pin-dot-reach" title="${m.reach === 2
       ? "Email and phone on file" : "One contact method on file"}">${m.reach === 2 ? "●" : "◐"}</span>`);
-  if (m.owned) bits.push(`<span class="pin-dot pin-dot-owned" title="Existing EIC relationship">◆</span>`);
+  if (owned) bits.push(`<span class="pin-dot pin-dot-owned" title="Existing EIC relationship">◆</span>`);
   if (m.assets) bits.push(`<span class="pin-dot pin-dot-assets" title="Asset figure on file">$</span>`);
   return `<span class="pin-dots">${bits.join("")}</span>`;
 }
@@ -6161,7 +6173,7 @@ function detailKey(entry){
   if (!entry) return "";
   if (entry.type === "firm") return `firm:${entry.crd}`;
   if (entry.type === "advisor") return `advisor:${entry.feature.properties.id}:${addrKey(entry.feature.properties)}`;
-  if (entry.type === "location") return `location:${entry.location.lat}:${entry.location.lon}:${entry.location.addr}`;
+  if (entry.type === "location") return `location:${entry.location.lat}:${entry.location.lon}:${entry.location.addr}:${entry.onlyFirm || ""}`;
   if (entry.type === "national-location") return `national:${entry.office[0]}:${entry.office[1]}:${natFirmCrd(entry.office)}`;
   return entry.type;
 }
@@ -6186,7 +6198,10 @@ function beginDetails(entry, push=true){
   if (push && listsBack) closeListManager(false);
   if (push && detailsCurrent && detailKey(detailsCurrent) !== detailKey(entry))
     detailsHistory.push({ entry:detailsCurrent, map:captureDetailMap() });
+  const body = document.getElementById("firmOverviewBody");
+  if (detailsCurrent?.roster) detailsCurrent.roster.scroll = body.scrollTop;
   detailsCurrent = entry;
+  detailsDrawer.dataset.detailsType = entry.type;
   /* A new subject starts at the top of the panel.
    *
    * The body keeps its scroll position across a re-render, which is right when
@@ -6199,8 +6214,7 @@ function beginDetails(entry, push=true){
    * through this function, and the next one added would otherwise inherit the
    * same bug.
    */
-  const body = document.getElementById("firmOverviewBody");
-  if (body) body.scrollTop = 0;
+  body.scrollTop = 0;
   syncDetailsHeader();
 }
 
@@ -6216,7 +6230,7 @@ async function renderDetailEntry(entry, push=false){
   if (!entry) return;
   if (entry.type === "firm") return openFirmOverview(entry.crd, false, push);
   if (entry.type === "advisor") return openAdvisorDetails(entry.feature, push);
-  if (entry.type === "location") return openRoster(entry.location, push);
+  if (entry.type === "location") return openRoster(entry.location, push, entry.onlyFirm, entry.roster);
   if (entry.type === "national-location") return openNationalLocation(entry.office, push);
 }
 
@@ -6744,6 +6758,7 @@ function redraw(fit){
   clearUnreachableActivitySelections();
   if (scope === "US") renderNational(fit); else renderMarkers(fit);
   refreshPanel();
+  refreshLocationRoster();
 }
 
 /* Turning a filter ON used to fly the map to the full extent of everything it
@@ -9845,14 +9860,13 @@ function flyTo(f){
 }
 
 // ---- address roster ----
-// every advisor filed at one address, grouped by firm. Shows the whole building
-// even when filters are narrowing the map, with a note on how many still match.
+// Keep the whole building visible while the map narrows to a subset.
 // features backing the rendered rows, in render order, so a row click can find
 // its advisor -- indices are rebuilt on every openRoster
 let rosterRows = [];
-let rosterSort = "name";
-let rosterLocation = null;
-let rosterOnlyFirm = null;
+const rosterCollation = new Intl.Collator(undefined, { sensitivity:"base", numeric:true });
+const rosterDate = new Intl.DateTimeFormat(undefined, { dateStyle:"medium" });
+const rosterSearchKey = value => String(value || "").normalize("NFD").replace(/\p{M}/gu, "").toLowerCase();
 
 function rosterBtn(a, label){
   return `<button class="rbtn" data-a="${a.i}"${a.bldg ? ' data-bldg="1"' : ""}>${esc(label)}</button>`;
@@ -9867,131 +9881,271 @@ function bldgForAddr(a, street){
   return (b && b.ids.size > a.ids.size) ? b : null;
 }
 
-// onlyFirm scopes the roster to one firm at this building -- what a firm spoke
-// means when you click it. The building's other firms stay one click away.
-function openRoster(a, detailPush=true, onlyFirm=null){
-  if (!a) return;
-  beginDetails({ type:"location", location:a }, detailPush);
-  openFirmCrd = null;
-  rosterRows = [];
-  rosterLocation = a;
-  rosterOnlyFirm = onlyFirm;
-  const seen = new Map();                       // one row per advisor, not per pin
-  a.feats.forEach(f => {
-    if (onlyFirm && String(f.properties.fc) !== String(onlyFirm)) return;
-    if (!seen.has(f.properties.id)) seen.set(f.properties.id, f);
-  });
-  const rows = [...seen.values()];
-  const allFirms = new Set(a.feats.map(f => String(f.properties.fc)));
-  const matching = rows.filter(f => passesFilters(f.properties)).length;
+// Match order is computed separately from the location's navigation and filters.
+function locationRosterSections(rows, sort, prioritize){
+  const byName = (a, b) => rosterCollation.compare(a.name, b.name);
+  if (sort !== "team"){
+    const ordered = rows.slice().sort(byName);
+    if (!prioritize) return [{ groups:[{ rows:ordered }] }];
+    return [
+      { heading:"Matching filters", groups:[{ rows:ordered.filter(row => row.matching) }] },
+      { heading:"Other advisors", groups:[{ rows:ordered.filter(row => !row.matching) }] },
+    ];
+  }
 
-  const byFirm = {};
-  rows.forEach(f => {
-    const p = f.properties;
-    (byFirm[p.fc] ||= { crd:p.fc, name:p.f, rows:[] }).rows.push(f);
-  });
-  const groups = Object.values(byFirm).sort((x, y) => y.rows.length - x.rows.length);
-
-  const head = [
-    `${rows.length.toLocaleString()} advisor${rows.length === 1 ? "" : "s"}`,
-    `${groups.length} firm${groups.length === 1 ? "" : "s"}`,
+  const teams = new Map();
+  for (const row of rows){
+    // Same-named teams at different firms are distinct. Unassigned advisors
+    // share one group at the end of their match-priority section.
+    const key = row.team ? JSON.stringify([row.firmCrd, rosterSearchKey(row.team)]) : "";
+    if (!teams.has(key)) teams.set(key, { team:row.team, firm:row.team ? row.firm : "", rows:[], matches:0 });
+    const group = teams.get(key);
+    group.rows.push(row);
+    if (row.matching) group.matches++;
+  }
+  const groups = [...teams.values()].sort((a, b) => Number(!a.team) - Number(!b.team)
+    || rosterCollation.compare(a.team, b.team) || rosterCollation.compare(a.firm, b.firm));
+  for (const group of groups)
+    group.rows.sort((a, b) => (prioritize ? Number(b.matching) - Number(a.matching) : 0) || byName(a, b));
+  if (!prioritize) return [{ groups }];
+  return [
+    { heading:"Matching filters", groups:groups.filter(group => group.matches > 0) },
+    { heading:"Other advisors", groups:groups.filter(group => group.matches === 0) },
   ];
-  if (a.bldg && a.lines.size > 1) head.push(`${a.lines.size} filed address lines`);
-  const unsure = rows.filter(f => f.properties.unc).length;
-  if (unsure) head.push(`${unsure.toLocaleString()} address uncertain`);
-  if (matching < rows.length) head.push(`${matching.toLocaleString()} match current filters`);
+}
 
-  document.getElementById("detailsKind").textContent = "Location";
-  // A city-level group has no street by definition, so the heading would be
-  // blank. Name the town instead and say plainly that it is not an address.
-  const cityOnly = rows.length && rows.every(f => f.properties.lt === 1);
-  document.getElementById("firmOverviewName").innerHTML = a.addr
-    ? `${esc(a.addr)}<br>${esc([a.city, a.zip].filter(Boolean).join(" "))}`
-    : `${esc(a.city || "Unnamed location")}` +
-      (cityOnly ? `<br><span class="head-sub">city-level &mdash; no street address filed</span>` : "");
-  document.getElementById("firmOverviewMeta").textContent = head.join(" · ");
-  if (onlyFirm && allFirms.size > 1)
-    document.getElementById("detailsKind").textContent =
-      `Location · ${rows.length ? rows[0].properties.f : "firm"} only`;
+function hasLocationFilters(location){
+  return !!(selectedFirms.length || excludedFirms.size || lassoPolygon || mapListFilter
+    || AUM_BOUNDS.length || selectsOnly || roleSel.size || reg !== "all" || ownerOnly
+    || lastEmailed || lastCalled || joinedFirm || contactableOnly || assetsOnly || rankedOnly
+    || (continentalOnly && location.feats.some(f => !passesContinental(f.properties))));
+}
 
+const ROSTER_ACTIVITY = {
+  inbound:{ label:"Latest email reply to you", path:"M2 3h12v9H2z M2 3l6 5 6-5 M13 15h-5m2-2-2 2 2 2" },
+  outbound:{ label:"Latest email you sent", path:"M2 3h12v9H2z M2 3l6 5 6-5 M8 15h5m-2-2 2 2-2 2" },
+  call:{ label:"Latest outbound call you logged", path:"M4 2l2 1.5-.7 2.5a9 9 0 004.6 4.6l2.5-.7L14 12l-1.5 2A12 12 0 012 3.5z M9 5l4-4m-3 0h3v3" },
+};
+const ROSTER_ACT_LABELS = {
+  linked:"In ACT! · confirmed link", unlinked:"No confirmed ACT! link",
+  review:"ACT! match needs review", unknown:"ACT! status unavailable",
+};
+
+function rosterActivityIcon(kind, at){
+  const { label, path } = ROSTER_ACTIVITY[kind];
+  const title = at ? `${label}: ${rosterDate.format(at)}` : label;
+  return `<svg class="roster-activity roster-activity-${kind}" viewBox="0 0 16 18" role="img"
+    aria-label="${esc(title)}"><title>${esc(title)}</title><path d="${path}"/></svg>`;
+}
+
+function rosterActivityMarks(id){
+  const mail = activitySource("email", "me");
+  const reply = mail.replies.get(id), sent = mail.rows.get(id);
+  const call = activitySource("call", "me").rows.get(id);
+  return (reply ? rosterActivityIcon("inbound", reply) : "")
+    + (sent ? rosterActivityIcon("outbound", sent) : "") + (call ? rosterActivityIcon("call", call) : "");
+}
+
+function rosterLegend(){
+  return `<details class="roster-legend"><summary>Legend</summary><dl>
+    <div><dt><span class="rflag">⚠</span></dt><dd>Reported regulatory disclosure</dd></div>
+    <div><dt><span class="roster-act linked">ACT!</span></dt><dd>Confirmed ACT! link. An outline means no confirmed link or status unavailable.</dd></div>
+    <div><dt><span class="pin-dot pin-dot-reach">● ◐</span></dt><dd>Email and phone, or one contact method on file</dd></div>
+    <div><dt><span class="pin-dot pin-dot-assets">$</span></dt><dd>EIC assets on file</dd></div>
+    <div><dt>${rosterActivityIcon("inbound")}</dt><dd>Email reply from the advisor</dd></div>
+    <div><dt>${rosterActivityIcon("outbound")}</dt><dd>Email you sent</dd></div>
+    <div><dt>${rosterActivityIcon("call")}</dt><dd>Outbound call you logged</dd></div>
+    <div><dt>≈ Forbes</dt><dd>Ranking matched by name, firm and location</dd></div>
+  </dl></details>`;
+}
+
+function renderLocationAdvisor(row, entry, muted, showFirm){
+  const { feature, contact, team, firm, name } = row;
+  const p = feature.properties, id = String(p.id);
+  const flag = p.dr?.length
+    ? `<span class="rflag" title="${esc(p.dr.join(", "))}" aria-label="Reported disclosure: ${esc(p.dr.join(", "))}">⚠</span>` : "";
+  const act = entry.roster.actStatuses.get(id) || "unknown";
+  const actLabel = ROSTER_ACT_LABELS[act];
+  const owns = ownerRolesFor(id).find(role => String(role.firmCrd) === String(p.fc));
+  const owner = owns
+    ? `<span class="rown${owns.code === "NA" ? " rown-officer" : ""}" title="${esc(owns.title || "Owner or officer")}">${roleTag(owns.code)}</span>` : "";
+  const address = p.unc
+    ? `<span class="runc" title="Employment record says ${esc(p.home || "elsewhere")}">ADDRESS UNCERTAIN</span>`
+    : p.lt === 1 ? '<span class="rcity" title="City and state filed, no street address">CITY LEVEL</span>' : "";
+  const line = entry.location.bldg && p.a && p.a !== entry.location.addr ? p.a : "";
+  const secondary = [contact.ti || "Job title not on file", team, showFirm ? firm : "",
+    p.g ? p.g.split("|").join(", ") : "", line].filter(Boolean).join(" · ");
+  const link = p.u
+    ? `<a class="rlink" href="${esc(p.u)}" target="_blank" rel="noopener"
+      title="Open ${esc(name)} on IAPD" aria-label="Open ${esc(name)} on IAPD">↗</a>`
+    : '<span class="roster-link-space" aria-hidden="true"></span>';
+  return `<div class="rrow${muted ? " roster-other" : ""}" data-ri="${rosterRows.push(feature) - 1}" data-roster-crd="${esc(id)}">
+    <div class="rrl">
+      <div class="rn"><button type="button" class="roster-name" title="${esc(name)}">${esc(name)}</button>
+        <span class="roster-marks">${flag}<span class="roster-act ${act}" title="${actLabel}" aria-label="${actLabel}" role="img">ACT!</span>
+          ${contactDots(id, false)}${rosterActivityMarks(id)}${flagGlyphs(id)}</span>
+        <span class="roster-badges">${owner}${address}${barronsTag(id, true)}${forbesTag(id, true)}</span>
+      </div>
+      <div class="rm" title="${esc(secondary)}">${esc(secondary)}</div>
+    </div>
+    <div class="roster-row-actions">${personActionButton(id, name, false)}${link}</div>
+  </div>`;
+}
+
+function refreshLocationRoster(){
+  const entry = detailsCurrent;
+  if (entry?.type !== "location") return;
+  const body = document.getElementById("firmOverviewBody");
+  const list = body.querySelector("[data-roster-results]");
+  if (!list) return;
+  const { location, roster } = entry;
+  const firms = new Set(roster.features.map(f => String(f.properties.fc)));
+  const filtersActive = hasLocationFilters(location);
+  const rows = roster.features.map(feature => {
+    const p = feature.properties;
+    const contact = contactFor(p.id) || {};
+    return { feature, contact, name:p.n, firm:p.f, firmCrd:p.fc,
+      team:String(contact.tn || "").trim(), matching:passesFilters(p) };
+  });
+  const matches = rows.filter(row => row.matching).length;
+  const countLabel = (n, label) => `${n.toLocaleString()} ${label}${n === 1 ? "" : "s"}`;
+  const addressCount = location.bldg && location.lines.size > 1
+    ? ` · ${countLabel(location.lines.size, "filed address line")}` : "";
+  const uncertain = rows.filter(row => row.feature.properties.unc).length;
+  document.getElementById("firmOverviewMeta").innerHTML =
+    `${countLabel(rows.length, "advisor")} · ${countLabel(firms.size, "firm")}${addressCount}`
+    + (uncertain ? ` · ${uncertain.toLocaleString()} address uncertain` : "")
+    + (filtersActive ? ` · <strong class="roster-match-count">${matches.toLocaleString()} match${matches === 1 ? "" : "es"}</strong>` : "");
+  const toggle = body.querySelector("[data-roster-priority]");
+  toggle.hidden = !filtersActive;
+  toggle.querySelector("input").checked = roster.matchesFirst;
+  for (const button of body.querySelectorAll("[data-roster-sort]"))
+    button.setAttribute("aria-pressed", String(button.dataset.rosterSort === roster.sort));
+
+  const terms = rosterSearchKey(roster.query).trim().split(/\s+/).filter(Boolean);
+  const shown = terms.length ? rows.filter(row => {
+    const search = rosterSearchKey(`${row.name} ${row.team}`);
+    return terms.every(term => search.includes(term));
+  }) : rows;
+  const prioritize = filtersActive && matches > 0 && roster.matchesFirst;
+  const sections = locationRosterSections(shown, roster.sort, prioritize);
+  const previousScroll = body.scrollTop;
+  const focusedRow = document.activeElement?.closest(".rrow");
+  const focusedId = list.contains(focusedRow) ? focusedRow.dataset.rosterCrd : "";
+  const focusedAction = document.activeElement?.closest("[data-person-actions], .rlink");
+  rosterRows = [];
+  const notice = filtersActive && !matches
+    ? '<p class="roster-note">No advisors match current filters</p>' : "";
+  list.innerHTML = notice + (shown.length ? sections.map(section => {
+    const groups = section.groups.filter(group => group.rows.length);
+    if (!groups.length) return "";
+    const count = groups.reduce((total, group) => total + group.rows.filter(row =>
+      section.heading !== "Matching filters" || row.matching).length, 0);
+    return `<section class="roster-section">${section.heading
+      ? `<h3>${section.heading} (${count.toLocaleString()})</h3>` : ""}
+      ${groups.map(group => `${roster.sort === "team"
+        ? `<h4>${esc(group.team || "No team listed")}${firms.size > 1 && group.firm ? ` <small>${esc(group.firm)}</small>` : ""}</h4>` : ""}
+        ${group.rows.map(row => renderLocationAdvisor(row, entry, filtersActive && matches > 0 && !row.matching, firms.size > 1)).join("")}`).join("")}</section>`;
+  }).join("") : '<p class="roster-note">No advisors or teams match your search.</p>');
+  if (focusedId){
+    const row = list.querySelector(`[data-roster-crd="${CSS.escape(focusedId)}"]`);
+    row?.querySelector(focusedAction?.matches(".rlink") ? ".rlink"
+      : focusedAction ? "[data-person-actions]" : ".roster-name")?.focus({ preventScroll:true });
+  }
+  body.scrollTop = previousScroll;
+}
+
+async function loadRosterActStatuses(roster){
+  const ids = roster.features.map(f => String(f.properties.id)).filter(id => /^\d{3,12}$/.test(id));
+  for (let start = 0; start < ids.length; start += 100){
+    const response = await fetch("/api/contact-address?advisorCrds=" + ids.slice(start, start + 100).join(","), { cache:"no-store" });
+    if (!response.ok) throw new Error("ACT! status unavailable");
+    const { statuses } = await response.json();
+    for (const [id, status] of statuses || [])
+      if (Object.hasOwn(ROSTER_ACT_LABELS, status)) roster.actStatuses.set(id, status);
+  }
+}
+
+function openRoster(a, detailPush=true, onlyFirm=null, saved=null){
+  if (!a) return;
+  const current = detailsCurrent;
+  const same = current?.type === "location" && current.location === a && current.onlyFirm === onlyFirm;
+  const allFirms = new Map(a.feats.map(f => [String(f.properties.fc), f.properties.f]));
+  let roster = saved || (same ? current.roster : null);
+  if (!roster){
+    const features = new Map();
+    for (const f of a.feats){
+      const { id, fc } = f.properties;
+      if ((!onlyFirm || String(fc) === String(onlyFirm)) && !features.has(String(id)))
+        features.set(String(id), f);
+    }
+    roster = { sort:"name", query:"", matchesFirst:true, scroll:0, actStatuses:new Map(), features:[...features.values()] };
+  }
+  const entry = { type:"location", location:a, onlyFirm, roster };
+  beginDetails(entry, detailPush);
+  openFirmCrd = null;
+  const cityOnly = roster.features.length && roster.features.every(f => f.properties.lt === 1);
+  const state = roster.features[0]?.properties._state;
+  const place = [[a.city, state].filter(Boolean).join(", "), a.zip].filter(Boolean).join(" ");
+  document.getElementById("detailsKind").textContent = onlyFirm && allFirms.size > 1 ? allFirms.get(String(onlyFirm)) : "Location";
+  document.getElementById("firmOverviewName").innerHTML =
+    esc(a.addr || place || "Unnamed location")
+    + (a.addr && place ? `<span class="roster-place">${esc(place)}</span>`
+      : cityOnly ? '<span class="roster-place">City level · no street address filed</span>' : "");
   const showAll = onlyFirm && allFirms.size > 1
-    ? `<div class="profile-actions"><button type="button" data-a="${a.i}"` +
-      `${a.bldg ? ' data-bldg="1"' : ""}>Show all ${allFirms.size} firms at this address</button></div>`
-    : "";
-  const sortBar = rows.length > 1
-    ? `<div class="roster-sort"><span>Sort people</span><div class="seg mini-seg">
-         <button type="button" data-roster-sort="name" aria-pressed="${rosterSort === "name"}">Name</button>
-         <button type="button" data-roster-sort="team" aria-pressed="${rosterSort === "team"}">Team</button>
-       </div></div>`
-    : "";
-  document.getElementById("firmOverviewBody").innerHTML = showAll + sortBar + groups.map(group => {
-    const firm = group.name, crd = group.crd, list = group.rows;
-    const col = selectedFirms.length
-      ? (firmColor[crd] || cssVar("--m-unc"))
-      : cssVar("--accent");
-    const people = list
-      .slice()
-      .sort((x, y) => {
-        if (rosterSort === "team") {
-          const xt = String(contactFor(x.properties.id)?.tn || "").trim();
-          const yt = String(contactFor(y.properties.id)?.tn || "").trim();
-          if (!!xt !== !!yt) return xt ? -1 : 1;
-          const teamOrder = xt.localeCompare(yt, undefined, { sensitivity:"base" });
-          if (teamOrder) return teamOrder;
-        }
-        return x.properties.n.localeCompare(y.properties.n, undefined, { sensitivity:"base" });
-      })
-      .map(f => {
-        const p = f.properties;
-        const contact = contactFor(p.id) || {};
-        const dim = passesFilters(p) ? "" : " dim";
-        const bits = [
-          contact.ti,
-          contact.tn ? `Team: ${contact.tn}` : "",
-          p.g ? p.g.split("|").join(", ") : "",
-        ].filter(Boolean).join(" · ");
-        // disclosures are the one thing a rep must not have to click to discover
-        const flag = p.dr && p.dr.length
-          ? `<span class="rflag" title="${esc(p.dr.join(", "))}">⚠</span>` : "";
-        // principals should be findable by scanning a building roster
-        const owns = ownerRolesFor(p.id).find(r => String(r.firmCrd) === String(p.fc));
-        const ownTag = owns
-          ? `<span class="rown${owns.code === "NA" ? " rown-officer" : ""}" ` +
-            `title="${esc(owns.title || "Owner or officer")}">${roleTag(owns.code)}</span>` : "";
-        const uncTag = p.unc
-          ? `<span class="runc" title="Employment record says ${esc(p.home || "elsewhere")}">ADDRESS UNCERTAIN</span>`
-          : (p.lt === 1
-             ? `<span class="rcity" title="City and state filed, no street address">CITY&nbsp;LEVEL</span>` : "");
-        const barTag = barronsTag(p.id);
-        const forTag = forbesTag(p.id);
-        // in building mode the person's own filed line is the point -- it is
-        // what tells you they are on floor 6 rather than floor 5
-        const line = (a.bldg && p.a && p.a !== a.addr)
-          ? `<span class="rline">${esc(p.a)}</span>` : "";
-        const link = p.u
-          ? `<a class="rlink" href="${esc(p.u)}" target="_blank" rel="noopener"
-                title="Open ${esc(p.n)} on IAPD">&#8599;</a>`
-          : "";
-        return `<div class="rrow${dim}" data-ri="${rosterRows.push(f) - 1}" role="button" tabindex="0">
-          <span class="rrl"><span class="rn">${esc(p.n)}${flag}${contactDots(p.id)}${barTag}${forTag}${ownTag}${uncTag}</span>
-          <span class="rm">${esc(bits || "Job title not on file")}</span>${line}</span>${personActionButton(p.id, p.n)}${link}</div>`;
-      }).join("");
-    return `<div class="rgrp">
-      <div class="rfirm"><span class="swatch" style="background:${col}"></span>
-        <button type="button" class="rft detail-noun" data-firm-profile="${esc(crd)}" title="Open ${esc(firm)}">${esc(firm)} · CRD ${esc(crd)}</button>
-        <span class="mono rfc">${list.length}</span>
-        <span class="detail-chevron">›</span></div>
-      ${people}</div>`;
-  }).join("");
-
+    ? `<button class="roster-show-all ask-btn ghost" type="button" data-a="${a.i}"${a.bldg ? ' data-bldg="1"' : ""}>Show all ${allFirms.size} firms</button>` : "";
+  const firms = [...allFirms]
+    .filter(([crd]) => !onlyFirm || crd === String(onlyFirm))
+    .sort((left, right) => rosterCollation.compare(left[1], right[1]));
+  const firmLinks = `<details class="roster-firms"><summary>${firms.length === 1 ? "Firm" : "Firms"}</summary>
+    <div class="roster-firm-links">${firms.map(([crd, name]) =>
+      `<button type="button" data-firm-profile="${esc(crd)}">${esc(name)}</button>`).join("")}</div></details>`;
+  const body = document.getElementById("firmOverviewBody");
+  body.innerHTML = `<div class="roster-controls">
+    <div class="roster-search-sort">
+      <input type="search" data-roster-search aria-label="Search advisors or teams" placeholder="Search advisors or teams" value="${esc(roster.query)}" maxlength="120">
+      <div class="seg mini-seg" role="group" aria-label="Sort advisors">
+        <button type="button" data-roster-sort="name">Name</button><button type="button" data-roster-sort="team">Team</button>
+      </div>
+    </div>
+    <div class="roster-options">
+      <label data-roster-priority hidden><input type="checkbox">Matches first</label>
+      ${showAll}${firmLinks}${rosterLegend()}
+    </div></div>
+    <div data-roster-results></div>`;
+  refreshLocationRoster();
+  body.scrollTop = roster.scroll;
+  if (!roster.actRequest){
+    roster.actRequest = loadRosterActStatuses(roster).catch(() => {}).finally(() => {
+      if (detailsCurrent?.roster === roster) refreshLocationRoster();
+    });
+    const sources = [activitySource("email", "me"), activitySource("call", "me")];
+    if (sources.some(source => source.state !== "ready"))
+      Promise.allSettled([loadActivitySource("email", "me"), loadActivitySource("call", "me")])
+        .then(() => { if (detailsCurrent?.roster === roster) refreshLocationRoster(); });
+  }
   syncDetailHash(null);
 }
 
-document.addEventListener("click", event => {
+const locationBody = document.getElementById("firmOverviewBody");
+locationBody.addEventListener("input", event => {
+  if (!event.target.matches("[data-roster-search]") || !detailsCurrent?.roster) return;
+  detailsCurrent.roster.query = event.target.value;
+  locationBody.scrollTop = 0;
+  refreshLocationRoster();
+});
+locationBody.addEventListener("change", event => {
+  if (!event.target.closest("[data-roster-priority]") || !detailsCurrent?.roster) return;
+  detailsCurrent.roster.matchesFirst = event.target.checked;
+  locationBody.scrollTop = 0;
+  refreshLocationRoster();
+});
+locationBody.addEventListener("click", event => {
   const button = event.target.closest("[data-roster-sort]");
-  if (!button || !rosterLocation) return;
-  rosterSort = button.dataset.rosterSort === "team" ? "team" : "name";
-  openRoster(rosterLocation, false, rosterOnlyFirm);
+  if (!button || !detailsCurrent?.roster) return;
+  detailsCurrent.roster.sort = button.dataset.rosterSort;
+  locationBody.scrollTop = 0;
+  refreshLocationRoster();
 });
 
 // Opening a location or a building from any drawer row now also takes the map
@@ -10333,21 +10487,12 @@ function uncertainNote(p){
 }
 
 document.getElementById("firmOverviewBody").addEventListener("click", e => {
-  if (e.target.closest(".rlink")) return;      // the IAPD link keeps its own job
+  if (e.target.closest("a, [data-person-actions]")) return;
   const row = e.target.closest(".rrow");
   if (!row) return;
   const f = rosterRows[+row.dataset.ri];
   if (f) openAdvisorPopup(f, row);
 });
-document.getElementById("firmOverviewBody").addEventListener("keydown", e => {
-  if (e.key !== "Enter" && e.key !== " ") return;
-  const row = e.target.closest(".rrow");
-  if (!row) return;
-  e.preventDefault();
-  const f = rosterRows[+row.dataset.ri];
-  if (f) openAdvisorPopup(f, row);
-});
-
 map.on("click", () => {
   if (!lassoArmed && !lassoDrawing && !detailsDrawer.hidden) closeDetails();
 });

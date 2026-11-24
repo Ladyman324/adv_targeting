@@ -10,6 +10,8 @@ module.exports = async function (context, req) {
     const crm = contextService.service();
     if (req.method === "GET") {
       const query = req.query || {};
+      if (query.advisorCrds !== undefined)
+        return store.ok(context, { statuses: crm.advisorStatuses(String(query.advisorCrds).split(",")) });
       if (query.keys !== undefined) {
         const keys = String(query.keys).split(",");
         if (keys.length > 50) throw Object.assign(new Error("Look up at most 50 ACT! contacts at a time."),

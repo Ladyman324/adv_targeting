@@ -152,16 +152,17 @@ function queueStore(rows) {
   return { store: { listEngagement: async () => rows } };
 }
 
-test("activity summary exposes only compact last-outbound rows", async () => {
+test("activity summary exposes only compact outbound and qualifying reply dates", async () => {
   const summary = await engagement.activitySummary("u1", queueStore([
     { advisorCrd: "111", lastOutboundAt: "2026-08-01T12:00:00Z", advisorEmail: "private@example.com" },
-    { advisorCrd: "222", lastReplyAt: "2026-08-02T12:00:00Z" },
+    { advisorCrd: "222", lastReplyAt: "2026-08-02T12:00:00Z", lastInboundAt: "2026-08-20T12:00:00Z" },
     { rowKey: "333", lastOutboundAt: "2026-08-03T12:00:00Z" },
   ]));
   assert.deepEqual(summary.entries, [
     ["111", "2026-08-01T12:00:00Z"],
     ["333", "2026-08-03T12:00:00Z"],
   ]);
+  assert.deepEqual(summary.replyEntries, [["222", "2026-08-02T12:00:00Z"]]);
   assert.ok(summary.generatedUtc);
   assert.equal(JSON.stringify(summary).includes("private@example.com"), false,
     "the map overlay must not become another contact-data payload");

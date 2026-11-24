@@ -35,6 +35,18 @@ function createService({ lookup, addressService, resolve, act, journal, mailCode
   const contacts = indexDirectory(directory);
   const lookupContacts = keys => keys.map(key => contacts.get(key)).filter(Boolean);
 
+  function advisorStatuses(crds) {
+    if (crds.length > 100 || crds.some(crd => !crdPattern.test(crd)))
+      throw failure("Look up at most 100 valid advisor CRDs at a time.", 400);
+    return [...new Set(crds)].map(crd => {
+      if (linked[crd]) return [crd, "linked"];
+      if (!directory) return [crd, "unknown"];
+      const emailHash = lookup.contact_create_profiles?.[crd]?.emailHash;
+      const review = claimed.has(crd) || lookup.activity_contacts?.[crd] || emails.has(emailHash);
+      return [crd, review ? "review" : "unlinked"];
+    });
+  }
+
   function search(query, personOnly = false) {
     if (!directory) throw failure("ACT! contacts are unavailable until the next data refresh.", 503);
     const terms = norm(query).slice(0, 120).split(/\s+/).filter(Boolean);
@@ -143,7 +155,7 @@ function createService({ lookup, addressService, resolve, act, journal, mailCode
       }
     });
   }
-  return { search, lookupContacts, preview, change };
+  return { search, lookupContacts, advisorStatuses, preview, change };
 }
 
 let installed;

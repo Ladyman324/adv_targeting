@@ -78,6 +78,39 @@ test("dynamic lists require regional filter rules that can be reapplied", () => 
   assert.match(context.dynamicAudienceIssue(), /Clear the lasso or list filter/);
 });
 
+test("location Name sorting puts two matches ahead of 99 other advisors", () => {
+  const context = vm.createContext({});
+  vm.runInContext(section("const rosterCollation", "function rosterBtn")
+    + section("function locationRosterSections", "function hasLocationFilters"), context);
+  const advisors = Array.from({ length:99 }, (_, i) => ({ name:`Advisor ${i+1}`, matching:false }));
+  advisors.push({ name:"Zoe", matching:true }, { name:"Bree", matching:true });
+  const sections = context.locationRosterSections(advisors, "name", true);
+  assert.equal(sections[0].heading, "Matching filters");
+  assert.equal(sections[0].groups[0].rows.map(row => row.name).join(","), "Bree,Zoe");
+  assert.equal(sections[1].groups[0].rows.length, 99);
+  const [unsplit] = context.locationRosterSections(advisors, "name", false);
+  assert.equal(unsplit.heading, undefined);
+  assert.equal(unsplit.groups[0].rows[0].name, "Advisor 1");
+});
+
+test("location Team sorting keeps colleagues together and prioritizes matching teams", () => {
+  const context = vm.createContext({});
+  vm.runInContext(section("const rosterCollation", "function rosterBtn")
+    + section("function locationRosterSections", "function hasLocationFilters"), context);
+  const [matching, other] = context.locationRosterSections([
+    { name:"Alice", matching:false, team:"Second", firmCrd:"1", firm:"Firm A" },
+    { name:"Zoe", matching:true, team:"second", firmCrd:"1", firm:"Firm A" },
+    { name:"Emma", matching:true, team:"First", firmCrd:"2", firm:"Firm B" },
+    { name:"Ben", matching:false, team:"First", firmCrd:"3", firm:"Firm C" },
+    { name:"Oliver", matching:false, team:"", firmCrd:"3", firm:"Firm C" },
+  ], "team", true);
+  assert.equal(matching.groups.map(group => group.team).join(","), "First,Second");
+  assert.equal(matching.groups[1].rows.map(row => row.name).join(","), "Zoe,Alice");
+  assert.equal(other.groups.length, 2);
+  assert.equal(other.groups[0].firm, "Firm C");
+  assert.equal(other.groups[1].team, "");
+});
+
 test("desktop summary offers one map export and the unified Add to List entry", () => {
   const html = fs.readFileSync(path.join(__dirname, "../../webapp/index.html"), "utf8");
   const summary = html.split('id="statsBar"')[1].split('id="mapLists"')[0];

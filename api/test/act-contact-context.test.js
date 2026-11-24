@@ -63,6 +63,16 @@ test("CRM-only search returns a distinct contact, and activity-only links do not
   assert.deepEqual(calls, ["replace_primary"]);
 });
 
+test("the roster can look up only batched ACT! link statuses", () => {
+  const { svc, calls } = fixture({ claimedCrds:["6000000"], emailHashes:["duplicate"], profile:{ emailHash:"duplicate" } });
+  assert.deepEqual(svc.advisorStatuses(["2066775", "123456", "6000000", crd, "7000000", "2066775"]), [
+    ["2066775", "linked"], ["123456", "review"], ["6000000", "review"], [crd, "review"], ["7000000", "unlinked"],
+  ]);
+  assert.throws(() => svc.advisorStatuses(["invalid"]), /valid advisor CRDs/);
+  assert.throws(() => svc.advisorStatuses(Array(101).fill(crd)), /at most 100/);
+  assert.deepEqual(calls, []);
+});
+
 test("confirmed creation uses server fields and refuses a second write", async () => {
   const { svc, calls } = fixture();
   const state = await svc.preview(crd);
