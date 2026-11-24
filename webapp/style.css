@@ -383,8 +383,9 @@ body.scope-pending #map{cursor:progress}
 .frow .fmetrics{grid-column:1/3;display:flex;align-items:baseline;gap:11px;color:var(--muted);font-size:10.5px;
   flex-wrap:wrap}
 .frow .fmetrics b{color:var(--ink);font-size:12px;font-weight:680}
-.frow .fb{grid-column:1/3;height:3px;border-radius:2px;background:var(--hair);overflow:hidden;margin-top:2px}
-.frow .fb i{display:block;height:100%;border-radius:2px;background:var(--accent)}
+.frow .fb{grid-column:1/3;height:2px;border-radius:2px;background:var(--hair);overflow:hidden;margin-top:2px}
+.frow .fb i{display:block;height:100%;border-radius:2px;background:var(--accent);opacity:.48}
+.frow.active .fb i{opacity:.78}
 .frow .meta{grid-column:1/3;font-size:11px;color:var(--muted)}
 
 /* compact segmented control for the firm-list sort */
@@ -986,21 +987,25 @@ body.scope-pending #map{cursor:progress}
    column instead of stretching it across nearly the whole viewport. */
 .stats-bar{position:absolute;top:12px;left:calc(var(--panel-w) + 12px);right:14px;z-index:1250;
   width:min(780px,calc(100% - var(--panel-w) - 26px));margin-inline:auto;
-  display:flex;align-items:center;justify-content:center;flex-wrap:wrap;gap:4px 18px;
-  padding:7px 13px;border:1px solid var(--hair);border-radius:11px;
+  display:grid;gap:5px;
+  padding:7px 12px;border:1px solid var(--hair);border-radius:11px;
   background:color-mix(in srgb,var(--panel) 94%,transparent);
   backdrop-filter:blur(6px);box-shadow:var(--shadow)}
 .stat{display:flex;align-items:baseline;gap:6px;min-width:0}
-/* Counts and allocated asset values share a banner but are different kinds of
-   measures; a quiet divider makes that grouping explicit without adding a
-   second floating panel. */
-.stat-market-start{border-left:2px solid var(--muted);padding-left:18px}
+.stats-primary,.stats-market,.stats-strategies{display:flex;align-items:center;flex-wrap:wrap;gap:5px 14px}
+.stats-primary{justify-content:space-between}
+.stats-strategies{border-top:1px solid var(--hair);padding-top:5px}
+.stats-strategies .stat-label{font-size:9px;letter-spacing:.05em}
+.stats-strategies .stat strong{font-size:11.5px;color:color-mix(in srgb,var(--ink) 77%,var(--muted))}
 .stat-label{display:inline-flex;align-items:center;gap:3px;color:var(--muted);
   font-size:9.5px;font-weight:700;line-height:1;text-transform:uppercase;letter-spacing:.08em;
   white-space:nowrap}
 .stat strong{flex:0 0 auto;color:var(--ink);font-size:13px;font-weight:680;line-height:1.2;
   font-variant-numeric:tabular-nums;white-space:nowrap}
-.stat-actions{display:flex;align-items:center;gap:5px}
+.stat-actions{display:flex;align-items:center;gap:5px;margin-left:auto}
+@media (min-width:1550px){
+  body:has(.list-drawer:not(.expanded)) #statsBar{right:446px;width:auto;max-width:780px}
+}
 .action-icon-library{position:absolute;pointer-events:none}
 .action-icon-btn{display:inline-flex;align-items:center;justify-content:center;gap:5px;
   padding:0 8px;height:28px;white-space:nowrap;border:1px solid var(--hair);border-radius:7px;
@@ -1010,13 +1015,12 @@ body.scope-pending #map{cursor:progress}
 .action-icon-btn:hover:not(:disabled){color:var(--accent);border-color:var(--accent)}
 .action-icon-btn:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 .action-icon-btn:disabled{opacity:.45;cursor:default}
-.stats-status{flex-basis:100%;margin:1px 0 0;font-size:10px;line-height:1.35;color:var(--muted)}
+.stats-status{margin:1px 0 0;font-size:10px;line-height:1.35;color:var(--muted)}
 .stats-status[hidden]{display:none}
 .stats-bar .info-popover{top:calc(100% + 6px)}
 
 @media (max-width:760px){
   .stats-bar{left:12px;right:12px;width:min(780px,calc(100% - 24px))}
-  .stat-market-start{border-left:0;padding-left:0}
   .scope-loading{top:64px;right:10px;max-width:calc(100vw - 20px)}
 }
 
@@ -1376,7 +1380,7 @@ body.scope-pending #map{cursor:progress}
 .map-list-action [hidden]{display:none}
 .map-list-action .list-toolbar{margin-top:10px}
 .map-list-action #mapListRules{margin-top:5px}
-.list-drawer{position:fixed;z-index:1350;top:62px;right:14px;bottom:76px;
+.list-drawer{position:fixed;z-index:1350;top:max(62px,var(--map-summary-bottom,82px));right:14px;bottom:76px;
   width:min(420px,calc(100vw - var(--panel-w) - 28px))}
 .list-drawer.expanded{width:min(850px,calc(100vw - var(--panel-w) - 28px))}
 @media (min-width:1224px){
@@ -1411,8 +1415,16 @@ body:has(.list-drawer) #firmOverview{visibility:hidden}
   display:grid;gap:4px;padding:5px;border:1px solid var(--hair);border-radius:8px;
   background:var(--panel);box-shadow:var(--shadow);max-height:50vh;overflow:auto}
 .list-options .ask-btn{text-align:left;margin:0}
-.list-selection{min-height:34px}
-[data-list-selection]{font-size:12px;color:var(--muted)}
+.list-selection{min-height:28px;justify-content:space-between}
+.list-select-shown{display:inline-flex;align-items:center;gap:6px;font-size:12px;cursor:pointer}
+.list-select-shown input{margin:0;accent-color:var(--accent)}
+[data-list-selection],.list-action-scope{font-size:11px;font-weight:650;color:var(--muted)}
+.list-selection-actions{padding:5px;border:1px solid var(--hair);border-radius:8px;background:var(--panel-2)}
+.list-selection-actions[hidden]{display:none}
+.list-selection-actions .ask-btn{height:28px}
+.list-drawer .list-close{margin-left:auto;min-width:30px;font-size:20px;line-height:1}
+.list-drawer .list-member-row .list-open{min-height:42px}
+.list-member-row .list-open small{font-size:11px;color:color-mix(in srgb,var(--ink) 22%,var(--muted))}
 .list-toolbar .ask-btn[hidden],.list-load-status:empty{display:none}
 .list-drawer .list-scroll{flex:1 1 auto;min-height:0;overflow:auto;overscroll-behavior:contain}
 .list-drawer .lists-row{gap:6px;padding:0}

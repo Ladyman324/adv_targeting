@@ -30,8 +30,8 @@
   <link rel="stylesheet" href="vendor/leaflet.css">
   <link rel="stylesheet" href="vendor/MarkerCluster.css">
   <link rel="stylesheet" href="vendor/MarkerCluster.Default.css">
-  <link rel="stylesheet" href="style.css?v=41181ea7e6">
-  <link rel="stylesheet" href="email.css?v=41181ea7e6">
+  <link rel="stylesheet" href="style.css?v=83d55730fa">
+  <link rel="stylesheet" href="email.css?v=83d55730fa">
 </head>
 <body>
   <svg class="action-icon-library" width="0" height="0" aria-hidden="true" focusable="false">
@@ -289,37 +289,36 @@
     <div id="map" role="application" aria-label="Interactive advisor opportunity map"></div>
     <div id="scopeLoading" class="scope-loading" role="status" aria-live="polite" hidden></div>
 
-    <!-- What is in the current map view. On the map rather than in the sidebar:
-         these numbers are a property of the viewport and change as you pan, and
-         the map has spare horizontal room where the sidebar has none to spare
-         vertically. Each export sits against the count it produces, so the
-         number beside it is the row count you will get. -->
     <div id="statsBar" class="stats-bar" aria-label="Current map summary">
-      <div class="stat">
-        <span class="stat-label">Advisors
-          <span class="info-wrap">
-            <button type="button" class="info-button" aria-label="About advisor, office, and firm counts">i</button>
-            <span id="countHelp" class="info-popover" role="tooltip"></span>
-          </span>
-        </span>
-        <strong id="kpiAdvisors">&mdash;</strong>
+      <div class="stats-primary">
+        <div class="stats-market">
+          <div class="stat">
+            <span class="stat-label">Advisors
+              <span class="info-wrap">
+                <button type="button" class="info-button" aria-label="About advisor, office, and firm counts">i</button>
+                <span id="countHelp" class="info-popover" role="tooltip"></span>
+              </span>
+            </span>
+            <strong id="kpiAdvisors">&mdash;</strong>
+          </div>
+          <div class="stat">
+            <span class="stat-label">AUM
+              <span class="info-wrap">
+                <button type="button" class="info-button" aria-label="How AUM, equities, and funds or ETFs are calculated">i</button>
+                <span id="estimatedAumHelp" class="info-popover" role="tooltip"></span>
+              </span>
+            </span>
+            <strong id="estimatedAum">&mdash;</strong>
+          </div>
+          <div class="stat"><span class="stat-label">Equities</span><strong id="estimatedEquities">&mdash;</strong></div>
+          <div class="stat"><span class="stat-label">Funds/ETFs</span><strong id="estimatedFunds">&mdash;</strong></div>
+        </div>
+        <div class="stat-actions" role="group" aria-label="Map actions">
+          <button type="button" id="exportAdvisors" class="action-icon-btn" title="Download advisors in view as CSV"
+                  aria-label="Download advisors in view as CSV"><svg aria-hidden="true"><use href="#icon-action-csv"/></svg>CSV</button>
+          <button type="button" id="addMapToList" class="action-icon-btn" aria-haspopup="dialog" title="Choose which advisors to add to a list"><svg aria-hidden="true"><use href="#icon-action-add"/></svg>Add to List</button>
+        </div>
       </div>
-      <div class="stat-actions" role="group" aria-label="Map actions">
-        <button type="button" id="exportAdvisors" class="action-icon-btn" title="Download advisors in view"
-                aria-label="Download advisors in view as CSV"><svg aria-hidden="true"><use href="#icon-action-csv"/></svg>CSV</button>
-        <button type="button" id="addMapToList" class="action-icon-btn" aria-haspopup="dialog"><svg aria-hidden="true"><use href="#icon-action-add"/></svg>Add to List</button>
-      </div>
-      <div class="stat stat-market-start">
-        <span class="stat-label">AUM
-          <span class="info-wrap">
-            <button type="button" class="info-button" aria-label="How AUM, equities, and funds or ETFs are calculated">i</button>
-            <span id="estimatedAumHelp" class="info-popover" role="tooltip"></span>
-          </span>
-        </span>
-        <strong id="estimatedAum">&mdash;</strong>
-      </div>
-      <div class="stat"><span class="stat-label">Equities</span><strong id="estimatedEquities">&mdash;</strong></div>
-      <div class="stat"><span class="stat-label">Funds/ETFs</span><strong id="estimatedFunds">&mdash;</strong></div>
       <!-- EIC's own book in the current view. Kept ALONGSIDE the ADV figures
            above, not in place of them: those are market size, these are our
            share of it, and the pair is what makes penetration readable. Each
@@ -330,18 +329,20 @@
            identities -- so they show the whole de-duplicated book instead, and
            a figure that ignores panning while its neighbours obey it has to say
            so on its face, not in a tooltip nobody opens. -->
-      <div class="stat stat-eic">
-        <span class="stat-label">All-Cap &middot; EIC<em id="eicScope" class="stat-scope" hidden></em>
-          <span class="info-wrap">
-            <button type="button" class="info-button" aria-label="About EIC assets in view">i</button>
-            <span id="eicAssetsHelp" class="info-popover" role="tooltip"></span>
+      <div class="stats-strategies" aria-label="EIC strategy assets">
+        <div class="stat stat-eic">
+          <span class="stat-label">All-Cap &middot; EIC<em id="eicScope" class="stat-scope" hidden></em>
+            <span class="info-wrap">
+              <button type="button" class="info-button" aria-label="About EIC assets in view">i</button>
+              <span id="eicAssetsHelp" class="info-popover" role="tooltip"></span>
+            </span>
           </span>
-        </span>
-        <strong id="eicAcv">&mdash;</strong>
+          <strong id="eicAcv">&mdash;</strong>
+        </div>
+        <div class="stat stat-eic"><span class="stat-label">Large-Cap &middot; EIC</span><strong id="eicLcv">&mdash;</strong></div>
+        <div class="stat stat-eic"><span class="stat-label">EICIX</span><strong id="eicMf">&mdash;</strong></div>
+        <div class="stat stat-eic"><span class="stat-label">Mid-Cap &middot; EIC</span><strong id="eicMidcap">&mdash;</strong></div>
       </div>
-      <div class="stat stat-eic"><span class="stat-label">Large-Cap &middot; EIC</span><strong id="eicLcv">&mdash;</strong></div>
-      <div class="stat stat-eic"><span class="stat-label">EICIX</span><strong id="eicMf">&mdash;</strong></div>
-      <div class="stat stat-eic"><span class="stat-label">Mid-Cap &middot; EIC</span><strong id="eicMidcap">&mdash;</strong></div>
       <!-- National only: the SHAPE of the book. The tiles carry its size; this
            carries what the size does not show -- how many advisors hold it, how
            concentrated it is, and which of the two SMAs each side is missing.
@@ -386,12 +387,12 @@
   <script src="vendor/leaflet-heat.js"></script>
   <!-- Shared with the field view: one definition of what a call outcome is,
        one queue, one do-not-call list. Loaded before app.js, which uses it. -->
-  <script src="dial.js?v=41181ea7e6"></script>
-  <script src="training.js?v=41181ea7e6"></script>
-  <script src="list_import.js?v=41181ea7e6"></script>
-  <script src="asset-product-filters.js?v=41181ea7e6"></script>
-  <script src="act-addresses.js?v=41181ea7e6"></script>
-  <script src="app.js?v=41181ea7e6"></script>
-  <script src="email.js?v=41181ea7e6"></script>
+  <script src="dial.js?v=83d55730fa"></script>
+  <script src="training.js?v=83d55730fa"></script>
+  <script src="list_import.js?v=83d55730fa"></script>
+  <script src="asset-product-filters.js?v=83d55730fa"></script>
+  <script src="act-addresses.js?v=83d55730fa"></script>
+  <script src="app.js?v=83d55730fa"></script>
+  <script src="email.js?v=83d55730fa"></script>
 </body>
 </html>

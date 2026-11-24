@@ -136,3 +136,26 @@ test("map and call badges are independent and use the correct owner's list", () 
   assert.deepEqual(usage("smart", "key"), { onMap:true, inQueue:true });
   assert.deepEqual(usage("filter", "role-key"), { onMap:false, inQueue:false });
 });
+
+test("selected outreach freezes the checked IDs and verifies current list ownership and membership", async () => {
+  const app = fs.readFileSync(path.join(__dirname, "../../webapp/app.js"), "utf8");
+  const start = app.indexOf("async function readSelectedMembers(");
+  const end = app.indexOf("function listAction(", start);
+  const detail = { id:"source", selected:new Set(["2","4"]) };
+  const owner = { id:"delegated-owner" };
+  let current = [{ crd:"1" }, { crd:"4" }, { crd:"2" }];
+  const context = { Dial:{ readList:async (id, ownerId) => {
+    assert.equal(id, detail.id);
+    assert.equal(ownerId, owner.id);
+    detail.selected.add("1");
+    return { id, name:"Original list", items:current };
+  } } };
+  vm.createContext(context);
+  vm.runInContext(app.slice(start, end), context);
+  const selection = await context.readSelectedMembers(detail, owner);
+  assert.equal(selection.items.map(item => item.crd).join(","), "4,2");
+  assert.equal(selection.id, detail.id);
+  detail.selected = new Set(["2"]);
+  current = [{ crd:"1" }, { crd:"4" }];
+  await assert.rejects(context.readSelectedMembers(detail, owner), /List membership changed/);
+});

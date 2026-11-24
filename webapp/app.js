@@ -488,6 +488,11 @@ const continentalBox = document.getElementById("continentalOnly");
 const noticeEl = document.getElementById("notice");
 const noticeText = document.getElementById("noticeText");
 const scopeLoadingEl = document.getElementById("scopeLoading");
+const statsBar = document.getElementById("statsBar");
+if (typeof ResizeObserver === "function") new ResizeObserver(() => {
+  document.documentElement.style.setProperty("--map-summary-bottom",
+    `${statsBar.offsetTop + statsBar.offsetHeight + 8}px`);
+}).observe(statsBar);
 let noticeTimer = null;
 let pendingScope = null; // { request, target }
 
@@ -2766,20 +2771,22 @@ function mapListScopes(selected = mapSelectedIds){
   return { selected:[...selected].map(String), inView:[...inView], matches:[...matches] };
 }
 
-async function openMapListAction(selected, preset){
+async function openMapListAction(selected, preset, sourceList){
+  const fixedSelection = !!sourceList;
   await dialReady;
   if (document.querySelector(".map-list-action[open]")) return;
-  const groups = mapListScopes(selected);
+  const groups = fixedSelection ? { selected:sourceList.items.map(item => String(item.crd)) } : mapListScopes(selected);
   const owner = listWorkspace?.owner;
   const destinations = currentWorkspaceLists().filter(list => !standingKindOf(list.id));
-  const dynamicProblem = dynamicAudienceIssue();
-  const definition = owner || dynamicProblem ? null : captureAudienceDefinition();
+  const dynamicProblem = fixedSelection ? "" : dynamicAudienceIssue();
+  const definition = fixedSelection || owner || dynamicProblem ? null : captureAudienceDefinition();
   const host = document.createElement("dialog");
   host.className = "map-list-action ask";
   host.setAttribute("aria-labelledby", "mapListActionTitle");
-  const scopes = [["selected","Selected"],["inView","In map view"],["matches","All matches"]];
+  const scopes = fixedSelection ? [["selected","Selected"]]
+    : [["selected","Selected"],["inView","In map view"],["matches","All matches"]];
   const origin = scopeLabel(scope);
-  const suggested = (mapListFilter?.name || origin) + " shortlist";
+  const suggested = (sourceList?.name || mapListFilter?.name || origin) + " shortlist";
   const dynamicName = origin + " prospects";
   let choice = preset || (groups.selected.length ? "selected" : "");
   let preparing = false;
@@ -2789,7 +2796,7 @@ async function openMapListAction(selected, preset){
     <label>Save as<select class="ask-name" id="mapListMode">
       <option value="new">Create static list</option>
       <option value="existing"${destinations.length ? "" : " disabled"}>Add to existing list</option>
-      ${owner ? "" : '<option value="dynamic">Create dynamic list</option>'}
+      ${owner || fixedSelection ? "" : '<option value="dynamic">Create dynamic list</option>'}
     </select></label>
     <label id="mapListScopeLabel">Contacts<select class="ask-name" id="mapListScope">
       <option value="">Choose which contacts</option>
@@ -2805,7 +2812,7 @@ async function openMapListAction(selected, preset){
     <label id="mapListDescriptionLabel" hidden>Description (optional)<input class="ask-name" id="mapListDescription" maxlength="300"></label>
     <div class="list-toolbar">
       <button type="submit" class="ask-btn primary" id="mapListSave"></button>
-      ${owner ? "" : `<button type="button" class="ask-btn" data-map-list-action="call"></button>
+      ${owner || fixedSelection ? "" : `<button type="button" class="ask-btn" data-map-list-action="call"></button>
         <button type="button" class="ask-btn" data-map-list-action="email"></button>`}
     </div><p id="mapListError" role="alert" hidden></p>
   </form>`;
@@ -2827,7 +2834,7 @@ async function openMapListAction(selected, preset){
       ? `${count.toLocaleString()} of ${groups.matches.length.toLocaleString()} contacts in map view`
       : choice ? `${count.toLocaleString()} ${choice === "selected" ? "selected" : "matching"} ${noun}` : "";
     const countAvailable = count > 0 && count <= Dial.MAX_QUEUE;
-    host.querySelector("#mapListScopeLabel").hidden = dynamic;
+    host.querySelector("#mapListScopeLabel").hidden = dynamic || fixedSelection;
     host.querySelector("#mapListCount").hidden = dynamic || !countText;
     host.querySelector("#mapListCount").textContent = countText;
     host.querySelector("#mapListDestinationLabel").hidden = !existing;
@@ -2877,15 +2884,7 @@ async function openMapListAction(selected, preset){
       await dialReady;
       if (action !== "email" && Dial.state.problem) throw new Error(Dial.state.problem);
       if (action === "call" && !await Dial.confirmCallSwitch()) return;
-      if (!await loadContacts()) throw new Error("Contact details could not be loaded.");
-      const actContacts = await ActAddresses.loadListContacts(ids.map(crd => ({ crd })));
-      const currentAct = new Map(actContacts.map(contact => [contact.contactKey, contact]));
-      const items = ids.map(crd => {
-        const act = currentAct.get(crd);
-        if (act) return ActAddresses.snapshot(act);
-        if (ActAddresses.isContactKey(crd)) return { crd, name:"ACT! contact", unconfirmed:true };
-        return dialSnapshot(crd);
-      });
+      const { items, currentAct } = await loadActionContacts(ids, sourceList?.items);
       if (action === "email") {
         host.close();
         return await emailSavedList({ items }, null, currentAct);
@@ -2943,6 +2942,22 @@ async function openMapListAction(selected, preset){
   update();
   host.showModal();
   mode.focus();
+}
+
+async function loadActionContacts(ids, savedItems = []){
+  if (!await loadContacts()) throw new Error("Contact details could not be loaded.");
+  const actContacts = await ActAddresses.loadListContacts(ids.map(crd => ({ crd })));
+  const currentAct = new Map(actContacts.map(contact => [contact.contactKey, contact]));
+  const savedById = new Map(savedItems.map(item => [String(item.crd), item]));
+  const items = ids.map(crd => {
+    const act = currentAct.get(crd);
+    if (act) return ActAddresses.snapshot(act);
+    const saved = savedById.get(crd);
+    if (ActAddresses.isContactKey(crd)) return { crd, name:saved?.name || "ACT! contact", unconfirmed:true };
+    const fresh = dialSnapshot(crd);
+    return saved ? { ...fresh, city:fresh.city || saved.city, state:fresh.state || saved.state } : fresh;
+  });
+  return { items, currentAct };
 }
 
 function mergeListContacts(existing, selected){
@@ -3197,7 +3212,7 @@ function paintAudiencePreview(){
   const readyCall = policy.rows.filter(row => row.callable).length;
   const readyEmail = policy.rows.filter(row => row.emailable).length;
   listsBack.innerHTML = `<div class="ask lists lists-workspace" aria-label="Saved filter preview">
-    <div class="lists-title"><div><span class="list-type dynamic">Saved filter</span><h3>${esc(p.audience.name)}</h3><p>${esc(p.audience.description || "Updates when source data or saved rules change.")}</p></div><button type="button" class="ask-btn ghost" data-lists="close">Close</button></div>
+    <div class="lists-title"><div><span class="list-type dynamic">Saved filter</span><h3>${esc(p.audience.name)}</h3><p>${esc(p.audience.description || "Updates when source data or saved rules change.")}</p></div><button type="button" class="ask-btn ghost list-close" data-lists="close" aria-label="Close Lists" title="Close Lists">×</button></div>
     <div class="audience-counts"><span><b>${p.matches.toLocaleString()}</b> matches</span><span><b>${p.callable.toLocaleString()}</b> callable</span><span><b>${p.emailable.toLocaleString()}</b> emailable</span><span class="excluded"><b>${p.excluded.toLocaleString()}</b> no usable route</span></div>
     <p class="audience-owner"><b>${policy.text}</b><br>Advisor territory coverage: ${owners.size ? [...owners].map(([n,c]) => `${esc(n)} (${c})`).join("; ") : "assignment information unavailable"}. Raw channel counts above describe the full audience; snapshot actions below use ${policy.kind === "territory" ? "only this account's assigned territory" : policy.kind === "national" || policy.kind === "cross_territory" ? "all matches with normal advisor ownership retained" : "no matches until list access is assigned"}.</p>
     <p class="dial-menu-note">Ready for a new snapshot: ${readyCall.toLocaleString()} callable; ${readyEmail.toLocaleString()} emailable${policy.outside ? `; ${policy.outside.toLocaleString()} outside-territory matches excluded before channel checks` : ""}.</p>
@@ -3424,7 +3439,7 @@ function paintListMemberRows(){
     || (a.name || "").localeCompare(b.name || ""));
   const body = listsBack.querySelector(".list-scroll");
   body.innerHTML = rows.length ? `<ul class="lists-ul">${rows.map(it =>
-    `<li class="lists-row">
+    `<li class="lists-row list-member-row">
       ${smart ? "" : `<input type="checkbox" data-list-member-select="${esc(it.crd)}"
         aria-label="Select ${esc(it.name || it.crd)}"${selected.has(String(it.crd)) ? " checked" : ""}>`}
       <button type="button" class="list-open" data-lists="member" data-id="${esc(it.crd)}">
@@ -3433,12 +3448,6 @@ function paintListMemberRows(){
       </button></li>`).join("")}</ul>`
     : `<p class="lists-none">${items.length ? "No members match your search." : "This list has no members yet."}</p>`;
   body.scrollTop = listDetail.scroll;
-  const select = listsBack.querySelector("[data-lists='select-members']");
-  if (select) {
-    select.disabled = !rows.length;
-    select.dataset.mode = rows.length && rows.every(item => selected.has(String(item.crd))) ? "none" : "all";
-    select.textContent = select.dataset.mode === "none" ? "Clear shown selection" : `Select ${rows.length} shown`;
-  }
   paintListSelection();
 }
 
@@ -3446,19 +3455,32 @@ function paintListSelection(){
   const status = listsBack?.querySelector("[data-list-selection]");
   if (!status || !listDetail) return;
   const count = listDetail.selected.size;
-  status.textContent = count ? `${count.toLocaleString()} selected` : "";
-  const remove = listsBack.querySelector("[data-lists='remove-members']");
-  const use = listsBack.querySelector("[data-lists='use-selected']");
-  if (remove) {
-    remove.hidden = use.hidden = !count;
-    remove.textContent = `Remove ${count.toLocaleString()}`;
-  }
+  status.textContent = `${count.toLocaleString()} selected`;
+  const boxes = [...listsBack.querySelectorAll("[data-list-member-select]")];
+  const shownSelected = boxes.filter(box => box.checked).length;
+  const selectShown = listsBack.querySelector("#listSelectShown");
+  selectShown.disabled = !boxes.length;
+  selectShown.checked = boxes.length > 0 && shownSelected === boxes.length;
+  selectShown.indeterminate = shownSelected > 0 && shownSelected < boxes.length;
+  const label = boxes.length === listDetail.items.length ? "Select all" : "Select";
+  listsBack.querySelector("[data-select-shown-label]").textContent = !boxes.length ? "Select shown"
+    : `${label} ${boxes.length.toLocaleString()}${label === "Select" ? " shown" : ""}`;
+  listsBack.querySelector(".list-selection-actions").hidden = !count;
+}
+
+async function readSelectedMembers(detail, owner){
+  const selection = new Set(detail.selected);
+  const saved = await Dial.readList(detail.id, owner?.id);
+  const items = saved.items.filter(item => selection.has(String(item.crd)));
+  if (items.length !== selection.size)
+    throw new Error("List membership changed. Reopen the list and check your selection.");
+  return { ...saved, items };
 }
 
 function listAction(label, action, attribute, disabled){
   const call = label === "Call";
   return `<button type="button" class="action-icon-btn${call ? " primary" : ""}"
-    data-lists="${action}" ${attribute}${disabled}><svg aria-hidden="true"><use href="#icon-action-${label.toLowerCase()}"/></svg>${label}</button>`;
+    data-lists="${action}" ${attribute}${disabled}><svg aria-hidden="true"><use href="#icon-action-${label === "Add to List" ? "add" : label.toLowerCase()}"/></svg>${label}</button>`;
 }
 
 function paintListEdit(){
@@ -3471,8 +3493,8 @@ function paintListEdit(){
   listsBack.innerHTML = `<div class="ask lists lists-workspace list-member-workspace" aria-labelledby="listsWorkspaceTitle">
     <div class="list-toolbar">
       <button type="button" class="ask-btn ghost" data-lists="edit-back">← Lists</button>
-      <button type="button" class="ask-btn ghost" data-lists="expand">${listExpanded ? "Dock" : "Expand"}</button>
-      <button type="button" class="ask-btn ghost" data-lists="close">Close</button>
+      <button type="button" class="ask-btn ghost" data-lists="expand">${listExpanded ? "Dock" : "Full view"}</button>
+      <button type="button" class="ask-btn ghost list-close" data-lists="close" aria-label="Close Lists" title="Close Lists">×</button>
     </div>
     <div class="list-member-title">
       <div>
@@ -3488,7 +3510,8 @@ function paintListEdit(){
           <button type="button" class="ask-btn grave" data-lists="drop" data-id="${id}">Delete list</button>
         </div></details>`}
     </div>
-    <div class="list-toolbar list-member-actions">
+    <div class="list-toolbar list-member-actions" role="group" aria-label="Whole list">
+      <span class="list-action-scope">Whole list</span>
       ${d.smart ? listAction("Call", "flag-call", `data-kind="${esc(d.smart)}"`, disabled)
         : !owner ? listAction("Call", "call", `data-id="${id}"`, disabled) : ""}
       ${listAction("Email", "email", `data-id="${id}"`, disabled)}
@@ -3502,10 +3525,15 @@ function paintListEdit(){
         <option value="firm"${d.order === "firm" ? " selected" : ""}>Firm</option>
       </select>
     </div>
-    ${d.smart ? "" : `<div class="list-toolbar list-selection"><button type="button" class="ask-btn ghost" data-lists="select-members"></button>
-      <span data-list-selection role="status"></span>
-      <button type="button" class="ask-btn" data-lists="use-selected" hidden>Use selected</button>
-      <button type="button" class="ask-btn grave" data-lists="remove-members" hidden></button></div>`}
+    ${d.smart ? "" : `<div class="list-toolbar list-selection">
+      <label class="list-select-shown"><input type="checkbox" id="listSelectShown"><span data-select-shown-label></span></label>
+      <span data-list-selection role="status"></span></div>
+    <div class="list-toolbar list-selection-actions" role="group" aria-label="Selected contacts" hidden>
+      ${owner ? "" : listAction("Call", "call-selected", "", "")}
+      ${listAction("Email", "email-selected", "", "")}
+      ${listAction("Add to List", "add-selected", "", "")}
+      <button type="button" class="ask-btn grave" data-lists="remove-members">Remove</button>
+    </div>`}
     <div class="list-scroll"></div>
   </div>`;
   paintListMemberRows();
@@ -3953,12 +3981,12 @@ function paintListManager(){
   if (listDetail) return paintListEdit();
   listsBack.innerHTML = `<div class="ask lists lists-workspace" aria-labelledby="listsWorkspaceTitle">
     <div class="lists-title"><h3 id="listsWorkspaceTitle" tabindex="-1">Lists</h3>
-      <button type="button" class="ask-btn ghost" data-lists="close">Close</button></div>
+      <button type="button" class="ask-btn ghost list-close" data-lists="close" aria-label="Close Lists" title="Close Lists">×</button></div>
     <div data-list-owner-picker>${listWorkspacePicker()}</div>
     <div class="list-toolbar">
       <button type="button" class="ask-btn primary" data-lists="new">New list</button>
       ${listWorkspace ? "" : `<button type="button" class="ask-btn" data-lists="import-open">Import emails</button>`}
-      <button type="button" class="ask-btn ghost" data-lists="expand">${listExpanded ? "Dock" : "Expand"}</button>
+      <button type="button" class="ask-btn ghost" data-lists="expand">${listExpanded ? "Dock" : "Full view"}</button>
     </div>
     <div class="list-toolbar">
       <input type="search" id="listDirectorySearch" class="ask-name" value="${esc(listDirectory.query)}" placeholder="Search lists" aria-label="Search lists">
@@ -3996,14 +4024,17 @@ document.addEventListener("change", e => {
     listDetail.order = e.target.value;
     listDetail.scroll = 0;
     paintListMemberRows();
+  } else if (e.target.id === "listSelectShown" && listDetail) {
+    for (const box of listsBack.querySelectorAll("[data-list-member-select]")) {
+      box.checked = e.target.checked;
+      if (box.checked) listDetail.selected.add(box.dataset.listMemberSelect);
+      else listDetail.selected.delete(box.dataset.listMemberSelect);
+    }
+    paintListSelection();
   } else if (e.target.dataset.listMemberSelect && listDetail) {
     const id = e.target.dataset.listMemberSelect;
     if (e.target.checked) listDetail.selected.add(id);
     else listDetail.selected.delete(id);
-    const boxes = [...listsBack.querySelectorAll("[data-list-member-select]")];
-    const toggle = listsBack.querySelector('[data-lists="select-members"]');
-    toggle.dataset.mode = boxes.every(box => box.checked) ? "none" : "all";
-    toggle.textContent = toggle.dataset.mode === "none" ? "Clear shown selection" : `Select ${boxes.length} shown`;
     paintListSelection();
   }
 });
@@ -4046,17 +4077,17 @@ document.addEventListener("click", async e => {
       return focusListDialog("#listsWorkspaceTitle");
     }
     if (act === "member" && detail) return await openListMember(id, detail);
-    if (act === "select-members" && detail) {
-      const select = b.dataset.mode === "all";
-      for (const box of listsBack.querySelectorAll("[data-list-member-select]")) {
-        const key = box.dataset.listMemberSelect;
-        if (select) detail.selected.add(key);
-        else detail.selected.delete(key);
-      }
-      captureListScroll();
-      return paintListMemberRows();
+    if (detail?.selected.size && ["call-selected","email-selected","add-selected"].includes(act)) {
+      if (act === "call-selected" && owner) return;
+      const saved = await readSelectedMembers(detail, owner);
+      if (listDetail !== detail || owner !== listWorkspace?.owner) return;
+      if (act === "email-selected") return await emailSavedList(saved, owner);
+      if (act === "add-selected") return await openMapListAction(null, "selected", saved);
+      await dialReady;
+      if (!await Dial.confirmCallSwitch()) return;
+      const { items } = await loadActionContacts(saved.items.map(item => String(item.crd)), saved.items);
+      return await startListFromContacts(items, `${saved.name} · ${items.length} selected`);
     }
-    if (act === "use-selected" && detail?.selected.size) return await openMapListAction(detail.selected, "selected");
     if (act === "remove-members" && detail?.selected.size) {
       const removed = new Set(detail.selected);
       if (!confirm(`Remove ${removed.size} of ${detail.items.length} contacts from "${detail.name}"${owner ? ` in ${owner.email}'s lists` : ""}?`)) return;
@@ -8441,11 +8472,13 @@ function renderFirms(q){
     row.setAttribute("aria-pressed", String(on));
     const col = on ? firmColor[f.crd] : cssVar("--accent");
     if (on) row.style.setProperty("--firm-col", col);
+    const barTitle = `${f.advisors.toLocaleString()} ${scope === "US" ? "advisor placements" : "advisors"} in view. Largest firm in view has ${max.toLocaleString()}.`;
     row.innerHTML = `
       <span class="fn" title="${esc(f.firm)} · CRD ${esc(f.crd)} · ${scope === "US" ? `in ${f.reachStates} state${f.reachStates > 1 ? "s" : ""}` : `${f.offices} office${f.offices === 1 ? "" : "s"} in the current view`}">${on ? `<span class="swatch" style="background:${col}"></span>` : ""}${esc(f.firm)}</span>
       <span class="fdetails" role="button" tabindex="0" data-firm-profile="${esc(f.crd)}">Details</span>
-      <span class="fmetrics"><span><b class="mono">${f.advisors.toLocaleString()}</b> advisor${f.advisors === 1 ? "" : "s"}</span><span><b class="mono">${f.offices.toLocaleString()}</b> office${f.offices === 1 ? "" : "s"}</span><span title="Equities plus Funds/ETFs"><b>${f.relevantAum == null ? "—" : fmtMoney(f.relevantAum)}</b> relevant AUM</span><span class="fexclude" role="button" tabindex="0" data-exclude-firm="${esc(f.crd)}" title="Remove ${esc(f.firm)} from the map">Exclude</span></span>
-      <span class="fb"><i style="width:${Math.max(3, f.advisors / max * 100)}%;background:${col}"></i></span>`;
+      <span class="fmetrics"><span title="${barTitle}"><b class="mono">${f.advisors.toLocaleString()}</b> advisor${f.advisors === 1 ? "" : "s"}</span><span><b class="mono">${f.offices.toLocaleString()}</b> office${f.offices === 1 ? "" : "s"}</span><span title="Equities plus Funds/ETFs"><b>${f.relevantAum == null ? "—" : fmtMoney(f.relevantAum)}</b> relevant AUM</span><span class="fexclude" role="button" tabindex="0" data-exclude-firm="${esc(f.crd)}" title="Remove ${esc(f.firm)} from the map">Exclude</span></span>
+      <span class="fb" aria-hidden="true" title="${barTitle}">
+        <i style="width:${f.advisors / max * 100}%;background:${col}"></i></span>`;
     row.addEventListener("click", e => {
       if (e.target.closest("[data-firm-profile]")) return;
       if (e.target.closest("[data-exclude-firm]")) return;   // exclude is not a selection
