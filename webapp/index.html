@@ -30,8 +30,8 @@
   <link rel="stylesheet" href="vendor/leaflet.css">
   <link rel="stylesheet" href="vendor/MarkerCluster.css">
   <link rel="stylesheet" href="vendor/MarkerCluster.Default.css">
-  <link rel="stylesheet" href="style.css?v=83d55730fa">
-  <link rel="stylesheet" href="email.css?v=83d55730fa">
+  <link rel="stylesheet" href="style.css?v=2803f73a17">
+  <link rel="stylesheet" href="email.css?v=2803f73a17">
 </head>
 <body>
   <svg class="action-icon-library" width="0" height="0" aria-hidden="true" focusable="false">
@@ -291,64 +291,46 @@
 
     <div id="statsBar" class="stats-bar" aria-label="Current map summary">
       <div class="stats-primary">
-        <div class="stats-market">
-          <div class="stat">
-            <span class="stat-label">Advisors
-              <span class="info-wrap">
-                <button type="button" class="info-button" aria-label="About advisor, office, and firm counts">i</button>
-                <span id="countHelp" class="info-popover" role="tooltip"></span>
-              </span>
-            </span>
-            <strong id="kpiAdvisors">&mdash;</strong>
-          </div>
-          <div class="stat">
-            <span class="stat-label">AUM
-              <span class="info-wrap">
-                <button type="button" class="info-button" aria-label="How AUM, equities, and funds or ETFs are calculated">i</button>
-                <span id="estimatedAumHelp" class="info-popover" role="tooltip"></span>
-              </span>
-            </span>
-            <strong id="estimatedAum">&mdash;</strong>
-          </div>
-          <div class="stat"><span class="stat-label">Equities</span><strong id="estimatedEquities">&mdash;</strong></div>
-          <div class="stat"><span class="stat-label">Funds/ETFs</span><strong id="estimatedFunds">&mdash;</strong></div>
-        </div>
-        <div class="stat-actions" role="group" aria-label="Map actions">
-          <button type="button" id="exportAdvisors" class="action-icon-btn" title="Download advisors in view as CSV"
-                  aria-label="Download advisors in view as CSV"><svg aria-hidden="true"><use href="#icon-action-csv"/></svg>CSV</button>
-          <button type="button" id="addMapToList" class="action-icon-btn" aria-haspopup="dialog" title="Choose which advisors to add to a list"><svg aria-hidden="true"><use href="#icon-action-add"/></svg>Add to List</button>
-        </div>
-      </div>
-      <!-- EIC's own book in the current view. Kept ALONGSIDE the ADV figures
-           above, not in place of them: those are market size, these are our
-           share of it, and the pair is what makes penetration readable. Each
-           carries the "with EIC" prefix so nobody reads them as market data. -->
-      <!-- The scope badge is not decoration. Every other tile in this strip is
-           scoped to the viewport and moves as the map moves. In the national
-           view these three cannot be -- the national layer carries no advisor
-           identities -- so they show the whole de-duplicated book instead, and
-           a figure that ignores panning while its neighbours obey it has to say
-           so on its face, not in a tooltip nobody opens. -->
-      <div class="stats-strategies" aria-label="EIC strategy assets">
-        <div class="stat stat-eic">
-          <span class="stat-label">All-Cap &middot; EIC<em id="eicScope" class="stat-scope" hidden></em>
+        <div class="stat stat-advisors">
+          <span class="stat-label">Advisors
             <span class="info-wrap">
-              <button type="button" class="info-button" aria-label="About EIC assets in view">i</button>
-              <span id="eicAssetsHelp" class="info-popover" role="tooltip"></span>
+              <button type="button" class="info-button" aria-label="About advisor, office, and firm counts">i</button>
+              <span id="countHelp" class="info-popover" role="tooltip"></span>
             </span>
           </span>
-          <strong id="eicAcv">&mdash;</strong>
+          <strong id="kpiAdvisors">&mdash;</strong>
         </div>
-        <div class="stat stat-eic"><span class="stat-label">Large-Cap &middot; EIC</span><strong id="eicLcv">&mdash;</strong></div>
-        <div class="stat stat-eic"><span class="stat-label">EICIX</span><strong id="eicMf">&mdash;</strong></div>
-        <div class="stat stat-eic"><span class="stat-label">Mid-Cap &middot; EIC</span><strong id="eicMidcap">&mdash;</strong></div>
+        <div class="stat-actions" role="group" aria-label="Map actions">
+          <button type="button" id="addMapToList" class="action-icon-btn" aria-haspopup="dialog" title="Choose which advisors to add to a list"><svg aria-hidden="true"><use href="#icon-action-add"/></svg>Add to List</button>
+          <button type="button" id="exportAdvisors" class="action-icon-btn" title="Download advisors in view as CSV"
+                  aria-label="Download advisors in view as CSV"><svg aria-hidden="true"><use href="#icon-action-csv"/></svg>CSV</button>
+        </div>
       </div>
-      <!-- National only: the SHAPE of the book. The tiles carry its size; this
-           carries what the size does not show -- how many advisors hold it, how
-           concentrated it is, and which of the two SMAs each side is missing.
-           Pre-computed and de-duplicated in build_act_assets.py, because the
-           national layer cannot derive any of it in the browser. -->
-      <p id="eicNationalNote" class="stats-status" hidden></p>
+      <div class="stats-assets">
+        <div class="stat stat-relevant">
+          <span class="stat-label">Relevant AUM
+            <span class="info-wrap">
+              <button type="button" class="info-button" aria-label="How relevant AUM is calculated">i</button>
+              <span id="estimatedAumHelp" class="info-popover" role="tooltip"></span>
+            </span>
+          </span>
+          <strong id="estimatedAum">&mdash;</strong>
+        </div>
+        <div class="stats-strategies" role="group" aria-label="EIC strategy assets">
+          <div class="stat stat-eic">
+            <span class="stat-label">All-Cap<em id="eicScope" class="stat-scope" title="United States" hidden></em>
+              <span class="info-wrap">
+                <button type="button" class="info-button" aria-label="About EIC strategy assets">i</button>
+                <span id="eicAssetsHelp" class="info-popover" role="tooltip"></span>
+              </span>
+            </span>
+            <strong id="eicAcv">&mdash;</strong>
+          </div>
+          <div class="stat stat-eic"><span class="stat-label">Large-Cap</span><strong id="eicLcv">&mdash;</strong></div>
+          <div class="stat stat-eic"><span class="stat-label">EICIX</span><strong id="eicMf">&mdash;</strong></div>
+          <div class="stat stat-eic"><span class="stat-label">Mid-Cap</span><strong id="eicMidcap">&mdash;</strong></div>
+        </div>
+      </div>
       <p id="count" class="stats-status" role="status" aria-live="polite" hidden></p>
       <p id="kpiNote" class="stats-status" hidden></p>
     </div>
@@ -387,12 +369,12 @@
   <script src="vendor/leaflet-heat.js"></script>
   <!-- Shared with the field view: one definition of what a call outcome is,
        one queue, one do-not-call list. Loaded before app.js, which uses it. -->
-  <script src="dial.js?v=83d55730fa"></script>
-  <script src="training.js?v=83d55730fa"></script>
-  <script src="list_import.js?v=83d55730fa"></script>
-  <script src="asset-product-filters.js?v=83d55730fa"></script>
-  <script src="act-addresses.js?v=83d55730fa"></script>
-  <script src="app.js?v=83d55730fa"></script>
-  <script src="email.js?v=83d55730fa"></script>
+  <script src="dial.js?v=2803f73a17"></script>
+  <script src="training.js?v=2803f73a17"></script>
+  <script src="list_import.js?v=2803f73a17"></script>
+  <script src="asset-product-filters.js?v=2803f73a17"></script>
+  <script src="act-addresses.js?v=2803f73a17"></script>
+  <script src="app.js?v=2803f73a17"></script>
+  <script src="email.js?v=2803f73a17"></script>
 </body>
 </html>

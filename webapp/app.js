@@ -2771,11 +2771,11 @@ function mapListScopes(selected = mapSelectedIds){
   return { selected:[...selected].map(String), inView:[...inView], matches:[...matches] };
 }
 
-async function openMapListAction(selected, preset, sourceList){
+async function openMapListAction(sourceList){
   const fixedSelection = !!sourceList;
   await dialReady;
   if (document.querySelector(".map-list-action[open]")) return;
-  const groups = fixedSelection ? { selected:sourceList.items.map(item => String(item.crd)) } : mapListScopes(selected);
+  const groups = fixedSelection ? { selected:sourceList.items.map(item => String(item.crd)) } : mapListScopes();
   const owner = listWorkspace?.owner;
   const destinations = currentWorkspaceLists().filter(list => !standingKindOf(list.id));
   const dynamicProblem = fixedSelection ? "" : dynamicAudienceIssue();
@@ -2788,7 +2788,7 @@ async function openMapListAction(selected, preset, sourceList){
   const origin = scopeLabel(scope);
   const suggested = (sourceList?.name || mapListFilter?.name || origin) + " shortlist";
   const dynamicName = origin + " prospects";
-  let choice = preset || (groups.selected.length ? "selected" : "");
+  let choice = fixedSelection ? "selected" : "inView";
   let preparing = false;
   host.innerHTML = `<form><div class="lists-title"><h3 id="mapListActionTitle">Add to List</h3>
     <button type="button" class="ask-btn ghost" data-map-list-action="close">Close</button></div>
@@ -4082,7 +4082,7 @@ document.addEventListener("click", async e => {
       const saved = await readSelectedMembers(detail, owner);
       if (listDetail !== detail || owner !== listWorkspace?.owner) return;
       if (act === "email-selected") return await emailSavedList(saved, owner);
-      if (act === "add-selected") return await openMapListAction(null, "selected", saved);
+      if (act === "add-selected") return await openMapListAction(saved);
       await dialReady;
       if (!await Dial.confirmCallSwitch()) return;
       const { items } = await loadActionContacts(saved.items.map(item => String(item.crd)), saved.items);
@@ -5427,7 +5427,7 @@ async function bulkQueue(ids, what){
 document.addEventListener("click", async e => {
   const add = e.target.closest("#addMapToList, #queueVisibleMobile, #saveListInView");
   if (add) {
-    try { await openMapListAction(undefined, add.id === "saveListInView" ? "inView" : ""); }
+    try { await openMapListAction(); }
     catch (error) { showNotice(error.message || "Could not open the map contact selection."); }
     return;
   }
@@ -8174,10 +8174,10 @@ function estimateAum(byFirm, placements){
 function renderEicNational(){
   const el = (id) => document.getElementById(id);
   const t = (ACT_ASSETS && ACT_ASSETS.totals) || null;
-  const scope = el("eicScope"), note = el("eicNationalNote");
+  const scope = el("eicScope");
   if (!t){
     ["eicAcv", "eicLcv", "eicMf", "eicMidcap"].forEach(i => { el(i).textContent = "—"; });
-    scope.hidden = true; note.hidden = true;
+    scope.hidden = true;
     el("eicAssetsHelp").textContent = ACT_ASSETS_ERROR
       ? "EIC book figures are unavailable."
       : "EIC book figures are still loading.";
@@ -8188,7 +8188,7 @@ function renderEicNational(){
   el("eicMf").textContent = fmtMoney(t.mf);
   el("eicMidcap").textContent = fmtMoney(t.midcap || 0);
   scope.hidden = false;
-  scope.textContent = " · United States";
+  scope.textContent = "US";
 
   const n = (v) => Number(v || 0).toLocaleString();
   const source = ACT_ASSETS.source_totals || null;
@@ -8215,13 +8215,10 @@ function renderEicNational(){
     ? `${n(t.gap_acv)} hold All-Cap but no Large-Cap and ${n(t.gap_lcv)} hold Large-Cap but no All-Cap`
       + (t.both_smas != null ? `; ${n(t.both_smas)} hold both.` : ".")
     : "";
-  note.hidden = false;
-  note.textContent = `${n(t.advisors)} advisors hold a book with EIC across `
-    + `${n(t.accounts)} accounts. ${gaps}`;
-
   el("eicAssetsHelp").textContent =
     `The approved CRD-linked EIC book, not the current viewport — the national layer carries firm-office `
     + `placements rather than advisor identities, so it cannot scope these to what is on screen. `
+    + `These figures cover ${n(t.advisors)} advisors and ${n(t.accounts)} accounts. ${gaps} `
     + `Unlike every other figure in this strip, they do not change as you pan or zoom. `
     + `${shared}`
     + reconciliation
@@ -8234,11 +8231,8 @@ function renderEicNational(){
 
 function renderEicAssets(ids){
   const el = (id) => document.getElementById(id);
-  // Leaving the national view puts these tiles back on the viewport, so the
-  // "United States" badge and its note have to come off with it -- a stale
-  // badge would relabel a Georgia figure as the whole country.
+  // Regional figures reflect the current viewport.
   document.getElementById("eicScope").hidden = true;
-  document.getElementById("eicNationalNote").hidden = true;
   // `null` means UNAVAILABLE, an empty array means genuinely nothing in view.
   // A detail view with no advisors on screen really is zero and says so.
   if (!ACT_ASSETS || !ACT_ASSETS.accounts || ids == null){
@@ -8279,15 +8273,13 @@ function renderEicAssets(ids){
 }
 
 function renderEstimatedAum(estimate){
-  document.getElementById("estimatedAum").textContent = fmtMoney(estimate.aum);
-  document.getElementById("estimatedEquities").textContent = fmtMoney(estimate.equities);
-  document.getElementById("estimatedFunds").textContent = fmtMoney(estimate.funds);
+  document.getElementById("estimatedAum").textContent = fmtMoney(estimate.equities + estimate.funds);
   const geography = estimate.placements
     ? "In the national view, each firm's pool is allocated by its share of firm-office advisor placements in the current viewport; the lightweight national layer does not carry advisor identities."
     : "In detailed views, each firm's pool is allocated by distinct mapped advisors in the current viewport divided by that firm's distinct mapped advisors nationally.";
   document.getElementById("estimatedAumHelp").textContent =
-    `AUM is firm regulatory AUM allocated to the current geography. The product pools use ADV Item 5.K percentages applied to non-pooled regulatory AUM. ` +
-    `Equities means exchange-traded equity securities; Funds/ETFs means securities issued by registered investment companies or BDCs. ` +
+    `Relevant AUM combines ${fmtMoney(estimate.equities)} in equities and ${fmtMoney(estimate.funds)} in funds or ETFs. Total regulatory AUM allocated to this view is ${fmtMoney(estimate.aum)}. ` +
+    `The product pools use ADV Item 5.K percentages applied to non-pooled regulatory AUM. Equities means exchange-traded equity securities. Funds/ETFs means securities issued by registered investment companies or BDCs. ` +
     `${geography} Allocations are capped at 100% and summed across firms. ` +
     `These are directional opportunity estimates—not actual product holdings—and discretionary share is not applied because the ADV does not cross-tab it by asset type. ` +
     `Coverage in this view: AUM ${estimate.aumCoverage.toLocaleString()} of ${estimate.firms.toLocaleString()} firms; ` +
@@ -8366,9 +8358,7 @@ function refreshPanelNational(){
     setScopeTotals(() => NAT_DETAIL_ERROR
       ? "Office detail is unavailable; national totals cannot be calculated."
       : "Office detail is still loading.");
-    ["estimatedAum", "estimatedEquities", "estimatedFunds"].forEach(id => {
-      document.getElementById(id).textContent = "—";
-    });
+    document.getElementById("estimatedAum").textContent = "—";
     document.getElementById("estimatedAumHelp").textContent = NAT_DETAIL_ERROR
       ? "Estimated national opportunity is unavailable because firm-office detail could not be loaded."
       : "Estimated national opportunity will appear when firm-office detail finishes loading.";
