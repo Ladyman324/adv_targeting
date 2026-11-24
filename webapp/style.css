@@ -988,38 +988,36 @@ body.scope-pending #map{cursor:progress}
   display:grid;gap:6px;padding:6px 10px;border:1px solid var(--hair);border-radius:11px;
   background:color-mix(in srgb,var(--panel) 94%,transparent);
   backdrop-filter:blur(6px);box-shadow:var(--shadow)}
-.stat{display:flex;align-items:baseline;gap:6px;min-width:0}
-.stats-primary,.stats-assets,.stats-strategies{display:flex;align-items:center;gap:10px}
-.stats-primary{justify-content:flex-start}
-.stats-assets{align-items:stretch;border-top:1px solid var(--hair);padding-top:5px}
-.stats-assets .stat{display:grid;align-content:center;justify-items:start;gap:3px}
-.stats-strategies{align-items:stretch;gap:11px;border-left:1px solid var(--hair);padding-left:10px}
-.stats-assets .stat-label{font-size:9px;letter-spacing:.05em}
-.stats-assets .stat strong{font-size:11.5px}
-.stat-relevant strong{font-weight:740}
-.stats-strategies .stat strong{color:color-mix(in srgb,var(--ink) 87%,var(--muted))}
-.stat-label{font-size:9px;letter-spacing:.05em}
-.stats-strategies .stat strong{font-size:11.5px;color:color-mix(in srgb,var(--ink) 77%,var(--muted))}
+.stats-toolbar{display:flex;align-items:stretch;justify-content:center;flex-wrap:wrap;gap:6px 11px}
+.stats-primary,.stats-assets,.stats-strategies{display:flex;align-items:stretch;gap:10px}
+.stats-primary{flex:none}
+.stats-assets{border-left:1px solid var(--hair);padding-left:11px}
+.stats-strategies{gap:11px}
+.stats-toolbar .stat{display:grid;align-content:center;justify-items:center;gap:3px;min-width:0;text-align:center}
 .stat-label{display:inline-flex;align-items:center;gap:3px;color:var(--muted);
-  font-size:9.5px;font-weight:700;line-height:1;text-transform:uppercase;letter-spacing:.08em;
-  white-space:nowrap}
-.stat strong{flex:0 0 auto;color:var(--ink);font-size:13px;font-weight:680;line-height:1.2;
+  font-size:9.5px;font-weight:700;line-height:1;text-transform:uppercase;letter-spacing:.05em;white-space:nowrap}
+.stat strong{color:var(--ink);font-size:13px;font-weight:680;line-height:1.2;
   font-variant-numeric:tabular-nums;white-space:nowrap}
-.stat-actions{display:flex;align-items:center;gap:5px}
-@media (min-width:1280px){
+.stats-assets .stat-label{font-size:9px}
+.stats-assets .stat strong{font-size:11.5px}
+.stat-opportunity strong{font-weight:740}
+.stats-strategies .stat strong{color:color-mix(in srgb,var(--ink) 87%,var(--muted))}
+.stat-actions{display:flex;align-items:stretch;gap:5px}
+.stats-bar .action-icon-btn{height:auto;min-height:30px}
+@media (min-width:1530px){
   body:has(.list-drawer:not(.expanded)) #statsBar{--stats-right:calc(var(--list-drawer-width) + 26px)}
 }
-@media (min-width:1350px){
+@media (min-width:1590px){
   body:has(#firmOverview:not([hidden])):not(:has(.list-drawer)) #statsBar{
     --stats-right:calc(var(--firm-drawer-width) + 26px)}
 }
-@media (min-width:1770px){
+@media (min-width:1960px){
   body:has(.list-drawer.expanded) #statsBar{--stats-right:calc(var(--list-full-width) + 26px)}
 }
 @media (max-width:850px){
   .stats-bar{padding-inline:8px}
-  .stats-assets,.stats-strategies{gap:7px}
-  .stats-strategies{padding-left:7px}
+  .stats-assets,.stats-strategies{gap:5px}
+  .stats-assets{padding-left:5px}
   .stats-assets .stat-label{font-size:8.5px;letter-spacing:.025em}
 }
 .action-icon-library{position:absolute;pointer-events:none}

@@ -8278,7 +8278,7 @@ function renderEstimatedAum(estimate){
     ? "In the national view, each firm's pool is allocated by its share of firm-office advisor placements in the current viewport; the lightweight national layer does not carry advisor identities."
     : "In detailed views, each firm's pool is allocated by distinct mapped advisors in the current viewport divided by that firm's distinct mapped advisors nationally.";
   document.getElementById("estimatedAumHelp").textContent =
-    `Relevant AUM combines ${fmtMoney(estimate.equities)} in equities and ${fmtMoney(estimate.funds)} in funds or ETFs. Total regulatory AUM allocated to this view is ${fmtMoney(estimate.aum)}. ` +
+    `Opportunity combines ${fmtMoney(estimate.equities)} in equities and ${fmtMoney(estimate.funds)} in funds or ETFs. Total regulatory AUM allocated to this view is ${fmtMoney(estimate.aum)}. ` +
     `The product pools use ADV Item 5.K percentages applied to non-pooled regulatory AUM. Equities means exchange-traded equity securities. Funds/ETFs means securities issued by registered investment companies or BDCs. ` +
     `${geography} Allocations are capped at 100% and summed across firms. ` +
     `These are directional opportunity estimates—not actual product holdings—and discretionary share is not applied because the ADV does not cross-tab it by asset type. ` +
