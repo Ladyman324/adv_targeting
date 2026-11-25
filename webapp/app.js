@@ -39,7 +39,7 @@ const COMPARE = ["#12b39c", "#e0a53a", "#8079e0", "#e8615d", "#4aa3e0", "#9fc93c
 // of every deployed JSON path and byte. It changes for standalone shard
 // rebuilds too, and its leading date keeps the stale-build warning readable.
 // Do not edit it by hand.
-const DATA_VERSION = "20261124T211522Z-5e01d0d3cc2f94ff";
+const DATA_VERSION = "20261125T052734Z-560b113637dcef73";
 const dataUrl = file => `data/${file}?v=${DATA_VERSION}`;
 Dial.setContactRouteVersion(DATA_VERSION);
 // ONE scale for every mark on the map. There used to be two, and they were not
