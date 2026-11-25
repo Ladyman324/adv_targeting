@@ -1,4 +1,4 @@
-"""Per-advisor product split of EIC's book, keyed on SEC advisor CRD.
+"""Per-contact product split of EIC's book by advisor CRD and shared ACT! contact key.
 
 WHAT THIS ANSWERS
 -----------------
@@ -25,7 +25,9 @@ same approved, on-map account set in its `totals` block, and the complete source
 book separately in `source_totals`. Nothing should ever recompute totals by
 summing `advisors`.
 
-Only approved ACT economic links are published. Economic-only inference never
+CRD-linked holdings require approved economic links. Holdings attributed
+directly to a shared ACT! contact with no recorded CRD use its directory key.
+Economic-only inference never
 authorizes an email, call, preferred name, ACT sync, or CRD write-back.
 
 Run:  python src/build_act_assets.py
@@ -43,7 +45,9 @@ import pandas as pd
 ROOT = pathlib.Path(__file__).parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 from act_book import ACCOUNT_VALUE_POLICY, build, slots                        # noqa: E402
+from act_address_review import build_crm_directory, crm_contact_key, text     # noqa: E402
 from act_economic_links import approved_link_map         # noqa: E402
+from build_act_lookup import approved_pairs             # noqa: E402
 from contact_provenance import sha256_file               # noqa: E402
 from identity_schema import content_hash                 # noqa: E402
 from identity_normalize import normalize_crd             # noqa: E402
@@ -130,6 +134,35 @@ def load_economic_links() -> tuple[pathlib.Path, list[dict], pd.DataFrame, dict]
     return source, rows, links, economic
 
 
+def load_act_only_asset_contacts(rows, economic_manifest):
+    """Select account holders already eligible for the shared ACT! directory."""
+    candidates = {}
+    for row in rows:
+        fields = row.get("customFields") or {}
+        aid = str(row.get("id") or "")
+        if (text(aid) and not normalize_crd(fields.get("crd") or fields.get("sec_crd"))
+                and any(code for code, *_ in slots(fields))):
+            candidates[crm_contact_key(aid)] = aid
+    if not candidates:
+        return {}
+    mapping, identity = approved_pairs()
+    if identity["contentHash"] != economic_manifest["identityManifestHash"]:
+        raise SystemExit("ACT contact directory and account book require the same identity snapshot")
+    web = ADVISOR_INDEX.parent
+    advisors = json.loads((web / "contacts.json").read_text(encoding="utf-8"))["advisors"]
+    zips = json.loads((web / "geo_index.json").read_text(encoding="utf-8"))["zips"]
+    contacts = build_crm_directory(mapping, rows, zips, advisors,
+                                   only_ids={text(aid).lower() for aid in candidates.values()})
+    return {
+        candidates[c["contactKey"]]: {
+            "key": c["contactKey"], "state": c["primary"]["state"],
+            "coordinates": c["coordinates"], "firmCrd": c["firmCrd"],
+            "contactable": bool(c["phone"] or c["emailApproved"]),
+        }
+        for c in contacts["contacts"]
+    }
+
+
 def main() -> None:
     src, rows, links, economic_manifest = load_economic_links()
     accounts, conflicts, unresolved = build(rows)
@@ -137,6 +170,8 @@ def main() -> None:
     crd_of = approved_link_map(links.to_dict("records"))
     print(f"[*] economic ledger: {len(crd_of):,} approved ACT contacts")
     deployed_crds, advisor_index_fact = load_deployed_advisor_crds()
+
+    act_only = load_act_only_asset_contacts(rows, economic_manifest)
 
     # Which Act! contacts hold each account.
     holders = collections.defaultdict(set)
@@ -156,19 +191,20 @@ def main() -> None:
     approved_accounts = {
         code for code in accounts
         if any(crd_of.get(aid) for aid in holders[code])}
-    placed_accounts = {
-        code for code in approved_accounts
-        if any(crd_of[aid][0] in deployed_crds
-               for aid in holders[code] if aid in crd_of)}
+    targets = collections.defaultdict(list)
+    for aid, (crd, tier) in crd_of.items():
+        if crd in deployed_crds:
+            targets[aid].append((crd, tier))
+    for aid, contact in act_only.items():
+        targets[aid].append((contact["key"], "confirmed"))
+    placed_accounts = {code for code in accounts if holders[code] & targets.keys()}
     off_map_accounts = approved_accounts - placed_accounts
     approved_crds = {crd for crd, _tier in crd_of.values()}
     off_map_crds = approved_crds - deployed_crds
 
-    # Publish only accounts reachable from an advisor actually present in the
-    # deployed advisor index. Unresolved and off-map vectors stay server-side.
+    # Both kinds of contact refer to the same indexed broker code table.
     index_of = {code: i for i, code in enumerate(sorted(placed_accounts))}
-    scoped_rows = [r for r in rows if str(r.get("id")) in crd_of
-                   and crd_of[str(r.get("id"))][0] in deployed_crds]
+    scoped_rows = [r for r in rows if str(r.get("id")) in targets]
     scoped_accounts = build(scoped_rows)[0]
     own_accounts = {str(r.get("id")): build([r])[0] for r in scoped_rows}
     table = [None] * len(index_of)
@@ -182,27 +218,26 @@ def main() -> None:
                                            "ix": [], "av": {}})
     for code in sorted(placed_accounts):
         for aid in holders[code]:
-            hit = crd_of.get(aid)
-            if not hit or hit[0] not in deployed_crds:
-                continue
-            crd, tier = hit
-            a = own_accounts[aid][code]
-            e = per[crd]
-            if account_vector(a) != table[index_of[code]]:
-                e["av"][str(index_of[code])] = account_vector(a)
-            e["acv"] += a["acv_sma"]
-            e["lcv"] += a["large"]
-            e["mf"] += a["fund"]
-            e["midcap"] += a["midcap"]
-            e["n"] += 1
-            e["ix"].append(index_of[code])
-            if accounts[code]["holders"] > 1:
-                e["shared"] += 1
-            if RANK.get(tier, 9) < RANK.get(e["t"], 9):
-                e["t"] = tier
+            for key, tier in targets.get(aid, ()):
+                a = own_accounts[aid][code]
+                e = per[key]
+                if account_vector(a) != table[index_of[code]]:
+                    e["av"][str(index_of[code])] = account_vector(a)
+                e["acv"] += a["acv_sma"]
+                e["lcv"] += a["large"]
+                e["mf"] += a["fund"]
+                e["midcap"] += a["midcap"]
+                e["n"] += 1
+                e["ix"].append(index_of[code])
+                if accounts[code]["holders"] > 1:
+                    e["shared"] += 1
+                if RANK.get(tier, 9) < RANK.get(e["t"], 9):
+                    e["t"] = tier
 
-    # The headline and the EIC-assets filter now answer the same question:
-    # approved economic links only, with every reached account counted once.
+    crm_locations = {contact["key"]: {k: v for k, v in contact.items() if k != "key"}
+                     for contact in act_only.values()}
+    advisors = {key: entry for key, entry in per.items() if key not in crm_locations}
+    # The headline and filter share one deduplicated account table.
     mapped_accounts = {code: scoped_accounts[code] for code in placed_accounts}
     totals = totals_for(scoped_accounts, placed_accounts)
     totals.update({
@@ -213,10 +248,11 @@ def main() -> None:
         # dashes, which reads as "we hold nothing" rather than "ask a smaller
         # question". Every figure below is de-duplicated: each account is
         # counted once, whoever holds it.
-        "advisors": len(per),
-        "advisors_review": sum(1 for e in per.values() if e["t"] == "review"),
+        "advisors": len(advisors),
+        "act_contacts": len(per) - len(advisors),
+        "advisors_review": sum(1 for e in advisors.values() if e["t"] == "review"),
         "advisors_economic_only": sum(
-            1 for e in per.values() if e["t"] == "high"),
+            1 for e in advisors.values() if e["t"] == "high"),
         "shared_accounts": sum(
             1 for a in mapped_accounts.values() if a["holders"] > 1),
         # The asymmetry the whole file exists to surface, at national scale.
@@ -227,12 +263,12 @@ def main() -> None:
     off_map_totals = totals_for(accounts, off_map_accounts)
     off_map_totals["advisors"] = len(off_map_crds)
     off_map_totals["crds"] = len(off_map_crds)
-    unresolved_codes = set(accounts) - approved_accounts
+    unresolved_codes = set(accounts) - approved_accounts - placed_accounts
     unresolved_totals = totals_for(accounts, unresolved_codes)
     source_totals = totals_for(accounts, accounts)
     source_totals.update({
         "unmapped_accounts": len(accounts) - len(mapped_accounts),
-        "approved_accounts": len(approved_accounts),
+        "approved_accounts": len(approved_accounts | placed_accounts),
         "approved_off_map": off_map_totals,
         "unapproved_or_unresolved": unresolved_totals,
     })
@@ -250,7 +286,8 @@ def main() -> None:
             **value_difference, "accounts": 0}
 
     out = {}
-    for crd, e in per.items():
+    crm_out = {}
+    for key, e in per.items():
         rec = {"t": e["t"], "n": e["n"], "ix": sorted(set(e["ix"]))}
         for k in ("acv", "lcv", "mf", "midcap"):
             if e[k] > 0:
@@ -259,11 +296,14 @@ def main() -> None:
             rec["sh"] = e["shared"]
         if e["av"]:
             rec["av"] = e["av"]
-        out[str(crd)] = rec
+        if key in crm_locations:
+            crm_out[key] = {**rec, **crm_locations[key]}
+        else:
+            out[key] = rec
 
     payload = {
-        "note": ("EIC assets by product from approved economic links. "
-                 "Headline totals and filtered advisors use the same approved "
+        "note": ("EIC assets by product from approved economic links and shared ACT! contacts. "
+                 "Headline totals and filtered contacts use the same published "
                  "account set. acv/lcv/mf are FULL "
                  "account values, so an account shared by several advisors appears "
                  "at full value on each -- correct for a card, WRONG for any sum. "
@@ -285,6 +325,7 @@ def main() -> None:
         "totals": totals,
         "source_totals": source_totals,
         "advisors": out,
+        "act_contacts": crm_out,
     }
     OUT.parent.mkdir(parents=True, exist_ok=True)
     atomic_json(OUT, payload)
@@ -297,7 +338,7 @@ def main() -> None:
     # national view cannot quote different numbers for the same question.
     gap_acv, gap_lcv = totals["gap_acv"], totals["gap_lcv"]
 
-    print(f"[*] {len(out):,} advisors carry a book  ({dict(tiers)})")
+    print(f"[*] {len(out):,} advisors and {len(crm_out):,} ACT-only contacts carry a book ({dict(tiers)})")
     print(f"[*] accounts reaching an advisor on the map: "
           f"{totals['accounts_on_map']:,} of {source_totals['accounts']:,}")
     print(f"[*] approved but off-map: {len(off_map_crds):,} advisors, "

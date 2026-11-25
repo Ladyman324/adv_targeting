@@ -265,11 +265,14 @@ function actOnlyMarker(contact){
   return L.circleMarker(contact.coordinates, { radius: 8, color: "#165f68",
     fillColor: "#37909b", fillOpacity: 1, weight: 2 })
     .bindTooltip(contact.name ? esc(contact.name) : "ACT! contact")
-    .on("click", () => ActAddresses.contactDetails(contact));
+    .on("click", () => {
+      if (contact.name) ActAddresses.contactDetails(contact);
+      else ActAddresses.openByKey(contact.contactKey).catch(error => showNotice(error.message));
+    });
 }
 
 function visibleListActContacts(){
-  if (!mapListFilter || scope === "US" || !map.hasLayer(listActMarkers)) return [];
+  if (scope === "US" || !map.hasLayer(listActMarkers)) return [];
   const bounds = map.getBounds();
   return listActMarkers.getLayers().filter(marker => bounds.contains(marker.getLatLng()))
     .map(marker => marker.actContact);
@@ -278,20 +281,31 @@ function visibleListActContacts(){
 function listActContactPassesFilters(contact){
   const states = scope.startsWith("T:") ? TERRITORIES[scope.slice(2)] : [scope];
   const state = contact.primary?.state;
+  const firm = NAT_FIRM_BY_CRD.get(contact.firmCrd);
   return states?.includes(state)
     && (!selectedFirms.length || selectedFirms.includes(contact.firmCrd))
-    && !excludedFirms.has(contact.firmCrd) && (!contactableOnly || contact.phone || contact.emailApproved)
-    && !selectsOnly && !aumSel.size && !rankedOnly && !ownerOnly && !roleSel.size && !assetsOnly
+    && !excludedFirms.has(contact.firmCrd)
+    && (!contactableOnly || contact.contactable || contact.phone || contact.emailApproved)
+    && passesTargeting({ sg:firm?.[4], ra:firm?.[3] })
+    && !rankedOnly && !ownerOnly && !roleSel.size && passesHasAssets({ id:contact.contactKey })
     && passesContinental({ _state:state })
     && !lastCalled && !lastEmailed && !joinedFirm && reg === "all"
     && (!lassoPolygon || (contact.coordinates && pointInLasso(...contact.coordinates)));
 }
 
+function matchingActContacts(){
+  if (scope === "US") return [];
+  if (mapListFilter) return mapListFilter.actContacts.filter(listActContactPassesFilters);
+  return Object.entries(ACT_ASSETS?.act_contacts || {}).map(([contactKey, holder]) => ({
+    contactKey, primary:{state:holder.state}, coordinates:holder.coordinates,
+    firmCrd:holder.firmCrd, contactable:holder.contactable,
+  })).filter(listActContactPassesFilters);
+}
+
 function renderListActContacts(){
   listActMarkers.clearLayers();
-  if (!mapListFilter || scope === "US") return;
-  for (const contact of mapListFilter.actContacts) {
-    if (!contact.coordinates || !listActContactPassesFilters(contact)) continue;
+  for (const contact of matchingActContacts()) {
+    if (!contact.coordinates) continue;
     const marker = actOnlyMarker(contact);
     marker.actContact = contact;
     listActMarkers.addLayer(marker);
@@ -1131,6 +1145,7 @@ function advisorDisplayName(advisorId, fallback=""){
 // its `totals` block for that.
 let ACT_ASSETS = null;
 let ACT_ASSETS_ERROR = "";
+ActAddresses.setAssetBook(() => ACT_ASSETS);
 
 function loadActAssets(){
   supportStart("act");
@@ -1156,11 +1171,12 @@ function loadActAssets(){
       syncAssetsUI();
       redraw();
       if (detailsCurrent) renderDetailEntry(detailsCurrent, false);
+      ActAddresses.refreshAssetDisplay();
     });
 }
 
 function bookFor(advisorId){
-  return (ACT_ASSETS && ACT_ASSETS.advisors[String(advisorId)]) || null;
+  return AssetProductFilters.holder(ACT_ASSETS, advisorId);
 }
 
 /* WHAT A TEAM HOLDS WITH US, counted once.
@@ -2773,8 +2789,7 @@ function mapListScopes(selected = mapSelectedIds){
       const coordinates = feature.geometry?.coordinates;
       if (coordinates && bounds.contains([coordinates[1], coordinates[0]])) inView.add(id);
     }
-    for (const contact of mapListFilter?.actContacts || []) {
-      if (!listActContactPassesFilters(contact)) continue;
+    for (const contact of matchingActContacts()) {
       matches.add(contact.contactKey);
       if (contact.coordinates && bounds.contains(contact.coordinates)) inView.add(contact.contactKey);
     }
@@ -6774,12 +6789,15 @@ function redraw(fit){
  */
 function reportFilterReach(emptyMsg, label){
   const matches = ALL.filter(f => passesFilters(f.properties));
-  if (!matches.length){ showNotice(emptyMsg); return; }
+  const actMatches = matchingActContacts().filter(contact => contact.coordinates);
+  const count = matches.length + actMatches.length;
+  if (!count){ showNotice(emptyMsg); return; }
   const bounds = map.getBounds();
   const here = matches.some(f =>
-    bounds.contains([f.geometry.coordinates[1], f.geometry.coordinates[0]]));
+    bounds.contains([f.geometry.coordinates[1], f.geometry.coordinates[0]]))
+    || actMatches.some(contact => bounds.contains(contact.coordinates));
   if (!here)
-    showNotice(`No ${label} in this view — ${matches.length.toLocaleString()} `
+    showNotice(`No ${label} in this view — ${count.toLocaleString()} `
       + `elsewhere in ${scopeLabel(scope)}. Zoom out to see them.`);
 }
 
@@ -7453,7 +7471,7 @@ function passesContactable(p){
   return !!(c && (c.e || c.w || c.c));
 }
 // One source decides both the filter and the EIC summary: the current,
-// CRD-keyed ACT account artifact. contacts.json still supplies contact and team
+// ACT account artifact, keyed by advisor CRD or ACT! contact key. contacts.json still supplies contact and team
 // presentation, but its legacy tm/ia fields cannot make an advisor pass. The
 // control stays disabled while this artifact is pending; an unexpected active
 // state fails closed, and a load failure clears the control with a visible
@@ -8179,7 +8197,7 @@ function estimateAum(byFirm, placements){
  * order to state the book itself, which is one de-duplicated number per product
  * and was already sitting in the file.
  *
- * So: the approved, CRD-linked book represented by the same advisor population
+ * The published EIC book covers the same contact population
  * as the assets filter, computed once in build_act_assets.py by counting each
  * mapped account exactly once whoever holds it. Complete ACT source totals and
  * unresolved accounts remain in source_totals for reconciliation, but are not
@@ -8215,13 +8233,13 @@ function renderEicNational(){
   const shared = t.shared_accounts
     ? `${n(t.shared_accounts)} of those accounts are shared by more than one advisor and are counted once, not once each. ` : "";
   const reconciliation = source
-    ? `${n(t.accounts)} of ${n(source.accounts)} ACT accounts are linked to approved advisors on the map. `
+    ? `${n(t.accounts)} of ${n(source.accounts)} ACT accounts are attributed to mapped advisors or shared ACT! contacts without a CRD. `
       + `${n(unresolved)} unapproved or unresolved ACT account${unresolved === 1 ? "" : "s"} `
       + `${unresolved === 1 ? "is" : "are"} outside the approved population. `
       + `${n(approvedOffMap)} approved account${approvedOffMap === 1 ? "" : "s"} belong${approvedOffMap === 1 ? "s" : ""} `
       + `only to advisor${approvedOffMap === 1 ? "" : "s"} absent from the current deployed map. `
       + `Both groups are excluded from both this headline and the EIC-assets filter. `
-    : `Only accounts linked to approved advisors on the current deployed map are included. Unapproved or unresolved accounts and approved accounts belonging only to off-map advisors are excluded from both this headline and the EIC-assets filter. `;
+    : `Accounts linked to mapped advisors or shared ACT! contacts without a CRD are included. Unapproved or unresolved accounts and approved accounts belonging only to off-map advisors are excluded from both this headline and the EIC-assets filter. `;
   /* The product gap, stated at national scale. This is the reason the file
    * splits by product at all: the two SMAs are close to mutually exclusive
    * advisor by advisor, and that is a targeting instruction, not trivia. */
@@ -8230,9 +8248,9 @@ function renderEicNational(){
       + (t.both_smas != null ? `; ${n(t.both_smas)} hold both.` : ".")
     : "";
   el("eicAssetsHelp").textContent =
-    `The approved CRD-linked EIC book, not the current viewport — the national layer carries firm-office `
+    `The national EIC book covers the full published contact set. The national layer carries firm-office `
     + `placements rather than advisor identities, so it cannot scope these to what is on screen. `
-    + `These figures cover ${n(t.advisors)} advisors and ${n(t.accounts)} accounts. ${gaps} `
+    + `These figures cover ${n(t.advisors)} CRD-linked advisors and ${n(t.act_contacts)} ACT! contacts without a CRD across ${n(t.accounts)} accounts. ${gaps} `
     + `Unlike every other figure in this strip, they do not change as you pan or zoom. `
     + `${shared}`
     + reconciliation
@@ -8256,8 +8274,8 @@ function renderEicAssets(ids){
   const selected = AssetProductFilters.accountValues(ACT_ASSETS, ids);
   const seen = new Set(selected.keys());
   let advisors = 0, review = 0, economic = 0;
-  for (const id of ids){
-    const b = ACT_ASSETS.advisors[String(id)];
+  for (const id of new Set(ids.map(String))){
+    const b = AssetProductFilters.holder(ACT_ASSETS, id);
     if (!b) continue;
     advisors++;
     if (b.t === "review") review++;
@@ -8274,7 +8292,7 @@ function renderEicAssets(ids){
   el("eicMf").textContent = fmtMoney(mf);
   el("eicMidcap").textContent = fmtMoney(midcap);
   el("eicAssetsHelp").textContent =
-    `EIC assets held by the ${advisors.toLocaleString()} advisor${advisors === 1 ? "" : "s"} `
+    `EIC assets held by the ${advisors.toLocaleString()} contact${advisors === 1 ? "" : "s"} `
     + `in view who have a book with us, across ${seen.size.toLocaleString()} `
     + `account${seen.size === 1 ? "" : "s"}. Each account is counted once even when `
     + `several advisors on a team share it, so these figures do not double count. `
@@ -8329,7 +8347,10 @@ function refreshPanel(){
   renderEstimatedAum(estimateAumFromAdvisors(shown));
   // Same feature set the counts above are drawn from, so "advisors in view" and
   // "our assets in view" can never describe different populations.
-  renderEicAssets(shown.map(f => f.properties.id));
+  renderEicAssets([
+    ...shown.map(f => f.properties.id),
+    ...visibleListActContacts().map(contact => contact.contactKey),
+  ]);
 
   // firm rollup, scoped to view, counting distinct advisors
   const agg = {};

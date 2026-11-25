@@ -56,16 +56,24 @@ class AccountValuePolicyTests(unittest.TestCase):
             self.assertTrue(any(r["contact_name"]=="'=unsafe" for r in report))
             self.assertEqual(1,len(issues))
 
-    def payload(self,deployed=("100","200","300"),values=(100,80,80)):
+    def payload(self,deployed=("100","200","300"),values=(100,80,80),act_only=None):
         rows=[contact(aid,value) for aid,value in zip(("a","b","c"),values)]
         links=pd.DataFrame([dict(act_id=aid,advisor_crd=crd,economic_status="approved",link_type="identity_approved")
                             for aid,crd in zip(("a","b","c"),("100","200","300"))])
+        projection = {}
+        if act_only is not None:
+            row = contact("crm", act_only)
+            row["customFields"].update(bcode2="RJ5555", bvalue_2=20, ballcap_2=20)
+            rows.append(row)
+            projection["crm"] = {"key":"act-test", "state":"CA", "coordinates":None,
+                                 "firmCrd":"", "contactable":False}
         original=copy.deepcopy(rows)
         with tempfile.TemporaryDirectory() as td:
             path=pathlib.Path(td)/"act_assets.json"
             with mock.patch.object(assets,"OUT",path), mock.patch.object(assets,"load_economic_links",
                     return_value=(pathlib.Path("act.json"),rows,links,{"contentHash":"economic","reconciliation":{}})), mock.patch.object(
-                    assets,"load_deployed_advisor_crds",return_value=(set(deployed),{})), contextlib.redirect_stdout(io.StringIO()):
+                    assets,"load_deployed_advisor_crds",return_value=(set(deployed),{})), mock.patch.object(
+                    assets,"load_act_only_asset_contacts",return_value=projection), contextlib.redirect_stdout(io.StringIO()):
                 assets.main()
             data=json.loads(path.read_text(encoding="utf-8"))
         self.assertEqual(original,rows)
@@ -80,6 +88,36 @@ class AccountValuePolicyTests(unittest.TestCase):
         self.assertEqual(100,data["totals"]["acv"])
         self.assertEqual(ACCOUNT_VALUE_POLICY,data["account_value_policy"])
         self.assertEqual([],_assets(data)["issues"])
+
+    def test_act_only_book_shares_account_indexes_with_crd_book(self):
+        data = self.payload(act_only=75)
+        act = data["act_contacts"]["act-test"]
+        self.assertEqual([0, 1], act["ix"])
+        self.assertEqual([75, 0, 0, 0, 75], act["av"]["0"])
+        self.assertEqual(95, act["acv"])
+        self.assertEqual(120, data["totals"]["acv"])
+        self.assertEqual(2, data["totals"]["accounts"])
+        self.assertEqual(1, data["totals"]["act_contacts"])
+        self.assertEqual(0, data["source_totals"]["unapproved_or_unresolved"]["accounts"])
+        self.assertEqual([], _assets(data)["issues"])
+
+    def test_directory_asset_projection_uses_act_primary_and_respects_visibility(self):
+        primary = {"line1":"1 Test St", "city":"Boulder", "state":"co", "postalCode":"80301"}
+        rows = [dict(contact(aid, 100), businessAddress=primary) for aid in
+                ("active", "linked", "private", "inactive", "claimed", "duplicate", "duplicate")]
+        rows[2]["isPrivate"] = True
+        rows[3]["isActive"] = False
+        rows[4]["customFields"]["crd"] = "1234567"
+        with tempfile.TemporaryDirectory() as td:
+            root = pathlib.Path(td)
+            (root / "contacts.json").write_text('{"advisors":{}}', encoding="utf-8")
+            (root / "geo_index.json").write_text('{"zips":{}}', encoding="utf-8")
+            with mock.patch.object(assets, "ADVISOR_INDEX", root / "advisor_index.json"), mock.patch.object(
+                    assets, "approved_pairs", return_value=({"123":"linked"}, {"contentHash":"identity"})):
+                projection = assets.load_act_only_asset_contacts(rows, {"identityManifestHash":"identity"})
+        self.assertEqual(["active"], list(projection))
+        self.assertEqual({"key", "state", "coordinates", "firmCrd", "contactable"}, set(projection["active"]))
+        self.assertEqual("CO", projection["active"]["state"])
 
     def test_off_map_higher_copy_does_not_inflate_mapped_summary(self):
         data=self.payload(deployed=("100","200"),values=(100,80,200))

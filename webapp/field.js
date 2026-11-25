@@ -111,7 +111,8 @@ async function whoAmI(){
 // territories under 4 KB, against a tile rebuild and a bigger payload on every
 // pan. Neither blocks the map: a rep who cannot reach them still gets names,
 // numbers and the call list, which is what the field view is for.
-let BOOK = null;      // {accounts:[[acv,lcv,mf,midcap]], advisors:{crd:{t,n,ix,...}}}
+let BOOK = null;      // Shared book indexed by CRD and ACT! contact key
+ActAddresses.setAssetBook(() => BOOK);
 let BOOK_STATE = "idle"; // idle | loading | ready | failed
 let TERR = null;      // {states:{XX:{c,n,e}}, national:{...}}
 
@@ -136,6 +137,7 @@ async function loadExtras(){
                                                   grab(dataUrl("territories.json"))]);
   BOOK = book && book.advisors ? book : null;
   BOOK_STATE = BOOK ? "ready" : "failed";
+  ActAddresses.refreshAssetDisplay();
   TERR = territories;
   const clearedAssets = BOOK_STATE === "failed" && CHIPS.assets;
   if (BOOK_STATE === "failed") CHIPS.assets = false;

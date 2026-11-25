@@ -150,7 +150,11 @@ def _firm_domains(advisors):
     return result
 
 
-def build_crm_directory(mapping, rows, zips, advisors=None):
+def crm_contact_key(contact_id):
+    return "act-" + hashlib.sha256(text(contact_id).lower().encode()).hexdigest()[:26]
+
+
+def build_crm_directory(mapping, rows, zips, advisors=None, *, only_ids=None):
     """Project shared, active CRM contacts separately from the advisor universe."""
     from contact_work_locations import source_record
     from contact_normalization import normalize_phone
@@ -182,6 +186,8 @@ def build_crm_directory(mapping, rows, zips, advisors=None):
         name = text(row.get("fullName")) or text(f"{row.get('firstName') or ''} {row.get('lastName') or ''}")
         if not (key and counts[key] == 1 and name) or key in linked:
             continue
+        if only_ids is not None and key not in only_ids:
+            continue
         if row.get("isPrivate") or row.get("isUser") or row.get("isActive") is False:
             continue
         raw = row.get("businessAddress") or {}
@@ -204,7 +210,7 @@ def build_crm_directory(mapping, rows, zips, advisors=None):
                         and len(email_owners[primary]) == 1
                         and primary not in advisor_emails and greeting
                         and text(custom.get("email__y_n")).upper() not in NO_EMAIL)
-        contacts.append({"contactKey": "act-" + hashlib.sha256(key.encode()).hexdigest()[:26],
+        contacts.append({"contactKey": crm_contact_key(key),
                          "name": name, "email": primary, "company": text(row.get("company")),
                          "firmCrd": firm_id, "firm": firm_name, "title": text(row.get("jobTitle")),
                          "phone": number + (",," + extension if number and extension else ""),

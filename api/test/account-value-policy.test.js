@@ -16,6 +16,15 @@ test("shared broker codes count once at the highest included amount",()=>{
     assert.equal(selected.size,1);assert.equal(selected.get(0)[0],100);
   }
 });
+test("ACT-only and CRD holders deduplicate together, preserving the filtered ACT-only balance",()=>{
+  const key = "act-00000000000000000000000001";
+  const mixed = {...book, accounts:[...book.accounts,[0,20,0,0,20]],
+    act_contacts:{[key]:{ix:[0,1],av:{0:[75,0,0,0,75]},acv:75,lcv:20}}};
+  assert.equal(AssetProductFilters.holder(mixed,key).acv,75);
+  assert.equal(AssetProductFilters.accountValues(mixed,[key]).get(0)[4],75);
+  const both=AssetProductFilters.accountValues(mixed,["high",key,key]);
+  assert.deepEqual([...both.values()].map(value=>value[4]),[100,20]);
+});
 test("selection preserves one whole source allocation, not product maxima",()=>{
   const mixed={accounts:[[100,0,0,0,100]],advisors:{
     a:{ix:[0]},b:{ix:[0],av:{0:[0,90,0,0,90]}}}};
@@ -38,4 +47,8 @@ test("team and viewport summaries both retain a filtered advisor's lower amount"
   assert.equal(context.teamBook(["low","high"]).acv,100);
   context.renderEicAssets(["low"]);assert.equal(elements.eicAcv.textContent,"80");
   context.renderEicAssets(["low","high"]);assert.equal(elements.eicAcv.textContent,"100");
+  const key = "act-00000000000000000000000001";
+  context.ACT_ASSETS = {...book, act_contacts:{[key]:{ix:[0],av:{0:[75,0,0,0,75]}}}};
+  context.renderEicAssets([key]);assert.equal(elements.eicAcv.textContent,"75");
+  context.renderEicAssets([key,"high"]);assert.equal(elements.eicAcv.textContent,"100");
 });

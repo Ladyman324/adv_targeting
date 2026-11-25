@@ -13,6 +13,19 @@
   };
   let locate;
   let openFirm;
+  let assetBook;
+
+  function refreshAssetDisplay() {
+    for (const field of root.document.querySelectorAll("[data-act-assets]")) {
+      const selected = root.AssetProductFilters?.accountValues(assetBook?.(), [field.dataset.actAssets]);
+      const total = [...(selected?.values() || [])].reduce((sum, vector) =>
+        sum + (vector[4] ?? vector.slice(0, 4).reduce((subtotal, value) => subtotal + value, 0)), 0);
+      field.hidden = !selected?.size;
+      field.querySelector("span").textContent = total.toLocaleString("en-US", {
+        style:"currency", currency:"USD", maximumFractionDigits:2,
+      });
+    }
+  }
 
   function badge(state, crd = "") {
     const label = states[state] || "Checking ACT!";
@@ -226,6 +239,7 @@
       ${contact.title ? `<p>${esc(contact.title)}</p>` : ""}
       ${firm ? `<p><b>Firm</b> ${firmLink}${contact.firm ? ' <small>Matched by email domain</small>' : ""}</p>` : ""}
       <p><b>Working office from ACT!</b> ${esc(address(contact.primary) || "Address unavailable")}</p>
+      <p data-act-assets="${esc(key)}" hidden><b>EIC Assets</b> <span></span></p>
       ${contact.phone ? `<p><b>Phone</b> ${esc(contact.phone)}${!tel && dial?.isDnc(key) ? " ? Do not call" : ""}</p>` : ""}
       ${contact.email ? `<p><b>Email</b> ${esc(contact.email)}${key && !contact.emailApproved ? " ? Needs review" : ""}</p>` : ""}
       <div class="act-contact-actions">
@@ -235,6 +249,7 @@
       </div>
       ${key && dial ? '<div class="act-list-control"></div>' : ""}
       <p class="act-result" role="status"></p>`;
+    refreshAssetDisplay();
     const status = body.querySelector(".act-result");
     body.querySelector("[data-act-pin]")?.addEventListener("click", () => { locate(contact); dialog.close(); });
     body.querySelector("[data-act-firm]")?.addEventListener("click", () => { dialog.close(); openFirm(contact.firmCrd); });
@@ -319,6 +334,7 @@
   }
   root.ActAddresses = { slot, officeSlot, badgeSlot, render, searchInto,
     isContactKey, current, snapshot, loadListContacts, openByKey, contactDetails,
+    refreshAssetDisplay, setAssetBook: callback => { assetBook = callback; },
     setLocator: (callback, firmCallback) => { locate = callback; openFirm = firmCallback; } };
   if (root.document && root.MutationObserver) {
     const start = () => {

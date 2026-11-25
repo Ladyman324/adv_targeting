@@ -23,7 +23,7 @@ test("map list scopes count contacts once and keep selected, visible, and matchi
       assert.equal(id, "prospects"); assert.equal(owner, "owner"); return { name:"Prospects", items };
     } },
     ActAddresses:{ loadListContacts:async () => [act, noPin] },
-    listActContactPassesFilters:() => true,
+    listActContactPassesFilters:() => true, ACT_ASSETS:null,
     visibleListActContacts:() => west <= -84 ? [act] : [],
     selectsOnly:true, syncTargetingUI(){}, actContactMarker:null, selectedFirms:[],
     excludedFirms:new Set(), reg:"all", closeListManager(){},
@@ -33,7 +33,8 @@ test("map list scopes count contacts once and keep selected, visible, and matchi
     passesGeography:pass, passesContactable:pass, passesHasAssets:pass,
   };
   vm.createContext(context);
-  vm.runInContext(section("let mapListFilter = null;", "/* Where should a bulk add land?")
+  vm.runInContext(section("function matchingActContacts(", "function renderListActContacts(")
+    + section("let mapListFilter = null;", "/* Where should a bulk add land?")
     + section("function passesBase(", "function colorFor("), context);
   await context.filterMapByList("prospects", "owner");
   assert.equal(context.selectsOnly, false);

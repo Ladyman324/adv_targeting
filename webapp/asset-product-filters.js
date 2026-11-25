@@ -37,9 +37,12 @@
     const selected = normalize(values);
     return selected.length ? PRODUCTS.filter(p => selected.includes(p.id)).map(p => p.label).join(" / ") : "Any EIC";
   }
+  function holder(book, id){
+    return book?.advisors?.[String(id)] || book?.act_contacts?.[String(id)] || null;
+  }
   function accountValues(book, ids){
     const selected = new Map();
-    if (!book || !book.accounts || !book.advisors) return selected;
+    if (!book?.accounts) return selected;
     const rank = (a) => [Number.isFinite(a[4]) ? a[4] : a.slice(0, 4).reduce((n, v) => n + (v || 0), 0),
       (a[0] || 0) + (a[2] || 0), a[1] || 0];
     const higher = (a, b) => {
@@ -50,7 +53,7 @@
       return false;
     };
     for (const id of new Set(ids || [])) {
-      const advisor = book.advisors[String(id)];
+      const advisor = holder(book, id);
       if (!advisor) continue;
       for (const i of advisor.ix || []) {
         const own = advisor.av && advisor.av[String(i)];
@@ -61,5 +64,5 @@
     }
     return selected;
   }
-  return Object.freeze({ PRODUCTS, normalize, transition, matches, label, accountValues });
+  return Object.freeze({ PRODUCTS, normalize, transition, matches, label, holder, accountValues });
 });
