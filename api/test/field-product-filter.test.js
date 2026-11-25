@@ -67,9 +67,12 @@ test('Field disables EIC Assets while book data is loading or unavailable', () =
 test('Field failed extras clear an active EIC Assets filter', async () => {
   const { context: c, chip, click, nodes } = setup();
   click();
-  Object.assign(c, { dataUrl: x => x, fetch: async () => ({ ok: false }), BOOK: null, TERR: null });
+  let assetCardRefreshes = 0;
+  Object.assign(c, { dataUrl: x => x, fetch: async () => ({ ok: false }), BOOK: null, TERR: null,
+    ActAddresses: { refreshAssetDisplay: () => { assetCardRefreshes++; } } });
   vm.runInContext(between('async function loadExtras(){', 'const bookFor ='), c);
   await c.loadExtras();
+  assert.equal(assetCardRefreshes, 1);
   assert.equal(c.CHIPS.assets, false);
   assert.equal(c.BOOK_STATE, 'failed');
   assert.equal(chip.pressed, 'false');
